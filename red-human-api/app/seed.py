@@ -1,0 +1,200 @@
+"""Semilla de datos de demostración (misma información que el frontend usa en modo mock)."""
+
+import secrets
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy.orm import Session
+
+from .models import Candidato, Documento, Expediente, Mensaje, Vacante, registrar, slugificar
+
+
+def _hace(**kw) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(**kw)
+
+
+def sembrar(db: Session) -> None:
+    if db.query(Vacante).count() > 0:
+        _rellenar_slugs(db)
+        return
+
+    vacantes = [
+        Vacante(codigo="VAC-1042", titulo="Cajero(a) de sucursal", area="Operaciones", empresa="Grupo Carbe",
+                ubicacion="Guadalajara, JAL", modalidad="Presencial", sueldo="$9,500 – 11,000", estado="Publicada",
+                requisitos="Secundaria concluida, experiencia en manejo de efectivo, disponibilidad de horario.",
+                preguntas_filtro=["¿Cuentas con disponibilidad para turnos rotativos?", "¿Tienes experiencia en manejo de efectivo?", "¿Vives en la zona metropolitana de Guadalajara?"],
+                plataformas=["WhatsApp", "OCC", "Portal"], creada_en=_hace(days=3)),
+        Vacante(codigo="VAC-1041", titulo="Ejecutivo(a) de ventas telefónicas", area="Comercial", empresa="Grupo Carbe",
+                ubicacion="CDMX", modalidad="Híbrido", sueldo="$12,000 + comisiones", estado="Publicada",
+                requisitos="1 año en ventas o call center, buena dicción, manejo básico de CRM.",
+                preguntas_filtro=["¿Tienes experiencia en ventas o call center?", "¿Cuentas con disponibilidad de lunes a sábado?"],
+                plataformas=["WhatsApp", "LinkedIn", "Indeed"], creada_en=_hace(days=5)),
+        Vacante(codigo="VAC-1040", titulo="Auxiliar de almacén", area="Logística", empresa="Distribuidora Norte",
+                ubicacion="Monterrey, NL", modalidad="Presencial", sueldo="$8,800 – 10,200", estado="Publicada",
+                requisitos="Experiencia mínima de 1 año en almacén, disponibilidad de turno nocturno.",
+                preguntas_filtro=["¿Tienes experiencia en almacén?", "¿Puedes trabajar turno nocturno?"],
+                plataformas=["WhatsApp", "OCC"], creada_en=_hace(days=7)),
+        Vacante(codigo="VAC-1039", titulo="Analista de nómina", area="Recursos Humanos", empresa="Grupo Carbe",
+                ubicacion="Querétaro, QRO", modalidad="Híbrido", sueldo="$18,000 – 22,000", estado="En revisión",
+                requisitos="3 años en nómina, dominio de IMSS, ISR y timbrado.",
+                preguntas_filtro=["¿Cuántos años de experiencia tienes en nómina?", "¿Dominas timbrado e IMSS?"],
+                plataformas=["Portal"], creada_en=_hace(days=2)),
+        Vacante(codigo="VAC-1038", titulo="Desarrollador(a) Full-Stack", area="Tecnología", empresa="Grupo Carbe",
+                ubicacion="Remoto (MX)", modalidad="Remoto", sueldo="$45,000 – 60,000", estado="Publicada",
+                requisitos="4+ años con React/Node, deseable Next.js y Postgres.",
+                preguntas_filtro=["¿Cuántos años llevas trabajando con React?", "¿Has trabajado con Next.js en producción?"],
+                plataformas=["LinkedIn", "Portal"], creada_en=_hace(days=2)),
+        Vacante(codigo="VAC-1037", titulo="Supervisor(a) de piso", area="Operaciones", empresa="Retail Bajío",
+                ubicacion="León, GTO", modalidad="Presencial", sueldo="$16,500 – 19,000", estado="Borrador",
+                requisitos="2 años supervisando equipos en retail.", creada_en=_hace(days=1)),
+    ]
+    db.add_all(vacantes)
+    db.flush()
+    for v in vacantes:
+        v.slug = slugificar(v.titulo)
+    vac = {v.codigo: v for v in vacantes}
+
+    candidatos = [
+        Candidato(codigo="C-8801", nombre="María Fernanda López", telefono="3311112222", ubicacion="Guadalajara",
+                  experiencia="3 años en retail", fuente="WhatsApp", estado="cumple", etapa="Entrevista", score=92,
+                  evidencia="Cumple escolaridad, disponibilidad de horario y experiencia en manejo de efectivo.",
+                  vacante_id=vac["VAC-1042"].id, consentimiento=True, prefiltro_completo=True, creado_en=_hace(hours=2)),
+        Candidato(codigo="C-8802", nombre="Jorge Alberto Ramírez", telefono="5522223333", ubicacion="CDMX",
+                  experiencia="5 años en call center", fuente="LinkedIn", estado="cumple", etapa="Evaluación", score=88,
+                  evidencia="Supera meta de experiencia; buen manejo de objeciones en el prefiltro por voz.",
+                  vacante_id=vac["VAC-1041"].id, consentimiento=True, prefiltro_completo=True, creado_en=_hace(hours=4)),
+        Candidato(codigo="C-8803", nombre="Ana Sofía Herrera", telefono="8133334444", ubicacion="Monterrey",
+                  experiencia="1 año", fuente="OCC", estado="revision", etapa="Prefiltro", score=71,
+                  evidencia="Experiencia limítrofe al mínimo requerido. Requiere validación de disponibilidad de turno nocturno.",
+                  vacante_id=vac["VAC-1040"].id, consentimiento=True, creado_en=_hace(hours=6)),
+        Candidato(codigo="C-8804", nombre="Luis Ángel Torres", telefono="5544445555", ubicacion="Remoto",
+                  experiencia="6 años, React/Node", fuente="LinkedIn", estado="cumple", etapa="Entrevista", score=95,
+                  evidencia="Stack alineado con el perfil; portafolio verificado; pretensión salarial dentro de rango.",
+                  vacante_id=vac["VAC-1038"].id, consentimiento=True, prefiltro_completo=True, creado_en=_hace(days=1)),
+        Candidato(codigo="C-8805", nombre="Diana Karen Méndez", telefono="3355556666", ubicacion="Zapopan",
+                  experiencia="6 meses", fuente="WhatsApp", estado="revision", etapa="Prefiltro", score=64,
+                  evidencia="Actitud positiva pero experiencia por debajo del mínimo. Sugerido para revisión humana.",
+                  vacante_id=vac["VAC-1042"].id, consentimiento=True, creado_en=_hace(hours=3)),
+        Candidato(codigo="C-8806", nombre="Roberto Carlos Nava", telefono="7226667777", ubicacion="Toluca",
+                  experiencia="Sin experiencia comercial", fuente="Indeed", estado="no_cumple", etapa="Prefiltro", score=38,
+                  evidencia="No cumple requisito indispensable de experiencia en ventas ni disponibilidad de horario.",
+                  vacante_id=vac["VAC-1041"].id, consentimiento=True, prefiltro_completo=True, creado_en=_hace(hours=5)),
+        Candidato(codigo="C-8807", nombre="Gabriela Ruiz Ponce", telefono="4427778888", ubicacion="Querétaro",
+                  experiencia="4 años, IMSS/ISR", fuente="Formulario", estado="cumple", etapa="Evaluación", score=84,
+                  evidencia="Domina timbrado, IMSS e ISR; conocimiento de sistema de nómina confirmado.",
+                  vacante_id=vac["VAC-1039"].id, consentimiento=True, prefiltro_completo=True, creado_en=_hace(hours=8)),
+        Candidato(codigo="C-8808", nombre="Emiliano Cruz Vega", telefono="8188889999", ubicacion="Monterrey",
+                  experiencia="2 años", fuente="WhatsApp", estado="cumple", etapa="Contratación", score=90,
+                  evidencia="Cumple todos los requisitos; expediente en integración, pendiente comprobante de domicilio.",
+                  vacante_id=vac["VAC-1040"].id, consentimiento=True, prefiltro_completo=True, creado_en=_hace(days=1)),
+        Candidato(codigo="C-8809", nombre="Valeria Jiménez Soto", telefono="5599990000", ubicacion="Remoto",
+                  experiencia="4 años, Next.js", fuente="LinkedIn", estado="cumple", etapa="Evaluación", score=87,
+                  evidencia="Fuerte en frontend; a validar experiencia en backend distribuido.",
+                  vacante_id=vac["VAC-1038"].id, consentimiento=True, prefiltro_completo=True, creado_en=_hace(days=2)),
+        Candidato(codigo="C-8810", nombre="Héctor Manuel Ríos", telefono="3300001111", ubicacion="Tlaquepaque",
+                  experiencia="", fuente="WhatsApp", estado="no_cumple", etapa="Prefiltro", score=29,
+                  evidencia="No completó el prefiltro; sin disponibilidad para el horario de la vacante.",
+                  vacante_id=vac["VAC-1042"].id, consentimiento=True, creado_en=_hace(hours=1)),
+    ]
+    db.add_all(candidatos)
+    db.flush()
+    cand = {c.codigo: c for c in candidatos}
+
+    # conversación de ejemplo del prefiltro (María Fernanda por WhatsApp)
+    charla = [
+        ("assistant", "¡Hola! Soy el asistente de Red Human. Vi tu interés en la vacante de Cajero(a) de sucursal en Guadalajara. ¿Te hago unas preguntas rápidas? 😊"),
+        ("user", "¡Hola! Sí, claro."),
+        ("assistant", "¿Cuentas con disponibilidad para turnos rotativos?"),
+        ("user", "Sí, no tengo problema con los horarios."),
+        ("assistant", "¿Tienes experiencia en manejo de efectivo?"),
+        ("user", "Sí, 3 años como cajera en una tienda departamental."),
+    ]
+    for rol, texto in charla:
+        db.add(Mensaje(candidato_id=cand["C-8801"].id, rol=rol, texto=texto, canal="whatsapp"))
+
+    # expedientes de contratación (módulo 2) — reflejan el mock de onboarding
+    exp1 = Expediente(candidato_id=cand["C-8808"].id, puesto="Auxiliar de almacén", fecha_ingreso=_hace(days=-2), seleccionado_por="Iván Olvera")
+    exp2 = Expediente(candidato_id=cand["C-8807"].id, puesto="Analista de nómina", fecha_ingreso=_hace(days=-4), seleccionado_por="Iván Olvera")
+    exp3 = Expediente(candidato_id=cand["C-8804"].id, puesto="Desarrollador Full-Stack", fecha_ingreso=_hace(days=-12), seleccionado_por="Iván Olvera")
+    db.add_all([exp1, exp2, exp3])
+    db.flush()
+
+    docs = {
+        exp1.id: [("INE", "recibido"), ("CURP", "recibido"), ("RFC", "recibido"), ("Comprobante de domicilio", "pendiente"), ("NSS", "revision")],
+        exp2.id: [("INE", "recibido"), ("CURP", "recibido"), ("RFC", "revision"), ("Comprobante de domicilio", "pendiente"), ("Título profesional", "pendiente")],
+        exp3.id: [("INE", "recibido"), ("CURP", "recibido"), ("RFC", "recibido"), ("Comprobante de domicilio", "recibido"), ("NSS", "recibido")],
+    }
+    for exp_id, lista in docs.items():
+        for tipo, estado in lista:
+            db.add(
+                Documento(
+                    expediente_id=exp_id,
+                    tipo=tipo,
+                    estado=estado,
+                    # los ya recibidos vienen confirmados por RH: así el expediente completo puede darse de alta
+                    revisado_por="Iván Olvera" if estado == "recibido" else "",
+                    subido_en=_hace(days=1) if estado in ("recibido", "revision") else None,
+                    notas_ia="Documento legible y vigente." if estado == "recibido" else "",
+                )
+            )
+    exp3.estado = "completo"
+
+    registrar(db, "sistema", "semilla_cargada", "sistema", "seed", {"vacantes": len(vacantes), "candidatos": len(candidatos)})
+    db.commit()
+
+
+def sembrar_admin(db: Session) -> None:
+    """Crea el primer administrador si la instalación no tiene ninguno.
+
+    La contraseña sale de ADMIN_PASSWORD; si no está definida se genera una y se
+    imprime una sola vez en el log (journalctl -u redhuman-api), nunca se guarda
+    en claro. En ambos casos el usuario debe cambiarla al primer ingreso.
+    """
+    from .config import settings
+    from .models import Usuario
+    from .services import auth
+
+    if db.query(Usuario).filter(Usuario.rol == "admin", Usuario.activo.is_(True)).count() > 0:
+        return
+
+    correo = settings.admin_email.strip().lower()
+    existente = db.query(Usuario).filter(Usuario.correo == correo).first()
+    if existente:  # existía pero sin rol admin (o desactivado): se restituye
+        existente.rol, existente.activo = "admin", True
+        db.commit()
+        return
+
+    generada = not settings.admin_password
+    password = settings.admin_password or secrets.token_urlsafe(12)
+    db.add(
+        Usuario(
+            correo=correo,
+            nombre=settings.admin_nombre,
+            puesto="Administrador de la plataforma",
+            rol="admin",
+            hash_pass=auth.hashear(password),
+            debe_cambiar_pass=True,
+        )
+    )
+    registrar(db, "sistema", "usuario_creado", "usuario", correo, {"rol": "admin", "via": "arranque inicial"})
+    db.commit()
+
+    if generada:
+        print("\n" + "=" * 62, flush=True)
+        print("  PRIMER ACCESO A RED HUMAN AI", flush=True)
+        print(f"  usuario:    {correo}", flush=True)
+        print(f"  contraseña: {password}", flush=True)
+        print("  Cámbiala al entrar. Este mensaje no se vuelve a mostrar.", flush=True)
+        print("=" * 62 + "\n", flush=True)
+
+
+def _rellenar_slugs(db: Session) -> None:
+    """Bases anteriores a la columna `slug`: genera el que falte para /aplicar/[slug]."""
+    faltantes = db.query(Vacante).filter((Vacante.slug == "") | (Vacante.slug.is_(None))).all()
+    if not faltantes:
+        return
+    usados = {s for (s,) in db.query(Vacante.slug).filter(Vacante.slug != "").all()}
+    for v in faltantes:
+        base = slugificar(v.titulo)
+        v.slug = base if base not in usados else f"{base}-{v.id}"
+        usados.add(v.slug)
+    db.commit()
