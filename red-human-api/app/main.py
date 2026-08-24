@@ -3,11 +3,13 @@
 Módulos implementados:
   1. Reclutamiento y selección  → /vacantes, /candidatos, /webhooks/whatsapp
   2. Contratación e integración → /contratacion
+  4. Requisiciones inteligentes → /requisiciones
 
 Documentación interactiva: http://localhost:8000/docs
 """
 
 from contextlib import asynccontextmanager
+
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .database import Base, SessionLocal, engine
 from .migraciones import sincronizar
-from .routers import auth, candidatos, contratacion, entrevistas, metricas, vacantes, webhooks
+from .routers import auth, candidatos, contratacion, empleados, entrevistas, metricas, requisiciones, vacantes, webhooks
 from .seed import sembrar, sembrar_admin
 from .services.avatar import avatar_activo
 from .services.ia import ia_activa
@@ -52,6 +54,8 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(requisiciones.router)
+app.include_router(empleados.router)
 app.include_router(vacantes.router)
 app.include_router(candidatos.router)
 app.include_router(entrevistas.router)

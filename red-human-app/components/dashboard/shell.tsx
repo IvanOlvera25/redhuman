@@ -8,6 +8,7 @@ import {
   BookOpen,
   Briefcase,
   ClipboardCheck,
+  ClipboardList,
   GraduationCap,
   HeartPulse,
   LayoutDashboard,
@@ -35,6 +36,7 @@ type NavItem = {
 
 const navOperacion: NavItem[] = [
   { href: "/dashboard", label: "Tablero de control", icon: LayoutDashboard },
+  { href: "/dashboard/requisiciones", label: "Requisiciones", icon: ClipboardList },
   { href: "/dashboard/vacantes", label: "Vacantes", icon: Briefcase, badge: "24" },
   { href: "/dashboard/candidatos", label: "Candidatos", icon: Users, badge: "1.8k" },
   { href: "/dashboard/entrevistas", label: "Entrevistas", icon: Video, badge: "12" },

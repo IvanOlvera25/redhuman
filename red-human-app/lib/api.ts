@@ -629,3 +629,136 @@ export function fetchSalud() {
     modo: string;
   }>("/salud");
 }
+
+/* ============================================================
+   Módulo 4 · Requisiciones inteligentes
+   ============================================================ */
+
+export type MotivoRequisicion = "Crecimiento" | "Reemplazo";
+export type EstadoRequisicion =
+  | "borrador"
+  | "pendiente_autorizacion"
+  | "autorizada"
+  | "rechazada"
+  | "convertida_vacante";
+
+export interface Requisicion {
+  id: string;
+  solicitanteNombre: string;
+  area: string;
+  motivo: MotivoRequisicion;
+  reemplazoDe: string;
+  puesto: string;
+  ubicacion: string;
+  modalidad: string;
+  sueldoPropuesto: string;
+  habilidadesRequeridas: string[];
+  requisitos: string;
+  justificacion: string;
+  estado: EstadoRequisicion;
+  autorizadaPor: string;
+  autorizadaEn: string | null;
+  comentarioAutorizacion: string;
+  vacante: string | null;
+  totalSugerencias: number;
+  creadaEn: string;
+}
+
+export type EstadoSugerencia =
+  | "sugerida"
+  | "notificada"
+  | "interesado"
+  | "no_interesado"
+  | "avanzo"
+  | "descartada";
+
+export interface SugerenciaMovilidad {
+  id: number;
+  empleado: {
+    id: string;
+    nombre: string;
+    puestoActual: string;
+    area: string;
+  };
+  porcentajeMatch: number;
+  habilidadesCoincidentes: string[];
+  habilidadesFaltantes: string[];
+  evidencia: string;
+  estado: EstadoSugerencia;
+  revisadoPor: string;
+  creadaEn: string;
+}
+
+export interface DatosRequisicion {
+  solicitanteNombre?: string;
+  area?: string;
+  motivo: MotivoRequisicion;
+  reemplazoDe?: string;
+  puesto: string;
+  ubicacion?: string;
+  modalidad?: string;
+  sueldoPropuesto?: string;
+  habilidadesRequeridas?: string[];
+  requisitos?: string;
+  justificacion?: string;
+  enviarAAutorizacion?: boolean;
+}
+
+export function fetchRequisiciones(filtros?: { estado?: string; area?: string }) {
+  const q = new URLSearchParams(
+    Object.entries(filtros ?? {}).filter(([, v]) => Boolean(v)) as [string, string][],
+  ).toString();
+  return get<Requisicion[]>(`/requisiciones${q ? `?${q}` : ""}`);
+}
+
+export function fetchRequisicion(id: string) {
+  return get<Requisicion & { sugerencias: SugerenciaMovilidad[] }>(`/requisiciones/${id}`);
+}
+
+export function crearRequisicion(datos: DatosRequisicion) {
+  return post<Requisicion>("/requisiciones", {
+    solicitante_nombre: datos.solicitanteNombre ?? "",
+    area: datos.area ?? "",
+    motivo: datos.motivo,
+    reemplazo_de: datos.reemplazoDe ?? "",
+    puesto: datos.puesto,
+    ubicacion: datos.ubicacion ?? "",
+    modalidad: datos.modalidad ?? "Presencial",
+    sueldo_propuesto: datos.sueldoPropuesto ?? "A convenir",
+    habilidades_requeridas: datos.habilidadesRequeridas ?? [],
+    requisitos: datos.requisitos ?? "",
+    justificacion: datos.justificacion ?? "",
+    enviar_a_autorizacion: datos.enviarAAutorizacion ?? false,
+  });
+}
+
+export function enviarRequisicion(id: string) {
+  return post<Requisicion>(`/requisiciones/${id}/enviar`);
+}
+
+export function autorizarRequisicion(id: string, comentario = "") {
+  return post<Requisicion & { sugerenciasInternas: number }>(`/requisiciones/${id}/autorizar`, { comentario });
+}
+
+export function rechazarRequisicion(id: string, comentario = "") {
+  return post<Requisicion>(`/requisiciones/${id}/rechazar`, { comentario });
+}
+
+export function decidirSugerencia(
+  requisicionId: string,
+  sugerenciaId: number,
+  estado: EstadoSugerencia,
+  comentario = "",
+) {
+  return post<SugerenciaMovilidad>(
+    `/requisiciones/${requisicionId}/sugerencias/${sugerenciaId}/decidir`,
+    { estado, comentario },
+  );
+}
+
+export function convertirVacante(id: string, generarContenido = true, notas = "") {
+  return post<Requisicion & { vacante: string; ia: boolean }>(`/requisiciones/${id}/convertir-vacante`, {
+    generar_contenido: generarContenido,
+    notas,
+  });
+}

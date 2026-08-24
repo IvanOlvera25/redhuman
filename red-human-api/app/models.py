@@ -60,6 +60,11 @@ class Vacante(Base):
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
     actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
 
+    # Origen: si esta vacante nació de una requisición autorizada (módulo 4). Puede ser null
+    # para vacantes creadas directamente por RH sin pasar por el flujo de requisición.
+    requisicion_id: Mapped[Optional[int]] = mapped_column(ForeignKey("requisiciones.id"), nullable=True)
+    requisicion: Mapped[Optional["Requisicion"]] = relationship(back_populates="vacante")
+
     candidatos: Mapped[List["Candidato"]] = relationship(back_populates="vacante")
 
 
@@ -151,6 +156,114 @@ class Mensaje(Base):
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
     candidato: Mapped[Candidato] = relationship(back_populates="mensajes")
+
+
+# ============================================================
+# Módulo 4 · Requisiciones inteligentes — Cazatalentos de IA
+# ============================================================
+#
+# Flujo: un gerente levanta una Requisicion (por qué se abre la plaza, skills,
+# sueldo) → RH la autoriza → al autorizar se corre el Radar Interno, que compara
+# la requisición contra los Empleado activos y guarda cada resultado como
+# SugerenciaMovilidad → si no hay match interno suficiente, RH decide publicar
+# hacia afuera y la Requisicion se convierte en una Vacante (Vacante.requisicion_id).
+# A partir de ahí corre el pipeline que ya existe: generador de contenido,
+# prefiltro conversacional y extracción/ranking de CVs externos.
+
+
+MOTIVOS_REQUISICION = ["Crecimiento", "Reemplazo"]
+ESTADOS_REQUISICION = ["borrador", "pendiente_autorizacion", "autorizada", "rechazada", "convertida_vacante"]
+
+
+class Requisicion(Base):
+    """Solicitud de un gerente para abrir una plaza — vive ANTES de que exista la Vacante pública."""
+
+    __tablename__ = "requisiciones"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+
+    solicitante_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
+    solicitante_nombre: Mapped[str] = mapped_column(String(150), default="")
+    area: Mapped[str] = mapped_column(String(100), default="")
+
+    motivo: Mapped[str] = mapped_column(String(20), default="Crecimiento")  # Crecimiento | Reemplazo
+    reemplazo_de: Mapped[str] = mapped_column(String(150), default="")  # solo si motivo == "Reemplazo"
+
+    puesto: Mapped[str] = mapped_column(String(200))
+    ubicacion: Mapped[str] = mapped_column(String(150), default="")
+    modalidad: Mapped[str] = mapped_column(String(30), default="Presencial")
+    sueldo_propuesto: Mapped[str] = mapped_column(String(80), default="A convenir")
+    habilidades_requeridas: Mapped[list] = mapped_column(JSON, default=list)  # [str] — insumo del Radar Interno
+    requisitos: Mapped[str] = mapped_column(Text, default="")
+    justificacion: Mapped[str] = mapped_column(Text, default="")
+
+    estado: Mapped[str] = mapped_column(String(30), default="borrador")
+    autorizada_por: Mapped[str] = mapped_column(String(150), default="")
+    autorizada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    comentario_autorizacion: Mapped[str] = mapped_column(Text, default="")
+
+    creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+    solicitante: Mapped[Optional["Usuario"]] = relationship()
+    vacante: Mapped[Optional["Vacante"]] = relationship(back_populates="requisicion", uselist=False)
+    sugerencias: Mapped[List["SugerenciaMovilidad"]] = relationship(
+        back_populates="requisicion", order_by="SugerenciaMovilidad.porcentaje_match.desc()"
+    )
+
+
+class Empleado(Base):
+    """Colaborador activo de la empresa — universo del Radar Interno y, a futuro, base del
+    ciclo de vida del Colaborador (onboarding, capacitación, desempeño, clima)."""
+
+    __tablename__ = "empleados"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    nombre: Mapped[str] = mapped_column(String(200))
+    correo: Mapped[str] = mapped_column(String(200), default="")
+    telefono: Mapped[str] = mapped_column(String(30), default="")
+    puesto_actual: Mapped[str] = mapped_column(String(200), default="")
+    area: Mapped[str] = mapped_column(String(100), default="")
+    ubicacion: Mapped[str] = mapped_column(String(150), default="")
+    seniority: Mapped[str] = mapped_column(String(40), default="")
+    skills: Mapped[list] = mapped_column(JSON, default=list)  # [str] — insumo del match del Radar Interno
+    anios_experiencia: Mapped[float] = mapped_column(Float, default=0.0)
+    fecha_ingreso: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    jefe_directo_id: Mapped[Optional[int]] = mapped_column(ForeignKey("empleados.id"), nullable=True)
+    activo: Mapped[bool] = mapped_column(Boolean, default=True)
+    # si esta persona fue contratada a través de la plataforma, queda la trazabilidad completa
+    candidato_origen_id: Mapped[Optional[int]] = mapped_column(ForeignKey("candidatos.id"), nullable=True)
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+    jefe_directo: Mapped[Optional["Empleado"]] = relationship(remote_side=[id])
+    candidato_origen: Mapped[Optional["Candidato"]] = relationship()
+    sugerencias: Mapped[List["SugerenciaMovilidad"]] = relationship(back_populates="empleado")
+
+
+ESTADOS_SUGERENCIA = ["sugerida", "notificada", "interesado", "no_interesado", "avanzo", "descartada"]
+
+
+class SugerenciaMovilidad(Base):
+    """Resultado del Radar Interno: qué tanto empata un empleado actual con una requisición,
+    antes de salir a buscar afuera. La decisión final de avanzarlo siempre es de RH (HITL)."""
+
+    __tablename__ = "sugerencias_movilidad"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    requisicion_id: Mapped[int] = mapped_column(ForeignKey("requisiciones.id"), index=True)
+    empleado_id: Mapped[int] = mapped_column(ForeignKey("empleados.id"), index=True)
+    porcentaje_match: Mapped[int] = mapped_column(Integer, default=0)
+    habilidades_coincidentes: Mapped[list] = mapped_column(JSON, default=list)
+    habilidades_faltantes: Mapped[list] = mapped_column(JSON, default=list)
+    evidencia: Mapped[str] = mapped_column(Text, default="")
+    estado: Mapped[str] = mapped_column(String(20), default="sugerida")
+    revisado_por: Mapped[str] = mapped_column(String(150), default="")
+    creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+    requisicion: Mapped["Requisicion"] = relationship(back_populates="sugerencias")
+    empleado: Mapped["Empleado"] = relationship(back_populates="sugerencias")
 
 
 DOCUMENTOS_BASE = ["INE", "CURP", "RFC", "Comprobante de domicilio", "NSS"]
