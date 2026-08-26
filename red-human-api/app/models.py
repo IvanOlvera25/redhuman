@@ -89,6 +89,8 @@ class Candidato(Base):
     consentimiento: Mapped[bool] = mapped_column(Boolean, default=False)
     consentimiento_fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     prefiltro_completo: Mapped[bool] = mapped_column(Boolean, default=False)
+    wa_nombre: Mapped[str] = mapped_column(String(200), default="")  # nombre del perfil de WhatsApp
+    wa_id: Mapped[str] = mapped_column(String(30), default="", index=True)  # ID de WhatsApp (tel tal como lo envía Meta)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
     vacante_id: Mapped[Optional[int]] = mapped_column(ForeignKey("vacantes.id"), nullable=True)

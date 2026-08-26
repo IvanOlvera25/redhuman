@@ -324,13 +324,13 @@ async def subir_cv(
 
 @router.post("/postular", status_code=201)
 async def postular(
-    vacante: str = Form(..., description="slug de la vacante publicada"),
+    vacante: str = Form(..., description="slug o código de la vacante publicada"),
     nombre: str = Form(...),
     telefono: str = Form(default=""),
     correo: str = Form(default=""),
     consentimiento: bool = Form(default=False),
     respuestas: str = Form(default="", description="JSON: [{pregunta, respuesta}]"),
-    cv: Optional[UploadFile] = File(default=None),
+    cv: Optional[UploadFile] = File(default=None, description="CV en PDF o imagen"),
     db: Session = Depends(get_db),
 ):
     """Postulación desde la página pública `/aplicar/[slug]` — un solo paso para el candidato."""
@@ -343,9 +343,14 @@ async def postular(
 
     vac = db.query(Vacante).filter(Vacante.slug == vacante).first()
     if not vac:
-        raise HTTPException(404, "Vacante no encontrada")
-    if vac.estado != "Publicada":
-        raise HTTPException(410, "Esta vacante ya no está recibiendo postulaciones.")
+        vac = db.query(Vacante).filter(func.lower(Vacante.slug) == vacante.lower()).first()
+    if not vac:
+        vac = db.query(Vacante).filter(Vacante.codigo == vacante).first()
+    if not vac:
+        # Si aún no coincide, buscar por título aproximado
+        vac = db.query(Vacante).filter(func.lower(Vacante.titulo) == vacante.replace("-", " ").lower()).first()
+    if not vac:
+        raise HTTPException(404, f"Vacante '{vacante}' no encontrada")
 
     tel = _telefono(telefono)
     c = _duplicado(db, tel, correo)
@@ -355,6 +360,14 @@ async def postular(
         db.add(c)
         db.flush()
         c.codigo = f"C-{8800 + c.id}"
+    else:
+        if nombre.strip() and (not c.nombre or c.nombre.startswith("Candidato")):
+            c.nombre = nombre.strip()
+        if tel and not c.telefono:
+            c.telefono = tel
+        if correo.strip() and not c.correo:
+            c.correo = correo.strip()
+
     if not c.vacante_id:
         c.vacante_id = vac.id
 
@@ -365,9 +378,13 @@ async def postular(
         {"medio": "portal", "vacante": vac.codigo, "aviso_privacidad": "aceptado en /aplicar"},
     )
 
-    resultado_cv = None
-    if cv is not None and cv.filename:
-        resultado_cv = await _procesar_cv(db, cv, vac, "Formulario", c.codigo, candidato=c)
+    resultado_cv = {"ok": False, "avisos": []}
+    if cv and cv.filename:
+        try:
+            resultado_cv = await _procesar_cv(db, cv, vac, "Formulario", c.codigo, candidato=c)
+        except Exception as e:
+            print(f"[postular-cv-error] Error procesando CV: {e}")
+            resultado_cv = {"ok": False, "avisos": [f"No se pudo extraer el CV: {e}"]}
 
     # las respuestas del formulario entran como turno del prefiltro para que el agente clasifique
     clasificacion = None
@@ -378,9 +395,12 @@ async def postular(
     if pares:
         texto = "\n".join(f"{p.get('pregunta', '')} → {p.get('respuesta', '')}" for p in pares if p.get("respuesta"))
         if texto:
-            # si dejó WhatsApp, la repregunta del agente le llega por ahí; si no, queda en el hilo web
-            turno = await procesar_prefiltro(db, c, texto, "whatsapp" if c.telefono else "web")
-            clasificacion = turno.get("clasificacion")
+            try:
+                # si dejó WhatsApp, la repregunta del agente le llega por ahí; si no, queda en el hilo web
+                turno = await procesar_prefiltro(db, c, texto, "whatsapp" if c.telefono else "web")
+                clasificacion = turno.get("clasificacion")
+            except Exception as e:
+                print(f"[postular-prefiltro-error] Error en prefiltro automático: {e}")
 
     registrar(db, "sistema", "postulacion_recibida", "candidato", c.codigo, {"vacante": vac.codigo, "nuevo": nuevo})
     db.commit()
@@ -389,7 +409,7 @@ async def postular(
         "candidato": c.codigo,
         "nombre": c.nombre,
         "nuevo": nuevo,
-        "cv": {"procesado": bool(resultado_cv), "avisos": (resultado_cv or {}).get("avisos", [])},
+        "cv": {"procesado": resultado_cv.get("ok", False), "avisos": resultado_cv.get("avisos", [])},
         "clasificacion": clasificacion,
     }
 
@@ -498,18 +518,33 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str) 
     db.flush()
 
     v = c.vacante
-    historial = [{"rol": m.rol, "texto": m.texto} for m in c.mensajes] + [{"rol": "user", "texto": texto}]
+    mensajes_db = [{"rol": m.rol, "texto": m.texto} for m in c.mensajes]
+    if mensajes_db and mensajes_db[-1]["texto"] == texto and mensajes_db[-1]["rol"] == "user":
+        historial = mensajes_db
+    else:
+        historial = mensajes_db + [{"rol": "user", "texto": texto}]
     turno, con_ia = ia.prefiltro_turno(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",
         (v.preguntas_filtro or []) if v else [],
         historial,
+        empresa=v.empresa if v else "",
+        ubicacion=v.ubicacion if v else "",
+        sueldo=v.sueldo if v else "",
+        modalidad=v.modalidad if v else "",
+        beneficios=(v.beneficios or []) if v else [],
+        perfil_ideal=v.perfil_ideal if v else "",
+        nombre_candidato=c.wa_nombre or c.nombre.split(" ")[0],
     )
 
     envio = {"enviado": False, "proveedor": "demo"}
     if canal == "whatsapp" and c.telefono:
-        envio = await enviar_mensaje(c.telefono, turno.respuesta)
-    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal, enviado=envio["enviado"]))
+        try:
+            envio = await enviar_mensaje(c.telefono, turno.respuesta)
+        except Exception as e:
+            print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
+            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal, enviado=envio.get("enviado", False)))
 
     clasificacion = None
     if turno.clasificacion_lista and turno.estado and not c.prefiltro_completo:

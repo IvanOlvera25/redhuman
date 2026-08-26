@@ -44,10 +44,23 @@ app = FastAPI(
 )
 
 origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+default_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3002",
+    "http://192.168.100.50:3000",
+]
+for d in default_origins:
+    if d not in origins:
+        origins.append(d)
+
 app.add_middleware(
     CORSMiddleware,
-    # con cookie de sesión el navegador exige orígenes explícitos: "*" no es válido junto con credenciales
-    allow_origins=origins or ["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -26,8 +26,15 @@ class Settings(BaseSettings):
     admin_nombre: str = "Administrador"
     admin_password: str = ""
 
-    # WhatsApp gateway propio
-    whatsapp_provider: str = ""  # "waha" | "evolution" | "" (demo)
+    # WhatsApp oficial (Meta Cloud API)
+    meta_whatsapp_token: str = ""
+    meta_phone_number_id: str = ""
+    meta_waba_id: str = ""
+    meta_verify_token: str = "redhuman_webhook_verify_token_2026_x89a"
+    whatsapp_public_number: str = ""  # número legible para deep-links wa.me
+
+    # WhatsApp gateway propio alternativo
+    whatsapp_provider: str = ""  # "meta" | "waha" | "evolution" | "" (demo)
     waha_url: str = "http://localhost:3001"
     waha_api_key: str = ""
     waha_session: str = "default"

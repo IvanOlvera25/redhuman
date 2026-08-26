@@ -68,8 +68,11 @@ export default function Requisiciones() {
 
   const lista = filtro ? datos.filter((r) => r.estado === filtro) : datos;
 
+  const showRequisicionesModule = false; // Feature flag para ocultar/mostrar
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
+      {showRequisicionesModule && (<>
       <PageHeader
         title="Requisiciones"
         subtitle="Solicita, autoriza y da seguimiento a nuevas plazas — con Radar Interno antes de salir a buscar afuera."
@@ -190,6 +193,7 @@ export default function Requisiciones() {
       )}
 
       {selId && <DetalleRequisicion id={selId} onClose={() => setSelId(null)} onCambio={recargar} />}
+      </>)}
     </div>
   );
 }

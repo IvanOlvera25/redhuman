@@ -364,6 +364,36 @@ def extraer_cv(
         else "\n\nNo hay vacante de referencia: deja `ajuste` en null."
     )
 
+    ext = extension.lower().lstrip(".")
+    if ext == "pdf":
+        try:
+            import base64
+            import io
+            from pypdf import PdfReader
+            pdf_bytes = base64.b64decode(archivo_b64)
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            texto_pdf = ""
+            for page in reader.pages:
+                texto_pdf += (page.extract_text() or "") + "\n"
+            
+            if texto_pdf.strip():
+                content_blocks = [
+                    {"type": "input_text", "text": f"CONTENIDO DEL CV (TEXTO EXTRAÍDO DEL PDF):\n\n{texto_pdf}\n\nExtrae los datos de este currículum y evalúa el ajuste con la vacante."}
+                ]
+            else:
+                content_blocks = [
+                    {"type": "input_text", "text": "El archivo PDF no contiene texto legible (podría ser una imagen escaneada sin OCR). Por favor, indica esto en las observaciones/alertas."}
+                ]
+        except Exception as e:
+            content_blocks = [
+                {"type": "input_text", "text": f"Error al extraer texto del PDF usando pypdf: {str(e)}"}
+            ]
+    else:
+        content_blocks = [
+            _bloque_archivo(archivo_b64, extension, "cv"),
+            {"type": "input_text", "text": "Extrae los datos de este currículum y evalúa el ajuste con la vacante."},
+        ]
+
     resp = client.responses.parse(
         model=MODEL,
         instructions=(
@@ -376,10 +406,7 @@ def extraer_cv(
         input=[
             {
                 "role": "user",
-                "content": [
-                    _bloque_archivo(archivo_b64, extension, "cv"),
-                    {"type": "input_text", "text": "Extrae los datos de este currículum y evalúa el ajuste con la vacante."},
-                ],
+                "content": content_blocks,
             }
         ],
         text_format=CVExtraido,
@@ -405,6 +432,14 @@ def prefiltro_turno(
     requisitos: str,
     preguntas: list,
     historial: List[dict],
+    *,
+    empresa: str = "",
+    ubicacion: str = "",
+    sueldo: str = "",
+    modalidad: str = "",
+    beneficios: Optional[List[str]] = None,
+    perfil_ideal: str = "",
+    nombre_candidato: str = "",
 ) -> Tuple[TurnoPrefiltro, bool]:
     """historial: [{"rol": "user"|"assistant", "texto": str}, ...] — el último es del candidato."""
     client = _client()
@@ -427,20 +462,43 @@ def prefiltro_turno(
             False,
         )
 
+    # --- Contexto enriquecido de la vacante ---
+    lineas_contexto = [f"Vacante: {vacante_titulo}."]
+    if empresa:
+        lineas_contexto.append(f"Empresa: {empresa}.")
+    if ubicacion:
+        lineas_contexto.append(f"Ubicación: {ubicacion}.")
+    if sueldo:
+        lineas_contexto.append(f"Sueldo: {sueldo}.")
+    if modalidad:
+        lineas_contexto.append(f"Modalidad: {modalidad}.")
+    if requisitos:
+        lineas_contexto.append(f"Requisitos indispensables: {requisitos}.")
+    if perfil_ideal:
+        lineas_contexto.append(f"Perfil ideal: {perfil_ideal}.")
+    if beneficios:
+        lineas_contexto.append(f"Beneficios: {', '.join(beneficios)}.")
+
+    saludo = f" Te diriges al candidato como «{nombre_candidato}»." if nombre_candidato else ""
+
     mensajes = [{"role": ("user" if m["rol"] == "user" else "assistant"), "content": m["texto"]} for m in historial]
     resp = client.responses.parse(
         model=MODEL,
         instructions=(
             "Eres el agente de prefiltro de Red Human AI, hablas por WhatsApp con candidatos en México.\n"
-            f"Vacante: {vacante_titulo}.\nRequisitos indispensables: {requisitos}.\n"
+            + "\n".join(lineas_contexto) + "\n"
             f"Criterios de prefiltro:\n{criterios_prefiltro(preguntas)}\n\n"
-            "Reglas: (1) una sola pregunta por mensaje, tono cálido y breve; (2) recorre los criterios en orden "
-            "y no repitas los que ya quedaron contestados; (3) cuando tengas suficiente información marca "
+            "Reglas: (1) una sola pregunta por mensaje, tono cálido y breve — hablas como un reclutador "
+            "humano, NO como un cuestionario robótico;" + saludo + " (2) recorre los criterios en orden "
+            "y no repitas los que ya quedaron contestados; (3) si el candidato pregunta sobre sueldo, "
+            "ubicación, beneficios o el puesto, contesta con los datos de la vacante que tienes arriba; "
+            "(4) cuando tengas suficiente información marca "
             "clasificacion_lista=true con estado, score y evidencia OBJETIVA citando lo que dijo la persona; "
-            "(4) si falla un criterio marcado como DESCARTA, el estado es 'no_cumple'; si solo quedan dudas, "
-            "'revision'; (5) NUNCA le comuniques un rechazo al candidato: si no cumple, agradece y di que RH "
-            "revisará su caso — la decisión final siempre la toma una persona de RH; (6) no pidas datos "
-            "sensibles (salud, embarazo, religión, estado civil, edad)."
+            "(5) si falla un criterio marcado como DESCARTA, el estado es 'no_cumple'; si solo quedan dudas, "
+            "'revision'; (6) NUNCA le comuniques un rechazo al candidato: si no cumple, agradece y di que RH "
+            "revisará su caso — la decisión final siempre la toma una persona de RH; (7) no pidas datos "
+            "sensibles (salud, embarazo, religión, estado civil, edad); (8) si el candidato dice que ya no le "
+            "interesa, agradece y clasifica como 'no_cumple' con evidencia 'candidato declinó participar'."
         ),
         input=mensajes,
         text_format=TurnoPrefiltro,
@@ -625,7 +683,37 @@ def validar_documento(
             False,
         )
 
-    bloque = _bloque_archivo(archivo_b64, extension, "documento")
+    ext = extension.lower().lstrip(".")
+    if ext == "pdf":
+        try:
+            import base64
+            import io
+            from pypdf import PdfReader
+            pdf_bytes = base64.b64decode(archivo_b64)
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            texto_pdf = ""
+            for page in reader.pages:
+                texto_pdf += (page.extract_text() or "") + "\n"
+            
+            if texto_pdf.strip():
+                content_blocks = [
+                    {"type": "input_text", "text": f"CONTENIDO DEL DOCUMENTO (TEXTO EXTRAÍDO DEL PDF):\n\n{texto_pdf}\n\nDocumento esperado: {tipo_esperado}. Valida este archivo."}
+                ]
+            else:
+                content_blocks = [
+                    {"type": "input_text", "text": "El archivo PDF no contiene texto legible (podría ser una imagen escaneada sin OCR)."}
+                ]
+        except Exception as e:
+            content_blocks = [
+                {"type": "input_text", "text": f"Error al extraer texto del PDF usando pypdf: {str(e)}"}
+            ]
+    else:
+        bloque = _bloque_archivo(archivo_b64, extension, "documento")
+        content_blocks = [
+            bloque,
+            {"type": "input_text", "text": f"Documento esperado: {tipo_esperado}. Valida este archivo."}
+        ]
+
     titular = (
         f"Titular esperado del documento: {titular_esperado}. Compara el nombre y llena coincide_titular "
         "(tolera abreviaturas y orden distinto de apellidos; marca false solo si claramente es otra persona)."
@@ -643,7 +731,7 @@ def validar_documento(
         input=[
             {
                 "role": "user",
-                "content": [bloque, {"type": "input_text", "text": f"Documento esperado: {tipo_esperado}. Valida este archivo."}],
+                "content": content_blocks,
             }
         ],
         text_format=DocumentoValidado,
