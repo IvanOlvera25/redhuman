@@ -291,3 +291,55 @@ def parsear_webhook(payload: dict) -> Optional[dict]:
                     "wa_id": str(key.get("id", "")), "tipo": "text"}
 
     return None
+
+
+async def enviar_lista_interactiva(
+    telefono: str,
+    encabezado: str,
+    cuerpo: str,
+    boton: str,
+    opciones: list,
+) -> dict:
+    """Mensaje interactivo tipo lista (Meta Cloud API).
+
+    opciones: [{"id": "VAC-1042", "titulo": "Cajero(a)", "descripcion": "Guadalajara · $9,500"}]
+    El candidato elige y Meta responde con un list_reply; `parsear_webhook` ya extrae
+    el título, y el webhook detecta el código VAC-XXXX en una segunda pasada.
+
+    Meta limita: encabezado 60, cuerpo 1024, botón 20, título de fila 24,
+    descripción 72 y un máximo de 10 filas por sección.
+    """
+    if proveedor() != "meta":
+        return _resultado(False, "Las listas interactivas solo existen en Meta Cloud API")
+    if not opciones:
+        return _resultado(False, "No hay opciones que mostrar")
+
+    return await _meta_post(
+        {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": numero_e164(telefono),
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "header": {"type": "text", "text": encabezado[:60]},
+                "body": {"text": cuerpo[:1024]},
+                "action": {
+                    "button": boton[:20],
+                    "sections": [
+                        {
+                            "title": "Vacantes",
+                            "rows": [
+                                {
+                                    "id": str(o["id"])[:200],
+                                    "title": str(o["titulo"])[:24],
+                                    "description": str(o.get("descripcion") or "")[:72],
+                                }
+                                for o in opciones[:10]
+                            ],
+                        }
+                    ],
+                },
+            },
+        }
+    )

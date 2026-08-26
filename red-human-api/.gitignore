@@ -1,5 +1,11 @@
 .venv/
+venv/
 __pycache__/
+*.py[cod]
 *.db
+*.sqlite3
 uploads/
 .env
+.env.*
+.env.local
+!.env.example

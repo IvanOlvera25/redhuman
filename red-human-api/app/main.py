@@ -3,11 +3,13 @@
 Módulos implementados:
   1. Reclutamiento y selección  → /vacantes, /candidatos, /webhooks/whatsapp
   2. Contratación e integración → /contratacion
+  4. Requisiciones inteligentes → /requisiciones
 
 Documentación interactiva: http://localhost:8000/docs
 """
 
 from contextlib import asynccontextmanager
+
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .database import Base, SessionLocal, engine
 from .migraciones import sincronizar
-from .routers import auth, candidatos, contratacion, entrevistas, metricas, vacantes, webhooks
+from .routers import auth, candidatos, contratacion, empleados, entrevistas, metricas, requisiciones, vacantes, webhooks
 from .seed import sembrar, sembrar_admin
 from .services.avatar import avatar_activo
 from .services.ia import ia_activa
@@ -42,16 +44,31 @@ app = FastAPI(
 )
 
 origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+default_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3002",
+    "http://192.168.100.50:3000",
+]
+for d in default_origins:
+    if d not in origins:
+        origins.append(d)
+
 app.add_middleware(
     CORSMiddleware,
-    # con cookie de sesión el navegador exige orígenes explícitos: "*" no es válido junto con credenciales
-    allow_origins=origins or ["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(auth.router)
+app.include_router(requisiciones.router)
+app.include_router(empleados.router)
 app.include_router(vacantes.router)
 app.include_router(candidatos.router)
 app.include_router(entrevistas.router)

@@ -30,12 +30,15 @@ class Settings(BaseSettings):
     # "meta" = WhatsApp Cloud API oficial (Meta) · "waha"/"evolution" = gateway propio
     # "" = modo demo (el mensaje se guarda en la base pero no sale)
     whatsapp_provider: str = ""
+    whatsapp_public_number: str = ""  # número legible para deep-links wa.me
 
     # --- Meta · WhatsApp Cloud API ---
     meta_phone_number_id: str = ""   # id del número emisor (panel de Meta)
     meta_waba_id: str = ""           # id de la cuenta de WhatsApp Business
     meta_whatsapp_token: str = ""    # token de acceso (System User, permanente)
-    meta_verify_token: str = ""      # el mismo string que capturas al dar de alta el webhook
+    # Mismo string que capturas al dar de alta el webhook en Meta.
+    # TODO: mover a .env — este default quedó en el repo y conviene rotarlo.
+    meta_verify_token: str = "redhuman_webhook_verify_token_2026_x89a"
     meta_app_secret: str = ""        # App Secret: valida la firma X-Hub-Signature-256
     meta_api_version: str = "v21.0"
     # Plantilla aprobada para escribirle a alguien fuera de la ventana de 24 h.

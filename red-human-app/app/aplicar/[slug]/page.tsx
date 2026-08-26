@@ -68,7 +68,7 @@ export default function Aplicar() {
   );
 
   const puedeAvanzar =
-    step === 0 ? datos.nombre.trim().length > 2 && (datos.telefono.trim() || datos.correo.trim()) : step === 1 ? consent : true;
+    step === 0 ? datos.nombre.trim().length > 2 && (datos.telefono.trim() || datos.correo.trim()) : step === 1 ? consent && cv !== null : true;
 
   async function siguiente() {
     setError("");
@@ -81,23 +81,39 @@ export default function Aplicar() {
       return;
     }
 
-    setEnviando(true);
-    const r = await postular({
-      slug,
-      nombre: datos.nombre,
-      telefono: datos.telefono,
-      correo: datos.correo,
-      consentimiento: consent,
-      respuestas: preguntas.map((p) => ({ pregunta: p, respuesta: respuestas[p] ?? "" })),
-      cv,
-    });
-    setEnviando(false);
-    if (!r.ok) {
-      setError(r.error);
+    // Validaciones previas al envío
+    if (!cv) {
+      setError("El currículum es obligatorio. Por favor sube tu CV en formato PDF o imagen.");
+      setStep(1);
       return;
     }
-    setDone(true);
+
+    setEnviando(true);
+    try {
+      const r = await postular({
+        slug,
+        nombre: datos.nombre,
+        telefono: datos.telefono,
+        correo: datos.correo,
+        consentimiento: consent,
+        respuestas: preguntas.map((p) => ({ pregunta: p, respuesta: respuestas[p] ?? "" })),
+        cv,
+      });
+      setEnviando(false);
+      if (!r.ok) {
+        setError(r.error);
+        return;
+      }
+      setDone(true);
+    } catch (err) {
+      setEnviando(false);
+      setError(
+        "No pudimos enviar tu aplicación. Verifica tu conexión a internet e inténtalo de nuevo. " +
+        "Si el problema persiste, contáctanos directamente."
+      );
+    }
   }
+
 
   return (
     <main className="min-h-svh bg-bg">
@@ -232,7 +248,7 @@ export default function Aplicar() {
                       ) : (
                         <Dropzone
                           onArchivos={(a) => setCv(a[0])}
-                          titulo="Sube tu currículum (opcional)"
+                          titulo="Sube tu currículum (obligatorio)"
                           ayuda="PDF o foto · máx. 10 MB · nuestro asistente leerá tus datos para que no los captures"
                         />
                       )}
