@@ -148,6 +148,9 @@ class Mensaje(Base):
     texto: Mapped[str] = mapped_column(Text)
     canal: Mapped[str] = mapped_column(String(20), default="whatsapp")  # whatsapp | web | simulador
     enviado: Mapped[bool] = mapped_column(Boolean, default=True)
+    # id del mensaje en WhatsApp (wamid…). Meta reenvía el webhook si no le
+    # contestamos rápido; guardarlo evita procesar dos veces el mismo mensaje.
+    wa_id: Mapped[str] = mapped_column(String(80), default="", index=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
     candidato: Mapped[Candidato] = relationship(back_populates="mensajes")

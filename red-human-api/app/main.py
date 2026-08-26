@@ -19,7 +19,7 @@ from .routers import auth, candidatos, contratacion, entrevistas, metricas, vaca
 from .seed import sembrar, sembrar_admin
 from .services.avatar import avatar_activo
 from .services.ia import ia_activa
-from .services.whatsapp import whatsapp_activo
+from .services.whatsapp import proveedor as whatsapp_proveedor, whatsapp_activo
 
 
 @asynccontextmanager
@@ -66,6 +66,8 @@ def salud():
         "ok": True,
         "ia_configurada": ia_activa(),
         "whatsapp_configurado": whatsapp_activo(),
+        "whatsapp_proveedor": whatsapp_proveedor(),
+        "whatsapp_webhook_firmado": bool(settings.meta_app_secret) if settings.whatsapp_provider == "meta" else None,
         "avatar_configurado": avatar_activo(),
         "modelo": settings.openai_model,
         "modo": "producción" if ia_activa() else "demo (sin OPENAI_API_KEY)",
