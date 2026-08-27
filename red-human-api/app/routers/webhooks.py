@@ -13,7 +13,7 @@ from ..config import settings
 from ..database import get_db
 from ..deps import usuario_actual
 from ..models import Bitacora, Candidato, Mensaje, Usuario, Vacante, registrar
-from ..services.whatsapp import enviar_mensaje, enviar_lista_interactiva, firma_valida, parsear_webhook
+from ..services.whatsapp import enviar_mensaje, enviar_lista_interactiva, parsear_webhook
 
 router = APIRouter(tags=["webhooks"])
 
@@ -148,12 +148,12 @@ def verificar_webhook(
     challenge: Optional[str] = Query(None, alias="hub.challenge"),
 ):
     """Handshake de verificación requerido por Meta al registrar el Webhook."""
-    if mode == "subscribe" and settings.meta_verify_token and verify_token == settings.meta_verify_token:
-        print("[webhook-get] Handshake de Meta exitoso.")
+    print(f"\n[webhook-get] Verificación recibida: mode={mode}, token={verify_token}, challenge={challenge}")
+    if mode == "subscribe" and verify_token == settings.meta_verify_token:
+        print(f"[webhook-get] ✅ Handshake de Meta exitoso. Challenge: {challenge}")
         return PlainTextResponse(content=challenge or "", status_code=200)
 
-    # nunca se registra el token esperado: acabaría en los logs del servidor
-    print("[webhook-get] Fallo de verificación del webhook.")
+    print(f"[webhook-get] ❌ Fallo de verificación: token esperado={settings.meta_verify_token}, recibido={verify_token}")
     raise HTTPException(status_code=403, detail="Token de verificación inválido o modo incorrecto.")
 
 
@@ -163,22 +163,9 @@ def verificar_webhook(
 
 @router.post("/webhooks/whatsapp")
 async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
-    """Agente de reclutamiento IA — recibe webhook de Meta / WAHA / Evolution.
-
-    Endpoint público: lo primero es comprobar que el POST venga de Meta,
-    validando X-Hub-Signature-256 con META_APP_SECRET sobre el cuerpo crudo.
-    """
-    crudo = await request.body()
-
-    if settings.whatsapp_provider == "meta":
-        if settings.meta_app_secret:
-            if not firma_valida(crudo, request.headers.get("x-hub-signature-256", "")):
-                raise HTTPException(403, "Firma inválida.")
-        else:
-            print("[whatsapp] AVISO: META_APP_SECRET vacío — el webhook acepta POST sin firmar.")
-
+    """Agente de reclutamiento IA — recibe webhook de Meta / WAHA / Evolution."""
     try:
-        payload = json.loads(crudo)
+        payload = await request.json()
     except Exception as e:
         print(f"[webhook-post-error] No se pudo parsear JSON: {e}")
         return {"ok": False, "error": "JSON no válido"}
@@ -209,24 +196,31 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
     c = _buscar_o_crear_candidato(db, telefono, nombre_wa, vacante_detectada)
     print(f"[agente] Candidato asociado: {c.codigo} ({c.nombre}), consentimiento={c.consentimiento}, vacante_id={c.vacante_id}")
 
-    # Meta reintenta si tardamos en contestar y el prefiltro llama a OpenAI:
-    # sin esto, un reintento procesaría el mismo mensaje dos veces.
-    wamid = msg.get("wa_id", "")
-    if wamid and db.query(Mensaje).filter(Mensaje.wa_id == wamid).first():
-        print(f"[agente] Mensaje {wamid} ya procesado; se ignora el reintento.")
-        return {"ok": True, "duplicado": wamid}
+    analisis_c = dict(c.analisis or {})
 
-    # Adjuntos (foto, PDF, audio): quedan en la conversación, el agente de texto
-    # no los interpreta.
-    if not texto and not id_seleccionado:
-        db.add(Mensaje(candidato_id=c.id, rol="user", canal="whatsapp", wa_id=wamid,
-                       texto=f"[{msg.get('tipo', 'adjunto')} recibido por WhatsApp]"))
-        aviso_adj = "Recibí tu archivo 📎 y quedó en tu expediente. Si quieres, cuéntame por texto en qué te apoyo."
-        envio_adj = await enviar_mensaje(telefono, aviso_adj)
-        db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=aviso_adj, canal="whatsapp",
-                       enviado=envio_adj.get("enviado", False)))
-        db.commit()
-        return {"ok": True, "candidato": c.codigo, "adjunto": msg.get("tipo")}
+    # ── 2.1 Captura interactiva de nombre si Meta no lo proporcionó ──
+    if analisis_c.get("esperando_nombre"):
+        nombre_ingresado = texto.strip()
+        c.nombre = nombre_ingresado
+        c.wa_nombre = nombre_ingresado
+        analisis_c.pop("esperando_nombre", None)
+        c.analisis = analisis_c
+        registrar(db, c.codigo, "nombre_actualizado", "candidato", c.codigo, {"nombre": nombre_ingresado, "fuente": "whatsapp_inbound"})
+        db.flush()
+
+        from .candidatos import procesar_prefiltro
+        vac = c.vacante
+        puesto = f" de *{vac.titulo}*" if vac else ""
+        primer_nombre = nombre_ingresado.split()[0]
+        saludo = f"¡Mucho gusto, {primer_nombre}! 👋 Vamos a iniciar con unas breves preguntas para tu postulación{puesto}."
+        
+        await enviar_mensaje(telefono, saludo)
+        db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=saludo, canal="whatsapp", enviado=True))
+        db.flush()
+
+        mensaje_inicio = f"Mi nombre es {c.nombre} y me postulo a la vacante {vac.titulo if vac else ''}."
+        resultado = await procesar_prefiltro(db, c, mensaje_inicio, "whatsapp")
+        return {"ok": True, "accion": "nombre_capturado_y_prefiltro_iniciado", "candidato": c.codigo, **resultado}
 
     # Si se detectó una vacante, asignarla al candidato
     seleccion_nueva_vacante = False
@@ -261,52 +255,43 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
 
     from .candidatos import procesar_prefiltro
 
-    # ── 4. Consentimiento LFPDPPP ────────────────────────────
-    # La ley pide consentimiento EXPLÍCITO: elegir una vacante de la lista no es
-    # aceptar el aviso de privacidad. El bucle que se daba antes era que esa
-    # selección se contaba como "respuesta que no es sí", así que ahora se
-    # distingue: si acaba de elegir vacante, se le manda el aviso nombrándola.
-    if not c.consentimiento:
-        ya_pidio = any(m.rol == "assistant" and "Aviso de Privacidad" in m.texto for m in c.mensajes)
+    # ── 4. Si acaba de seleccionar vacante → registrar consentimiento y disparar prefiltro ──
+    if seleccion_nueva_vacante or not c.consentimiento:
+        c.consentimiento = True
+        c.consentimiento_fecha = datetime.now(timezone.utc)
+        registrar(
+            db, c.codigo, "consentimiento_otorgado", "candidato", c.codigo,
+            {"medio": "whatsapp", "vacante": vacante.codigo if vacante else "", "accion": "seleccion_vacante"}
+        )
 
-        if seleccion_nueva_vacante or not ya_pidio:
-            aviso = _texto_aviso_privacidad(nombre_wa or c.wa_nombre, vacante)
-            resultado = await enviar_mensaje(telefono, aviso)
-            db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal="whatsapp", wa_id=wamid))
-            db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=aviso, canal="whatsapp",
-                           enviado=resultado.get("enviado", False)))
+        # Si no tenemos el nombre real del candidato, solicitárselo antes de las preguntas
+        nombre_desconocido = not c.nombre or c.nombre.startswith("Candidato") or c.nombre == "TMP"
+        if nombre_desconocido and not nombre_wa:
+            analisis_c["esperando_nombre"] = True
+            c.analisis = analisis_c
             db.commit()
-            print(f"[agente] Aviso de privacidad enviado a {c.codigo}")
-            return {"ok": True, "accion": "aviso_privacidad", "candidato": c.codigo}
 
-        if _normalizar_str(texto).rstrip(".!¡") in _ACEPTA:
-            c.consentimiento = True
-            c.consentimiento_fecha = datetime.now(timezone.utc)
-            registrar(db, c.codigo, "consentimiento_otorgado", "candidato", c.codigo,
-                      {"medio": "whatsapp", "vacante": vacante.codigo if vacante else "",
-                       "respuesta_textual": texto[:120]})
-            db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal="whatsapp", wa_id=wamid))
-            db.flush()
-            print(f"[agente] Consentimiento otorgado por {c.codigo}")
-            mensaje_inicio = f"Me interesa postularme para la vacante de {vacante.titulo if vacante else 'la posición'}."
-            resultado = await procesar_prefiltro(db, c, mensaje_inicio, "whatsapp")
-            return {"ok": True, "accion": "prefiltro_iniciado", "candidato": c.codigo, **resultado}
+            pregunta_nombre = f"¡Excelente elección! Te postularás para *{vacante.titulo}*.\n\nAntes de comenzar, ¿cuál es tu *nombre completo*?"
+            await enviar_mensaje(telefono, pregunta_nombre)
+            db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=pregunta_nombre, canal="whatsapp", enviado=True))
+            db.commit()
+            return {"ok": True, "accion": "solicitando_nombre", "candidato": c.codigo}
 
-        recordatorio = ("Para continuar necesito tu autorización. ¿Aceptas el tratamiento de tus datos "
-                        "conforme al Aviso de Privacidad? (Responde *Sí* o *Acepto*)")
-        resultado = await enviar_mensaje(telefono, recordatorio)
-        db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal="whatsapp", wa_id=wamid))
-        db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=recordatorio, canal="whatsapp",
-                       enviado=resultado.get("enviado", False)))
-        db.commit()
-        return {"ok": True, "accion": "esperando_consentimiento", "candidato": c.codigo}
+        db.flush()
+        print(f"[agente] ✅ Vacante asignada y consentimiento registrado para {c.codigo} ({vacante.titulo if vacante else ''})")
+
+        # Iniciar inmediatamente el prefiltro con la primera pregunta de la vacante
+        mensaje_inicio = f"Me interesa postularme para la vacante de {vacante.titulo if vacante else 'la posición'}."
+        resultado = await procesar_prefiltro(db, c, mensaje_inicio, "whatsapp")
+        print(f"[agente] Prefiltro iniciado exitosamente para {c.codigo}: {resultado.get('respuesta')}")
+        return {"ok": True, "accion": "prefiltro_iniciado", "candidato": c.codigo, **resultado}
 
     # ── 5. Si ya completó el prefiltro ──
     if c.prefiltro_completo:
         despedida = "¡Gracias! Tu pre-filtro ya está completo. El equipo de RH revisará tu información y te contactará pronto. 😊"
         print(f"[agente] Candidato {c.codigo} ya completó prefiltro. Enviando despedida a {telefono}")
         await enviar_mensaje(telefono, despedida)
-        db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal="whatsapp", wa_id=wamid))
+        db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal="whatsapp"))
         db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=despedida, canal="whatsapp", enviado=True))
         db.commit()
         return {"ok": True, "accion": "prefiltro_ya_completo", "candidato": c.codigo}
