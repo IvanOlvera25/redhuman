@@ -623,9 +623,45 @@ function PestanaPerfilYCV({
                 ))}
               </ul>
             </Card>
-          )}
+      {/* Respuestas Estructuradas del Pre-filtro (WhatsApp) */}
+      {Boolean(a.respuestas_prefiltro?.length) && (
+        <div>
+          <Eyebrow>Entrevista Pre-filtro por WhatsApp ({a.respuestas_prefiltro!.length} respuestas)</Eyebrow>
+          <Card className="mt-2 border-good/30 bg-good-soft/10 p-5">
+            <div className="space-y-3">
+              {a.respuestas_prefiltro!.map((r, i) => (
+                <div key={i} className="rounded-xl border border-border-soft bg-surface p-3.5 shadow-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <span className="grid h-6 w-6 shrink-0 place-items-center rounded-lg bg-good/15 text-good font-mono text-[11px] font-bold">
+                        {i + 1}
+                      </span>
+                      <p className="font-semibold text-xs sm:text-sm text-ink">{r.criterio || r.pregunta}</p>
+                    </div>
+
+                    {r.cumple !== null && r.cumple !== undefined && (
+                      <span
+                        className={cn(
+                          "shrink-0 rounded-full px-2.5 py-0.5 font-mono text-[10px] font-bold uppercase",
+                          r.cumple
+                            ? "border border-good/30 bg-good-soft text-good"
+                            : "border border-bad/30 bg-bad-soft text-bad"
+                        )}
+                      >
+                        {r.cumple ? "Cumple" : "No cumple"}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="mt-2.5 rounded-lg bg-surface-2/60 p-2.5 pl-3 border-l-2 border-brand/50">
+                    <p className="text-xs leading-relaxed text-ink-2 italic">“{r.respuesta}”</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
         </div>
-      ) : null}
+      )}
 
       {/* Análisis y Extracción del Currículum */}
       <div>

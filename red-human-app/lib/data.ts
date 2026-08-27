@@ -8,6 +8,13 @@ export type FuenteCandidato = "Formulario" | "WhatsApp" | "OCC" | "LinkedIn" | "
 
 export type EtapaCandidato = "Prefiltro" | "Entrevista" | "Evaluación" | "Contratación";
 
+export interface RespuestaPrefiltro {
+  criterio?: string;
+  pregunta?: string;
+  respuesta?: string;
+  cumple?: boolean | null;
+}
+
 export interface Candidato {
   id: string;
   nombre: string;
@@ -46,6 +53,8 @@ export interface Candidato {
     brechas?: string[];
     alertas?: string[];
     datos_faltantes?: string[];
+    respuestas_prefiltro?: RespuestaPrefiltro[];
+    [key: string]: unknown;
   };
   listaArchivos?: {
     id: number;

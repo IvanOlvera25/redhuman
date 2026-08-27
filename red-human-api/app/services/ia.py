@@ -419,12 +419,23 @@ def extraer_cv(
 # ============================================================
 
 
+class RespuestaCriterio(BaseModel):
+    criterio: str = Field(description="Nombre del criterio o pregunta evaluada")
+    pregunta: str = Field(description="Pregunta formulada al candidato")
+    respuesta: str = Field(description="Resumen o cita de la respuesta del candidato")
+    cumple: Optional[bool] = Field(default=None, description="true si cumple, false si descarta, null si aún no concluyente")
+
+
 class TurnoPrefiltro(BaseModel):
     respuesta: str = Field(description="Siguiente mensaje del agente al candidato, breve y cálido, español mexicano.")
     clasificacion_lista: bool = Field(description="true solo cuando ya hay información suficiente para clasificar.")
     estado: Optional[Literal["cumple", "revision", "no_cumple"]] = Field(default=None)
     score: Optional[int] = Field(default=None, description="0-100, qué tanto empata con el perfil.")
     evidencia: Optional[str] = Field(default=None, description="Evidencia objetiva que sustenta la clasificación.")
+    respuestas_extraidas: List[RespuestaCriterio] = Field(
+        default_factory=list,
+        description="Lista acumulada de preguntas realizadas y respuestas estructuradas obtenidas del candidato hasta el momento."
+    )
 
 
 def prefiltro_turno(
@@ -458,6 +469,10 @@ def prefiltro_turno(
                 estado="revision",
                 score=65,
                 evidencia="Modo demo: clasificación simulada. Agrega OPENAI_API_KEY para el prefiltro real.",
+                respuestas_extraidas=[
+                    RespuestaCriterio(criterio=q, pregunta=q, respuesta="Respuesta registrada en modo demo", cumple=True)
+                    for q in qs
+                ],
             ),
             False,
         )
@@ -492,13 +507,15 @@ def prefiltro_turno(
             "humano, NO como un cuestionario robótico;" + saludo + " (2) recorre los criterios en orden "
             "y no repitas los que ya quedaron contestados; (3) si el candidato pregunta sobre sueldo, "
             "ubicación, beneficios o el puesto, contesta con los datos de la vacante que tienes arriba; "
-            "(4) cuando tengas suficiente información marca "
-            "clasificacion_lista=true con estado, score y evidencia OBJETIVA citando lo que dijo la persona; "
-            "(5) si falla un criterio marcado como DESCARTA, el estado es 'no_cumple'; si solo quedan dudas, "
-            "'revision'; (6) NUNCA le comuniques un rechazo al candidato: si no cumple, agradece y di que RH "
-            "revisará su caso — la decisión final siempre la toma una persona de RH; (7) no pidas datos "
-            "sensibles (salud, embarazo, religión, estado civil, edad); (8) si el candidato dice que ya no le "
-            "interesa, agradece y clasifica como 'no_cumple' con evidencia 'candidato declinó participar'."
+            "(4) en `respuestas_extraidas` mantén una lista estructurada y acumulada de los criterios "
+            "evaluados, la pregunta, la respuesta del candidato y si cumple (true/false/null); "
+            "(5) cuando tengas suficiente información marca clasificacion_lista=true con estado, score "
+            "y evidencia OBJETIVA citando lo que dijo la persona; (6) si falla un criterio marcado como "
+            "DESCARTA, el estado es 'no_cumple'; si solo quedan dudas, 'revision'; (7) NUNCA le comuniques "
+            "un rechazo al candidato: si no cumple, agradece y di que RH revisará su caso — la decisión "
+            "final siempre la toma una persona de RH; (8) no pidas datos sensibles (salud, embarazo, "
+            "religión, estado civil, edad); (9) si el candidato dice que ya no le interesa, agradece y "
+            "clasifica como 'no_cumple' con evidencia 'candidato declinó participar'."
         ),
         input=mensajes,
         text_format=TurnoPrefiltro,

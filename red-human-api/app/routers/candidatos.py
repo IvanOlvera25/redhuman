@@ -386,22 +386,6 @@ async def postular(
             print(f"[postular-cv-error] Error procesando CV: {e}")
             resultado_cv = {"ok": False, "avisos": [f"No se pudo extraer el CV: {e}"]}
 
-    # las respuestas del formulario entran como turno del prefiltro para que el agente clasifique
-    clasificacion = None
-    try:
-        pares = json.loads(respuestas) if respuestas.strip() else []
-    except json.JSONDecodeError:
-        pares = []
-    if pares:
-        texto = "\n".join(f"{p.get('pregunta', '')} → {p.get('respuesta', '')}" for p in pares if p.get("respuesta"))
-        if texto:
-            try:
-                # si dejó WhatsApp, la repregunta del agente le llega por ahí; si no, queda en el hilo web
-                turno = await procesar_prefiltro(db, c, texto, "whatsapp" if c.telefono else "web")
-                clasificacion = turno.get("clasificacion")
-            except Exception as e:
-                print(f"[postular-prefiltro-error] Error en prefiltro automático: {e}")
-
     registrar(db, "sistema", "postulacion_recibida", "candidato", c.codigo, {"vacante": vac.codigo, "nuevo": nuevo})
     db.commit()
     return {
@@ -410,7 +394,6 @@ async def postular(
         "nombre": c.nombre,
         "nuevo": nuevo,
         "cv": {"procesado": resultado_cv.get("ok", False), "avisos": resultado_cv.get("avisos", [])},
-        "clasificacion": clasificacion,
     }
 
 
@@ -546,16 +529,21 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str) 
             envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
     db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal, enviado=envio.get("enviado", False)))
 
+    analisis_actual = dict(c.analisis or {})
+    if turno.respuestas_extraidas:
+        analisis_actual["respuestas_prefiltro"] = [r.model_dump() for r in turno.respuestas_extraidas]
+
     clasificacion = None
     if turno.clasificacion_lista and turno.estado and not c.prefiltro_completo:
         c.estado = turno.estado
         c.score = turno.score or 0
         c.evidencia = turno.evidencia or ""
         c.prefiltro_completo = True
-        c.analisis = {**(c.analisis or {}), "origen": "prefiltro", "ia": con_ia}
+        analisis_actual.update({"origen": "prefiltro", "ia": con_ia})
         clasificacion = {"estado": c.estado, "score": c.score, "evidencia": c.evidencia}
         registrar(db, "agente-ia", "prefiltro_clasificado", "candidato", c.codigo, {"ia": con_ia, **clasificacion})
 
+    c.analisis = analisis_actual
     db.commit()
     return {"respuesta": turno.respuesta, "clasificacion": clasificacion, "ia": con_ia, "whatsapp": envio}
 

@@ -196,6 +196,32 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
     c = _buscar_o_crear_candidato(db, telefono, nombre_wa, vacante_detectada)
     print(f"[agente] Candidato asociado: {c.codigo} ({c.nombre}), consentimiento={c.consentimiento}, vacante_id={c.vacante_id}")
 
+    analisis_c = dict(c.analisis or {})
+
+    # ── 2.1 Captura interactiva de nombre si Meta no lo proporcionó ──
+    if analisis_c.get("esperando_nombre"):
+        nombre_ingresado = texto.strip()
+        c.nombre = nombre_ingresado
+        c.wa_nombre = nombre_ingresado
+        analisis_c.pop("esperando_nombre", None)
+        c.analisis = analisis_c
+        registrar(db, c.codigo, "nombre_actualizado", "candidato", c.codigo, {"nombre": nombre_ingresado, "fuente": "whatsapp_inbound"})
+        db.flush()
+
+        from .candidatos import procesar_prefiltro
+        vac = c.vacante
+        puesto = f" de *{vac.titulo}*" if vac else ""
+        primer_nombre = nombre_ingresado.split()[0]
+        saludo = f"¡Mucho gusto, {primer_nombre}! 👋 Vamos a iniciar con unas breves preguntas para tu postulación{puesto}."
+        
+        await enviar_mensaje(telefono, saludo)
+        db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=saludo, canal="whatsapp", enviado=True))
+        db.flush()
+
+        mensaje_inicio = f"Mi nombre es {c.nombre} y me postulo a la vacante {vac.titulo if vac else ''}."
+        resultado = await procesar_prefiltro(db, c, mensaje_inicio, "whatsapp")
+        return {"ok": True, "accion": "nombre_capturado_y_prefiltro_iniciado", "candidato": c.codigo, **resultado}
+
     # Si se detectó una vacante, asignarla al candidato
     seleccion_nueva_vacante = False
     if vacante_detectada and c.vacante_id != vacante_detectada.id:
@@ -237,6 +263,20 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
             db, c.codigo, "consentimiento_otorgado", "candidato", c.codigo,
             {"medio": "whatsapp", "vacante": vacante.codigo if vacante else "", "accion": "seleccion_vacante"}
         )
+
+        # Si no tenemos el nombre real del candidato, solicitárselo antes de las preguntas
+        nombre_desconocido = not c.nombre or c.nombre.startswith("Candidato") or c.nombre == "TMP"
+        if nombre_desconocido and not nombre_wa:
+            analisis_c["esperando_nombre"] = True
+            c.analisis = analisis_c
+            db.commit()
+
+            pregunta_nombre = f"¡Excelente elección! Te postularás para *{vacante.titulo}*.\n\nAntes de comenzar, ¿cuál es tu *nombre completo*?"
+            await enviar_mensaje(telefono, pregunta_nombre)
+            db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=pregunta_nombre, canal="whatsapp", enviado=True))
+            db.commit()
+            return {"ok": True, "accion": "solicitando_nombre", "candidato": c.codigo}
+
         db.flush()
         print(f"[agente] ✅ Vacante asignada y consentimiento registrado para {c.codigo} ({vacante.titulo if vacante else ''})")
 
