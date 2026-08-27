@@ -623,6 +623,10 @@ function PestanaPerfilYCV({
                 ))}
               </ul>
             </Card>
+          )}
+        </div>
+      ) : null}
+
       {/* Respuestas Estructuradas del Pre-filtro (WhatsApp) */}
       {Boolean(a.respuestas_prefiltro?.length) && (
         <div>
