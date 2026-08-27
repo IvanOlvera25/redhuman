@@ -34,11 +34,17 @@ CODIGOS_FUERA_DE_VENTANA = {131047, 131026, 132000}
 
 
 def whatsapp_activo() -> bool:
-    return settings.whatsapp_provider in ("meta", "waha", "evolution")
+    return proveedor() != "demo"
 
 
 def proveedor() -> str:
-    return settings.whatsapp_provider or "demo"
+    """Proveedor efectivo. Si no se declaró pero hay credenciales de Meta, es Meta:
+    así un .env incompleto no deja la mensajería en modo demo sin avisar."""
+    if settings.whatsapp_provider in ("meta", "waha", "evolution"):
+        return settings.whatsapp_provider
+    if settings.meta_whatsapp_token and settings.meta_phone_number_id:
+        return "meta"
+    return "demo"
 
 
 def _solo_digitos(telefono: str) -> str:
@@ -220,6 +226,22 @@ def firma_valida(cuerpo: bytes, cabecera: str) -> bool:
     return hmac.compare_digest(esperado, recibida)
 
 
+def _id_seleccionado(m: dict) -> str:
+    """Id de la opción elegida en una lista o botón (p. ej. 'VAC-1042').
+
+    Es más confiable que el título para saber qué eligió el candidato, porque el
+    título va recortado a 24 caracteres por Meta.
+    """
+    tipo = m.get("type")
+    if tipo == "interactive":
+        inter = m.get("interactive") or {}
+        destino = inter.get("list_reply") or inter.get("button_reply") or {}
+        return destino.get("id", "")
+    if tipo == "button":
+        return (m.get("button") or {}).get("payload", "")
+    return ""
+
+
 def _texto_de_meta(m: dict) -> str:
     """Saca el texto de un mensaje de Meta sea cual sea su tipo."""
     tipo = m.get("type")
@@ -255,12 +277,15 @@ def parsear_webhook(payload: dict) -> Optional[dict]:
                 m = mensajes[0]
                 contactos = valor.get("contacts") or [{}]
                 nombre = ((contactos[0].get("profile") or {}).get("name")) or ""
+                elegido = _id_seleccionado(m)
                 return {
                     "telefono": str(m.get("from", "")),
-                    "texto": _texto_de_meta(m),
+                    # si la opción no trae título legible, el id sirve de texto
+                    "texto": _texto_de_meta(m) or elegido,
                     "nombre": nombre,
                     "wa_id": m.get("id", ""),
                     "tipo": m.get("type", "text"),
+                    "id_seleccionado": elegido,
                 }
         return None
 
@@ -274,7 +299,7 @@ def parsear_webhook(payload: dict) -> Optional[dict]:
         nombre = (p.get("_data") or {}).get("notifyName") or ""
         if tel and texto:
             return {"telefono": tel, "texto": texto, "nombre": nombre,
-                    "wa_id": str(p.get("id", "")), "tipo": "text"}
+                    "wa_id": str(p.get("id", "")), "tipo": "text", "id_seleccionado": ""}
 
     # --- Evolution ---
     if payload.get("event") in ("messages.upsert", "MESSAGES_UPSERT") and isinstance(payload.get("data"), dict):
@@ -288,7 +313,7 @@ def parsear_webhook(payload: dict) -> Optional[dict]:
         nombre = d.get("pushName") or ""
         if tel and texto:
             return {"telefono": tel, "texto": texto, "nombre": nombre,
-                    "wa_id": str(key.get("id", "")), "tipo": "text"}
+                    "wa_id": str(key.get("id", "")), "tipo": "text", "id_seleccionado": ""}
 
     return None
 
