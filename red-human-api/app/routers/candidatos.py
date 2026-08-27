@@ -495,9 +495,9 @@ class MensajeIn(BaseModel):
     canal: str = "simulador"  # simulador | whatsapp | web
 
 
-async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str) -> dict:
+async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, wa_id: str = "") -> dict:
     """Registra el mensaje del candidato, corre un turno del agente y responde."""
-    db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal=canal))
+    db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal=canal, wa_id=wa_id))
     db.flush()
 
     v = c.vacante
@@ -525,9 +525,11 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str) 
         try:
             envio = await enviar_mensaje(c.telefono, turno.respuesta)
         except Exception as e:
+            # que WhatsApp falle no debe tumbar el prefiltro: queda registrado y RH lo ve
             print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
             envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
-    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal, enviado=envio.get("enviado", False)))
+    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal,
+                   enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
 
     analisis_actual = dict(c.analisis or {})
     if turno.respuestas_extraidas:

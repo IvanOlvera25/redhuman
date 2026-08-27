@@ -1,88 +1,189 @@
 """
-Servicio de WhatsApp — soporta:
-  1. Meta Cloud API oficial (v22.0)
-  2. Gateway propio (WAHA / Evolution)
+Servicio de WhatsApp — envío y recepción de mensajes del agente.
+
+Proveedores (`WHATSAPP_PROVIDER` en .env):
+  · meta       →  WhatsApp Cloud API oficial. Número verificado por Meta, sin
+                  servidor extra que mantener. Se paga por conversación.
+  · waha       →  https://waha.devlike.pro          (docker devlikeapro/waha)
+  · evolution  →  https://github.com/EvolutionAPI/evolution-api
+  · ""         →  modo demo: el mensaje se guarda en la base como "no enviado".
+
+Webhook de entrada:  {API}/webhooks/whatsapp
+  · Meta pide además un GET de verificación (hub.challenge) y firma cada POST
+    con HMAC-SHA256 en la cabecera X-Hub-Signature-256.
+
+Ventana de 24 horas (solo Meta): a un candidato que NO nos ha escrito en las
+últimas 24 h no se le puede mandar texto libre; Meta lo rechaza con el error
+131047. Para esos casos se usa una plantilla aprobada (`META_PLANTILLA_AVISO`),
+y `enviar_mensaje` cae a ella automáticamente cuando existe.
 """
 
+import hashlib
+import hmac
 import re
-from typing import Optional
+from typing import List, Optional
+
 import httpx
 
 from ..config import settings
 
+GRAPH_URL = "https://graph.facebook.com"
 
-def _solo_digitos(valor: Optional[str]) -> str:
-    """Extrae únicamente los dígitos de una cadena de texto."""
-    return re.sub(r"\D", "", valor or "")
+# Meta rechaza texto libre fuera de la ventana de 24 h con estos códigos.
+CODIGOS_FUERA_DE_VENTANA = {131047, 131026, 132000}
 
 
 def whatsapp_activo() -> bool:
+    return proveedor() != "demo"
+
+
+def proveedor() -> str:
+    """Proveedor efectivo. Si no se declaró pero hay credenciales de Meta, es Meta:
+    así un .env incompleto no deja la mensajería en modo demo sin avisar."""
     if settings.whatsapp_provider in ("meta", "waha", "evolution"):
-        return True
-    return bool(settings.meta_whatsapp_token and settings.meta_phone_number_id)
+        return settings.whatsapp_provider
+    if settings.meta_whatsapp_token and settings.meta_phone_number_id:
+        return "meta"
+    return "demo"
 
 
-def normalizar_numero_meta(telefono: str) -> str:
-    """Normaliza número de teléfono para Meta Cloud API (E.164 mexicano 52 + 10 dígitos).
-    Meta rechaza números con prefijo 521 en muchas regiones."""
-    num = _solo_digitos(telefono)
-    if num.startswith("521") and len(num) == 13:
-        return "52" + num[3:]
-    if len(num) == 10:
-        return "52" + num
-    return num
+def _solo_digitos(telefono: str) -> str:
+    return re.sub(r"\D", "", telefono or "")
+
+
+def clave_telefono(telefono: str) -> str:
+    """Últimos 10 dígitos: la forma en que se guardan los teléfonos en la base.
+
+    Sirve para que un mensaje entrante (que llega como 5213311112222) empate con
+    el candidato que ya existe capturado como 3311112222.
+    """
+    digitos = _solo_digitos(telefono)
+    return digitos[-10:] if len(digitos) > 10 else digitos
+
+
+def numero_e164(telefono: str) -> str:
+    """Número listo para la API, en E.164 sin '+'. Asume México si no trae lada."""
+    digitos = _solo_digitos(telefono)
+    if len(digitos) == 10:  # capturado sin lada internacional
+        digitos = "52" + digitos
+    # México ya no usa el '1' después del 52 para WhatsApp; Meta devuelve los
+    # wa_id sin él, así que lo quitamos para que envío y webhook coincidan.
+    if len(digitos) == 13 and digitos.startswith("521"):
+        digitos = "52" + digitos[3:]
+    return digitos
+
+
+def _resultado(enviado: bool, detalle, prov: Optional[str] = None, **extra) -> dict:
+    return {"enviado": enviado, "proveedor": prov or proveedor(), "detalle": detalle, **extra}
+
+
+# --------------------------------------------------------------------------- #
+# Envío
+# --------------------------------------------------------------------------- #
+
+def _meta_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {settings.meta_whatsapp_token}",
+        "Content-Type": "application/json",
+    }
+
+
+def _meta_url() -> str:
+    return (
+        f"{GRAPH_URL}/{settings.meta_api_version}"
+        f"/{settings.meta_phone_number_id}/messages"
+    )
+
+
+def _meta_error(r: httpx.Response) -> dict:
+    """Extrae {codigo, mensaje} del cuerpo de error de Graph."""
+    try:
+        err = (r.json() or {}).get("error") or {}
+    except Exception:
+        return {"codigo": r.status_code, "mensaje": r.text[:300]}
+    return {
+        "codigo": err.get("code", r.status_code),
+        "mensaje": err.get("error_user_msg") or err.get("message") or r.text[:300],
+    }
+
+
+async def _meta_post(cuerpo: dict) -> dict:
+    if not (settings.meta_whatsapp_token and settings.meta_phone_number_id):
+        return _resultado(False, "Faltan META_WHATSAPP_TOKEN o META_PHONE_NUMBER_ID")
+    try:
+        async with httpx.AsyncClient(timeout=20) as cli:
+            r = await cli.post(_meta_url(), headers=_meta_headers(), json=cuerpo)
+    except Exception as e:  # red caída: no romper el flujo de RH
+        return _resultado(False, f"error de red: {e}")
+
+    if r.status_code < 300:
+        datos = r.json()
+        wamid = ((datos.get("messages") or [{}])[0]).get("id", "")
+        return _resultado(True, r.status_code, wa_id=wamid)
+
+    error = _meta_error(r)
+    return _resultado(False, f"{error['codigo']}: {error['mensaje']}", codigo=error["codigo"])
+
+
+def _param_plantilla(valor: str) -> str:
+    """Meta rechaza variables con saltos de línea, tabuladores o 4+ espacios seguidos."""
+    limpio = re.sub(r"[\r\n\t]+", " ", valor or "")
+    limpio = re.sub(r" {2,}", " ", limpio).strip()
+    return limpio[:900]
+
+
+async def enviar_plantilla(
+    telefono: str,
+    plantilla: str,
+    parametros: Optional[List[str]] = None,
+    idioma: Optional[str] = None,
+) -> dict:
+    """Manda una plantilla aprobada (único formato válido fuera de la ventana de 24 h)."""
+    componentes = []
+    if parametros:
+        componentes.append({
+            "type": "body",
+            "parameters": [{"type": "text", "text": _param_plantilla(p)} for p in parametros],
+        })
+    cuerpo = {
+        "messaging_product": "whatsapp",
+        "to": numero_e164(telefono),
+        "type": "template",
+        "template": {
+            "name": plantilla,
+            "language": {"code": idioma or settings.meta_plantilla_idioma},
+            **({"components": componentes} if componentes else {}),
+        },
+    }
+    resultado = await _meta_post(cuerpo)
+    resultado["formato"] = "plantilla"
+    return resultado
 
 
 async def enviar_mensaje(telefono: str, texto: str) -> dict:
     """Envía un mensaje de texto. Regresa {enviado, proveedor, detalle}."""
-    numero = normalizar_numero_meta(telefono)
-    proveedor = settings.whatsapp_provider
-    if not proveedor and settings.meta_whatsapp_token and settings.meta_phone_number_id:
-        proveedor = "meta"
-
-    # 1. Meta WhatsApp Cloud API (Oficial v22.0)
-    if proveedor == "meta":
-        if not settings.meta_whatsapp_token or not settings.meta_phone_number_id:
-            print("[whatsapp-meta-error] Faltan META_WHATSAPP_TOKEN o META_PHONE_NUMBER_ID en configuración")
-            return {"enviado": False, "proveedor": "meta", "detalle": "Faltan META_WHATSAPP_TOKEN o META_PHONE_NUMBER_ID"}
-
-        url = f"https://graph.facebook.com/v22.0/{settings.meta_phone_number_id}/messages"
-        headers = {
-            "Authorization": f"Bearer {settings.meta_whatsapp_token}",
-            "Content-Type": "application/json",
-        }
-        payload = {
+    if settings.whatsapp_provider == "meta":
+        resultado = await _meta_post({
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
-            "to": numero,
+            "to": numero_e164(telefono),
             "type": "text",
-            "text": {
-                "preview_url": False,
-                "body": texto,
-            },
-        }
+            "text": {"preview_url": True, "body": texto},
+        })
+        # Fuera de la ventana de 24 h el texto libre no pasa: reintenta con la
+        # plantilla aprobada si está configurada.
+        if (
+            not resultado["enviado"]
+            and resultado.get("codigo") in CODIGOS_FUERA_DE_VENTANA
+            and settings.meta_plantilla_aviso
+        ):
+            alterno = await enviar_plantilla(telefono, settings.meta_plantilla_aviso, [texto])
+            alterno["motivo_fallback"] = resultado["detalle"]
+            return alterno
+        return resultado
 
-        print(f"[whatsapp-meta] Enviando mensaje a {numero} ({len(texto)} chars)...")
-        try:
-            async with httpx.AsyncClient(timeout=15) as cli:
-                r = await cli.post(url, headers=headers, json=payload)
-                try:
-                    data = r.json()
-                except Exception:
-                    data = r.text
-            exito = r.status_code < 300
-            print(f"[whatsapp-meta] Respuesta Meta ({r.status_code}): {data}")
-            return {
-                "enviado": exito,
-                "proveedor": "meta",
-                "status_code": r.status_code,
-                "detalle": data,
-            }
-        except Exception as e:
-            print(f"[whatsapp-meta-error] Excepción al llamar a Meta Graph API: {e}")
-            return {"enviado": False, "proveedor": "meta", "detalle": str(e)}
+    numero = numero_e164(telefono)
 
-    # 2. WAHA
     if settings.whatsapp_provider == "waha":
         try:
             async with httpx.AsyncClient(timeout=15) as cli:
@@ -91,11 +192,10 @@ async def enviar_mensaje(telefono: str, texto: str) -> dict:
                     headers={"X-Api-Key": settings.waha_api_key} if settings.waha_api_key else {},
                     json={"session": settings.waha_session, "chatId": f"{numero}@c.us", "text": texto},
                 )
-            return {"enviado": r.status_code < 300, "proveedor": "waha", "detalle": r.status_code}
-        except Exception as e:
-            return {"enviado": False, "proveedor": "waha", "detalle": str(e)}
+            return _resultado(r.status_code < 300, r.status_code)
+        except Exception as e:  # gateway caído: no romper el flujo
+            return _resultado(False, str(e))
 
-    # 3. Evolution API
     if settings.whatsapp_provider == "evolution":
         try:
             async with httpx.AsyncClient(timeout=15) as cli:
@@ -104,72 +204,92 @@ async def enviar_mensaje(telefono: str, texto: str) -> dict:
                     headers={"apikey": settings.evolution_api_key} if settings.evolution_api_key else {},
                     json={"number": numero, "text": texto},
                 )
-            return {"enviado": r.status_code < 300, "proveedor": "evolution", "detalle": r.status_code}
+            return _resultado(r.status_code < 300, r.status_code)
         except Exception as e:
-            return {"enviado": False, "proveedor": "evolution", "detalle": str(e)}
+            return _resultado(False, str(e))
 
-    return {"enviado": False, "proveedor": "demo", "detalle": "WHATSAPP_PROVIDER sin configurar"}
+    return _resultado(False, "WHATSAPP_PROVIDER sin configurar", prov="demo")
+
+
+# --------------------------------------------------------------------------- #
+# Recepción
+# --------------------------------------------------------------------------- #
+
+def firma_valida(cuerpo: bytes, cabecera: str) -> bool:
+    """Valida X-Hub-Signature-256. Sin META_APP_SECRET no se puede validar."""
+    if not settings.meta_app_secret:
+        return False
+    esperado = hmac.new(
+        settings.meta_app_secret.encode(), cuerpo, hashlib.sha256
+    ).hexdigest()
+    recibida = (cabecera or "").removeprefix("sha256=").strip()
+    return hmac.compare_digest(esperado, recibida)
+
+
+def _id_seleccionado(m: dict) -> str:
+    """Id de la opción elegida en una lista o botón (p. ej. 'VAC-1042').
+
+    Es más confiable que el título para saber qué eligió el candidato, porque el
+    título va recortado a 24 caracteres por Meta.
+    """
+    tipo = m.get("type")
+    if tipo == "interactive":
+        inter = m.get("interactive") or {}
+        destino = inter.get("list_reply") or inter.get("button_reply") or {}
+        return destino.get("id", "")
+    if tipo == "button":
+        return (m.get("button") or {}).get("payload", "")
+    return ""
+
+
+def _texto_de_meta(m: dict) -> str:
+    """Saca el texto de un mensaje de Meta sea cual sea su tipo."""
+    tipo = m.get("type")
+    if tipo == "text":
+        return (m.get("text") or {}).get("body", "")
+    if tipo == "interactive":
+        inter = m.get("interactive") or {}
+        destino = inter.get("button_reply") or inter.get("list_reply") or {}
+        return destino.get("title", "")
+    if tipo == "button":
+        return (m.get("button") or {}).get("text", "")
+    # imagen/documento/video con pie de foto: el pie es el mensaje
+    return (m.get(tipo) or {}).get("caption", "") if isinstance(m.get(tipo), dict) else ""
 
 
 def parsear_webhook(payload: dict) -> Optional[dict]:
-    """Normaliza webhooks de Meta, WAHA o Evolution a {telefono, texto, nombre, id_seleccionado, tipo}."""
-    # 1. Meta WhatsApp Cloud API
-    if payload.get("object") == "whatsapp_business_account":
-        try:
-            for entry in payload.get("entry", []):
-                for change in entry.get("changes", []):
-                    value = change.get("value", {})
-                    statuses = value.get("statuses", [])
-                    if statuses:
-                        print(f"[whatsapp-meta] Recibido estado de mensaje: {statuses[0].get('status')} para id {statuses[0].get('id')}")
-                        return None
-                    messages = value.get("messages", [])
-                    contacts = value.get("contacts", [])
-                    if messages:
-                        msg = messages[0]
-                        tel = msg.get("from", "")
-                        tipo = msg.get("type", "")
-                        texto = ""
-                        id_seleccionado = ""
-                        if tipo == "text":
-                            texto = msg.get("text", {}).get("body", "")
-                        elif tipo == "button":
-                            btn = msg.get("button", {})
-                            texto = btn.get("text", "")
-                            id_seleccionado = btn.get("payload", "")
-                        elif tipo == "interactive":
-                            interactive = msg.get("interactive", {})
-                            list_reply = interactive.get("list_reply", {})
-                            button_reply = interactive.get("button_reply", {})
-                            if list_reply:
-                                id_seleccionado = list_reply.get("id", "")
-                                texto = list_reply.get("title", "") or id_seleccionado
-                            elif button_reply:
-                                id_seleccionado = button_reply.get("id", "")
-                                texto = button_reply.get("title", "") or id_seleccionado
-                            else:
-                                texto = ""
-                        nombre = ""
-                        if contacts:
-                            nombre = contacts[0].get("profile", {}).get("name", "")
-                        if tel and (texto or id_seleccionado):
-                            res = {
-                                "telefono": tel,
-                                "texto": texto or id_seleccionado,
-                                "nombre": nombre,
-                                "id_mensaje": msg.get("id"),
-                                "id_seleccionado": id_seleccionado,
-                                "tipo": tipo,
-                            }
-                            print(f"[whatsapp-meta] Mensaje parseado exitosamente: {res}")
-                            return res
-                        else:
-                            print(f"[whatsapp-meta] Mensaje recibido pero sin texto legible o tipo no soportado: tipo={tipo}, tel={tel}")
-        except Exception as e:
-            print(f"[whatsapp-meta-error] Error parseando payload de Meta: {e}")
-            return None
+    """Normaliza el webhook de Meta, WAHA o Evolution.
 
-    # 2. WAHA
+    Regresa {telefono, texto, nombre, wa_id, tipo} o None si el evento no es un
+    mensaje entrante de una persona (acuses de entrega, mensajes propios, etc.).
+    """
+    # --- Meta Cloud API ---
+    # {"object":"whatsapp_business_account","entry":[{"changes":[{"field":"messages",
+    #   "value":{"contacts":[{"profile":{"name":...},"wa_id":...}],
+    #            "messages":[{"from":...,"id":"wamid...","type":"text","text":{"body":...}}]}}]}]}
+    if payload.get("object") == "whatsapp_business_account":
+        for entrada in payload.get("entry") or []:
+            for cambio in entrada.get("changes") or []:
+                valor = cambio.get("value") or {}
+                mensajes = valor.get("messages") or []
+                if not mensajes:
+                    continue  # "statuses": acuses de entrega/lectura, se ignoran
+                m = mensajes[0]
+                contactos = valor.get("contacts") or [{}]
+                nombre = ((contactos[0].get("profile") or {}).get("name")) or ""
+                elegido = _id_seleccionado(m)
+                return {
+                    "telefono": str(m.get("from", "")),
+                    # si la opción no trae título legible, el id sirve de texto
+                    "texto": _texto_de_meta(m) or elegido,
+                    "nombre": nombre,
+                    "wa_id": m.get("id", ""),
+                    "tipo": m.get("type", "text"),
+                    "id_seleccionado": elegido,
+                }
+        return None
+
+    # --- WAHA ---
     if payload.get("event") == "message" and isinstance(payload.get("payload"), dict):
         p = payload["payload"]
         if p.get("fromMe"):
@@ -178,9 +298,10 @@ def parsear_webhook(payload: dict) -> Optional[dict]:
         texto = p.get("body") or ""
         nombre = (p.get("_data") or {}).get("notifyName") or ""
         if tel and texto:
-            return {"telefono": tel, "texto": texto, "nombre": nombre, "id_seleccionado": "", "tipo": "text"}
+            return {"telefono": tel, "texto": texto, "nombre": nombre,
+                    "wa_id": str(p.get("id", "")), "tipo": "text", "id_seleccionado": ""}
 
-    # 3. Evolution
+    # --- Evolution ---
     if payload.get("event") in ("messages.upsert", "MESSAGES_UPSERT") and isinstance(payload.get("data"), dict):
         d = payload["data"]
         key = d.get("key") or {}
@@ -191,7 +312,8 @@ def parsear_webhook(payload: dict) -> Optional[dict]:
         texto = msg.get("conversation") or (msg.get("extendedTextMessage") or {}).get("text") or ""
         nombre = d.get("pushName") or ""
         if tel and texto:
-            return {"telefono": tel, "texto": texto, "nombre": nombre, "id_seleccionado": "", "tipo": "text"}
+            return {"telefono": tel, "texto": texto, "nombre": nombre,
+                    "wa_id": str(key.get("id", "")), "tipo": "text", "id_seleccionado": ""}
 
     return None
 
@@ -203,65 +325,46 @@ async def enviar_lista_interactiva(
     boton: str,
     opciones: list,
 ) -> dict:
-    """Envía un mensaje interactivo tipo lista (Meta Cloud API).
+    """Mensaje interactivo tipo lista (Meta Cloud API).
 
     opciones: [{"id": "VAC-1042", "titulo": "Cajero(a)", "descripcion": "Guadalajara · $9,500"}]
-    El candidato elige una opción y Meta manda un list_reply con el id seleccionado.
-    parsear_webhook extrae id y título, permitiendo detectar la vacante inmediatamente.
+    El candidato elige y Meta responde con un list_reply; `parsear_webhook` ya extrae
+    el título, y el webhook detecta el código VAC-XXXX en una segunda pasada.
+
+    Meta limita: encabezado 60, cuerpo 1024, botón 20, título de fila 24,
+    descripción 72 y un máximo de 10 filas por sección.
     """
-    numero = normalizar_numero_meta(telefono)
-    proveedor = settings.whatsapp_provider
-    if not proveedor and settings.meta_whatsapp_token and settings.meta_phone_number_id:
-        proveedor = "meta"
+    if proveedor() != "meta":
+        return _resultado(False, "Las listas interactivas solo existen en Meta Cloud API")
+    if not opciones:
+        return _resultado(False, "No hay opciones que mostrar")
 
-    if proveedor != "meta" or not settings.meta_whatsapp_token:
-        print("[whatsapp-meta-error] enviar_lista_interactiva solo soportado con Meta Cloud API configurada")
-        return {"enviado": False, "proveedor": "demo", "detalle": "Solo soportado con Meta Cloud API"}
-
-    url = f"https://graph.facebook.com/v22.0/{settings.meta_phone_number_id}/messages"
-    headers = {
-        "Authorization": f"Bearer {settings.meta_whatsapp_token}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": numero,
-        "type": "interactive",
-        "interactive": {
-            "type": "list",
-            "header": {"type": "text", "text": encabezado[:60]},
-            "body": {"text": cuerpo[:1024]},
-            "action": {
-                "button": boton[:20],
-                "sections": [
-                    {
-                        "title": "Vacantes",
-                        "rows": [
-                            {
-                                "id": o["id"],
-                                "title": o["titulo"][:24],
-                                "description": (o.get("descripcion") or "")[:72],
-                            }
-                            for o in opciones[:10]  # Meta permite máx. 10 rows
-                        ],
-                    }
-                ],
+    return await _meta_post(
+        {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": numero_e164(telefono),
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "header": {"type": "text", "text": encabezado[:60]},
+                "body": {"text": cuerpo[:1024]},
+                "action": {
+                    "button": boton[:20],
+                    "sections": [
+                        {
+                            "title": "Vacantes",
+                            "rows": [
+                                {
+                                    "id": str(o["id"])[:200],
+                                    "title": str(o["titulo"])[:24],
+                                    "description": str(o.get("descripcion") or "")[:72],
+                                }
+                                for o in opciones[:10]
+                            ],
+                        }
+                    ],
+                },
             },
-        },
-    }
-
-    print(f"[whatsapp-meta] Enviando lista interactiva a {numero} ({len(opciones)} opciones)...")
-    try:
-        async with httpx.AsyncClient(timeout=15) as cli:
-            r = await cli.post(url, headers=headers, json=payload)
-            try:
-                data = r.json()
-            except Exception:
-                data = r.text
-        exito = r.status_code < 300
-        print(f"[whatsapp-meta] Respuesta Meta Lista Interactiva ({r.status_code}): {data}")
-        return {"enviado": exito, "proveedor": "meta", "status_code": r.status_code, "detalle": data}
-    except Exception as e:
-        print(f"[whatsapp-meta-error] Excepción en lista interactiva: {e}")
-        return {"enviado": False, "proveedor": "meta", "detalle": str(e)}
+        }
+    )

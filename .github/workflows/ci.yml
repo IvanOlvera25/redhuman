@@ -1,0 +1,121 @@
+name: CI
+
+# Corre en cada Pull Request hacia main y en cada push a main.
+# Su trabajo es atrapar en GitHub lo que antes se descubría en producción.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  api:
+    name: API (FastAPI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: red-human-api/requirements.txt
+
+      - name: Instalar dependencias
+        working-directory: red-human-api
+        run: pip install -q -r requirements.txt
+
+      - name: Toda librería importada debe estar declarada
+        # Atrapa el caso real de pypdf: importado dentro de una función y
+        # ausente de requirements.txt, así que solo fallaba al subir un PDF.
+        run: python scripts/verificar_dependencias.py
+
+      - name: La aplicación arranca y registra sus rutas
+        working-directory: red-human-api
+        env:
+          DATABASE_URL: sqlite:///./ci.db
+        run: |
+          python - <<'PY'
+          import warnings; warnings.filterwarnings("ignore")
+          from fastapi.testclient import TestClient
+          from app.main import app
+
+          with TestClient(app) as cliente:          # dispara el lifespan: crea tablas y siembra
+              assert cliente.get("/salud").status_code == 200, "la API no arranca"
+
+              # Los datos de candidatos nunca pueden quedar abiertos (LFPDPPP)
+              for ruta in ("/candidatos", "/contratacion/expedientes", "/bitacora", "/metricas/pipeline"):
+                  codigo = cliente.get(ruta).status_code
+                  assert codigo == 401, f"{ruta} responde {codigo}, debería exigir sesión (401)"
+
+              # El webhook es público: sin firma válida no se procesa
+              r = cliente.post("/webhooks/whatsapp", json={"entry": []})
+              assert r.status_code in (200, 403), f"webhook responde {r.status_code}"
+
+          n = len(app.openapi()["paths"])
+          assert n > 40, f"solo {n} rutas registradas: falta algún router"
+          print(f"  OK · {n} rutas, endpoints privados protegidos")
+          PY
+
+  web:
+    name: Web (Next.js)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: red-human-app/package-lock.json
+
+      - name: Instalar dependencias
+        working-directory: red-human-app
+        run: npm ci --no-audit --no-fund
+
+      - name: Tipos
+        working-directory: red-human-app
+        run: npx tsc --noEmit
+
+      - name: Build
+        working-directory: red-human-app
+        env:
+          # la misma URL pública que usa producción, para que el build sea representativo
+          NEXT_PUBLIC_API_URL: https://srv1893825.hstgr.cloud/api
+        run: npm run build
+
+      - name: El bundle del navegador no puede apuntar a localhost
+        # Atrapa el caso real de NEXT_PUBLIC_API_URL=http://localhost:8001, que
+        # dejó el panel muerto para todos los visitantes.
+        working-directory: red-human-app
+        run: |
+          if grep -rl "localhost:800" .next/static/chunks 2>/dev/null | head -1 | grep -q .; then
+            echo "::error::El bundle contiene una URL localhost. NEXT_PUBLIC_API_URL debe ser la URL pública."
+            exit 1
+          fi
+          echo "  OK · sin localhost en el bundle"
+
+  secretos:
+    name: Sin secretos en el repo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ningún .env versionado
+        run: |
+          encontrados=$(git ls-files | grep -E '(^|/)\.env(\.|$)' | grep -v '\.example$' || true)
+          if [ -n "$encontrados" ]; then
+            echo "::error::Hay archivos .env versionados: $encontrados"
+            exit 1
+          fi
+          echo "  OK · ningún .env en el repositorio"
+
+      - name: Ninguna base de datos ni CV versionado
+        # La base y los uploads llevan datos personales de candidatos (LFPDPPP)
+        run: |
+          encontrados=$(git ls-files | grep -E '\.(db|sqlite3)$|^red-human-api/uploads/' || true)
+          if [ -n "$encontrados" ]; then
+            echo "::error::Hay datos personales versionados: $encontrados"
+            exit 1
+          fi
+          echo "  OK · sin bases de datos ni archivos de candidatos"

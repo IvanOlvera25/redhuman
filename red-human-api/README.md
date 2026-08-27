@@ -31,12 +31,32 @@ cp .env.example .env            # llena tus claves (opcional)
 |---|-----|-----------------|-----------------|--------------------|
 | 1 | **OpenAI** | Extractor de CVs, generador de vacantes, agente de prefiltro y entrevistas, validación de documentos | [platform.openai.com](https://platform.openai.com) → API Keys | `OPENAI_API_KEY` (modelo con `OPENAI_MODEL`) |
 | 1b | **Anam** (avatar de video) | Entrevista en video con avatar neutral; sin clave la entrevista corre por chat | [lab.anam.ai/register](https://lab.anam.ai/register) → API Keys (gratis: 30 min/mes) | `ANAM_API_KEY`, `ANAM_AVATAR_ID` |
-| 2 | **WAHA** (WhatsApp, opción A) | Enviar/recibir WhatsApp con tu propio número (sin costo por mensaje de Meta) | [waha.devlike.pro](https://waha.devlike.pro) · Docker: `devlikeapro/waha` en tu VPS | `WHATSAPP_PROVIDER=waha`, `WAHA_URL`, `WAHA_API_KEY` |
-| 2 | **Evolution API** (WhatsApp, opción B) | Igual que WAHA, alternativa popular en LATAM | [github.com/EvolutionAPI/evolution-api](https://github.com/EvolutionAPI/evolution-api) (Docker) | `WHATSAPP_PROVIDER=evolution`, `EVOLUTION_URL`, `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE` |
+| 2 | **Meta · WhatsApp Cloud API** (opción A, la que usamos) | Enviar/recibir WhatsApp desde un número verificado por Meta, sin servidor extra | [developers.facebook.com](https://developers.facebook.com) → app de Negocio → WhatsApp | `WHATSAPP_PROVIDER=meta`, `META_PHONE_NUMBER_ID`, `META_WABA_ID`, `META_WHATSAPP_TOKEN`, `META_VERIFY_TOKEN`, `META_APP_SECRET` |
+| 2 | **WAHA** (opción B) | Tu propio número, sin costo por mensaje de Meta | [waha.devlike.pro](https://waha.devlike.pro) · Docker: `devlikeapro/waha` en tu VPS | `WHATSAPP_PROVIDER=waha`, `WAHA_URL`, `WAHA_API_KEY` |
+| 2 | **Evolution API** (opción C) | Igual que WAHA, alternativa popular en LATAM | [github.com/EvolutionAPI/evolution-api](https://github.com/EvolutionAPI/evolution-api) (Docker) | `WHATSAPP_PROVIDER=evolution`, `EVOLUTION_URL`, `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE` |
 
-**Webhook de entrada:** configura tu gateway (WAHA o Evolution) para que apunte a
-`POST http://tu-servidor:8000/webhooks/whatsapp`. Con eso, cuando un candidato escribe al número,
-el agente lo registra y hace el prefiltro solo.
+### Alta del webhook de WhatsApp
+
+El webhook vive en `{API}/webhooks/whatsapp` y **exige HTTPS público**: por eso no se puede
+probar en `localhost`. Con el dominio de producción ya arriba:
+
+1. **Meta** → tu app → WhatsApp → Configuración → Webhook → *Editar*:
+   - URL de devolución de llamada: `https://api.tudominio.mx/webhooks/whatsapp`
+   - Token de verificación: el mismo valor de `META_VERIFY_TOKEN`
+   Meta pega un `GET` y espera de vuelta el `hub.challenge`; la API ya lo contesta sola.
+2. Suscríbete al campo **`messages`**.
+3. Copia el **App Secret** (app → Configuración → Básica) a `META_APP_SECRET`.
+   Sin él, el webhook queda abierto: cualquiera puede inyectar mensajes falsos.
+4. La cuenta de WhatsApp Business debe estar suscrita a la app
+   (`POST /{WABA_ID}/subscribed_apps`); si no, Meta nunca manda los webhooks.
+5. Usa un token de **System User sin caducidad** (Business Manager → Usuarios del sistema,
+   permisos `whatsapp_business_messaging` + `whatsapp_business_management`).
+   El token de prueba del panel dura 24 horas.
+
+**Ventana de 24 horas.** Meta solo deja mandar texto libre a quien nos escribió en las últimas
+24 h. Fuera de esa ventana el mensaje se rechaza con el error `131047`, y hay que usar una
+plantilla aprobada: pon su nombre en `META_PLANTILLA_AVISO` y la API la usa sola como respaldo.
+Los mensajes que el candidato inicia (ruta normal del prefiltro) no tienen este problema.
 
 Próximas fases (aún no requeridas): Deepgram (voz STT), Cartesia/ElevenLabs (voz TTS),
 LiveKit (entrevistas en vivo), Resend (correo).
@@ -75,16 +95,21 @@ LiveKit (entrevistas en vivo), Resend (correo).
 ### Transversal
 | Método | Ruta | Qué hace |
 |---|---|---|
-| POST | `/webhooks/whatsapp` | Entrada de mensajes (WAHA y Evolution) |
+| GET | `/webhooks/whatsapp` | Verificación del webhook de Meta (`hub.challenge`) |
+| POST | `/webhooks/whatsapp` | Entrada de mensajes (Meta, WAHA y Evolution) |
 | GET | `/bitacora` | Auditoría con cadena de hashes |
 | GET | `/salud` | Estado de configuración |
 
 ## Producción (VPS Hostinger)
 
 1. `DATABASE_URL=postgresql+psycopg://…` (instala Postgres en el VPS) — SQLite es solo para dev.
-2. Corre la API con `uvicorn` detrás de Nginx/Caddy (o en Docker/Coolify).
-3. Levanta WAHA o Evolution en el mismo VPS y apunta su webhook a la API.
-4. En el frontend define `NEXT_PUBLIC_API_URL=https://api.tudominio.mx`.
+2. Corre la API con `uvicorn` detrás de Nginx/Caddy (o en Docker/Coolify), **con certificado
+   válido**: Meta rechaza webhooks en HTTP o con certificado autofirmado.
+3. `CORS_ORIGINS=https://app.tudominio.mx` y `APP_URL=https://app.tudominio.mx`.
+4. Da de alta el webhook de WhatsApp con la URL pública (ver arriba) y llena `META_APP_SECRET`.
+5. En el frontend define `NEXT_PUBLIC_API_URL=https://api.tudominio.mx`.
+6. Comprueba con `curl https://api.tudominio.mx/salud` → debe decir
+   `"whatsapp_proveedor": "meta"` y `"whatsapp_webhook_firmado": true`.
 
 ## Principios integrados
 
