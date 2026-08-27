@@ -29,13 +29,27 @@ correr si `origin` apunta a otro lado.
 ssh root@srv1893825.hstgr.cloud /opt/redhuman/redesplegar.sh
 ```
 
-El script respalda la base, actualiza el código, repone la configuración,
-reconstruye, reinicia y **verifica**. Si algo queda mal, lo dice y sale con
-error. Para revisar producción sin desplegar:
+El script deja un punto de retorno, actualiza el código, repone la
+configuración, reconstruye, reinicia y **verifica**. Si algo queda mal, lo dice y
+sale con error. Para revisar producción sin desplegar:
 
 ```bash
 ssh root@srv1893825.hstgr.cloud /opt/redhuman/verificar.sh
 ```
+
+### Si un despliegue rompe producción
+
+```bash
+ssh -t root@srv1893825.hstgr.cloud /opt/redhuman/revertir.sh
+```
+
+Regresa al commit que estaba corriendo antes del último despliegue y reconstruye.
+La base **no** se toca: restaurarla descartaría todo lo capturado desde entonces,
+así que solo se hace con `--con-base` y a propósito. `--lista` muestra los puntos
+de retorno disponibles.
+
+Revertir deja el servidor detrás de `main`. Es una medida temporal: arregla la
+causa, súbela por Pull Request y vuelve a desplegar.
 
 ## La configuración de producción no vive en el repositorio
 
