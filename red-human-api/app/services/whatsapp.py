@@ -17,7 +17,9 @@ def _solo_digitos(valor: Optional[str]) -> str:
 
 
 def whatsapp_activo() -> bool:
-    return settings.whatsapp_provider in ("meta", "waha", "evolution")
+    if settings.whatsapp_provider in ("meta", "waha", "evolution"):
+        return True
+    return bool(settings.meta_whatsapp_token and settings.meta_phone_number_id)
 
 
 def normalizar_numero_meta(telefono: str) -> str:
@@ -34,9 +36,12 @@ def normalizar_numero_meta(telefono: str) -> str:
 async def enviar_mensaje(telefono: str, texto: str) -> dict:
     """Envía un mensaje de texto. Regresa {enviado, proveedor, detalle}."""
     numero = normalizar_numero_meta(telefono)
+    proveedor = settings.whatsapp_provider
+    if not proveedor and settings.meta_whatsapp_token and settings.meta_phone_number_id:
+        proveedor = "meta"
 
     # 1. Meta WhatsApp Cloud API (Oficial v22.0)
-    if settings.whatsapp_provider == "meta":
+    if proveedor == "meta":
         if not settings.meta_whatsapp_token or not settings.meta_phone_number_id:
             print("[whatsapp-meta-error] Faltan META_WHATSAPP_TOKEN o META_PHONE_NUMBER_ID en configuración")
             return {"enviado": False, "proveedor": "meta", "detalle": "Faltan META_WHATSAPP_TOKEN o META_PHONE_NUMBER_ID"}
@@ -107,7 +112,7 @@ async def enviar_mensaje(telefono: str, texto: str) -> dict:
 
 
 def parsear_webhook(payload: dict) -> Optional[dict]:
-    """Normaliza webhooks de Meta, WAHA o Evolution a {telefono, texto, nombre}."""
+    """Normaliza webhooks de Meta, WAHA o Evolution a {telefono, texto, nombre, id_seleccionado, tipo}."""
     # 1. Meta WhatsApp Cloud API
     if payload.get("object") == "whatsapp_business_account":
         try:
@@ -125,26 +130,37 @@ def parsear_webhook(payload: dict) -> Optional[dict]:
                         tel = msg.get("from", "")
                         tipo = msg.get("type", "")
                         texto = ""
+                        id_seleccionado = ""
                         if tipo == "text":
                             texto = msg.get("text", {}).get("body", "")
                         elif tipo == "button":
-                            texto = msg.get("button", {}).get("text", "")
+                            btn = msg.get("button", {})
+                            texto = btn.get("text", "")
+                            id_seleccionado = btn.get("payload", "")
                         elif tipo == "interactive":
                             interactive = msg.get("interactive", {})
                             list_reply = interactive.get("list_reply", {})
                             button_reply = interactive.get("button_reply", {})
                             if list_reply:
-                                # Incluir el id (VAC-XXXX) para que el webhook detecte la vacante
-                                texto = f"{list_reply.get('title', '')} {list_reply.get('id', '')}".strip()
+                                id_seleccionado = list_reply.get("id", "")
+                                texto = list_reply.get("title", "") or id_seleccionado
                             elif button_reply:
-                                texto = button_reply.get("title", "")
+                                id_seleccionado = button_reply.get("id", "")
+                                texto = button_reply.get("title", "") or id_seleccionado
                             else:
                                 texto = ""
                         nombre = ""
                         if contacts:
                             nombre = contacts[0].get("profile", {}).get("name", "")
-                        if tel and texto:
-                            res = {"telefono": tel, "texto": texto, "nombre": nombre, "id_mensaje": msg.get("id")}
+                        if tel and (texto or id_seleccionado):
+                            res = {
+                                "telefono": tel,
+                                "texto": texto or id_seleccionado,
+                                "nombre": nombre,
+                                "id_mensaje": msg.get("id"),
+                                "id_seleccionado": id_seleccionado,
+                                "tipo": tipo,
+                            }
                             print(f"[whatsapp-meta] Mensaje parseado exitosamente: {res}")
                             return res
                         else:
@@ -162,7 +178,7 @@ def parsear_webhook(payload: dict) -> Optional[dict]:
         texto = p.get("body") or ""
         nombre = (p.get("_data") or {}).get("notifyName") or ""
         if tel and texto:
-            return {"telefono": tel, "texto": texto, "nombre": nombre}
+            return {"telefono": tel, "texto": texto, "nombre": nombre, "id_seleccionado": "", "tipo": "text"}
 
     # 3. Evolution
     if payload.get("event") in ("messages.upsert", "MESSAGES_UPSERT") and isinstance(payload.get("data"), dict):
@@ -175,7 +191,7 @@ def parsear_webhook(payload: dict) -> Optional[dict]:
         texto = msg.get("conversation") or (msg.get("extendedTextMessage") or {}).get("text") or ""
         nombre = d.get("pushName") or ""
         if tel and texto:
-            return {"telefono": tel, "texto": texto, "nombre": nombre}
+            return {"telefono": tel, "texto": texto, "nombre": nombre, "id_seleccionado": "", "tipo": "text"}
 
     return None
 
@@ -191,12 +207,14 @@ async def enviar_lista_interactiva(
 
     opciones: [{"id": "VAC-1042", "titulo": "Cajero(a)", "descripcion": "Guadalajara · $9,500"}]
     El candidato elige una opción y Meta manda un list_reply con el id seleccionado.
-    parsear_webhook ya extrae el título de list_reply como texto; el webhook detecta
-    el código VAC-XXXX en una segunda pasada por regex.
+    parsear_webhook extrae id y título, permitiendo detectar la vacante inmediatamente.
     """
     numero = normalizar_numero_meta(telefono)
+    proveedor = settings.whatsapp_provider
+    if not proveedor and settings.meta_whatsapp_token and settings.meta_phone_number_id:
+        proveedor = "meta"
 
-    if settings.whatsapp_provider != "meta" or not settings.meta_whatsapp_token:
+    if proveedor != "meta" or not settings.meta_whatsapp_token:
         print("[whatsapp-meta-error] enviar_lista_interactiva solo soportado con Meta Cloud API configurada")
         return {"enviado": False, "proveedor": "demo", "detalle": "Solo soportado con Meta Cloud API"}
 

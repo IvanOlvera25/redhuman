@@ -1,10 +1,12 @@
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -16,7 +18,7 @@ from ..services.whatsapp import enviar_mensaje, enviar_lista_interactiva, parsea
 router = APIRouter(tags=["webhooks"])
 
 # Regex para detectar códigos de vacante en el texto del candidato
-_RE_VAC = re.compile(r"VAC-(\d+)", re.IGNORECASE)
+_RE_VAC = re.compile(r"VAC[-_]?([A-Za-z0-9]+)", re.IGNORECASE)
 
 # Palabras que interpretamos como consentimiento LFPDPPP
 _ACEPTA = {"sí", "si", "acepto", "aceptar", "ok", "va", "dale", "claro", "por supuesto", "de acuerdo"}
@@ -25,6 +27,11 @@ _ACEPTA = {"sí", "si", "acepto", "aceptar", "ok", "va", "dale", "claro", "por s
 # ============================================================
 # Helpers internos
 # ============================================================
+
+def _normalizar_str(s: str) -> str:
+    """Quita acentos y pasa a minúsculas para comparaciones flexibles."""
+    return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower().strip()
+
 
 def _normalizar_telefono(wa_id: str) -> str:
     """521XXXXXXXXXX → 10 dígitos mexicanos para dedup con Candidato.telefono."""
@@ -36,13 +43,47 @@ def _normalizar_telefono(wa_id: str) -> str:
     return digitos[-10:] if len(digitos) > 10 else digitos
 
 
-def _detectar_vacante(texto: str, db: Session) -> Optional[Vacante]:
-    """Extrae VAC-XXXX del texto y busca la vacante en la BD."""
-    m = _RE_VAC.search(texto)
-    if not m:
-        return None
-    codigo = f"VAC-{m.group(1)}"
-    return db.query(Vacante).filter(Vacante.codigo == codigo).first()
+def _detectar_vacante(texto: str, db: Session, id_seleccionado: Optional[str] = None) -> Optional[Vacante]:
+    """Busca la vacante por ID interactivo, código VAC-XXXX, número de lista, título o slug."""
+    candidatos_cod = [s for s in [id_seleccionado, texto] if s]
+
+    # 1. Búsqueda por código exacto o regex VAC-XXXX
+    for s in candidatos_cod:
+        s_clean = s.strip()
+        # Coincidencia directa por código
+        v = db.query(Vacante).filter(func.lower(Vacante.codigo) == s_clean.lower()).first()
+        if v:
+            return v
+        # Regex VAC-####
+        m = _RE_VAC.search(s_clean)
+        if m:
+            cod = f"VAC-{m.group(1)}"
+            v = db.query(Vacante).filter(func.lower(Vacante.codigo) == cod.lower()).first()
+            if v:
+                return v
+
+    vacantes_activas = db.query(Vacante).filter(Vacante.estado == "Publicada").order_by(Vacante.id.desc()).limit(10).all()
+
+    # 2. Búsqueda por número si el usuario respondió "1", "2", etc.
+    t_clean = (texto or "").strip()
+    if t_clean.isdigit():
+        num = int(t_clean)
+        if 1 <= num <= len(vacantes_activas):
+            return vacantes_activas[num - 1]
+
+    # 3. Búsqueda por título o slug (flexible / sin acentos)
+    t_norm = _normalizar_str(texto)
+    id_norm = _normalizar_str(id_seleccionado or "")
+    if t_norm or id_norm:
+        for v in vacantes_activas:
+            v_tit = _normalizar_str(v.titulo)
+            v_slug = _normalizar_str(v.slug)
+            if t_norm and (v_tit in t_norm or t_norm in v_tit or v_slug == t_norm):
+                return v
+            if id_norm and (v_tit in id_norm or id_norm in v_tit or v_slug == id_norm):
+                return v
+
+    return None
 
 
 def _buscar_o_crear_candidato(
@@ -142,26 +183,31 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
     telefono = msg["telefono"]
     texto = msg["texto"].strip()
     nombre_wa = msg.get("nombre", "")
+    id_seleccionado = msg.get("id_seleccionado", "")
 
-    print(f"[agente] Procesando mensaje de {nombre_wa} ({telefono}): '{texto}'")
+    print(f"[agente] Procesando mensaje de {nombre_wa} ({telefono}): '{texto}' (id_sel='{id_seleccionado}')")
 
-    # ── 1. Detectar vacante en el texto ──────────────────────
-    vacante = _detectar_vacante(texto, db)
-    if vacante:
-        print(f"[agente] Vacante detectada en mensaje: {vacante.codigo} - {vacante.titulo}")
+    # ── 1. Detectar vacante (por código, id seleccionado, título, slug o número) ──
+    vacante_detectada = _detectar_vacante(texto, db, id_seleccionado)
+    if vacante_detectada:
+        print(f"[agente] Vacante detectada: {vacante_detectada.codigo} - {vacante_detectada.titulo}")
 
     # ── 2. Buscar o crear candidato ──────────────────────────
-    c = _buscar_o_crear_candidato(db, telefono, nombre_wa, vacante)
+    c = _buscar_o_crear_candidato(db, telefono, nombre_wa, vacante_detectada)
     print(f"[agente] Candidato asociado: {c.codigo} ({c.nombre}), consentimiento={c.consentimiento}, vacante_id={c.vacante_id}")
 
-    # Si detectamos una vacante y el candidato no tenía una, asignarla
-    if vacante and not c.vacante_id:
-        c.vacante_id = vacante.id
+    # Si se detectó una vacante, asignarla al candidato
+    seleccion_nueva_vacante = False
+    if vacante_detectada and c.vacante_id != vacante_detectada.id:
+        c.vacante_id = vacante_detectada.id
+        seleccion_nueva_vacante = True
         db.flush()
-    elif not vacante and c.vacante:
-        vacante = c.vacante  # heredar la vacante que ya tenía
+    elif not vacante_detectada and c.vacante:
+        vacante_detectada = c.vacante
 
-    # ── 3. Si no hay vacante → enviar menú de vacantes activas ──
+    vacante = vacante_detectada
+
+    # ── 3. Si aún no hay vacante asignada → enviar menú de vacantes activas ──
     if not c.vacante_id:
         print(f"[agente] Candidato {c.codigo} no tiene vacante asignada. Buscando vacantes publicadas...")
         vacantes = db.query(Vacante).filter(Vacante.estado == "Publicada").order_by(Vacante.id.desc()).limit(10).all()
@@ -181,48 +227,26 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
         db.commit()
         return {"ok": True, "accion": "menu_vacantes"}
 
-    # ── 4. Consentimiento LFPDPPP ────────────────────────────
-    if not c.consentimiento:
-        ya_pidio = any(m.rol == "assistant" and "Aviso de Privacidad" in m.texto for m in c.mensajes)
+    from .candidatos import procesar_prefiltro
 
-        if not ya_pidio:
-            # Primer contacto: enviar aviso de privacidad
-            aviso = _texto_aviso_privacidad(nombre_wa or c.wa_nombre, vacante)
-            print(f"[agente] Enviando aviso de privacidad a {c.codigo} ({telefono})...")
-            resultado = await enviar_mensaje(telefono, aviso)
-            print(f"[agente] Resultado envío aviso de privacidad: {resultado}")
-            db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal="whatsapp"))
-            db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=aviso, canal="whatsapp", enviado=resultado.get("enviado", False)))
-            db.commit()
-            print(f"[agente] Aviso de privacidad registrado para {c.codigo}")
-            return {"ok": True, "accion": "aviso_privacidad", "candidato": c.codigo}
+    # ── 4. Si acaba de seleccionar vacante → registrar consentimiento y disparar prefiltro ──
+    if seleccion_nueva_vacante or not c.consentimiento:
+        c.consentimiento = True
+        c.consentimiento_fecha = datetime.now(timezone.utc)
+        registrar(
+            db, c.codigo, "consentimiento_otorgado", "candidato", c.codigo,
+            {"medio": "whatsapp", "vacante": vacante.codigo if vacante else "", "accion": "seleccion_vacante"}
+        )
+        db.flush()
+        print(f"[agente] ✅ Vacante asignada y consentimiento registrado para {c.codigo} ({vacante.titulo if vacante else ''})")
 
-        # Ya se pidió el consentimiento, verificar respuesta
-        respuesta = texto.lower().strip().rstrip(".!¡")
-        if respuesta in _ACEPTA:
-            c.consentimiento = True
-            c.consentimiento_fecha = datetime.now(timezone.utc)
-            registrar(db, c.codigo, "consentimiento_otorgado", "candidato", c.codigo, {"medio": "whatsapp", "aviso_privacidad": "aceptado"})
-            db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal="whatsapp"))
-            db.flush()
-            print(f"[agente] ✅ Consentimiento otorgado por {c.codigo}")
+        # Iniciar inmediatamente el prefiltro con la primera pregunta de la vacante
+        mensaje_inicio = f"Me interesa postularme para la vacante de {vacante.titulo if vacante else 'la posición'}."
+        resultado = await procesar_prefiltro(db, c, mensaje_inicio, "whatsapp")
+        print(f"[agente] Prefiltro iniciado exitosamente para {c.codigo}: {resultado.get('respuesta')}")
+        return {"ok": True, "accion": "prefiltro_iniciado", "candidato": c.codigo, **resultado}
 
-            # Arrancar el prefiltro con un mensaje inicial de bienvenida
-            from .candidatos import procesar_prefiltro
-            resultado = await procesar_prefiltro(db, c, f"Acepto el aviso de privacidad. Quiero aplicar a {vacante.titulo if vacante else 'la vacante'}.", "whatsapp")
-            print(f"[agente] Primer turno de prefiltro arrancado para {c.codigo}: {resultado}")
-            return {"ok": True, "accion": "prefiltro_iniciado", "candidato": c.codigo, **resultado}
-        else:
-            # Respuesta no es un consentimiento claro
-            recordatorio = "Para continuar con el proceso necesito tu autorización. ¿Aceptas el tratamiento de tus datos conforme al Aviso de Privacidad? (Responde *Sí* o *Acepto*)"
-            print(f"[agente] Respuesta de consentimiento no clara ('{texto}'). Re-enviando solicitud a {telefono}")
-            resultado = await enviar_mensaje(telefono, recordatorio)
-            db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal="whatsapp"))
-            db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=recordatorio, canal="whatsapp", enviado=resultado.get("enviado", False)))
-            db.commit()
-            return {"ok": True, "accion": "esperando_consentimiento", "candidato": c.codigo}
-
-    # ── 5. Prefiltro conversacional (el candidato ya dio consentimiento) ──
+    # ── 5. Si ya completó el prefiltro ──
     if c.prefiltro_completo:
         despedida = "¡Gracias! Tu pre-filtro ya está completo. El equipo de RH revisará tu información y te contactará pronto. 😊"
         print(f"[agente] Candidato {c.codigo} ya completó prefiltro. Enviando despedida a {telefono}")
@@ -232,10 +256,10 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
         db.commit()
         return {"ok": True, "accion": "prefiltro_ya_completo", "candidato": c.codigo}
 
-    from .candidatos import procesar_prefiltro
+    # ── 6. Turno conversacional de prefiltro (respuestas del candidato a las preguntas) ──
     print(f"[agente] Procesando turno de prefiltro con IA para {c.codigo}...")
     resultado = await procesar_prefiltro(db, c, texto, "whatsapp")
-    print(f"[agente] Turno completado para {c.codigo}: ia={resultado.get('ia')}, clasificacion={resultado.get('clasificacion')}, resp={resultado.get('respuesta')}")
+    print(f"[agente] Turno completado para {c.codigo}: ia={resultado.get('ia')}, clasificacion={resultado.get('clasificacion')}")
     return {"ok": True, "accion": "turno_prefiltro", "candidato": c.codigo, **resultado}
 
 
@@ -261,4 +285,3 @@ def bitacora(limite: int = 50, db: Session = Depends(get_db), _: Usuario = Depen
         }
         for b in filas
     ]
-
