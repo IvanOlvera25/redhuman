@@ -221,6 +221,17 @@ def por_slug(slug: str, db: Session = Depends(get_db)):
     return _salida(db, v)
 
 
+@router.get("/publicas")
+def listar_publicas(db: Session = Depends(get_db)):
+    """Bolsa de trabajo pública (/portal) — solo vacantes Publicadas, sin sesión.
+
+    Debe declararse antes de GET /{codigo} para que 'publicas' no se interprete
+    como un código de vacante.
+    """
+    q = db.query(Vacante).filter(Vacante.estado == "Publicada").order_by(Vacante.id.desc())
+    return [_salida(db, v) for v in q.all()]
+
+
 @router.get("/{codigo}")
 def detalle(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
     return _salida(db, _por_codigo(db, codigo))

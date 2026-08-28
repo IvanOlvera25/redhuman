@@ -57,12 +57,40 @@ const etapaColor: Record<EtapaCandidato, string> = {
   Contratación: "var(--good)",
 };
 
+type FiltroEstado = "todos" | "en_proceso" | "aptos" | "contratados" | "descartados";
+
+const FILTROS_ESTADO: { key: FiltroEstado; label: string }[] = [
+  { key: "todos", label: "Todos" },
+  { key: "en_proceso", label: "En proceso" },
+  { key: "aptos", label: "Aptos" },
+  { key: "contratados", label: "Contratados" },
+  { key: "descartados", label: "Descartados" },
+];
+
+/** "Todos" excluye a los descartados a propósito: son un archivo aparte, no la vista por defecto. */
+function coincideEstado(c: Candidato, filtro: FiltroEstado): boolean {
+  switch (filtro) {
+    case "en_proceso":
+      return c.etapa !== "Contratación" && (c.estado === "revision" || c.estado === "pendiente");
+    case "aptos":
+      return c.etapa !== "Contratación" && c.estado === "cumple";
+    case "contratados":
+      return c.etapa === "Contratación";
+    case "descartados":
+      return c.estado === "no_cumple";
+    case "todos":
+    default:
+      return c.estado !== "no_cumple";
+  }
+}
+
 export default function Candidatos() {
   const puedeDecidir = usePuedeDecidir();
   const [sel, setSel] = useState<Candidato | null>(null);
   const [datos, setDatos] = useState<Candidato[]>(candidatosDemo);
   const [vacantes, setVacantes] = useState<Vacante[]>([]);
   const [filtroVacante, setFiltroVacante] = useState<string>("");
+  const [filtroEstado, setFiltroEstado] = useState<FiltroEstado>("todos");
   const [live, setLive] = useState(false);
   const [carga, setCarga] = useState(false);
 
@@ -94,9 +122,9 @@ export default function Candidatos() {
   }
 
   const sinConsentimiento = datos.filter((c) => c.consentimiento === false).length;
-  const datosFiltrados = filtroVacante
-    ? datos.filter((c) => c.vacanteId === filtroVacante)
-    : datos;
+  const datosFiltrados = datos.filter(
+    (c) => (!filtroVacante || c.vacanteId === filtroVacante) && coincideEstado(c, filtroEstado),
+  );
   const vacanteSeleccionada = vacantes.find((v) => v.id === filtroVacante);
 
   return (
@@ -135,11 +163,27 @@ export default function Candidatos() {
             ))}
           </select>
         </div>
-        {filtroVacante && (
-          <Badge tone="brand" dot>
-            {datosFiltrados.length} candidato{datosFiltrados.length !== 1 ? "s" : ""}
-          </Badge>
-        )}
+        {/* Barra de filtro por estado */}
+        <div className="flex flex-wrap items-center gap-1 rounded-xl border border-border-soft bg-surface-2/60 p-1">
+          {FILTROS_ESTADO.map((f) => (
+            <button
+              key={f.key}
+              onClick={() => setFiltroEstado(f.key)}
+              className={cn(
+                "rounded-lg px-3 py-1.5 text-xs font-semibold transition",
+                filtroEstado === f.key
+                  ? "bg-surface text-brand shadow-sm"
+                  : "text-ink-3 hover:bg-surface/60 hover:text-ink",
+              )}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+
+        <Badge tone="brand" dot>
+          {datosFiltrados.length} candidato{datosFiltrados.length !== 1 ? "s" : ""}
+        </Badge>
         {filtroVacante && vacanteSeleccionada && (
           <button
             onClick={() => setFiltroVacante("")}

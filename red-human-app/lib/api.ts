@@ -197,6 +197,11 @@ export function fetchVacantes() {
   return get<Vacante[]>("/vacantes");
 }
 
+/** Bolsa de trabajo pública (/portal): solo vacantes en estado "Publicada", sin sesión. */
+export function fetchVacantesPublicas() {
+  return get<Vacante[]>("/vacantes/publicas");
+}
+
 export function fetchVacante(codigo: string) {
   return get<Vacante>(`/vacantes/${codigo}`);
 }
