@@ -9,6 +9,8 @@ import {
   Briefcase,
   ClipboardCheck,
   ClipboardList,
+  ExternalLink,
+  Globe,
   GraduationCap,
   HeartPulse,
   LayoutDashboard,
@@ -93,6 +95,18 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <Button href="/dashboard/vacantes" size="sm" className="w-full">
         <Plus className="h-4 w-4" /> Nueva vacante
       </Button>
+
+      {/* Acceso directo a la bolsa de trabajo pública: se abre en pestaña nueva para no perder el panel. */}
+      <Link
+        href="/portal"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="group flex items-center gap-2.5 rounded-xl border border-border-soft bg-surface-2/60 px-3 py-2.5 text-sm font-medium text-ink-2 transition hover:border-brand/40 hover:bg-brand-soft hover:text-brand"
+      >
+        <Globe className="h-[18px] w-[18px] text-ink-3 transition group-hover:text-brand" />
+        <span className="flex-1">Ver Bolsa de Trabajo</span>
+        <ExternalLink className="h-3.5 w-3.5 text-ink-3 transition group-hover:text-brand" />
+      </Link>
 
       <div className="flex-1 space-y-5 overflow-y-auto">
         <div>
