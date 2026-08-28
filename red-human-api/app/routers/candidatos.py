@@ -495,6 +495,54 @@ class MensajeIn(BaseModel):
     canal: str = "simulador"  # simulador | whatsapp | web
 
 
+# Score mínimo (0-100) para considerarse "apto" en el flujo automático (Zero-Touch).
+UMBRAL_ZERO_TOUCH = 50
+
+
+async def _auto_decision_zero_touch(db: Session, c: Candidato) -> None:
+    """Flujo Zero-Touch: al terminar el prefiltro, clasifica al candidato contra
+    UMBRAL_ZERO_TOUCH y le avisa el resultado por WhatsApp sin intervención de RH.
+
+    Reemplaza el estado intermedio 'revision' del agente por una decisión binaria
+    (cumple/no_cumple). RH conserva la capacidad de reabrir el caso desde el panel;
+    la bitácora deja constancia de que la acción la tomó el agente ("agente-ia"),
+    no una persona de RH, para no falsear la trazabilidad que exige la LFPDPPP.
+    """
+    if c.score < UMBRAL_ZERO_TOUCH:
+        c.estado = "no_cumple"
+        accion = "auto_descartado_zero_touch"
+        texto = (
+            f"Gracias por tu tiempo, {c.nombre.split(' ')[0]}. Después de revisar tus respuestas, "
+            "por ahora tu perfil no se alinea con lo que busca esta vacante. Guardamos tu información "
+            "por si surge una oportunidad más adelante. ¡Mucho éxito en tu búsqueda! 🙌"
+        )
+    else:
+        c.estado = "cumple"
+        accion = "auto_apto_zero_touch"
+        texto = (
+            f"¡Buenas noticias, {c.nombre.split(' ')[0]}! 🎉 Tu perfil es compatible con lo que buscamos "
+            "para esta vacante. Tu proceso avanza — el equipo de RH revisará tu información y te "
+            "contactará para los siguientes pasos."
+        )
+
+    registrar(
+        db, "agente-ia", accion, "candidato", c.codigo,
+        {"score": c.score, "umbral": UMBRAL_ZERO_TOUCH},
+    )
+
+    if not c.telefono:
+        return
+    try:
+        envio = await enviar_mensaje(c.telefono, texto)
+    except Exception as e:  # que WhatsApp falle no debe tumbar la clasificación
+        print(f"[zero-touch-whatsapp-error] {c.codigo}: {e}")
+        envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+    db.add(Mensaje(
+        candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
+        enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
+    ))
+
+
 async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, wa_id: str = "") -> dict:
     """Registra el mensaje del candidato, corre un turno del agente y responde."""
     db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal=canal, wa_id=wa_id))
@@ -537,13 +585,18 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, 
 
     clasificacion = None
     if turno.clasificacion_lista and turno.estado and not c.prefiltro_completo:
-        c.estado = turno.estado
         c.score = turno.score or 0
         c.evidencia = turno.evidencia or ""
         c.prefiltro_completo = True
         analisis_actual.update({"origen": "prefiltro", "ia": con_ia})
+        registrar(
+            db, "agente-ia", "prefiltro_clasificado", "candidato", c.codigo,
+            {"ia": con_ia, "estado_ia": turno.estado, "score": c.score, "evidencia": c.evidencia},
+        )
+
+        # Zero-Touch: clasificación final (cumple/no_cumple) y aviso automático por WhatsApp.
+        await _auto_decision_zero_touch(db, c)
         clasificacion = {"estado": c.estado, "score": c.score, "evidencia": c.evidencia}
-        registrar(db, "agente-ia", "prefiltro_clasificado", "candidato", c.codigo, {"ia": con_ia, **clasificacion})
 
     c.analisis = analisis_actual
     db.commit()
