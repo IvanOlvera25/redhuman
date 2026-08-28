@@ -22,11 +22,30 @@ import { cn } from "@/lib/utils";
 
 const MODALIDADES: Vacante["modalidad"][] = ["Presencial", "Híbrido", "Remoto"];
 
+const formatoMXN = new Intl.NumberFormat("es-MX", {
+  style: "currency",
+  currency: "MXN",
+  maximumFractionDigits: 0,
+});
+
+/** Saca el número más alto que aparezca en un texto de sueldo libre (p. ej. "$9,500 – 11,000" -> 11500).
+ *  null cuando no hay ningún número (p. ej. "A convenir") — esas vacantes nunca se descartan por sueldo,
+ *  porque no hay forma de saber si cumplen el filtro o no. */
+function sueldoMaximo(sueldo?: string): number | null {
+  if (!sueldo) return null;
+  const numeros = (sueldo.match(/[\d,]+/g) ?? [])
+    .map((n) => parseInt(n.replace(/,/g, ""), 10))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  return numeros.length ? Math.max(...numeros) : null;
+}
+
 export default function Portal() {
   const [vacantes, setVacantes] = useState<Vacante[]>([]);
   const [cargando, setCargando] = useState(true);
   const [ubicacion, setUbicacion] = useState("");
+  const [area, setArea] = useState("");
   const [modalidades, setModalidades] = useState<string[]>([]);
+  const [sueldoMin, setSueldoMin] = useState(0);
 
   useEffect(() => {
     fetchVacantesPublicas().then((v) => {
@@ -40,14 +59,31 @@ export default function Portal() {
     [vacantes],
   );
 
+  const areas = useMemo(
+    () => Array.from(new Set(vacantes.map((v) => v.area).filter(Boolean))).sort(),
+    [vacantes],
+  );
+
+  /** Techo del slider: el sueldo más alto entre las vacantes activas, redondeado a $5,000 (mínimo $60,000). */
+  const sueldoTope = useMemo(() => {
+    const valores = vacantes.map((v) => sueldoMaximo(v.sueldo)).filter((n): n is number => n !== null);
+    if (!valores.length) return 60000;
+    return Math.max(60000, Math.ceil(Math.max(...valores) / 5000) * 5000);
+  }, [vacantes]);
+
   const filtradas = useMemo(
     () =>
       vacantes.filter((v) => {
         if (ubicacion && v.ubicacion !== ubicacion) return false;
+        if (area && v.area !== area) return false;
         if (modalidades.length && !modalidades.includes(v.modalidad)) return false;
+        if (sueldoMin > 0) {
+          const max = sueldoMaximo(v.sueldo);
+          if (max !== null && max < sueldoMin) return false;
+        }
         return true;
       }),
-    [vacantes, ubicacion, modalidades],
+    [vacantes, ubicacion, area, modalidades, sueldoMin],
   );
 
   function toggleModalidad(m: string) {
@@ -56,10 +92,12 @@ export default function Portal() {
 
   function limpiar() {
     setUbicacion("");
+    setArea("");
     setModalidades([]);
+    setSueldoMin(0);
   }
 
-  const hayFiltros = Boolean(ubicacion) || modalidades.length > 0;
+  const hayFiltros = Boolean(ubicacion) || Boolean(area) || modalidades.length > 0 || sueldoMin > 0;
 
   return (
     <main className="min-h-svh bg-bg">
@@ -140,6 +178,22 @@ export default function Portal() {
                 </select>
               </div>
 
+              <div className="mt-5 flex flex-col gap-1.5">
+                <Eyebrow className="text-[10px] text-ink-3">Área / Departamento</Eyebrow>
+                <select
+                  value={area}
+                  onChange={(e) => setArea(e.target.value)}
+                  className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+                >
+                  <option value="">Todas</option>
+                  {areas.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div className="mt-5 flex flex-col gap-2">
                 <Eyebrow className="text-[10px] text-ink-3">Modalidad</Eyebrow>
                 <div className="flex flex-col gap-1.5">
@@ -167,6 +221,31 @@ export default function Portal() {
                     );
                   })}
                 </div>
+              </div>
+
+              <div className="mt-5 flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <Eyebrow className="text-[10px] text-ink-3">Sueldo mínimo</Eyebrow>
+                  <span className="font-mono text-xs font-semibold text-brand">
+                    {sueldoMin > 0 ? formatoMXN.format(sueldoMin) : "Cualquiera"}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={sueldoTope}
+                  step={1000}
+                  value={sueldoMin}
+                  onChange={(e) => setSueldoMin(Number(e.target.value))}
+                  className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-surface-2 accent-[var(--brand)]"
+                />
+                <div className="flex items-center justify-between font-mono text-[10px] text-ink-3">
+                  <span>$0</span>
+                  <span>{formatoMXN.format(sueldoTope)}</span>
+                </div>
+                <p className="text-[11px] leading-relaxed text-ink-3">
+                  Referencial: incluye vacantes con sueldo “A convenir”.
+                </p>
               </div>
             </Card>
 

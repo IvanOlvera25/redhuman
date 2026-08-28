@@ -14,6 +14,8 @@ import {
   Link2,
   RefreshCw,
   ExternalLink,
+  Ban,
+  RotateCcw,
 } from "lucide-react";
 import { Button, Card, Badge, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
@@ -23,6 +25,7 @@ import {
   crearVacante,
   fetchVacantes,
   publicarVacante,
+  cerrarVacante,
   regenerarVacante,
   generarVacanteIA,
   type BloquePlataforma,
@@ -56,6 +59,7 @@ export default function Vacantes() {
   const [sel, setSel] = useState<Vacante | null>(null);
   const [datos, setDatos] = useState<Vacante[]>(vacantesDemo);
   const [live, setLive] = useState(false);
+  const [cambiandoEstatus, setCambiandoEstatus] = useState("");
 
   const recargar = useCallback(
     async (seleccionar?: string) => {
@@ -72,6 +76,17 @@ export default function Vacantes() {
   useEffect(() => {
     recargar();
   }, [recargar]);
+
+  /** Switch de estatus: Publicada -> Cerrada le quita la vacante del portal público al instante; Cerrada -> Publicada la reabre. */
+  async function alternarEstatus(v: Vacante) {
+    setCambiandoEstatus(v.id);
+    const r =
+      v.estado === "Publicada"
+        ? await cerrarVacante(v.id)
+        : await publicarVacante(v.id, v.plataformas.length ? v.plataformas : ["WhatsApp", "Portal"]);
+    setCambiandoEstatus("");
+    if (r.ok) recargar(sel?.id === v.id ? v.id : undefined);
+  }
 
   const lista = filtro === "Todas" ? datos : datos.filter((v) => v.estado === filtro);
 
@@ -167,6 +182,33 @@ export default function Vacantes() {
                 </span>
               )}
             </div>
+
+            {/* Acción rápida de estatus: no abre el detalle, cambia el switch Publicada <-> Cerrada al instante */}
+            {puedeDecidir && (v.estado === "Publicada" || v.estado === "Cerrada") && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  alternarEstatus(v);
+                }}
+                disabled={cambiandoEstatus === v.id}
+                className={cn(
+                  "mt-3 flex items-center justify-center gap-1.5 rounded-xl border py-2 text-xs font-semibold transition disabled:opacity-50",
+                  v.estado === "Publicada"
+                    ? "border-border-soft text-ink-2 hover:border-bad/40 hover:bg-bad-soft hover:text-bad"
+                    : "border-border-soft text-ink-2 hover:border-good/40 hover:bg-good-soft hover:text-good",
+                )}
+              >
+                {v.estado === "Publicada" ? (
+                  <>
+                    <Ban className="h-3.5 w-3.5" /> {cambiandoEstatus === v.id ? "Cerrando…" : "Cerrar vacante"}
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw className="h-3.5 w-3.5" /> {cambiandoEstatus === v.id ? "Reabriendo…" : "Reabrir vacante"}
+                  </>
+                )}
+              </button>
+            )}
           </Card>
         ))}
 
@@ -604,6 +646,25 @@ function DetalleVacante({
     if (r.ok) onCambio(v.id);
   }
 
+  /** Switch de estatus: al cerrar, la vacante desaparece de /vacantes/publicas al instante (sin borrar su historial). */
+  async function alternarEstatus() {
+    setOcupado("estatus");
+    const r = v.estado === "Publicada" ? await cerrarVacante(v.id) : await publicarVacante(v.id, destinos);
+    setOcupado("");
+    setAviso(
+      r.ok
+        ? {
+            tono: "ok",
+            texto:
+              v.estado === "Publicada"
+                ? "Vacante cerrada: ya no aparece en el portal público ni recibe nuevas postulaciones."
+                : "Vacante reabierta: vuelve a aparecer en el portal público.",
+          }
+        : { tono: "error", texto: r.error },
+    );
+    if (r.ok) onCambio(v.id);
+  }
+
   const embudo = v.embudo?.etapas ?? {};
 
   return (
@@ -712,6 +773,34 @@ function DetalleVacante({
                 {ocupado === "publicar" ? "Publicando…" : "Publicar"}
               </Button>
             </div>
+
+            {(v.estado === "Publicada" || v.estado === "Cerrada") && (
+              <div>
+                <Eyebrow>Estatus de la vacante</Eyebrow>
+                <button
+                  onClick={alternarEstatus}
+                  disabled={Boolean(ocupado)}
+                  className={cn(
+                    "mt-2.5 flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-semibold transition disabled:opacity-50",
+                    v.estado === "Publicada"
+                      ? "border-bad/30 text-bad hover:bg-bad-soft"
+                      : "border-good/30 text-good hover:bg-good-soft",
+                  )}
+                >
+                  {v.estado === "Publicada" ? (
+                    <>
+                      <Ban className="h-4 w-4" />
+                      {ocupado === "estatus" ? "Cerrando…" : "Cerrar vacante (deja de verse en el portal)"}
+                    </>
+                  ) : (
+                    <>
+                      <RotateCcw className="h-4 w-4" />
+                      {ocupado === "estatus" ? "Reabriendo…" : "Reabrir vacante"}
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
