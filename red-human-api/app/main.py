@@ -10,7 +10,7 @@ Documentación interactiva: http://localhost:8000/docs
 
 from contextlib import asynccontextmanager
 
-
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -19,9 +19,13 @@ from .database import Base, SessionLocal, engine
 from .migraciones import sincronizar
 from .routers import auth, candidatos, contratacion, empleados, entrevistas, metricas, requisiciones, vacantes, webhooks
 from .seed import sembrar, sembrar_admin
+from .services.agenda import revisar_videollamadas_noshow
 from .services.avatar import avatar_activo
 from .services.ia import ia_activa
 from .services.whatsapp import proveedor as whatsapp_proveedor, whatsapp_activo
+
+# Zero-Touch fase 1: barre videollamadas vencidas cada 5 min (ver services/agenda.py).
+scheduler = AsyncIOScheduler(timezone="UTC")
 
 
 @asynccontextmanager
@@ -33,7 +37,16 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         sembrar(db)
         sembrar_admin(db)
-    yield
+
+    scheduler.add_job(
+        revisar_videollamadas_noshow, "interval", minutes=5,
+        id="noshow_videollamadas", replace_existing=True,
+    )
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.shutdown(wait=False)
 
 
 app = FastAPI(

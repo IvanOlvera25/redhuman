@@ -381,9 +381,6 @@ function Campo({
 }
 
 function Exito({ titulo, conCv }: { titulo: string; conCv: boolean }) {
-  const mensajeWa = `Hola, completé mi registro en la web para la vacante de ${titulo}`;
-  const urlWhatsapp = `https://wa.me/525610355836?text=${encodeURIComponent(mensajeWa)}`;
-
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
       <Card className="mt-8 overflow-hidden text-center">
@@ -399,7 +396,7 @@ function Exito({ titulo, conCv }: { titulo: string; conCv: boolean }) {
             >
               <Check className="h-9 w-9" />
             </motion.div>
-            <h2 className="font-display mt-5 text-2xl font-bold">¡Aplicación enviada con éxito!</h2>
+            <h2 className="font-display mt-5 text-2xl font-bold">¡Postulación enviada con éxito!</h2>
             <p className="mx-auto mt-2 max-w-md text-white/70">
               Registramos tu postulación para <b className="text-white">{titulo}</b>.
               {conCv && " Tu CV ha sido procesado correctamente."}
@@ -407,26 +404,15 @@ function Exito({ titulo, conCv }: { titulo: string; conCv: boolean }) {
           </div>
         </div>
 
-        {/* Sección de Acción: Continuar por WhatsApp */}
+        {/* Zero-Touch: el siguiente contacto lo dispara el sistema por WhatsApp, no un clic del candidato */}
         <div className="p-6 sm:p-8 flex flex-col items-center gap-5">
-          <div className="w-full max-w-md rounded-2xl border border-[#25D366]/30 bg-[#25D366]/10 p-5 text-center">
-            <p className="text-sm font-semibold text-ink">Último paso para completar tu postulación</p>
-            <p className="mt-1 text-xs text-ink-3">
-              Haz clic en el siguiente botón para iniciar tu entrevista interactiva con nuestro asistente por WhatsApp.
+          <div className="flex w-full max-w-md items-start gap-3 rounded-2xl border border-[#25D366]/30 bg-[#25D366]/10 p-5 text-left">
+            <span className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[#25D366]/15 text-[#25D366]">
+              <MessageCircle className="h-5 w-5" />
+            </span>
+            <p className="text-sm leading-relaxed text-ink">
+              Nuestro asistente virtual de RH te contactará por WhatsApp en breve para continuar tu proceso.
             </p>
-
-            <div className="mt-4">
-              <a
-                href={urlWhatsapp}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex w-full items-center justify-center gap-2.5 rounded-2xl bg-[#25D366] px-6 py-4 text-base font-bold text-white shadow-lg shadow-[#25D366]/25 transition hover:brightness-105 active:scale-[0.98]"
-              >
-                <MessageCircle className="h-5 w-5 fill-current" />
-                Continuar entrevista por WhatsApp
-                <ArrowRight className="h-5 w-5" />
-              </a>
-            </div>
           </div>
 
           <div className="flex items-center justify-center gap-6 text-xs text-ink-3">

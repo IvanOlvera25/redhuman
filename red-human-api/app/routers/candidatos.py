@@ -33,9 +33,13 @@ from ..models import (
 from ..serial import archivo_dict, candidato_dict, expediente_dict
 from ..services import archivos as fs
 from ..services import ia
-from ..services.whatsapp import enviar_mensaje
+from ..services.whatsapp import enviar_mensaje, enviar_plantilla
 
 router = APIRouter(prefix="/candidatos", tags=["candidatos"])
+
+# Plantilla aprobada en Meta para romper el hielo tras una postulación web (fuera de la ventana
+# de 24h: el candidato no nos ha escrito todavía, así que solo una plantilla aprobada pasa).
+PLANTILLA_INICIO_ENTREVISTA = "inicio_entrevista_rh"
 
 TIPOS_ARCHIVO = ["cv", "carta", "certificado", "identificacion", "otro"]
 
@@ -322,6 +326,25 @@ async def subir_cv(
     }
 
 
+async def _disparar_plantilla_inicio(db: Session, c: Candidato) -> dict:
+    """Rompe el hielo por WhatsApp justo después de guardar al candidato, usando la plantilla
+    aprobada de Meta (nunca texto libre: la web no cuenta como 'el candidato escribió primero')."""
+    if not c.telefono:
+        return {"enviado": False, "detalle": "El candidato no dejó WhatsApp."}
+    primer_nombre = (c.nombre or "").split(" ")[0] or "candidato(a)"
+    envio = await enviar_plantilla(c.telefono, PLANTILLA_INICIO_ENTREVISTA, [primer_nombre])
+    db.add(Mensaje(
+        candidato_id=c.id, rol="assistant",
+        texto=f"[Plantilla de WhatsApp «{PLANTILLA_INICIO_ENTREVISTA}»] Hola {primer_nombre}, ¡gracias por tu interés! Empecemos con tu proceso.",
+        canal="whatsapp", enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
+    ))
+    registrar(
+        db, "sistema", "plantilla_inicio_enviada", "candidato", c.codigo,
+        {"plantilla": PLANTILLA_INICIO_ENTREVISTA, "whatsapp": envio},
+    )
+    return envio
+
+
 @router.post("/postular", status_code=201)
 async def postular(
     vacante: str = Form(..., description="slug o código de la vacante publicada"),
@@ -367,6 +390,11 @@ async def postular(
             c.telefono = tel
         if correo.strip() and not c.correo:
             c.correo = correo.strip()
+
+    # Zero-Touch: dispara la plantilla de Meta apenas se guarda el registro — solo para
+    # candidatos nuevos, para no volver a "romper el hielo" con alguien que ya nos escribió.
+    if nuevo:
+        await _disparar_plantilla_inicio(db, c)
 
     if not c.vacante_id:
         c.vacante_id = vac.id
@@ -543,6 +571,72 @@ async def _auto_decision_zero_touch(db: Session, c: Candidato) -> None:
     ))
 
 
+def _parsear_fecha_cita(valor: str) -> Optional[datetime]:
+    """agendar_videollamada debe regresar ISO 8601; si el modelo se equivocó de formato, se
+    ignora la fecha — mejor no programar el aviso de no-show que programarlo mal."""
+    try:
+        dt = datetime.fromisoformat(valor)
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+async def _procesar_turno_agenda(db: Session, c: Candidato, historial: List[dict], canal: str) -> dict:
+    """Turno posterior a la clasificación: coordina la videollamada con la herramienta
+    agendar_videollamada (function calling) — ver ia.agenda_turno."""
+    v = c.vacante
+    turno, con_ia = ia.agenda_turno(c.wa_nombre or c.nombre.split(" ")[0], v.titulo if v else "", historial)
+
+    if turno.cita_fecha_hora and turno.cita_liga:
+        fecha = _parsear_fecha_cita(turno.cita_fecha_hora)
+        c.videollamada_agendada_en = fecha or datetime.now(timezone.utc)
+        c.videollamada_liga = turno.cita_liga
+        c.etapa = "Entrevista"  # avanza el kanban a la etapa que ya existe para esto
+        registrar(
+            db, "agente-ia", "videollamada_agendada", "candidato", c.codigo,
+            {"fecha_hora": turno.cita_fecha_hora, "liga": turno.cita_liga, "fecha_parseada": bool(fecha)},
+        )
+
+    envio = {"enviado": False, "proveedor": "demo"}
+    if canal == "whatsapp" and c.telefono:
+        try:
+            envio = await enviar_mensaje(c.telefono, turno.respuesta)
+        except Exception as e:  # que WhatsApp falle no debe tumbar la conversación
+            print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
+            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal,
+                   enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
+    db.commit()
+    return {
+        "respuesta": turno.respuesta,
+        "clasificacion": None,
+        "ia": con_ia,
+        "whatsapp": envio,
+        "cita": {"fechaHora": turno.cita_fecha_hora, "liga": turno.cita_liga} if turno.cita_liga else None,
+    }
+
+
+async def _procesar_turno_post_completo(db: Session, c: Candidato, texto: str, canal: str) -> dict:
+    """No queda nada pendiente que la IA deba coordinar (no_cumple ya avisado, o cumple con
+    videollamada ya agendada) — se responde con un mensaje fijo, sin volver a llamar al modelo."""
+    respuesta = (
+        "¡Ya tienes tu videollamada agendada! Si necesitas reagendar, avísame y lo vemos. 🙌"
+        if c.videollamada_agendada_en
+        else "¡Gracias! Tu pre-filtro ya está completo. El equipo de RH revisará tu información y te contactará pronto. 😊"
+    )
+    envio = {"enviado": False, "proveedor": "demo"}
+    if canal == "whatsapp" and c.telefono:
+        try:
+            envio = await enviar_mensaje(c.telefono, respuesta)
+        except Exception as e:
+            print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
+            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=respuesta, canal=canal,
+                   enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
+    db.commit()
+    return {"respuesta": respuesta, "clasificacion": None, "ia": False, "whatsapp": envio}
+
+
 async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, wa_id: str = "") -> dict:
     """Registra el mensaje del candidato, corre un turno del agente y responde."""
     db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal=canal, wa_id=wa_id))
@@ -554,6 +648,16 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, 
         historial = mensajes_db
     else:
         historial = mensajes_db + [{"rol": "user", "texto": texto}]
+
+    # Zero-Touch fase 1: ya clasificado como apto y sin videollamada agendada -> seguimos la
+    # conversación con la herramienta de agendamiento en vez de re-correr la clasificación.
+    if c.prefiltro_completo and c.estado == "cumple" and not c.videollamada_agendada_en:
+        return await _procesar_turno_agenda(db, c, historial, canal)
+
+    # Ya no hay nada más que resolver (no_cumple avisado, o cita ya agendada): respuesta fija.
+    if c.prefiltro_completo:
+        return await _procesar_turno_post_completo(db, c, texto, canal)
+
     turno, con_ia = ia.prefiltro_turno(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",

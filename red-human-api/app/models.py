@@ -89,6 +89,13 @@ class Candidato(Base):
     consentimiento: Mapped[bool] = mapped_column(Boolean, default=False)
     consentimiento_fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     prefiltro_completo: Mapped[bool] = mapped_column(Boolean, default=False)
+    # --- Zero-Touch fase 1: videollamada agendada por la IA (herramienta agendar_videollamada) ---
+    # No confundir con el módulo de Entrevista (avatar/token público, tabla `entrevistas`): esto es
+    # la liga de videollamada que el agente ofrece por WhatsApp justo después del prefiltro.
+    videollamada_agendada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    videollamada_liga: Mapped[str] = mapped_column(String(300), default="")
+    # true en cuanto se manda el mensaje de rescate por inasistencia — evita reenviarlo cada 5 min
+    videollamada_aviso_noshow_enviado: Mapped[bool] = mapped_column(Boolean, default=False)
     wa_nombre: Mapped[str] = mapped_column(String(200), default="")  # nombre del perfil de WhatsApp
     wa_id: Mapped[str] = mapped_column(String(30), default="", index=True)  # ID de WhatsApp (tel tal como lo envía Meta)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
