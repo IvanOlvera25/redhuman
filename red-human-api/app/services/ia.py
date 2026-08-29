@@ -6,6 +6,7 @@ Sin clave, cada función regresa un resultado determinista en "modo demo"
 para que la plataforma siga funcionando de punta a punta.
 """
 
+import json
 from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -436,6 +437,13 @@ class TurnoPrefiltro(BaseModel):
         default_factory=list,
         description="Lista acumulada de preguntas realizadas y respuestas estructuradas obtenidas del candidato hasta el momento."
     )
+    # --- Zero-Touch fase 1: solo se llenan cuando este turno invocó agendar_videollamada ---
+    cita_fecha_hora: Optional[str] = Field(
+        default=None, description="Fecha/hora ISO 8601 de la videollamada agendada en este turno, si aplica."
+    )
+    cita_liga: Optional[str] = Field(
+        default=None, description="Liga de la videollamada agendada en este turno, si aplica."
+    )
 
 
 def prefiltro_turno(
@@ -521,6 +529,123 @@ def prefiltro_turno(
         text_format=TurnoPrefiltro,
     )
     return resp.output_parsed, True
+
+
+# ============================================================
+# 3a) Zero-Touch fase 1 — herramienta agendar_videollamada (function calling)
+# ============================================================
+#
+# Una vez que el candidato queda clasificado como apto (score >= UMBRAL_ZERO_TOUCH, ver
+# candidatos._auto_decision_zero_touch), el agente sigue la conversación con el único
+# objetivo de coordinar una videollamada. Cuando el candidato confirma fecha/hora, el
+# modelo invoca esta herramienta en vez de inventarse la confirmación.
+
+HERRAMIENTA_AGENDAR_VIDEOLLAMADA = {
+    "type": "function",
+    "name": "agendar_videollamada",
+    "description": (
+        "Agenda la videollamada de entrevista con el candidato. Úsala SOLO cuando el candidato "
+        "ya te dio una fecha/hora concreta de disponibilidad — nunca la inventes ni confirmes "
+        "una cita sin haberla invocado primero."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "fecha_hora": {
+                "type": "string",
+                "description": (
+                    "Fecha y hora acordada con el candidato, normalizada por ti a ISO 8601 con "
+                    "zona horaria de México (ej. '2026-09-02T11:00:00-06:00')."
+                ),
+            },
+        },
+        "required": ["fecha_hora"],
+        "additionalProperties": False,
+    },
+}
+
+LIGA_VIDEOLLAMADA_DEMO = "https://meet.google.com/redhuman-demo"
+
+
+def _agendar_videollamada_mock(nombre_candidato: str, fecha_hora: str) -> dict:
+    """Ejecuta la herramienta 'agendar_videollamada'. MOCK: todavía no hay integración real con
+    un calendario, así que solo registra la intención y regresa una liga fija.
+
+    Para conectar Google Calendar más adelante: sustituir el cuerpo por la llamada real (crear
+    evento, invitar al candidato con su correo, regresar la liga de Meet real que da la API). La
+    firma — (nombre, fecha_hora) -> {"liga": str, "fecha_hora": str} — no debería cambiar, así
+    que ni `agenda_turno` ni el router que la llama (candidatos.py) se enteran del cambio.
+    """
+    print(f"[agendar_videollamada] Agendando videollamada para {nombre_candidato} el {fecha_hora}")
+    return {"liga": LIGA_VIDEOLLAMADA_DEMO, "fecha_hora": fecha_hora}
+
+
+def agenda_turno(nombre_candidato: str, vacante_titulo: str, historial: List[dict]) -> Tuple[TurnoPrefiltro, bool]:
+    """Turno posterior a la clasificación para un candidato ya apto: pregunta disponibilidad y,
+    en cuanto el candidato confirma fecha/hora, invoca agendar_videollamada (function calling).
+
+    historial: [{"rol": "user"|"assistant", "texto": str}, ...] — el último es del candidato.
+    """
+    client = _client()
+    if client is None:
+        return (
+            TurnoPrefiltro(
+                respuesta="¡Perfecto! En cuanto tengamos lista la agenda automática te comparto la liga (modo demo).",
+                clasificacion_lista=False,
+            ),
+            False,
+        )
+
+    instrucciones = (
+        "Eres el agente de Red Human AI (México). Ya clasificaste a este candidato como apto para "
+        f"{vacante_titulo or 'la vacante'}; tu único objetivo ahora es coordinar una videollamada.\n"
+        f"Te diriges a {nombre_candidato}. Reglas: (1) si todavía no sabes su disponibilidad, "
+        "pregúntasela en un mensaje breve y cálido; (2) en cuanto el candidato te dé una fecha/hora "
+        "concreta, DEBES invocar la herramienta agendar_videollamada con esa fecha/hora en ISO 8601 "
+        "— nunca confirmes una cita sin haberla invocado; (3) después de invocarla, confirma la fecha "
+        "y comparte la liga que te regresó la herramienta; (4) tono cálido, una sola idea por mensaje."
+    )
+    mensajes = [{"role": ("user" if m["rol"] == "user" else "assistant"), "content": m["texto"]} for m in historial]
+
+    resp = client.responses.parse(
+        model=MODEL,
+        instructions=instrucciones,
+        input=mensajes,
+        text_format=TurnoPrefiltro,
+        tools=[HERRAMIENTA_AGENDAR_VIDEOLLAMADA],
+    )
+
+    llamada = next(
+        (it for it in resp.output if getattr(it, "type", None) == "function_call" and it.name == "agendar_videollamada"),
+        None,
+    )
+    if llamada is None:
+        return resp.output_parsed, True
+
+    args = json.loads(llamada.arguments or "{}")
+    fecha_hora = args.get("fecha_hora", "")
+    resultado_tool = _agendar_videollamada_mock(nombre_candidato, fecha_hora)
+
+    # Se reenvía resp.output completo (no solo el function_call): en modelos con razonamiento
+    # la Responses API exige también el ítem de 'reasoning' que precedió a la llamada, o rechaza
+    # la petición con 400 ("function_call was provided without its required reasoning item").
+    resp2 = client.responses.parse(
+        model=MODEL,
+        instructions=instrucciones,
+        input=mensajes + resp.output + [
+            {
+                "type": "function_call_output",
+                "call_id": llamada.call_id,
+                "output": json.dumps(resultado_tool, ensure_ascii=False),
+            },
+        ],
+        text_format=TurnoPrefiltro,
+    )
+    turno = resp2.output_parsed
+    # se fuerzan con el valor real de la herramienta, para no depender de que el modelo los copie bien
+    turno.cita_fecha_hora = resultado_tool["fecha_hora"]
+    turno.cita_liga = resultado_tool["liga"]
+    return turno, True
 
 
 # ============================================================

@@ -288,6 +288,13 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
 
     # ── 5. Si ya completó el prefiltro ──
     if c.prefiltro_completo:
+        # Zero-Touch fase 1: apto y aún sin videollamada agendada -> dejamos pasar el mensaje
+        # para que el agente siga coordinando la cita (herramienta agendar_videollamada).
+        if c.estado == "cumple" and not c.videollamada_agendada_en:
+            print(f"[agente] Candidato {c.codigo} apto, coordinando videollamada...")
+            resultado = await procesar_prefiltro(db, c, texto, "whatsapp")
+            return {"ok": True, "accion": "turno_agenda", "candidato": c.codigo, **resultado}
+
         despedida = "¡Gracias! Tu pre-filtro ya está completo. El equipo de RH revisará tu información y te contactará pronto. 😊"
         print(f"[agente] Candidato {c.codigo} ya completó prefiltro. Enviando despedida a {telefono}")
         await enviar_mensaje(telefono, despedida)

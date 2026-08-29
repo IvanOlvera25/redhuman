@@ -7,3 +7,4 @@ openai>=1.60
 httpx>=0.27
 python-multipart>=0.0.12
 pypdf>=5.1
+apscheduler>=3.10
