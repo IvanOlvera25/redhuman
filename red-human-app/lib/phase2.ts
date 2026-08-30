@@ -44,6 +44,11 @@ export interface NuevoIngreso {
   expedienteId?: number;
   estado?: "integracion" | "completo" | "alta" | string;
   fechaIngreso?: string | null;
+  /* --- condiciones finales de contratación, capturadas en la etapa Contratación --- */
+  sueldo?: string;
+  tipoContratacion?: string;
+  ubicacionTrabajo?: string;
+  jefeDirecto?: string;
   pendientes?: string[];
   porRevisar?: string[];
   sinConfirmar?: string[];

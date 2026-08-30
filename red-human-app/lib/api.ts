@@ -364,19 +364,44 @@ export function asignarVacante(codigo: string, vacante: string) {
   return post<Candidato>(`/candidatos/${codigo}/asignar`, { vacante, reevaluar: true });
 }
 
-/** Puente Módulo 1 → Módulo 2: abre el expediente de contratación. */
-export function seleccionarCandidato(
+/* ============================================================
+   Entrevista Humana — modal "Programar entrevista" y checkbox "Entrevista realizada"
+   ============================================================ */
+
+export type ModalidadEntrevistaHumana = "Presencial" | "Videollamada" | "Llamada";
+
+export function programarEntrevistaHumana(
   codigo: string,
-  datos: { fechaIngreso?: string; documentos?: string[]; avisarWhatsapp?: boolean },
+  datos: { entrevistador: string; fecha: string; hora: string; modalidad: ModalidadEntrevistaHumana; comentario?: string },
 ) {
-  return post<Candidato & { expediente_id: number; expediente: NuevoIngreso }>(
-    `/candidatos/${codigo}/seleccionar`,
-    {
-      fecha_ingreso: datos.fechaIngreso ?? null,
-      documentos: datos.documentos ?? [],
-      avisar_whatsapp: datos.avisarWhatsapp ?? true,
-    },
-  );
+  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana`, datos);
+}
+
+export function marcarEntrevistaHumanaRealizada(codigo: string) {
+  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/realizada`);
+}
+
+/* ============================================================
+   Contratación — condiciones finales (Puesto/Sueldo/Tipo/Fecha/Ubicación/Jefe directo)
+   ============================================================ */
+
+export function guardarCondicionesContratacion(
+  codigo: string,
+  datos: { puesto?: string; sueldo?: string; tipoContratacion?: string; fechaIngreso?: string; ubicacion?: string; jefeDirecto?: string },
+) {
+  return patch<Candidato>(`/candidatos/${codigo}/condiciones-contratacion`, {
+    puesto: datos.puesto ?? "",
+    sueldo: datos.sueldo ?? "",
+    tipo_contratacion: datos.tipoContratacion ?? "",
+    fecha_ingreso: datos.fechaIngreso || null,
+    ubicacion: datos.ubicacion ?? "",
+    jefe_directo: datos.jefeDirecto ?? "",
+  });
+}
+
+/** Nombres de personas de RH activas, para el select de "Entrevistador". */
+export function fetchEntrevistadores() {
+  return get<string[]>("/auth/entrevistadores");
 }
 
 /** Postulación pública desde /aplicar/[slug]: alta + consentimiento + CV + prefiltro en un paso. */
@@ -601,6 +626,11 @@ export function autorizarAlta(expedienteId: number, fechaIngreso?: string) {
   });
 }
 
+/** Botón "Cancelar contratación" — cierra el expediente y regresa al candidato a Entrevista Humana. */
+export function cancelarExpediente(expedienteId: number, motivo: string) {
+  return post<{ ok: boolean; candidato: string }>(`/contratacion/expedientes/${expedienteId}/cancelar`, { motivo });
+}
+
 /* ============================================================
    Métricas cruzadas y salud
    ============================================================ */
@@ -793,6 +823,10 @@ export interface Colaborador {
   telefono: string;
   puesto: string;
   salario: string;
+  empresa: string;
+  ubicacion: string;
+  jefeDirecto: string;
+  estatus: "Activo" | "Inactivo";
   cvNombre: string;
   tieneCv: boolean;
   fechaIngreso: string | null;

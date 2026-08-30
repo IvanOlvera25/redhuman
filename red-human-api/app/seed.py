@@ -115,17 +115,43 @@ def sembrar(db: Session) -> None:
     for rol, texto in charla:
         db.add(Mensaje(candidato_id=cand["C-8801"].id, rol=rol, texto=texto, canal="whatsapp"))
 
+    # Entrevista Humana ya programada para Valeria (etapa "Entrevista Humana")
+    cand["C-8809"].entrevista_humana_entrevistador = "Iván Olvera"
+    cand["C-8809"].entrevista_humana_fecha = _hace(hours=-26)  # en las próximas horas
+    cand["C-8809"].entrevista_humana_modalidad = "Videollamada"
+    cand["C-8809"].entrevista_humana_comentario = "Segunda ronda: profundizar en backend distribuido."
+
+    # Fernando ya tuvo su Entrevista Humana y RH lo movió a Contratación
+    cand["C-8811"].entrevista_humana_entrevistador = "Iván Olvera"
+    cand["C-8811"].entrevista_humana_fecha = _hace(days=1)
+    cand["C-8811"].entrevista_humana_modalidad = "Presencial"
+    cand["C-8811"].entrevista_humana_realizada = True
+
     # expedientes de contratación (módulo 2) — reflejan el mock de onboarding
-    exp1 = Expediente(candidato_id=cand["C-8808"].id, puesto="Auxiliar de almacén", fecha_ingreso=_hace(days=-2), seleccionado_por="Iván Olvera")
-    exp2 = Expediente(candidato_id=cand["C-8807"].id, puesto="Analista de nómina", fecha_ingreso=_hace(days=-4), seleccionado_por="Iván Olvera")
-    exp3 = Expediente(candidato_id=cand["C-8804"].id, puesto="Desarrollador Full-Stack", fecha_ingreso=_hace(days=-12), seleccionado_por="Iván Olvera")
-    db.add_all([exp1, exp2, exp3])
+    exp1 = Expediente(candidato_id=cand["C-8808"].id, puesto="Auxiliar de almacén", sueldo="$8,800 – 10,200",
+                       tipo_contratacion="Tiempo indeterminado", ubicacion="Monterrey, NL", jefe_directo="Iván Olvera",
+                       fecha_ingreso=_hace(days=-2), seleccionado_por="Iván Olvera")
+    exp2 = Expediente(candidato_id=cand["C-8807"].id, puesto="Analista de nómina", sueldo="$18,000 – 22,000",
+                       tipo_contratacion="Tiempo indeterminado", ubicacion="Querétaro, QRO", jefe_directo="Iván Olvera",
+                       fecha_ingreso=_hace(days=-4), seleccionado_por="Iván Olvera")
+    exp3 = Expediente(candidato_id=cand["C-8804"].id, puesto="Desarrollador Full-Stack", sueldo="$45,000 – 60,000",
+                       tipo_contratacion="Tiempo indeterminado", ubicacion="Remoto (MX)", jefe_directo="Iván Olvera",
+                       fecha_ingreso=_hace(days=-12), seleccionado_por="Iván Olvera")
+    # Fernando (Contratación) — expediente recién abierto, condiciones aún sin capturar del todo
+    exp4 = Expediente(candidato_id=cand["C-8811"].id, puesto="Cajero(a) de sucursal", sueldo="$9,500 – 11,000",
+                       ubicacion="Guadalajara, JAL", seleccionado_por="Iván Olvera")
+    db.add_all([exp1, exp2, exp3, exp4])
     db.flush()
 
     docs = {
-        exp1.id: [("INE", "recibido"), ("CURP", "recibido"), ("RFC", "recibido"), ("Comprobante de domicilio", "pendiente"), ("NSS", "revision")],
-        exp2.id: [("INE", "recibido"), ("CURP", "recibido"), ("RFC", "revision"), ("Comprobante de domicilio", "pendiente"), ("Título profesional", "pendiente")],
-        exp3.id: [("INE", "recibido"), ("CURP", "recibido"), ("RFC", "recibido"), ("Comprobante de domicilio", "recibido"), ("NSS", "recibido")],
+        exp1.id: [("Identificación oficial", "recibido"), ("CURP", "recibido"), ("Constancia de Situación Fiscal / RFC", "recibido"),
+                  ("Comprobante de domicilio", "pendiente"), ("Número de Seguridad Social", "revision"), ("Cuenta bancaria / CLABE", "pendiente")],
+        exp2.id: [("Identificación oficial", "recibido"), ("CURP", "recibido"), ("Constancia de Situación Fiscal / RFC", "revision"),
+                  ("Comprobante de domicilio", "pendiente"), ("Número de Seguridad Social", "pendiente"), ("Cuenta bancaria / CLABE", "recibido")],
+        exp3.id: [("Identificación oficial", "recibido"), ("CURP", "recibido"), ("Constancia de Situación Fiscal / RFC", "recibido"),
+                  ("Comprobante de domicilio", "recibido"), ("Número de Seguridad Social", "recibido"), ("Cuenta bancaria / CLABE", "recibido")],
+        exp4.id: [("Identificación oficial", "pendiente"), ("CURP", "pendiente"), ("Constancia de Situación Fiscal / RFC", "pendiente"),
+                  ("Comprobante de domicilio", "pendiente"), ("Número de Seguridad Social", "pendiente"), ("Cuenta bancaria / CLABE", "pendiente")],
     }
     for exp_id, lista in docs.items():
         for tipo, estado in lista:

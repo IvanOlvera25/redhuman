@@ -40,10 +40,26 @@ export interface Candidato {
   correo?: string;
   consentimiento?: boolean;
   prefiltroCompleto?: boolean;
+  /* --- Entrevista Humana (flujo manual) --- */
+  entrevistaHumana?: {
+    entrevistador: string;
+    fecha: string | null;
+    modalidad: "Presencial" | "Videollamada" | "Llamada" | "";
+    comentario: string;
+    realizada: boolean;
+  } | null;
   /* puentes hacia los otros módulos */
   expedienteId?: number | null;
   expedienteProgreso?: number | null;
   expedienteEstado?: string | null;
+  expedienteCondiciones?: {
+    puesto: string;
+    sueldo: string;
+    tipoContratacion: string;
+    ubicacion: string;
+    jefeDirecto: string;
+    fechaIngreso: string | null;
+  } | null;
   entrevistaId?: string | null;
   entrevistaEstado?: string | null;
   entrevistaMatch?: number | null;

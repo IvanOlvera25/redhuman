@@ -87,6 +87,18 @@ def yo(u: Usuario = Depends(usuario_actual)):
    """Quién soy — lo usa el frontend para pintar el shell y decidir permisos."""
    return usuario_dict(u)
 
+@router.get("/entrevistadores")
+def entrevistadores(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
+   """Lista ligera de nombres para el select de 'Entrevistador' — a diferencia de /usuarios,
+   cualquier persona con sesión la puede pedir (no expone correo, rol ni otros datos)."""
+   filas = (
+       db.query(Usuario.nombre)
+       .filter(Usuario.activo.is_(True), Usuario.rol.in_(("admin", "rh")))
+       .order_by(Usuario.nombre)
+       .all()
+   )
+   return [nombre for (nombre,) in filas]
+
 class CambiarPassIn(BaseModel):
    actual: str
    nueva: str

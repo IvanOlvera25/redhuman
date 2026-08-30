@@ -275,6 +275,32 @@ function Expediente({
         )}
       </div>
 
+      {/* Condiciones de contratación — capturadas en la etapa Contratación, se mantienen visibles aquí */}
+      {(n.sueldo || n.tipoContratacion || n.ubicacionTrabajo || n.jefeDirecto) && (
+        <div className="flex flex-wrap gap-2 border-b border-border-faint bg-surface-2/40 px-5 py-3">
+          {n.sueldo && (
+            <span className="rounded-lg border border-border-soft bg-surface px-2.5 py-1 font-mono text-xs text-brand">
+              {n.sueldo}
+            </span>
+          )}
+          {n.tipoContratacion && (
+            <span className="rounded-lg border border-border-soft bg-surface px-2.5 py-1 text-xs text-ink-2">
+              {n.tipoContratacion}
+            </span>
+          )}
+          {n.ubicacionTrabajo && (
+            <span className="rounded-lg border border-border-soft bg-surface px-2.5 py-1 text-xs text-ink-2">
+              📍 {n.ubicacionTrabajo}
+            </span>
+          )}
+          {n.jefeDirecto && (
+            <span className="rounded-lg border border-border-soft bg-surface px-2.5 py-1 text-xs text-ink-2">
+              Jefe directo: {n.jefeDirecto}
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="grid gap-5 p-5 lg:grid-cols-2">
         {/* Checklist de documentos */}
         <div>

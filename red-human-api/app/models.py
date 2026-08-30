@@ -104,6 +104,12 @@ class Candidato(Base):
     videollamada_liga: Mapped[str] = mapped_column(String(300), default="")
     # true en cuanto se manda el mensaje de rescate por inasistencia — evita reenviarlo cada 5 min
     videollamada_aviso_noshow_enviado: Mapped[bool] = mapped_column(Boolean, default=False)
+    # --- Entrevista Humana (flujo manual de RH, ver ETAPAS_CANDIDATO) ---
+    entrevista_humana_entrevistador: Mapped[str] = mapped_column(String(150), default="")
+    entrevista_humana_fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    entrevista_humana_modalidad: Mapped[str] = mapped_column(String(20), default="")  # Presencial|Videollamada|Llamada
+    entrevista_humana_comentario: Mapped[str] = mapped_column(Text, default="")
+    entrevista_humana_realizada: Mapped[bool] = mapped_column(Boolean, default=False)
     wa_nombre: Mapped[str] = mapped_column(String(200), default="")  # nombre del perfil de WhatsApp
     wa_id: Mapped[str] = mapped_column(String(30), default="", index=True)  # ID de WhatsApp (tel tal como lo envía Meta)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
@@ -286,7 +292,15 @@ class SugerenciaMovilidad(Base):
     empleado: Mapped["Empleado"] = relationship(back_populates="sugerencias")
 
 
-DOCUMENTOS_BASE = ["INE", "CURP", "RFC", "Comprobante de domicilio", "NSS"]
+# Checklist exacto pedido por el cliente para el expediente de contratación.
+DOCUMENTOS_BASE = [
+    "Identificación oficial",
+    "CURP",
+    "Constancia de Situación Fiscal / RFC",
+    "Número de Seguridad Social",
+    "Comprobante de domicilio",
+    "Cuenta bancaria / CLABE",
+]
 
 
 class Expediente(Base):
@@ -295,6 +309,11 @@ class Expediente(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     candidato_id: Mapped[int] = mapped_column(ForeignKey("candidatos.id"), unique=True)
     puesto: Mapped[str] = mapped_column(String(200), default="")
+    # --- condiciones finales de contratación (formulario de la etapa Contratación) ---
+    sueldo: Mapped[str] = mapped_column(String(80), default="")
+    tipo_contratacion: Mapped[str] = mapped_column(String(60), default="")
+    ubicacion: Mapped[str] = mapped_column(String(150), default="")
+    jefe_directo: Mapped[str] = mapped_column(String(150), default="")
     fecha_ingreso: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     estado: Mapped[str] = mapped_column(String(20), default="integracion")  # integracion | completo | alta
     alta_autorizada_por: Mapped[str] = mapped_column(String(150), default="")
@@ -352,13 +371,8 @@ class Documento(Base):
 
 class Colaborador(Base):
     """Colaborador activo — se crea al presionar «Dar de alta como colaborador» al cierre del
-    Onboarding (ver contratacion.alta). Hereda del candidato lo crítico: nombre, puesto, CV
-    y salario (tomado de Vacante.sueldo).
-
-    No sustituye a `Empleado` (universo del Radar Interno, módulo 4 — movilidad interna con
-    skills/seniority/jefe directo): son dos registros con propósitos distintos que hoy conviven
-    a propósito por pedido explícito del cliente. Si a futuro conviene unificarlos, es un
-    cambio aparte.
+    Onboarding (ver contratacion.alta). Hereda del candidato y del expediente lo definitivo:
+    nombre, puesto, CV, sueldo, ubicación, jefe directo y empresa.
     """
 
     __tablename__ = "colaboradores"
@@ -370,6 +384,9 @@ class Colaborador(Base):
     telefono: Mapped[str] = mapped_column(String(30), default="")
     puesto: Mapped[str] = mapped_column(String(200), default="")
     salario: Mapped[str] = mapped_column(String(80), default="")
+    empresa: Mapped[str] = mapped_column(String(150), default="")
+    ubicacion: Mapped[str] = mapped_column(String(150), default="")
+    jefe_directo: Mapped[str] = mapped_column(String(150), default="")
     cv_ruta: Mapped[str] = mapped_column(String(400), default="")
     cv_nombre: Mapped[str] = mapped_column(String(255), default="")
     fecha_ingreso: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

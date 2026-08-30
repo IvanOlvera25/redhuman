@@ -815,21 +815,52 @@ class EtapaIn(BaseModel):
     comentario: str = ""
 
 
+def _abrir_expediente(db: Session, c: Candidato, u: Usuario) -> Expediente:
+    """Crea el expediente con el checklist de 6 documentos al entrar a Contratación. Ya no
+    existe el botón «Seleccionar y crear expediente»: esto lo dispara automáticamente
+    PATCH /{codigo}/etapa cuando el destino es "Contratación"."""
+    exp = Expediente(
+        puesto=c.vacante.titulo if c.vacante else "",
+        seleccionado_por=u.nombre,
+    )
+    # se asigna por la relación (no solo candidato_id=c.id): así c.expediente queda
+    # sincronizado en memoria de inmediato — si no, candidato_dict(c) seguía viendo None
+    # hasta el próximo refresh, aunque el registro ya existiera en la base.
+    c.expediente = exp
+    db.add(exp)
+    db.flush()
+    for tipo in DOCUMENTOS_BASE:
+        db.add(Documento(expediente_id=exp.id, tipo=tipo, obligatorio=True))
+    registrar(db, u.nombre, "expediente_abierto", "candidato", c.codigo, {"expediente": exp.id, "puesto": exp.puesto})
+    return exp
+
+
 @router.patch("/{codigo}/etapa")
 def mover_etapa(codigo: str, datos: EtapaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
     """Avance manual explícito del Kanban — cada botón del panel manda su etapa destino exacta
     (ver ETAPAS_CANDIDATO). No reemplaza los saltos automáticos del agente: Prefiltro ->
-    Entrevista IA lo dispara Zero-Touch (candidatos._procesar_turno_agenda) y Contratación ->
-    Onboarding lo dispara «Seleccionar y crear expediente» (POST /{codigo}/seleccionar)."""
+    Entrevista IA lo dispara Zero-Touch (candidatos._procesar_turno_agenda). Tampoco reemplaza
+    el flujo dedicado de Entrevista Humana (POST /{codigo}/entrevista-humana, que captura
+    entrevistador/fecha/modalidad además de mover la tarjeta) — aquí se rechaza a propósito."""
     c = _por_codigo(db, codigo)
     if datos.etapa not in ETAPAS_CANDIDATO:
         raise HTTPException(400, f"Etapa inválida. Usa una de: {', '.join(ETAPAS_CANDIDATO)}")
+    if datos.etapa == "Entrevista Humana":
+        raise HTTPException(409, "Para programar la Entrevista Humana usa POST /candidatos/{codigo}/entrevista-humana.")
     if datos.etapa == "Onboarding":
-        raise HTTPException(
-            409, "Para pasar a Onboarding usa «Seleccionar y crear expediente»: ahí queda registrada la apertura del expediente."
-        )
-    if c.etapa == "Onboarding":
+        if c.etapa != "Contratación":
+            raise HTTPException(409, "Solo se puede enviar a Onboarding desde la etapa de Contratación.")
+    elif c.etapa == "Onboarding":
         raise HTTPException(409, "El candidato ya está en Onboarding; gestiona su expediente desde ese módulo.")
+
+    if datos.etapa == "Contratación" and not c.expediente:
+        if not c.consentimiento:
+            raise HTTPException(
+                409,
+                "El candidato no tiene consentimiento registrado para el tratamiento de sus datos (LFPDPPP). "
+                "Regístralo antes de continuar.",
+            )
+        _abrir_expediente(db, c, u)
 
     anterior = c.etapa
     c.etapa = datos.etapa
@@ -842,14 +873,69 @@ def mover_etapa(codigo: str, datos: EtapaIn, db: Session = Depends(get_db), u: U
 
 
 # ------------------------------------------------------------
-# Selección → inicia Módulo 2 (Contratación e integración)
+# Entrevista Humana — modal "Programar entrevista" + checkbox "Entrevista realizada"
 # ------------------------------------------------------------
 
+MODALIDADES_ENTREVISTA_HUMANA = ("Presencial", "Videollamada", "Llamada")
 
-class SeleccionarIn(BaseModel):
-    fecha_ingreso: Optional[str] = None  # ISO: 2026-07-28
-    documentos: List[str] = []  # documentos extra además de DOCUMENTOS_BASE
-    avisar_whatsapp: bool = True
+
+class EntrevistaHumanaIn(BaseModel):
+    entrevistador: str
+    fecha: str  # ISO: 2026-09-05
+    hora: str  # HH:MM
+    modalidad: str  # Presencial | Videollamada | Llamada
+    comentario: str = ""
+
+
+@router.post("/{codigo}/entrevista-humana", status_code=201)
+def programar_entrevista_humana(
+    codigo: str, datos: EntrevistaHumanaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+):
+    """Botón «Programar entrevista» del modal — agenda y mueve la tarjeta a Entrevista Humana."""
+    c = _por_codigo(db, codigo)
+    if not datos.entrevistador.strip():
+        raise HTTPException(400, "Indica quién entrevista.")
+    if datos.modalidad not in MODALIDADES_ENTREVISTA_HUMANA:
+        raise HTTPException(400, f"Modalidad inválida. Usa una de: {', '.join(MODALIDADES_ENTREVISTA_HUMANA)}")
+    try:
+        fecha_hora = datetime.fromisoformat(f"{datos.fecha}T{datos.hora}").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(400, "Fecha u hora inválida (fecha ISO: 2026-09-05, hora: 14:30).")
+
+    anterior = c.etapa
+    c.etapa = "Entrevista Humana"
+    c.entrevista_humana_entrevistador = datos.entrevistador.strip()
+    c.entrevista_humana_fecha = fecha_hora
+    c.entrevista_humana_modalidad = datos.modalidad
+    c.entrevista_humana_comentario = datos.comentario.strip()
+    c.entrevista_humana_realizada = False
+    registrar(
+        db, u.nombre, "entrevista_humana_programada", "candidato", c.codigo,
+        {
+            "de": anterior, "entrevistador": c.entrevista_humana_entrevistador,
+            "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
+        },
+    )
+    db.commit()
+    return candidato_dict(c, detalle=True)
+
+
+@router.post("/{codigo}/entrevista-humana/realizada")
+def marcar_entrevista_humana_realizada(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+    """Checkbox «Entrevista realizada» (el frontend pide confirmación antes de llamar esto) —
+    habilita los botones Descartar y Enviar a Contratación."""
+    c = _por_codigo(db, codigo)
+    if c.etapa != "Entrevista Humana":
+        raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
+    c.entrevista_humana_realizada = True
+    registrar(db, u.nombre, "entrevista_humana_realizada", "candidato", c.codigo, {"correo_rh": u.correo})
+    db.commit()
+    return candidato_dict(c, detalle=True)
+
+
+# ------------------------------------------------------------
+# Contratación — expediente automático + formulario de condiciones finales
+# ------------------------------------------------------------
 
 
 @router.get("/{codigo}/expediente")
@@ -860,65 +946,45 @@ def expediente(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(
     return expediente_dict(c.expediente)
 
 
-@router.post("/{codigo}/seleccionar", status_code=201)
-async def seleccionar(codigo: str, datos: SeleccionarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    """Puente Módulo 1 → Módulo 2: abre el expediente y pide los documentos."""
-    c = _por_codigo(db, codigo)
-    if c.expediente:
-        raise HTTPException(409, "El candidato ya tiene expediente de contratación.")
-    if not c.consentimiento:
-        raise HTTPException(
-            409,
-            "El candidato no tiene consentimiento registrado para el tratamiento de sus datos (LFPDPPP). "
-            "Regístralo antes de abrir el expediente.",
-        )
+class CondicionesContratacionIn(BaseModel):
+    puesto: str = ""
+    sueldo: str = ""
+    tipo_contratacion: str = ""
+    fecha_ingreso: Optional[str] = None  # ISO: 2026-09-15
+    ubicacion: str = ""
+    jefe_directo: str = ""
 
-    fecha = None
+
+@router.patch("/{codigo}/condiciones-contratacion")
+def guardar_condiciones_contratacion(
+    codigo: str, datos: CondicionesContratacionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+):
+    """Formulario de la etapa Contratación (puesto precargado pero editable, sueldo, tipo de
+    contratación, fecha de ingreso, ubicación y jefe directo). Requiere que el expediente ya
+    exista — se abre solo al entrar a Contratación, ver mover_etapa/_abrir_expediente."""
+    c = _por_codigo(db, codigo)
+    if not c.expediente:
+        raise HTTPException(404, "El candidato todavía no tiene expediente de contratación.")
+
+    exp = c.expediente
+    if datos.puesto.strip():
+        exp.puesto = datos.puesto.strip()
+    exp.sueldo = datos.sueldo.strip()
+    exp.tipo_contratacion = datos.tipo_contratacion.strip()
+    exp.ubicacion = datos.ubicacion.strip()
+    exp.jefe_directo = datos.jefe_directo.strip()
     if datos.fecha_ingreso:
         try:
-            fecha = datetime.fromisoformat(datos.fecha_ingreso).replace(tzinfo=timezone.utc)
+            exp.fecha_ingreso = datetime.fromisoformat(datos.fecha_ingreso).replace(tzinfo=timezone.utc)
         except ValueError:
-            raise HTTPException(400, "fecha_ingreso inválida (usa ISO: 2026-07-28)")
-
-    c.etapa = "Onboarding"  # abrir el expediente ES el inicio del onboarding (ver ETAPAS_CANDIDATO)
-    exp = Expediente(
-        candidato_id=c.id,
-        puesto=c.vacante.titulo if c.vacante else "",
-        fecha_ingreso=fecha,
-        seleccionado_por=u.nombre,
-    )
-    db.add(exp)
-    db.flush()
-
-    extra = [d.strip() for d in datos.documentos if d.strip() and d.strip() not in DOCUMENTOS_BASE]
-    for tipo in DOCUMENTOS_BASE:
-        db.add(Documento(expediente_id=exp.id, tipo=tipo, obligatorio=True))
-    for tipo in extra:
-        db.add(Documento(expediente_id=exp.id, tipo=tipo, obligatorio=True))
+            raise HTTPException(400, "fecha_ingreso inválida (usa ISO: 2026-09-15)")
 
     registrar(
-        db, u.nombre, "candidato_seleccionado", "candidato", c.codigo,
-        {"expediente": exp.id, "puesto": exp.puesto, "documentos": DOCUMENTOS_BASE + extra, "correo_rh": u.correo},
+        db, u.nombre, "condiciones_contratacion_guardadas", "candidato", c.codigo,
+        {"expediente": exp.id, "sueldo": exp.sueldo, "tipo_contratacion": exp.tipo_contratacion, "correo_rh": u.correo},
     )
-
-    # el agente informa al candidato y solicita documentos (módulo 3.11 paso 2-3)
-    solicitados = ", ".join(DOCUMENTOS_BASE + extra)
-    texto = (
-        f"¡Felicidades {c.nombre.split(' ')[0]}! 🎉 Fuiste seleccionado(a) para {exp.puesto or 'la vacante'}. "
-        f"Para tu expediente necesito foto o PDF de: {solicitados}. "
-        "Puedes mandarlos por aquí uno por uno cuando gustes."
-    )
-    envio = {"enviado": False, "proveedor": "demo"}
-    if datos.avisar_whatsapp and c.telefono:
-        envio = await enviar_mensaje(c.telefono, texto)
-        db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp", enviado=envio["enviado"]))
     db.commit()
-    return {
-        "expediente_id": exp.id,
-        "whatsapp": envio,
-        "expediente": expediente_dict(exp),
-        **candidato_dict(c, detalle=True),
-    }
+    return candidato_dict(c, detalle=True)
 
 
 # ------------------------------------------------------------
