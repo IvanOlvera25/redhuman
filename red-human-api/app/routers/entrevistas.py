@@ -102,7 +102,7 @@ async def agendar(datos: AgendarIn, db: Session = Depends(get_db), u: Usuario = 
     db.flush()
     e.codigo = f"ENT-{300 + e.id}"
     if c.etapa == "Prefiltro":
-        c.etapa = "Entrevista"
+        c.etapa = "Entrevista IA"  # ver ETAPAS_CANDIDATO — la entrevista con avatar también es "IA"
     registrar(db, u.nombre, "entrevista_agendada", "entrevista", e.codigo, {"candidato": c.codigo, "ia": con_ia})
 
     liga = f"{settings.app_url}/entrevista/{e.token}"
@@ -150,7 +150,7 @@ async def inmediata(datos: InmediataIn, db: Session = Depends(get_db), u: Usuari
             telefono=datos.telefono,
             correo=datos.correo,
             fuente="RH",
-            etapa="Entrevista",
+            etapa="Entrevista IA",
             vacante_id=vac.id if vac else None,
         )
         db.add(c)

@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import usuario_actual, usuario_decisor
-from ..models import Documento, Expediente, Mensaje, Usuario, registrar
-from ..serial import expediente_dict
+from ..models import Colaborador, Documento, Expediente, Mensaje, Usuario, registrar
+from ..serial import colaborador_dict, expediente_dict
 from ..services import archivos as fs
 from ..services import ia
 from ..services.whatsapp import enviar_mensaje
@@ -257,8 +257,40 @@ async def recordatorio(exp_id: int, db: Session = Depends(get_db), _: Usuario = 
 
 
 # ------------------------------------------------------------
-# Alta del colaborador (HITL obligatorio — RH autoriza)
+# Alta del colaborador (HITL obligatorio — RH autoriza) — «Dar de alta como colaborador»
 # ------------------------------------------------------------
+
+
+def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colaborador]:
+    """Cierra el ciclo del candidato: crea el registro en `colaboradores` heredando nombre,
+    puesto, CV y salario. No toca `Empleado` (universo aparte del Radar Interno, módulo 4)."""
+    c = e.candidato
+    if not c:
+        return None
+
+    cv = next((a for a in reversed(c.archivos) if a.tipo == "cv"), None)
+    col = Colaborador(
+        codigo="TMP",
+        nombre=c.nombre,
+        correo=c.correo,
+        telefono=c.telefono,
+        puesto=e.puesto or (c.vacante.titulo if c.vacante else ""),
+        salario=c.vacante.sueldo if c.vacante else "",
+        cv_ruta=cv.ruta if cv else "",
+        cv_nombre=cv.nombre if cv else "",
+        fecha_ingreso=e.fecha_ingreso,
+        dado_de_alta_por=u.nombre,
+        candidato_origen_id=c.id,
+        expediente_id=e.id,
+    )
+    db.add(col)
+    db.flush()
+    col.codigo = f"COL-{100 + col.id}"
+    registrar(
+        db, u.nombre, "colaborador_alta", "colaborador", col.codigo,
+        {"candidato_origen": c.codigo, "puesto": col.puesto, "expediente": e.id},
+    )
+    return col
 
 
 class AltaIn(BaseModel):
@@ -295,6 +327,8 @@ async def alta(exp_id: int, datos: AltaIn, db: Session = Depends(get_db), u: Usu
         {"candidato": e.candidato.codigo if e.candidato else "", "puesto": e.puesto, "correo_rh": u.correo},
     )
 
+    colaborador = _crear_colaborador(db, e, u)
+
     c = e.candidato
     envio = {"enviado": False, "proveedor": "demo"}
     if datos.avisar_whatsapp and c and c.telefono:
@@ -307,7 +341,12 @@ async def alta(exp_id: int, datos: AltaIn, db: Session = Depends(get_db), u: Usu
         db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp", enviado=envio["enviado"]))
 
     db.commit()
-    return {"ok": True, "whatsapp": envio, "expediente": expediente_dict(e)}
+    return {
+        "ok": True,
+        "whatsapp": envio,
+        "expediente": expediente_dict(e),
+        "colaborador": colaborador_dict(colaborador) if colaborador else None,
+    }
 
 
 class CancelarIn(BaseModel):

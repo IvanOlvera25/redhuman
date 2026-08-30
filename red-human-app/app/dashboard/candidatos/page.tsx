@@ -38,8 +38,11 @@ import {
   fetchCandidatos,
   fetchMensajes,
   fetchVacantes,
+  moverEtapaCandidato,
+  recordatorioDocumentosCandidato,
   registrarConsentimiento,
   seleccionarCandidato,
+  solicitarDocumentosCandidato,
   subirArchivoCandidato,
   subirCVs,
   urlArchivoCandidato,
@@ -49,13 +52,27 @@ import {
 import { useNombreRH, usePuedeDecidir } from "@/components/sesion";
 import { cn } from "@/lib/utils";
 
-const etapas: EtapaCandidato[] = ["Prefiltro", "Entrevista", "Evaluación", "Contratación"];
+const etapas: EtapaCandidato[] = [
+  "Prefiltro",
+  "Entrevista IA",
+  "Evaluación",
+  "Entrevista Humana",
+  "Contratación",
+  "Onboarding",
+];
 const etapaColor: Record<EtapaCandidato, string> = {
   Prefiltro: "var(--ink-3)",
-  Entrevista: "var(--brand)",
+  "Entrevista IA": "var(--brand)",
   Evaluación: "var(--human)",
-  Contratación: "var(--good)",
+  "Entrevista Humana": "var(--brand-2)",
+  Contratación: "var(--warn)",
+  Onboarding: "var(--good)",
 };
+
+/** Destinos manuales a los que RH puede mandar una tarjeta con un botón explícito
+ * (PATCH /candidatos/{codigo}/etapa). Onboarding queda fuera: se llega ahí solo por
+ * «Seleccionar y crear expediente», nunca por un botón de avance genérico. */
+const ETAPAS_AVANCE_MANUAL: EtapaCandidato[] = ["Evaluación", "Entrevista Humana", "Contratación"];
 
 type FiltroEstado = "todos" | "en_proceso" | "aptos" | "contratados" | "descartados";
 
@@ -67,15 +84,18 @@ const FILTROS_ESTADO: { key: FiltroEstado; label: string }[] = [
   { key: "descartados", label: "Descartados" },
 ];
 
+const ETAPAS_YA_CONTRATADO: EtapaCandidato[] = ["Contratación", "Onboarding"];
+
 /** "Todos" excluye a los descartados a propósito: son un archivo aparte, no la vista por defecto. */
 function coincideEstado(c: Candidato, filtro: FiltroEstado): boolean {
+  const yaContratado = ETAPAS_YA_CONTRATADO.includes(c.etapa);
   switch (filtro) {
     case "en_proceso":
-      return c.etapa !== "Contratación" && (c.estado === "revision" || c.estado === "pendiente");
+      return !yaContratado && (c.estado === "revision" || c.estado === "pendiente");
     case "aptos":
-      return c.etapa !== "Contratación" && c.estado === "cumple";
+      return !yaContratado && c.estado === "cumple";
     case "contratados":
-      return c.etapa === "Contratación";
+      return yaContratado;
     case "descartados":
       return c.estado === "no_cumple";
     case "todos":
@@ -204,7 +224,7 @@ export default function Candidatos() {
       )}
 
       {/* Kanban */}
-      <div className="mt-6 grid gap-4 lg:grid-cols-4">
+      <div className="mt-6 grid gap-4 overflow-x-auto sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         {etapas.map((etapa) => {
           const cols = datosFiltrados.filter((c) => c.etapa === etapa);
           return (
@@ -371,15 +391,44 @@ function ModalCandidato({
     return r.data;
   }
 
-  async function decidir(accion: "avanzar" | "descartar") {
+  async function descartar() {
     if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
-    setOcupado(accion);
-    const r = await decidirCandidato(c.id, accion, comentario);
-    const data = resolver(r, accion === "avanzar" ? `Avanzó a ${r.ok ? r.data.etapa : ""}.` : "Candidato descartado.");
+    setOcupado("descartar");
+    const r = await decidirCandidato(c.id, "descartar", comentario);
+    const data = resolver(r, "Candidato descartado.");
     if (data) {
       setComentario("");
       onCambio(data);
     }
+  }
+
+  /** Botón explícito de avance — PATCH /candidatos/{codigo}/etapa con el destino exacto. */
+  async function enviarAEtapa(etapa: EtapaCandidato) {
+    if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
+    setOcupado(etapa);
+    const r = await moverEtapaCandidato(c.id, etapa, comentario);
+    const data = resolver(r, `Enviado a ${etapa}.`);
+    if (data) {
+      setComentario("");
+      onCambio(data);
+    }
+  }
+
+  /** Onboarding · Zero-Touch fase 2 — RH detona, la IA da seguimiento por WhatsApp. */
+  async function solicitarDocumentos() {
+    if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para enviar mensajes por WhatsApp." });
+    setOcupado("solicitar-documentos");
+    const r = await solicitarDocumentosCandidato(c.id);
+    const data = resolver(r, "Solicitud de documentos enviada por WhatsApp.");
+    if (data) onCambio(data.candidato);
+  }
+
+  async function enviarRecordatorioDocumentos() {
+    if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para enviar mensajes por WhatsApp." });
+    setOcupado("recordatorio-documentos");
+    const r = await recordatorioDocumentosCandidato(c.id);
+    const data = resolver(r, "Recordatorio enviado por WhatsApp.");
+    if (data) onCambio(data.candidato);
   }
 
   async function consentir() {
@@ -391,6 +440,8 @@ function ModalCandidato({
     const data = resolver(r, "Consentimiento registrado en la bitácora.");
     if (data) onCambio(data);
   }
+
+  const siguientesEtapas = ETAPAS_AVANCE_MANUAL.filter((e) => etapas.indexOf(e) > etapas.indexOf(c.etapa));
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-md animate-in fade-in duration-200">
@@ -491,35 +542,51 @@ function ModalCandidato({
         {/* Footer Fijo con HITL y Acciones */}
         {puedeDecidir && (
           <div className="border-t border-border-soft bg-surface px-6 py-4">
-            <div className="flex flex-col sm:flex-row items-center gap-3">
-              <div className="flex-1 w-full">
-                <input
-                  value={comentario}
-                  onChange={(e) => setComentario(e.target.value)}
-                  placeholder="Nota de decisión para auditoría (opcional)…"
-                  className="h-10 w-full rounded-xl border border-border-soft bg-bg px-3.5 text-xs sm:text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
-                />
-              </div>
+            <div className="flex flex-col gap-3">
+              <input
+                value={comentario}
+                onChange={(e) => setComentario(e.target.value)}
+                placeholder="Nota de decisión para auditoría (opcional)…"
+                className="h-10 w-full rounded-xl border border-border-soft bg-bg px-3.5 text-xs sm:text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
 
-              <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => decidir("descartar")}
-                  disabled={Boolean(ocupado)}
-                  className="flex-1 sm:flex-initial"
-                >
-                  <ThumbsDown className="h-4 w-4 text-bad" /> Descartar
-                </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                {c.expedienteId == null && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={descartar}
+                    disabled={Boolean(ocupado)}
+                    className="border-bad/30 text-bad hover:bg-bad-soft"
+                  >
+                    <ThumbsDown className="h-4 w-4" /> Descartar
+                  </Button>
+                )}
 
-                <Button
-                  size="sm"
-                  onClick={() => decidir("avanzar")}
-                  disabled={Boolean(ocupado)}
-                  className="flex-1 sm:flex-initial"
-                >
-                  <ThumbsUp className="h-4 w-4" /> Avanzar etapa
-                </Button>
+                {/* Botones explícitos de avance: cada uno dice a dónde manda la tarjeta */}
+                {siguientesEtapas.map((etapa) => (
+                  <Button
+                    key={etapa}
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => enviarAEtapa(etapa)}
+                    disabled={Boolean(ocupado)}
+                  >
+                    <ThumbsUp className="h-4 w-4" /> Enviar a {etapa}
+                  </Button>
+                ))}
+
+                {/* Onboarding · Zero-Touch fase 2: RH detona por WhatsApp, la IA da seguimiento */}
+                {c.etapa === "Onboarding" && (
+                  <>
+                    <Button variant="outline" size="sm" onClick={solicitarDocumentos} disabled={Boolean(ocupado)}>
+                      <Send className="h-4 w-4" /> Solicitar documentos
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={enviarRecordatorioDocumentos} disabled={Boolean(ocupado)}>
+                      <RotateCw className="h-4 w-4" /> Enviar recordatorio
+                    </Button>
+                  </>
+                )}
 
                 {c.expedienteId != null ? (
                   <a
@@ -530,13 +597,11 @@ function ModalCandidato({
                   </a>
                 ) : (
                   <Button
-                    variant="secondary"
                     size="sm"
                     onClick={() => setSeleccionar(true)}
                     disabled={Boolean(ocupado) || !live}
-                    className="flex-1 sm:flex-initial"
                   >
-                    <UserCheck className="h-4 w-4" /> Seleccionar
+                    <UserCheck className="h-4 w-4" /> Seleccionar y crear expediente
                   </Button>
                 )}
               </div>

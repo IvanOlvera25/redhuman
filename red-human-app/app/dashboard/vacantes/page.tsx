@@ -682,8 +682,8 @@ function DetalleVacante({
         </div>
 
         {/* Embudo de esta vacante — conecta con el pipeline de candidatos */}
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {["Prefiltro", "Entrevista", "Evaluación", "Contratación"].map((e) => (
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+          {["Prefiltro", "Entrevista IA", "Evaluación", "Entrevista Humana", "Contratación", "Onboarding"].map((e) => (
             <div key={e} className="rounded-xl border border-border-soft bg-surface p-3 text-center">
               <p className="font-display text-xl font-bold tabular">{embudo[e] ?? 0}</p>
               <p className="mt-0.5 text-[11px] text-ink-3">{e}</p>

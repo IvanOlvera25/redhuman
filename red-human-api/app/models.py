@@ -24,6 +24,14 @@ def slugificar(texto: str) -> str:
 # Plataformas de publicación soportadas por el distribuidor (módulo 3.5).
 PLATAFORMAS = ["WhatsApp", "OCC", "LinkedIn", "Portal"]
 
+# Kanban de Candidato.etapa — flujo confirmado con el cliente (documento + audio, 2026-08-29):
+# Prefiltro -> Entrevista IA -> Evaluación -> Entrevista Humana -> Contratación -> Onboarding.
+# "Entrevista IA" cubre TANTO la videollamada mock que agenda el agente (Zero-Touch,
+# ver candidatos._procesar_turno_agenda) COMO la entrevista con avatar del módulo 3.10
+# (ver entrevistas.py): ambas las conduce la IA. "Entrevista Humana" es la única etapa
+# nueva que RH mueve a mano sin automatización detrás.
+ETAPAS_CANDIDATO = ["Prefiltro", "Entrevista IA", "Evaluación", "Entrevista Humana", "Contratación", "Onboarding"]
+
 
 class Vacante(Base):
     __tablename__ = "vacantes"
@@ -80,7 +88,7 @@ class Candidato(Base):
     experiencia: Mapped[str] = mapped_column(String(250), default="")
     fuente: Mapped[str] = mapped_column(String(30), default="Formulario")  # Formulario|WhatsApp|OCC|LinkedIn|Indeed|RH
     estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # cumple|revision|no_cumple|pendiente
-    etapa: Mapped[str] = mapped_column(String(20), default="Prefiltro")  # Prefiltro|Entrevista|Evaluación|Contratación
+    etapa: Mapped[str] = mapped_column(String(30), default="Prefiltro")  # ver ETAPAS_CANDIDATO
     score: Mapped[int] = mapped_column(Integer, default=0)
     evidencia: Mapped[str] = mapped_column(Text, default="")
     cv_datos: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -340,6 +348,38 @@ class Documento(Base):
     actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
 
     expediente: Mapped[Expediente] = relationship(back_populates="documentos")
+
+
+class Colaborador(Base):
+    """Colaborador activo — se crea al presionar «Dar de alta como colaborador» al cierre del
+    Onboarding (ver contratacion.alta). Hereda del candidato lo crítico: nombre, puesto, CV
+    y salario (tomado de Vacante.sueldo).
+
+    No sustituye a `Empleado` (universo del Radar Interno, módulo 4 — movilidad interna con
+    skills/seniority/jefe directo): son dos registros con propósitos distintos que hoy conviven
+    a propósito por pedido explícito del cliente. Si a futuro conviene unificarlos, es un
+    cambio aparte.
+    """
+
+    __tablename__ = "colaboradores"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    nombre: Mapped[str] = mapped_column(String(200))
+    correo: Mapped[str] = mapped_column(String(200), default="")
+    telefono: Mapped[str] = mapped_column(String(30), default="")
+    puesto: Mapped[str] = mapped_column(String(200), default="")
+    salario: Mapped[str] = mapped_column(String(80), default="")
+    cv_ruta: Mapped[str] = mapped_column(String(400), default="")
+    cv_nombre: Mapped[str] = mapped_column(String(255), default="")
+    fecha_ingreso: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    activo: Mapped[bool] = mapped_column(Boolean, default=True)
+    dado_de_alta_por: Mapped[str] = mapped_column(String(150), default="")
+    candidato_origen_id: Mapped[Optional[int]] = mapped_column(ForeignKey("candidatos.id"), nullable=True)
+    expediente_id: Mapped[Optional[int]] = mapped_column(ForeignKey("expedientes.id"), nullable=True)
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+    candidato_origen: Mapped[Optional["Candidato"]] = relationship()
 
 
 ROLES = ("admin", "rh", "lectura")

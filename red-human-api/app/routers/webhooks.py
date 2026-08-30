@@ -288,6 +288,13 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
 
     # ── 5. Si ya completó el prefiltro ──
     if c.prefiltro_completo:
+        # Zero-Touch fase 2: en Onboarding -> el agente ya no evalúa ni agenda, solo acompaña
+        # documentos. Se revisa ANTES que la fase 1 (mismo orden que procesar_prefiltro).
+        if c.etapa == "Onboarding":
+            print(f"[agente] Candidato {c.codigo} en Onboarding, acompañando documentos...")
+            resultado = await procesar_prefiltro(db, c, texto, "whatsapp")
+            return {"ok": True, "accion": "turno_onboarding", "candidato": c.codigo, **resultado}
+
         # Zero-Touch fase 1: apto y aún sin videollamada agendada -> dejamos pasar el mensaje
         # para que el agente siga coordinando la cita (herramienta agendar_videollamada).
         if c.estado == "cumple" and not c.videollamada_agendada_en:

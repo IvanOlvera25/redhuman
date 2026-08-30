@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from .models import Archivo, Candidato, Documento, Entrevista, Expediente, Vacante
+from .models import Archivo, Candidato, Colaborador, Documento, Entrevista, Expediente, Vacante
 from .services.ia import texto_preguntas
 
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
@@ -255,4 +255,28 @@ def expediente_dict(e: Expediente) -> dict:
         "altaAutorizadaPor": e.alta_autorizada_por or "",
         "altaFecha": iso(e.alta_fecha),
         "creado": hace(e.creado_en),
+    }
+
+
+# ------------------------------------------------------------
+# Colaboradores (alta al cierre del Onboarding)
+# ------------------------------------------------------------
+
+
+def colaborador_dict(col: Colaborador) -> dict:
+    return {
+        "id": col.codigo,
+        "nombre": col.nombre,
+        "correo": col.correo,
+        "telefono": col.telefono,
+        "puesto": col.puesto,
+        "salario": col.salario,
+        "cvNombre": col.cv_nombre,
+        "tieneCv": bool(col.cv_ruta),
+        "fechaIngreso": iso(col.fecha_ingreso),
+        "activo": col.activo,
+        "dadoDeAltaPor": col.dado_de_alta_por,
+        "candidatoOrigenId": col.candidato_origen.codigo if col.candidato_origen else None,
+        "expedienteId": col.expediente_id,
+        "creado": hace(col.creado_en),
     }

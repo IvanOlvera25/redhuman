@@ -4,8 +4,9 @@ Zero-Touch fase 1 — seguimiento de videollamadas agendadas por el agente.
 `revisar_videollamadas_noshow` corre cada 5 min desde el lifespan de FastAPI (ver app/main.py)
 y rescata a los candidatos que agendaron una videollamada (herramienta agendar_videollamada,
 ver services/ia.py) pero no llegaron: 15 minutos después de la hora acordada, nadie los movió
-de la etapa "Entrevista". Es un mensaje de texto libre porque el candidato ya nos escribió antes
-para llegar hasta aquí, así que la ventana de 24h de Meta sigue abierta.
+de la etapa "Entrevista IA" (ver models.ETAPAS_CANDIDATO). Es un mensaje de texto libre porque
+el candidato ya nos escribió antes para llegar hasta aquí, así que la ventana de 24h de Meta
+sigue abierta.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -36,7 +37,7 @@ async def revisar_videollamadas_noshow() -> int:
                 Candidato.videollamada_agendada_en.isnot(None),
                 Candidato.videollamada_agendada_en < corte,
                 Candidato.videollamada_aviso_noshow_enviado.is_(False),
-                Candidato.etapa == "Entrevista",
+                Candidato.etapa == "Entrevista IA",
             )
             .all()
         )

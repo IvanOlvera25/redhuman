@@ -12,11 +12,9 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import usuario_actual
-from ..models import Candidato, Entrevista, Expediente, Vacante
+from ..models import ETAPAS_CANDIDATO, Candidato, Entrevista, Expediente, Vacante
 
 router = APIRouter(prefix="/metricas", tags=["metricas"], dependencies=[Depends(usuario_actual)])
-
-ETAPAS = ["Prefiltro", "Entrevista", "Evaluación", "Contratación"]
 
 
 @router.get("/pipeline")
@@ -53,7 +51,7 @@ def pipeline(db: Session = Depends(get_db)):
         "candidatos": {
             "total": total_candidatos,
             "nuevos_7d": db.query(Candidato).filter(Candidato.creado_en >= hace_7d).count(),
-            "por_etapa": {e: por_etapa.get(e, 0) for e in ETAPAS},
+            "por_etapa": {e: por_etapa.get(e, 0) for e in ETAPAS_CANDIDATO},
             "por_estado": por_estado,
             "por_fuente": por_fuente,
             "sin_consentimiento": db.query(Candidato).filter(Candidato.consentimiento.is_(False)).count(),

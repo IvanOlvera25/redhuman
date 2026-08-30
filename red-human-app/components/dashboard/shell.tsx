@@ -20,6 +20,7 @@ import {
   Search,
   Sparkles,
   Target,
+  UserSquare2,
   Users,
   Video,
   X,
@@ -45,6 +46,7 @@ const navOperacion: NavItem[] = [
 ];
 
 const navColaborador: NavItem[] = [
+  { href: "/dashboard/colaboradores", label: "Colaboradores", icon: UserSquare2 },
   { href: "/dashboard/onboarding", label: "Onboarding", icon: ClipboardCheck, badge: "3" },
   { href: "/dashboard/capacitacion", label: "Capacitación", icon: GraduationCap },
   { href: "/dashboard/desempeno", label: "Desempeño", icon: Target },

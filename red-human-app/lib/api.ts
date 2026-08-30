@@ -342,8 +342,22 @@ export function registrarConsentimiento(
   });
 }
 
-export function decidirCandidato(codigo: string, accion: "avanzar" | "descartar", comentario = "") {
+export function decidirCandidato(codigo: string, accion: "descartar", comentario = "") {
   return post<Candidato>(`/candidatos/${codigo}/decision`, { accion, comentario });
+}
+
+/** Botones explícitos del Kanban ("Enviar a X") — mueve la tarjeta a una etapa exacta. */
+export function moverEtapaCandidato(codigo: string, etapa: string, comentario = "") {
+  return patch<Candidato>(`/candidatos/${codigo}/etapa`, { etapa, comentario });
+}
+
+/** Onboarding · Zero-Touch fase 2 — RH detona el mensaje, la IA da seguimiento por WhatsApp. */
+export function solicitarDocumentosCandidato(codigo: string) {
+  return post<{ enviado: boolean; candidato: Candidato }>(`/candidatos/${codigo}/solicitar-documentos`);
+}
+
+export function recordatorioDocumentosCandidato(codigo: string) {
+  return post<{ enviado: boolean; candidato: Candidato }>(`/candidatos/${codigo}/recordatorio-documentos`);
 }
 
 export function asignarVacante(codigo: string, vacante: string) {
@@ -766,4 +780,30 @@ export function convertirVacante(id: string, generarContenido = true, notas = ""
     generar_contenido: generarContenido,
     notas,
   });
+}
+
+/* ============================================================
+   Colaboradores — alta al cierre del Onboarding
+   ============================================================ */
+
+export interface Colaborador {
+  id: string;
+  nombre: string;
+  correo: string;
+  telefono: string;
+  puesto: string;
+  salario: string;
+  cvNombre: string;
+  tieneCv: boolean;
+  fechaIngreso: string | null;
+  activo: boolean;
+  dadoDeAltaPor: string;
+  candidatoOrigenId: string | null;
+  expedienteId: number | null;
+  creado: string;
+}
+
+export function fetchColaboradores(activo?: boolean) {
+  const q = activo === undefined ? "" : `?activo=${activo}`;
+  return get<Colaborador[]>(`/colaboradores${q}`);
 }

@@ -21,6 +21,7 @@ from ..database import get_db
 from ..deps import usuario_actual, usuario_decisor
 from ..models import (
     DOCUMENTOS_BASE,
+    ETAPAS_CANDIDATO,
     Archivo,
     Candidato,
     Documento,
@@ -591,7 +592,7 @@ async def _procesar_turno_agenda(db: Session, c: Candidato, historial: List[dict
         fecha = _parsear_fecha_cita(turno.cita_fecha_hora)
         c.videollamada_agendada_en = fecha or datetime.now(timezone.utc)
         c.videollamada_liga = turno.cita_liga
-        c.etapa = "Entrevista"  # avanza el kanban a la etapa que ya existe para esto
+        c.etapa = "Entrevista IA"  # ver ETAPAS_CANDIDATO — no cambia el comportamiento de Zero-Touch, solo el nombre de la columna
         registrar(
             db, "agente-ia", "videollamada_agendada", "candidato", c.codigo,
             {"fecha_hora": turno.cita_fecha_hora, "liga": turno.cita_liga, "fecha_parseada": bool(fecha)},
@@ -614,6 +615,25 @@ async def _procesar_turno_agenda(db: Session, c: Candidato, historial: List[dict
         "whatsapp": envio,
         "cita": {"fechaHora": turno.cita_fecha_hora, "liga": turno.cita_liga} if turno.cita_liga else None,
     }
+
+
+async def _procesar_turno_onboarding(db: Session, c: Candidato, historial: List[dict], canal: str) -> dict:
+    """Zero-Touch fase 2: el candidato ya está en Onboarding — el agente ya no evalúa ni agenda,
+    solo acompaña la recolección de documentos (ver ia.onboarding_turno)."""
+    v = c.vacante
+    turno, con_ia = ia.onboarding_turno(c.wa_nombre or c.nombre.split(" ")[0], v.titulo if v else "", historial)
+
+    envio = {"enviado": False, "proveedor": "demo"}
+    if canal == "whatsapp" and c.telefono:
+        try:
+            envio = await enviar_mensaje(c.telefono, turno.respuesta)
+        except Exception as e:  # que WhatsApp falle no debe tumbar la conversación
+            print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
+            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal,
+                   enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
+    db.commit()
+    return {"respuesta": turno.respuesta, "clasificacion": None, "ia": con_ia, "whatsapp": envio}
 
 
 async def _procesar_turno_post_completo(db: Session, c: Candidato, texto: str, canal: str) -> dict:
@@ -648,6 +668,13 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, 
         historial = mensajes_db
     else:
         historial = mensajes_db + [{"rol": "user", "texto": texto}]
+
+    # Zero-Touch fase 2: candidato ya en Onboarding -> el agente ya no evalúa ni agenda, solo
+    # acompaña documentos. Va ANTES que las ramas de fase 1 a propósito: sin este check, un
+    # candidato en Onboarding (que ya trae prefiltro_completo=True y estado="cumple" de fases
+    # previas) caería por error en la rama de "ya tienes tu videollamada agendada".
+    if c.etapa == "Onboarding":
+        return await _procesar_turno_onboarding(db, c, historial, canal)
 
     # Zero-Touch fase 1: ya clasificado como apto y sin videollamada agendada -> seguimos la
     # conversación con la herramienta de agendamiento en vez de re-correr la clasificación.
@@ -750,42 +777,65 @@ def consentimiento(codigo: str, datos: ConsentimientoIn, db: Session = Depends(g
 # ------------------------------------------------------------
 # Decisión humana (HITL — LFPDPPP: RH decide, la IA recomienda)
 # ------------------------------------------------------------
-
-ETAPAS = ["Prefiltro", "Entrevista", "Evaluación", "Contratación"]
+#
+# El botón genérico "Avanzar etapa" se reemplazó por botones explícitos por destino
+# (ver PATCH /{codigo}/etapa más abajo) a pedido del cliente. "Descartar" sigue aquí
+# porque no es un movimiento de tarjeta: es una reclasificación (estado -> no_cumple).
 
 
 class DecisionIn(BaseModel):
-    accion: str  # avanzar | descartar
+    accion: str  # descartar (el avance genérico se reemplazó por PATCH /candidatos/{codigo}/etapa)
     comentario: str = ""
 
 
 @router.post("/{codigo}/decision")
 def decision(codigo: str, datos: DecisionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
     c = _por_codigo(db, codigo)
-    if datos.accion not in ("avanzar", "descartar"):
-        raise HTTPException(400, "Acción inválida")
-    if c.expediente and datos.accion == "descartar":
+    if datos.accion != "descartar":
+        raise HTTPException(400, "Acción inválida. Para mover de etapa usa PATCH /candidatos/{codigo}/etapa.")
+    if c.expediente:
         raise HTTPException(
             409,
             "El candidato ya tiene expediente de contratación abierto. Cancélalo desde el módulo de contratación antes de descartarlo.",
         )
 
     recomendacion_ia = {"estado": c.estado, "score": c.score}
-    if datos.accion == "descartar":
-        c.etapa = "Prefiltro"
-        c.estado = "no_cumple"
-    else:
-        idx = ETAPAS.index(c.etapa) if c.etapa in ETAPAS else 0
-        if idx >= ETAPAS.index("Evaluación"):
-            raise HTTPException(
-                409,
-                "Para pasar a Contratación usa «Seleccionar y crear expediente»: ahí queda registrada la autorización de RH.",
-            )
-        c.etapa = ETAPAS[idx + 1]
-
+    c.etapa = "Prefiltro"
+    c.estado = "no_cumple"
     registrar(
-        db, u.nombre, f"decision_{datos.accion}", "candidato", c.codigo,
-        {"recomendacion_ia": recomendacion_ia, "comentario": datos.comentario, "nueva_etapa": c.etapa, "correo_rh": u.correo},
+        db, u.nombre, "decision_descartar", "candidato", c.codigo,
+        {"recomendacion_ia": recomendacion_ia, "comentario": datos.comentario, "correo_rh": u.correo},
+    )
+    db.commit()
+    return candidato_dict(c, detalle=True)
+
+
+class EtapaIn(BaseModel):
+    etapa: str
+    comentario: str = ""
+
+
+@router.patch("/{codigo}/etapa")
+def mover_etapa(codigo: str, datos: EtapaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+    """Avance manual explícito del Kanban — cada botón del panel manda su etapa destino exacta
+    (ver ETAPAS_CANDIDATO). No reemplaza los saltos automáticos del agente: Prefiltro ->
+    Entrevista IA lo dispara Zero-Touch (candidatos._procesar_turno_agenda) y Contratación ->
+    Onboarding lo dispara «Seleccionar y crear expediente» (POST /{codigo}/seleccionar)."""
+    c = _por_codigo(db, codigo)
+    if datos.etapa not in ETAPAS_CANDIDATO:
+        raise HTTPException(400, f"Etapa inválida. Usa una de: {', '.join(ETAPAS_CANDIDATO)}")
+    if datos.etapa == "Onboarding":
+        raise HTTPException(
+            409, "Para pasar a Onboarding usa «Seleccionar y crear expediente»: ahí queda registrada la apertura del expediente."
+        )
+    if c.etapa == "Onboarding":
+        raise HTTPException(409, "El candidato ya está en Onboarding; gestiona su expediente desde ese módulo.")
+
+    anterior = c.etapa
+    c.etapa = datos.etapa
+    registrar(
+        db, u.nombre, "etapa_movida", "candidato", c.codigo,
+        {"de": anterior, "a": datos.etapa, "comentario": datos.comentario, "correo_rh": u.correo},
     )
     db.commit()
     return candidato_dict(c, detalle=True)
@@ -830,7 +880,7 @@ async def seleccionar(codigo: str, datos: SeleccionarIn, db: Session = Depends(g
         except ValueError:
             raise HTTPException(400, "fecha_ingreso inválida (usa ISO: 2026-07-28)")
 
-    c.etapa = "Contratación"
+    c.etapa = "Onboarding"  # abrir el expediente ES el inicio del onboarding (ver ETAPAS_CANDIDATO)
     exp = Expediente(
         candidato_id=c.id,
         puesto=c.vacante.titulo if c.vacante else "",
@@ -869,3 +919,56 @@ async def seleccionar(codigo: str, datos: SeleccionarIn, db: Session = Depends(g
         "expediente": expediente_dict(exp),
         **candidato_dict(c, detalle=True),
     }
+
+
+# ------------------------------------------------------------
+# Zero-Touch fase 2 — botones de Onboarding (RH detona, la IA da seguimiento)
+# ------------------------------------------------------------
+#
+# El checklist real de documentos (qué falta, validación con IA, alta) sigue viviendo en
+# contratacion.py sobre el Expediente. Estos dos endpoints son el "romper el hielo" y el
+# "recordatorio" que pide RH desde la tarjeta del candidato — un mensaje simple que deja al
+# agente (ia.onboarding_turno, ver procesar_prefiltro) listo para dar seguimiento a lo que
+# el candidato conteste después.
+
+TEXTO_SOLICITUD_DOCUMENTOS = (
+    "¡Felicidades por tu contratación! 🎉 Para avanzar, por favor envíame por aquí foto o PDF de "
+    "tu INE y tu comprobante de domicilio. En cuanto los reciba los reviso y seguimos con el resto "
+    "de tu expediente."
+)
+
+TEXTO_RECORDATORIO_DOCUMENTOS = (
+    "Hola de nuevo 👋 Te escribo para dar seguimiento: ¿ya tienes a la mano tu INE y tu comprobante "
+    "de domicilio? Mándamelos por aquí en cuanto puedas para no atrasar tu proceso de ingreso."
+)
+
+
+async def _disparar_mensaje_onboarding(db: Session, c: Candidato, texto: str, accion: str, u: Usuario) -> dict:
+    if c.etapa != "Onboarding":
+        raise HTTPException(409, "Esta acción es solo para candidatos en la etapa de Onboarding.")
+    envio = {"enviado": False, "proveedor": "demo"}
+    if c.telefono:
+        try:
+            envio = await enviar_mensaje(c.telefono, texto)
+        except Exception as e:  # que WhatsApp falle no debe tumbar el disparo manual de RH
+            print(f"[whatsapp-send-error] {accion} -> {c.codigo}: {e}")
+            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
+                   enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
+    registrar(db, u.nombre, accion, "candidato", c.codigo, {"whatsapp": envio, "correo_rh": u.correo})
+    db.commit()
+    return {"enviado": envio.get("enviado", False), "whatsapp": envio, "candidato": candidato_dict(c, detalle=True)}
+
+
+@router.post("/{codigo}/solicitar-documentos")
+async def solicitar_documentos(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+    """Botón 'Solicitar documentos' — rompe el hielo por WhatsApp al entrar a Onboarding."""
+    c = _por_codigo(db, codigo)
+    return await _disparar_mensaje_onboarding(db, c, TEXTO_SOLICITUD_DOCUMENTOS, "documentos_solicitados", u)
+
+
+@router.post("/{codigo}/recordatorio-documentos")
+async def recordatorio_documentos(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+    """Botón 'Enviar recordatorio' — seguimiento manual si el candidato no ha respondido."""
+    c = _por_codigo(db, codigo)
+    return await _disparar_mensaje_onboarding(db, c, TEXTO_RECORDATORIO_DOCUMENTOS, "recordatorio_documentos_enviado", u)
