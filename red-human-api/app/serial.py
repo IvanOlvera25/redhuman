@@ -259,6 +259,10 @@ def expediente_dict(e: Expediente) -> dict:
         "tipoContratacion": e.tipo_contratacion,
         "ubicacionTrabajo": e.ubicacion,
         "jefeDirecto": e.jefe_directo,
+        # --- preparación de ingreso (Onboarding, bloque 4) ---
+        "contrato": e.contrato,
+        "altaAdministrativa": e.alta_administrativa,
+        "equipoAccesos": e.equipo_accesos,
         "progreso": e.progreso,
         "tono": (e.id or 0) % 4,
         "estado": estado,
@@ -275,6 +279,16 @@ def expediente_dict(e: Expediente) -> dict:
         "score": c.score if c else 0,
         "entrevistaMatch": (ultima.evaluacion or {}).get("match_perfil") if ultima else None,
         "entrevistaRecomendacion": (ultima.evaluacion or {}).get("recomendacion") if ultima else None,
+        # --- Bloque 2 (resumen de evaluación): lo que ya sabemos del candidato sin ir a buscarlo aparte ---
+        "evaluacion": {
+            "score": c.score,
+            "requisitosCumplidos": (c.analisis or {}).get("requisitos_cumplidos", []),
+            "brechas": (c.analisis or {}).get("brechas", []),
+            "alertas": (c.analisis or {}).get("alertas", []),
+            "evidencia": c.evidencia or "",
+        }
+        if c
+        else None,
         # --- trazabilidad HITL ---
         "seleccionadoPor": e.seleccionado_por or "",
         "altaAutorizadaPor": e.alta_autorizada_por or "",

@@ -528,6 +528,33 @@ class MensajeIn(BaseModel):
 UMBRAL_ZERO_TOUCH = 50
 
 
+def _texto_apto(c: Candidato) -> str:
+    return (
+        f"¡Buenas noticias, {c.nombre.split(' ')[0]}! 🎉 Tu perfil es compatible con lo que buscamos "
+        "para esta vacante. Cuéntame, ¿qué disponibilidad tienes para una breve videollamada?"
+    )
+
+
+async def _avisar_apto_e_iniciar_agenda(db: Session, c: Candidato) -> dict:
+    """Mensaje que invita al candidato a compartir su disponibilidad — en cuanto responda,
+    procesar_prefiltro lo enruta a _procesar_turno_agenda (herramienta agendar_videollamada).
+    La usan tanto la clasificación automática de Zero-Touch como el botón manual
+    'Enviar a Entrevista IA' (mover_etapa), para que ambos caminos se comporten igual."""
+    texto = _texto_apto(c)
+    envio = {"enviado": False, "proveedor": "demo"}
+    if c.telefono:
+        try:
+            envio = await enviar_mensaje(c.telefono, texto)
+        except Exception as e:  # que WhatsApp falle no debe tumbar el flujo
+            print(f"[whatsapp-send-error] avisar_apto -> {c.codigo}: {e}")
+            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+    db.add(Mensaje(
+        candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
+        enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
+    ))
+    return envio
+
+
 async def _auto_decision_zero_touch(db: Session, c: Candidato) -> None:
     """Flujo Zero-Touch: al terminar el prefiltro, clasifica al candidato contra
     UMBRAL_ZERO_TOUCH y le avisa el resultado por WhatsApp sin intervención de RH.
@@ -545,31 +572,30 @@ async def _auto_decision_zero_touch(db: Session, c: Candidato) -> None:
             "por ahora tu perfil no se alinea con lo que busca esta vacante. Guardamos tu información "
             "por si surge una oportunidad más adelante. ¡Mucho éxito en tu búsqueda! 🙌"
         )
-    else:
-        c.estado = "cumple"
-        accion = "auto_apto_zero_touch"
-        texto = (
-            f"¡Buenas noticias, {c.nombre.split(' ')[0]}! 🎉 Tu perfil es compatible con lo que buscamos "
-            "para esta vacante. Tu proceso avanza — el equipo de RH revisará tu información y te "
-            "contactará para los siguientes pasos."
-        )
+        registrar(db, "agente-ia", accion, "candidato", c.codigo, {"score": c.score, "umbral": UMBRAL_ZERO_TOUCH})
+        if not c.telefono:
+            return
+        try:
+            envio = await enviar_mensaje(c.telefono, texto)
+        except Exception as e:
+            print(f"[zero-touch-whatsapp-error] {c.codigo}: {e}")
+            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+        db.add(Mensaje(
+            candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
+            enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
+        ))
+        return
 
+    c.estado = "cumple"
+    # antes la tarjeta solo se movía al agendar la cita, así que un candidato ya clasificado
+    # como apto seguía viéndose "atorado" en Prefiltro mientras coordinaba fecha/hora — se
+    # mueve aquí para que el Kanban refleje la realidad de inmediato.
+    c.etapa = "Entrevista IA"
     registrar(
-        db, "agente-ia", accion, "candidato", c.codigo,
+        db, "agente-ia", "auto_apto_zero_touch", "candidato", c.codigo,
         {"score": c.score, "umbral": UMBRAL_ZERO_TOUCH},
     )
-
-    if not c.telefono:
-        return
-    try:
-        envio = await enviar_mensaje(c.telefono, texto)
-    except Exception as e:  # que WhatsApp falle no debe tumbar la clasificación
-        print(f"[zero-touch-whatsapp-error] {c.codigo}: {e}")
-        envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
-    db.add(Mensaje(
-        candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
-        enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
-    ))
+    await _avisar_apto_e_iniciar_agenda(db, c)
 
 
 def _parsear_fecha_cita(valor: str) -> Optional[datetime]:
@@ -836,12 +862,16 @@ def _abrir_expediente(db: Session, c: Candidato, u: Usuario) -> Expediente:
 
 
 @router.patch("/{codigo}/etapa")
-def mover_etapa(codigo: str, datos: EtapaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+async def mover_etapa(codigo: str, datos: EtapaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
     """Avance manual explícito del Kanban — cada botón del panel manda su etapa destino exacta
-    (ver ETAPAS_CANDIDATO). No reemplaza los saltos automáticos del agente: Prefiltro ->
-    Entrevista IA lo dispara Zero-Touch (candidatos._procesar_turno_agenda). Tampoco reemplaza
-    el flujo dedicado de Entrevista Humana (POST /{codigo}/entrevista-humana, que captura
-    entrevistador/fecha/modalidad además de mover la tarjeta) — aquí se rechaza a propósito."""
+    (ver ETAPAS_CANDIDATO). No reemplaza el flujo dedicado de Entrevista Humana
+    (POST /{codigo}/entrevista-humana, que captura entrevistador/fecha/modalidad además de
+    mover la tarjeta) — aquí se rechaza a propósito.
+
+    "Entrevista IA" desde Prefiltro es la única "fricción manual" a propósito: fuerza la
+    clasificación como apto y dispara el mismo mensaje que usa Zero-Touch para invitar al
+    candidato a compartir disponibilidad, para RH pueda arrancar el proceso sin esperar a
+    que el agente termine el prefiltro por su cuenta."""
     c = _por_codigo(db, codigo)
     if datos.etapa not in ETAPAS_CANDIDATO:
         raise HTTPException(400, f"Etapa inválida. Usa una de: {', '.join(ETAPAS_CANDIDATO)}")
@@ -852,6 +882,19 @@ def mover_etapa(codigo: str, datos: EtapaIn, db: Session = Depends(get_db), u: U
             raise HTTPException(409, "Solo se puede enviar a Onboarding desde la etapa de Contratación.")
     elif c.etapa == "Onboarding":
         raise HTTPException(409, "El candidato ya está en Onboarding; gestiona su expediente desde ese módulo.")
+
+    if datos.etapa == "Entrevista IA":
+        if c.etapa != "Prefiltro":
+            raise HTTPException(409, "Solo se puede forzar Entrevista IA desde la etapa de Prefiltro.")
+        if not c.telefono:
+            raise HTTPException(409, "El candidato no tiene WhatsApp registrado; no se puede iniciar el agendamiento.")
+        c.estado = "cumple"
+        c.prefiltro_completo = True
+        envio = await _avisar_apto_e_iniciar_agenda(db, c)
+        registrar(
+            db, u.nombre, "entrevista_ia_forzada", "candidato", c.codigo,
+            {"whatsapp": envio, "correo_rh": u.correo},
+        )
 
     if datos.etapa == "Contratación" and not c.expediente:
         if not c.consentimiento:

@@ -555,9 +555,33 @@ function ModalCandidato({
           {tab === "whatsapp" && <PestanaWhatsApp c={c} live={live} onCambio={onCambio} />}
         </div>
 
-        {/* Footer Fijo con HITL y Acciones — Entrevista Humana y Contratación tienen su propio
-            panel de acciones arriba; este footer genérico no aplica ahí. */}
-        {puedeDecidir && c.etapa !== "Contratación" && (c.etapa !== "Entrevista Humana" || c.entrevistaHumana?.realizada) && (
+        {/* Etapa Prefiltro: exactamente 2 botones — fricción manual para forzar Entrevista IA
+            sin esperar a que el agente termine el prefiltro por su cuenta (Zero-Touch). */}
+        {puedeDecidir && c.etapa === "Prefiltro" && (
+          <div className="border-t border-border-soft bg-surface px-6 py-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={descartar}
+                disabled={Boolean(ocupado)}
+                className="border-bad/30 text-bad hover:bg-bad-soft"
+              >
+                <ThumbsDown className="h-4 w-4" /> Descartar candidato
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => enviarAEtapa("Entrevista IA")} disabled={Boolean(ocupado)}>
+                <ThumbsUp className="h-4 w-4" /> Enviar a Entrevista IA
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Footer Fijo con HITL y Acciones — Prefiltro, Entrevista Humana y Contratación tienen
+            su propio panel de acciones; este footer genérico no aplica ahí. */}
+        {puedeDecidir &&
+          c.etapa !== "Prefiltro" &&
+          c.etapa !== "Contratación" &&
+          (c.etapa !== "Entrevista Humana" || c.entrevistaHumana?.realizada) && (
           <div className="border-t border-border-soft bg-surface px-6 py-4">
             <div className="flex flex-col gap-3">
               <input

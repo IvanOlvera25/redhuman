@@ -11,24 +11,34 @@ import {
   CalendarClock,
   MapPin,
   ChevronRight,
+  ChevronDown,
   X,
   Plus,
   Download,
   ExternalLink,
   Sparkles,
+  UserCheck,
+  MessageCircle,
+  Video,
 } from "lucide-react";
 import { Card, Badge, Button, Avatar, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
 import { Aviso, Dropzone, pesoLegible } from "@/components/dashboard/subida";
 import { nuevosIngresos, type DocExpediente, type EstadoDoc, type NuevoIngreso } from "@/lib/phase2";
+import type { Candidato } from "@/lib/data";
 import {
+  actualizarPreparacion,
   agregarDocumento,
   autorizarAlta,
   enviarRecordatorio,
+  fetchCandidato,
   fetchExpedientes,
+  fetchMensajes,
   marcarDocumento,
+  solicitarDocumentosCandidato,
   subirDocumento,
   urlDocumento,
+  type MensajePrefiltro,
 } from "@/lib/api";
 import { useNombreRH, usePuedeDecidir } from "@/components/sesion";
 import { cn } from "@/lib/utils";
@@ -156,7 +166,7 @@ export default function Onboarding() {
 }
 
 /* ============================================================
-   Detalle del expediente
+   Detalle del expediente — 6 bloques, de arriba hacia abajo
    ============================================================ */
 function Expediente({
   n,
@@ -175,6 +185,8 @@ function Expediente({
 }) {
   const [ocupado, setOcupado] = useState("");
   const [nuevoDoc, setNuevoDoc] = useState("");
+  const [verEvaluacion, setVerEvaluacion] = useState(false);
+  const [verHistorial, setVerHistorial] = useState(false);
   const yo = useNombreRH();
   const puedeDecidir = usePuedeDecidir();
 
@@ -182,6 +194,17 @@ function Expediente({
     setAviso({ tono: "warn", texto: "Levanta la API para operar el expediente con datos reales." });
     return false;
   };
+
+  const soloLectura = !live || !puedeDecidir || n.estado === "alta";
+
+  async function solicitarFaltantes() {
+    if (!live || !n.candidatoId) return exigeApi();
+    setOcupado("solicitar");
+    const r = await solicitarDocumentosCandidato(n.candidatoId);
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    setAviso({ tono: "ok", texto: "Solicitud de documentos enviada por WhatsApp." });
+  }
 
   async function recordatorio() {
     if (!live || !n.expedienteId) return exigeApi();
@@ -203,7 +226,7 @@ function Expediente({
     const r = await autorizarAlta(n.expedienteId);
     setOcupado("");
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
-    setAviso({ tono: "ok", texto: `Alta autorizada por ${yo} y registrada en la bitácora ✓` });
+    setAviso({ tono: "ok", texto: `Alta autorizada por ${yo} y registrada en la bitácora ✓ — movido a Colaboradores.` });
     onActualizado(r.data.expediente);
   }
 
@@ -218,6 +241,15 @@ function Expediente({
     onActualizado(r.data);
   }
 
+  async function actualizarPrep(campo: "contrato" | "altaAdministrativa" | "equipoAccesos", valor: string) {
+    if (!live || !n.expedienteId) return exigeApi();
+    setOcupado(`prep-${campo}`);
+    const r = await actualizarPreparacion(n.expedienteId, { [campo]: valor });
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    onActualizado(r.data);
+  }
+
   const bloqueoAlta =
     n.estado === "alta"
       ? "Este expediente ya fue dado de alta."
@@ -227,29 +259,37 @@ function Expediente({
           ? `Confirma como RH los documentos validados por la IA: ${n.sinConfirmar!.join(", ")}.`
           : "";
 
+  const recibidos = n.documentos.filter((d) => d.estado === "recibido").length;
+  const evaluacion = n.evaluacion;
+  const brechas = evaluacion?.brechas ?? [];
+  const resultado = brechas.length > 0 ? "Apto con observaciones" : "Apto";
+
   return (
     <Card className="overflow-hidden">
-      {/* Encabezado */}
+      {/* ============ BLOQUE 1 — Encabezado ============ */}
       <div className="flex flex-col gap-4 border-b border-border-faint p-5 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <div className="scale-110">
             <Avatar name={n.nombre} tone={n.tono} />
           </div>
           <div className="ml-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <Eyebrow>Onboarding</Eyebrow>
+            </div>
             <h2 className="font-display truncate text-xl font-bold">{n.nombre}</h2>
             <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-ink-3">
               <span>{n.puesto}</span>
               <span className="flex items-center gap-1">
-                <MapPin className="h-3 w-3" /> {n.ubicacion}
+                <MapPin className="h-3 w-3" /> {n.ubicacionTrabajo || n.ubicacion}
               </span>
               <span className="flex items-center gap-1 text-human">
                 <CalendarClock className="h-3 w-3" /> {n.ingreso}
               </span>
+              <span className="flex items-center gap-1">
+                <UserCheck className="h-3 w-3" /> Responsable: {n.seleccionadoPor || "RH"}
+              </span>
               {n.candidatoId && (
-                <a
-                  href="/dashboard/candidatos"
-                  className="flex items-center gap-1 text-brand transition hover:underline"
-                >
+                <a href="/dashboard/candidatos" className="flex items-center gap-1 text-brand transition hover:underline">
                   <ExternalLink className="h-3 w-3" /> {n.candidatoId}
                 </a>
               )}
@@ -276,7 +316,7 @@ function Expediente({
       </div>
 
       {/* Condiciones de contratación — capturadas en la etapa Contratación, se mantienen visibles aquí */}
-      {(n.sueldo || n.tipoContratacion || n.ubicacionTrabajo || n.jefeDirecto) && (
+      {(n.sueldo || n.tipoContratacion || n.jefeDirecto) && (
         <div className="flex flex-wrap gap-2 border-b border-border-faint bg-surface-2/40 px-5 py-3">
           {n.sueldo && (
             <span className="rounded-lg border border-border-soft bg-surface px-2.5 py-1 font-mono text-xs text-brand">
@@ -288,11 +328,6 @@ function Expediente({
               {n.tipoContratacion}
             </span>
           )}
-          {n.ubicacionTrabajo && (
-            <span className="rounded-lg border border-border-soft bg-surface px-2.5 py-1 text-xs text-ink-2">
-              📍 {n.ubicacionTrabajo}
-            </span>
-          )}
           {n.jefeDirecto && (
             <span className="rounded-lg border border-border-soft bg-surface px-2.5 py-1 text-xs text-ink-2">
               Jefe directo: {n.jefeDirecto}
@@ -301,137 +336,362 @@ function Expediente({
         </div>
       )}
 
-      <div className="grid gap-5 p-5 lg:grid-cols-2">
-        {/* Checklist de documentos */}
-        <div>
-          <div className="flex items-center justify-between">
-            <Eyebrow>Expediente · {n.progreso}%</Eyebrow>
-            {(n.porRevisar?.length ?? 0) > 0 && (
-              <span className="font-mono text-[10px] text-warn">{n.porRevisar!.length} por revisar</span>
+      {/* ============ BLOQUE 2 — Resumen de evaluación ============ */}
+      <div className="border-b border-border-faint p-5">
+        <Eyebrow>Resumen de evaluación</Eyebrow>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <span className="font-display text-2xl font-bold tabular">{evaluacion?.score ?? n.score ?? 0}</span>
+          <Badge tone={resultado === "Apto" ? "good" : "warn"} dot>
+            {resultado}
+          </Badge>
+          {brechas.length > 0 && (
+            <span className="text-xs text-ink-3">
+              {brechas.length} punto{brechas.length !== 1 ? "s" : ""} pendiente{brechas.length !== 1 ? "s" : ""}
+            </span>
+          )}
+          {n.entrevistaMatch != null && (
+            <span className="text-xs text-ink-3">
+              · entrevista {n.entrevistaMatch} ({n.entrevistaRecomendacion})
+            </span>
+          )}
+        </div>
+
+        <button
+          onClick={() => setVerEvaluacion((x) => !x)}
+          className="mt-2.5 flex items-center gap-1 text-xs font-semibold text-brand hover:underline"
+        >
+          <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", verEvaluacion && "rotate-180")} />
+          {verEvaluacion ? "Ocultar evaluación completa" : "Ver evaluación completa"}
+        </button>
+
+        {verEvaluacion && (
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            {evaluacion?.evidencia && (
+              <p className="text-[13px] leading-relaxed text-ink-2 sm:col-span-2">{evaluacion.evidencia}</p>
+            )}
+            {(evaluacion?.requisitosCumplidos?.length ?? 0) > 0 && (
+              <div>
+                <span className="font-mono text-[10px] uppercase tracking-wider text-good">Requisitos cumplidos</span>
+                <ul className="mt-1.5 space-y-1">
+                  {evaluacion!.requisitosCumplidos.map((x, i) => (
+                    <li key={i} className="text-xs text-ink-2">
+                      • {x}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {brechas.length > 0 && (
+              <div>
+                <span className="font-mono text-[10px] uppercase tracking-wider text-warn">Puntos pendientes</span>
+                <ul className="mt-1.5 space-y-1">
+                  {brechas.map((x, i) => (
+                    <li key={i} className="text-xs text-ink-2">
+                      • {x}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {(evaluacion?.alertas?.length ?? 0) > 0 && (
+              <div className="sm:col-span-2">
+                <span className="font-mono text-[10px] uppercase tracking-wider text-ink-3">Alertas del CV</span>
+                <ul className="mt-1.5 space-y-1">
+                  {evaluacion!.alertas.map((x, i) => (
+                    <li key={i} className="text-xs text-ink-3">
+                      • {x}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </div>
+        )}
+      </div>
 
-          <div className="mt-3 space-y-2">
-            {n.documentos.map((d) => (
-              <Documento
-                key={d.nombre}
-                d={d}
-                expedienteId={n.expedienteId}
-                live={live && puedeDecidir && n.estado !== "alta"}
-                setAviso={setAviso}
-                onActualizado={onActualizado}
-              />
-            ))}
-          </div>
-
-          {live && puedeDecidir && n.estado !== "alta" && (
-            <div className="mt-3 flex gap-2">
-              <input
-                value={nuevoDoc}
-                onChange={(e) => setNuevoDoc(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && agregar()}
-                placeholder="Pedir otro documento…"
-                className="h-9 flex-1 rounded-lg border border-border-soft bg-surface px-3 text-[13px] outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
-              />
-              <Button size="sm" variant="outline" onClick={agregar} disabled={!nuevoDoc.trim() || Boolean(ocupado)}>
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
+      {/* ============ BLOQUE 3 — Expediente de ingreso ============ */}
+      <div className="border-b border-border-faint p-5">
+        <div className="flex items-center justify-between">
+          <Eyebrow>Expediente de ingreso</Eyebrow>
+          {(n.porRevisar?.length ?? 0) > 0 && (
+            <span className="font-mono text-[10px] text-warn">{n.porRevisar!.length} por revisar</span>
           )}
         </div>
+        <p className="mt-1.5 text-sm font-semibold text-ink">
+          Expediente {n.progreso}% — {recibidos} de {n.documentos.length} documentos recibidos
+        </p>
 
-        {/* Proceso + acciones */}
-        <div className="flex flex-col gap-4">
-          <div>
-            <Eyebrow>Proceso de integración</Eyebrow>
-            <ol className="relative ml-1 mt-3 space-y-3 border-l border-border-soft pl-5">
-              {[
-                { t: `Seleccionado por ${n.seleccionadoPor || "RH"}`, done: true },
-                { t: "Solicitud de documentos enviada", done: true },
-                { t: "Documentos recibidos y validados por IA", done: n.progreso === 100 },
-                { t: "Confirmación humana de cada documento", done: Boolean(n.listoParaAlta) || n.estado === "alta" },
-                {
-                  t: n.altaAutorizadaPor ? `Alta autorizada por ${n.altaAutorizadaPor}` : "Alta como colaborador",
-                  done: n.estado === "alta",
-                },
-              ].map((s, i) => (
-                <li key={i} className="relative">
-                  <span
-                    className={cn(
-                      "absolute -left-[27px] grid h-6 w-6 place-items-center rounded-full border-2 border-surface",
-                      s.done ? "bg-brand text-brand-ink" : "bg-surface-2 text-ink-3",
-                    )}
-                  >
-                    {s.done ? <Check className="h-3 w-3" /> : <span className="h-1.5 w-1.5 rounded-full bg-current" />}
-                  </span>
-                  <p className={cn("text-sm", s.done ? "font-medium" : "text-ink-3")}>{s.t}</p>
-                </li>
-              ))}
-            </ol>
+        <div className="mt-3 space-y-2">
+          {n.documentos.map((d) => (
+            <Documento
+              key={d.nombre}
+              d={d}
+              expedienteId={n.expedienteId}
+              live={live && puedeDecidir && n.estado !== "alta"}
+              setAviso={setAviso}
+              onActualizado={onActualizado}
+            />
+          ))}
+        </div>
+
+        {!soloLectura && (
+          <div className="mt-3 flex gap-2">
+            <input
+              value={nuevoDoc}
+              onChange={(e) => setNuevoDoc(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && agregar()}
+              placeholder="Pedir otro documento…"
+              className="h-9 flex-1 rounded-lg border border-border-soft bg-surface px-3 text-[13px] outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+            />
+            <Button size="sm" variant="outline" onClick={agregar} disabled={!nuevoDoc.trim() || Boolean(ocupado)}>
+              <Plus className="h-4 w-4" />
+            </Button>
           </div>
+        )}
 
-          {(n.score ?? 0) > 0 && (
-            <Card className="p-3.5">
-              <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-ink-3">
-                <Sparkles className="h-3 w-3" /> Viene del pipeline
-              </span>
-              <p className="mt-1.5 text-[13px] text-ink-2">
-                Match de prefiltro <b className="text-ink">{n.score}</b>
-                {n.entrevistaMatch != null && (
-                  <>
-                    {" "}
-                    · entrevista <b className="text-ink">{n.entrevistaMatch}</b> ({n.entrevistaRecomendacion})
-                  </>
-                )}
-              </p>
-            </Card>
-          )}
-
-          <div className="flex items-start gap-2.5 rounded-xl border border-human/25 bg-human-soft/50 p-3">
-            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-human" />
-            <p className="text-[13px] leading-relaxed text-ink-2">
-              <b className="text-ink">RH autoriza el alta.</b> El agente prepara el expediente y valida los
-              documentos; la decisión final la firma {yo}.
-            </p>
-          </div>
-
-          {aviso && <Aviso tono={aviso.tono} onCerrar={() => setAviso(null)}>{aviso.texto}</Aviso>}
-
-          {bloqueoAlta && n.estado !== "alta" && (
-            <p className="text-[12px] leading-relaxed text-ink-3">{bloqueoAlta}</p>
-          )}
-
-          <div className="flex gap-2.5">
-            <Button variant="outline" className="flex-1" size="sm" onClick={recordatorio} disabled={Boolean(ocupado)}>
+        {!soloLectura && (
+          <div className="mt-3 flex flex-wrap gap-2.5">
+            <Button variant="outline" size="sm" onClick={solicitarFaltantes} disabled={Boolean(ocupado)}>
+              <MessageCircle className="h-4 w-4" />
+              {ocupado === "solicitar" ? "Enviando…" : "Solicitar documentos faltantes"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={recordatorio} disabled={Boolean(ocupado)}>
               <Send className="h-4 w-4" />
-              {ocupado === "recordatorio" ? "Enviando…" : "Recordatorio"}
-            </Button>
-            <Button
-              className="flex-1"
-              size="sm"
-              disabled={Boolean(ocupado) || !n.listoParaAlta || n.estado === "alta"}
-              onClick={alta}
-            >
-              <FileCheck2 className="h-4 w-4" />
-              {n.estado === "alta" ? "Alta completada ✓" : ocupado === "alta" ? "Dando de alta…" : "Dar de alta como colaborador"}
+              {ocupado === "recordatorio" ? "Enviando…" : "Enviar recordatorio"}
             </Button>
           </div>
+        )}
+      </div>
 
-          {live && (
-            <button
-              onClick={onRecargar}
-              className="self-end font-mono text-[11px] text-ink-3 transition hover:text-brand"
-            >
-              actualizar
-            </button>
-          )}
+      {/* ============ BLOQUE 4 — Preparación de ingreso ============ */}
+      <div className="border-b border-border-faint p-5">
+        <Eyebrow>Preparación de ingreso</Eyebrow>
+        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+          <TogglePrep
+            label="Contrato"
+            valor={n.contrato ?? "Pendiente"}
+            opciones={["Pendiente", "Firmado"]}
+            onChange={(v) => actualizarPrep("contrato", v)}
+            disabled={soloLectura || Boolean(ocupado)}
+          />
+          <TogglePrep
+            label="Alta administrativa"
+            valor={n.altaAdministrativa ?? "Pendiente"}
+            opciones={["Pendiente", "Realizada"]}
+            onChange={(v) => actualizarPrep("altaAdministrativa", v)}
+            disabled={soloLectura || Boolean(ocupado)}
+          />
+          <TogglePrep
+            label="Equipo y accesos"
+            valor={n.equipoAccesos ?? "Pendiente"}
+            opciones={["Pendiente", "Listo", "No aplica"]}
+            onChange={(v) => actualizarPrep("equipoAccesos", v)}
+            disabled={soloLectura || Boolean(ocupado)}
+          />
         </div>
+        <p className="mt-3 flex items-center gap-1.5 text-xs text-ink-3">
+          <CalendarClock className="h-3.5 w-3.5" /> Fecha prevista de ingreso: {n.ingreso}
+        </p>
+      </div>
+
+      {/* ============ BLOQUE 5 — Acción final ============ */}
+      <div className="border-b border-border-faint p-5">
+        {aviso && (
+          <div className="mb-3">
+            <Aviso tono={aviso.tono} onCerrar={() => setAviso(null)}>
+              {aviso.texto}
+            </Aviso>
+          </div>
+        )}
+        {bloqueoAlta && n.estado !== "alta" && (
+          <p className="mb-3 text-[12px] leading-relaxed text-ink-3">{bloqueoAlta}</p>
+        )}
+
+        <Button
+          size="lg"
+          className="w-full"
+          disabled={Boolean(ocupado) || !n.listoParaAlta || n.estado === "alta"}
+          onClick={alta}
+        >
+          <FileCheck2 className="h-5 w-5" />
+          {n.estado === "alta" ? "Alta completada ✓" : ocupado === "alta" ? "Dando de alta…" : "DAR DE ALTA COMO COLABORADOR"}
+        </Button>
+
+        <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-human/25 bg-human-soft/50 p-3">
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-human" />
+          <p className="text-[13px] leading-relaxed text-ink-2">
+            <b className="text-ink">RH autoriza el alta.</b> El agente prepara el expediente y valida los documentos;
+            la decisión final la firma {yo}. Al confirmar, el registro se mueve a Colaboradores.
+          </p>
+        </div>
+
+        {live && (
+          <button onClick={onRecargar} className="mt-2 font-mono text-[11px] text-ink-3 transition hover:text-brand">
+            actualizar
+          </button>
+        )}
+      </div>
+
+      {/* ============ BLOQUE 6 — Historial del candidato (colapsable) ============ */}
+      <div>
+        <button
+          onClick={() => setVerHistorial((x) => !x)}
+          className="flex w-full items-center justify-between px-5 py-3.5 text-left text-sm font-semibold text-ink-2 transition hover:bg-surface-2/50"
+        >
+          <span>Historial del candidato (CV, chats, entrevistas)</span>
+          <ChevronDown className={cn("h-4 w-4 transition-transform", verHistorial && "rotate-180")} />
+        </button>
+        {verHistorial && <HistorialCandidato candidatoId={n.candidatoId} />}
       </div>
     </Card>
   );
 }
 
-/* ---------------- Un documento del checklist ---------------- */
+/* ---------------- Toggle de 2-3 estados (bloque 4) ---------------- */
+function TogglePrep({
+  label,
+  valor,
+  opciones,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  valor: string;
+  opciones: string[];
+  onChange: (v: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div>
+      <span className="text-xs font-medium text-ink-3">{label}</span>
+      <div className="mt-1.5 flex gap-1 rounded-xl border border-border-soft bg-surface-2/60 p-1">
+        {opciones.map((o) => (
+          <button
+            key={o}
+            onClick={() => onChange(o)}
+            disabled={disabled}
+            className={cn(
+              "flex-1 rounded-lg px-2 py-1.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-60",
+              valor === o ? "bg-surface text-brand shadow-sm" : "text-ink-3 hover:text-ink",
+            )}
+          >
+            {o}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Bloque 6: historial completo, carga perezosa ---------------- */
+function HistorialCandidato({ candidatoId }: { candidatoId?: string }) {
+  const [candidato, setCandidato] = useState<Candidato | null>(null);
+  const [mensajes, setMensajes] = useState<MensajePrefiltro[]>([]);
+  const [cargando, setCargando] = useState(true);
+
+  useEffect(() => {
+    if (!candidatoId) {
+      setCargando(false);
+      return;
+    }
+    Promise.all([fetchCandidato(candidatoId), fetchMensajes(candidatoId)]).then(([c, m]) => {
+      if (c) setCandidato(c);
+      if (m) setMensajes(m);
+      setCargando(false);
+    });
+  }, [candidatoId]);
+
+  if (cargando) return <div className="border-t border-border-faint p-5 text-xs text-ink-3">Cargando historial…</div>;
+  if (!candidato) return <div className="border-t border-border-faint p-5 text-xs text-ink-3">Sin datos adicionales.</div>;
+
+  const cv = (candidato.cvDatos || {}) as Record<string, unknown>;
+  const habilidades = (cv.habilidades as string[]) || [];
+  const estudios = (cv.estudios as string[]) || [];
+  const resumen = (cv.experiencia_resumen as string) || candidato.experiencia;
+
+  return (
+    <div className="flex flex-col gap-5 border-t border-border-faint p-5">
+      {/* CV */}
+      <div>
+        <Eyebrow>Currículum</Eyebrow>
+        <p className="mt-2 text-[13px] leading-relaxed text-ink-2">{resumen || "Sin resumen de experiencia disponible."}</p>
+        {habilidades.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {habilidades.map((h, i) => (
+              <span key={i} className="rounded-md bg-brand-soft/50 px-2 py-0.5 text-[11px] text-brand-ink">
+                {h}
+              </span>
+            ))}
+          </div>
+        )}
+        {estudios.length > 0 && (
+          <ul className="mt-2 space-y-1">
+            {estudios.map((e, i) => (
+              <li key={i} className="text-xs text-ink-3">
+                • {e}
+              </li>
+            ))}
+          </ul>
+        )}
+        {candidato.listaArchivos?.some((a) => a.tipo === "cv") && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {candidato.listaArchivos
+              .filter((a) => a.tipo === "cv")
+              .map((a) => (
+                <span key={a.id} className="inline-flex items-center gap-1 rounded-lg border border-border-soft px-2.5 py-1 text-[11px] text-ink-2">
+                  <FileText className="h-3.5 w-3.5" /> {a.nombre}
+                </span>
+              ))}
+          </div>
+        )}
+      </div>
+
+      {/* Entrevistas */}
+      {(candidato.entrevistas?.length ?? 0) > 0 && (
+        <div>
+          <Eyebrow>Entrevistas</Eyebrow>
+          <div className="mt-2 flex flex-col gap-1.5">
+            {candidato.entrevistas!.map((e) => {
+              const ev = e.evaluacion as { recomendacion?: string; match_perfil?: number } | null;
+              return (
+                <div key={e.id} className="flex items-center gap-2 rounded-lg border border-border-soft bg-surface px-3 py-2 text-xs">
+                  <Video className="h-3.5 w-3.5 text-ink-3" />
+                  <span className="font-medium">{e.tipo}</span>
+                  <span className="text-ink-3">· {e.estado}</span>
+                  {ev?.recomendacion && <span className="text-ink-3">· {ev.recomendacion} ({ev.match_perfil ?? 0})</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Chat de WhatsApp */}
+      <div>
+        <Eyebrow>Chat de WhatsApp ({mensajes.length})</Eyebrow>
+        {mensajes.length === 0 ? (
+          <p className="mt-2 text-xs text-ink-3">Sin mensajes registrados.</p>
+        ) : (
+          <div className="mt-2 flex max-h-64 flex-col gap-2 overflow-y-auto rounded-xl border border-border-soft bg-surface-2/40 p-3">
+            {mensajes.map((m, i) => (
+              <div
+                key={i}
+                className={cn(
+                  "max-w-[85%] rounded-xl px-3 py-2 text-xs leading-relaxed",
+                  m.rol === "assistant" ? "self-start bg-surface text-ink-2" : "self-end bg-brand text-brand-ink",
+                )}
+              >
+                {m.texto}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Un documento del checklist (Bloque 3) ---------------- */
 function Documento({
   d,
   expedienteId,
@@ -448,6 +708,11 @@ function Documento({
   const [abierto, setAbierto] = useState(false);
   const [cargando, setCargando] = useState(false);
   const c = docConfig[d.estado];
+
+  // Vista simplificada que pide el bloque 3: Recibido / Pendiente / No aplica.
+  const noAplica = d.obligatorio === false;
+  const badgeLabel = noAplica ? "No aplica" : d.estado === "recibido" ? "Recibido" : "Pendiente";
+  const badgeTone: "good" | "warn" | "neutral" = noAplica ? "neutral" : d.estado === "recibido" ? "good" : "warn";
 
   async function subir(archivos: File[]) {
     if (!expedienteId) return;
@@ -491,14 +756,11 @@ function Documento({
           <c.icon className="h-4 w-4" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium">
-            {d.nombre}
-            {d.obligatorio === false && <span className="ml-1.5 text-[10px] font-normal text-ink-3">(opcional)</span>}
-          </span>
+          <span className="block truncate text-sm font-medium">{d.nombre}</span>
           {d.subido && <span className="font-mono text-[10px] text-ink-3">{d.subido}</span>}
         </span>
         {necesitaConfirmar && <span className="shrink-0 font-mono text-[10px] text-warn">confirmar</span>}
-        <Badge tone={c.tone}>{c.label}</Badge>
+        <Badge tone={badgeTone}>{badgeLabel}</Badge>
       </button>
 
       {abierto && live && (
@@ -554,9 +816,7 @@ function Documento({
             )}
           </div>
 
-          {d.revisadoPor && (
-            <p className="font-mono text-[10px] text-ink-3">revisado por {d.revisadoPor}</p>
-          )}
+          {d.revisadoPor && <p className="font-mono text-[10px] text-ink-3">revisado por {d.revisadoPor}</p>}
         </div>
       )}
     </div>

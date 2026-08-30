@@ -631,6 +631,18 @@ export function cancelarExpediente(expedienteId: number, motivo: string) {
   return post<{ ok: boolean; candidato: string }>(`/contratacion/expedientes/${expedienteId}/cancelar`, { motivo });
 }
 
+/** Onboarding · Bloque 4 (Preparación de ingreso) — contrato, alta administrativa, equipo/accesos. */
+export function actualizarPreparacion(
+  expedienteId: number,
+  datos: { contrato?: string; altaAdministrativa?: string; equipoAccesos?: string },
+) {
+  return patch<NuevoIngreso>(`/contratacion/expedientes/${expedienteId}/preparacion`, {
+    contrato: datos.contrato,
+    alta_administrativa: datos.altaAdministrativa,
+    equipo_accesos: datos.equipoAccesos,
+  });
+}
+
 /* ============================================================
    Métricas cruzadas y salud
    ============================================================ */
