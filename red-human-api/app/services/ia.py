@@ -649,6 +649,58 @@ def agenda_turno(nombre_candidato: str, vacante_titulo: str, historial: List[dic
 
 
 # ============================================================
+# Zero-Touch fase 2 — asistente conversacional de Onboarding
+# ============================================================
+#
+# Una vez que el candidato llega a la etapa "Onboarding" (ver models.ETAPAS_CANDIDATO), el
+# objetivo del agente cambia por completo: ya no evalúa ni agenda nada, solo acompaña la
+# recolección de documentos que RH detonó con /candidatos/{codigo}/solicitar-documentos o
+# /recordatorio-documentos (ver candidatos.py). El checklist real y la validación de cada
+# documento siguen viviendo en el módulo 2 (contratacion.py + ia.validar_documento) — este
+# turno es solo la conversación de acompañamiento por WhatsApp.
+
+
+class TurnoOnboarding(BaseModel):
+    respuesta: str = Field(description="Siguiente mensaje del agente al candidato, breve y cálido, español mexicano.")
+
+
+def onboarding_turno(nombre_candidato: str, vacante_titulo: str, historial: List[dict]) -> Tuple[TurnoOnboarding, bool]:
+    """historial: [{"rol": "user"|"assistant", "texto": str}, ...] — el último es del candidato."""
+    client = _client()
+    if client is None:
+        return (
+            TurnoOnboarding(
+                respuesta="¡Gracias! En cuanto activemos la confirmación automática te aviso que lo recibí (modo demo)."
+            ),
+            False,
+        )
+
+    mensajes = [{"role": ("user" if m["rol"] == "user" else "assistant"), "content": m["texto"]} for m in historial]
+    resp = client.responses.parse(
+        model=MODEL,
+        instructions=(
+            "Eres el agente de Red Human AI (México). Este candidato YA fue contratado y está en la "
+            f"etapa de Onboarding para {vacante_titulo or 'su nuevo puesto'}; te diriges a él/ella como "
+            f"{nombre_candidato}. Tu objetivo cambió por completo respecto al resto de la conversación: "
+            "ya NO evalúas su perfil ni agendas videollamadas — ahora solo lo acompañas a juntar los "
+            "documentos que RH ya le pidió en un mensaje anterior de esta misma conversación.\n"
+            "Reglas: (1) si pregunta qué documentos faltan o cómo mandarlos, contesta con base en lo "
+            "que ya se le pidió arriba en la conversación, no inventes documentos nuevos; (2) si dice "
+            "que ya envió, adjuntó o mandó una foto/PDF de un documento, agradécele cálidamente y "
+            "confírmale que RH lo va a revisar — nunca digas que ya quedó validado o aceptado, eso lo "
+            "confirma una persona de RH desde el expediente; (3) si pregunta algo fuera de documentos "
+            "(fecha exacta de ingreso, sueldo, horario), sé honesto: dile que RH se lo confirma "
+            "directamente, no lo inventes; (4) tono cálido, breve, una sola idea por mensaje; (5) nunca "
+            "vuelvas a hacer preguntas de prefiltro o de disponibilidad para entrevista — esa etapa ya "
+            "quedó atrás."
+        ),
+        input=mensajes,
+        text_format=TurnoOnboarding,
+    )
+    return resp.output_parsed, True
+
+
+# ============================================================
 # 3b) Entrevista estructurada (módulo 3.10) — guion, turnos y evaluación
 # ============================================================
 

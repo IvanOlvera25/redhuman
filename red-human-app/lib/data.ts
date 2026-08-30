@@ -6,7 +6,13 @@
 export type EstadoPrefiltro = "cumple" | "revision" | "no_cumple" | "pendiente";
 export type FuenteCandidato = "Formulario" | "WhatsApp" | "OCC" | "LinkedIn" | "Indeed" | "RH";
 
-export type EtapaCandidato = "Prefiltro" | "Entrevista" | "Evaluación" | "Contratación";
+export type EtapaCandidato =
+  | "Prefiltro"
+  | "Entrevista IA"
+  | "Evaluación"
+  | "Entrevista Humana"
+  | "Contratación"
+  | "Onboarding";
 
 export interface RespuestaPrefiltro {
   criterio?: string;
@@ -130,9 +136,11 @@ export const kpis = [
 export const funnelData = [
   { etapa: "Candidatos", valor: 1842, pct: 100 },
   { etapa: "Prefiltro IA", valor: 1204, pct: 65 },
-  { etapa: "Entrevista", valor: 486, pct: 26 },
-  { etapa: "Evaluación", valor: 198, pct: 11 },
-  { etapa: "Contratación", valor: 63, pct: 3 },
+  { etapa: "Entrevista IA", valor: 486, pct: 26 },
+  { etapa: "Evaluación", valor: 320, pct: 17 },
+  { etapa: "Entrevista Humana", valor: 210, pct: 11 },
+  { etapa: "Contratación", valor: 98, pct: 5 },
+  { etapa: "Onboarding", valor: 63, pct: 3 },
 ];
 
 export const fuentesData = [
@@ -250,16 +258,17 @@ export const vacantes: Vacante[] = [
 ];
 
 export const candidatos: Candidato[] = [
-  { id: "C-8801", nombre: "María Fernanda López", puesto: "Cajero(a) de sucursal", vacanteId: "VAC-1042", fuente: "WhatsApp", estado: "cumple", etapa: "Entrevista", score: 92, experiencia: "3 años en retail", ubicacion: "Guadalajara", aplicado: "hace 2 h", tono: 1, evidencia: "Cumple escolaridad, disponibilidad de horario y experiencia en manejo de efectivo." },
+  { id: "C-8801", nombre: "María Fernanda López", puesto: "Cajero(a) de sucursal", vacanteId: "VAC-1042", fuente: "WhatsApp", estado: "cumple", etapa: "Entrevista IA", score: 92, experiencia: "3 años en retail", ubicacion: "Guadalajara", aplicado: "hace 2 h", tono: 1, evidencia: "Cumple escolaridad, disponibilidad de horario y experiencia en manejo de efectivo." },
   { id: "C-8802", nombre: "Jorge Alberto Ramírez", puesto: "Ejecutivo(a) de ventas", vacanteId: "VAC-1041", fuente: "LinkedIn", estado: "cumple", etapa: "Evaluación", score: 88, experiencia: "5 años en call center", ubicacion: "CDMX", aplicado: "hace 4 h", tono: 0, evidencia: "Supera meta de experiencia; buen manejo de objeciones en el prefiltro por voz." },
   { id: "C-8803", nombre: "Ana Sofía Herrera", puesto: "Auxiliar de almacén", vacanteId: "VAC-1040", fuente: "OCC", estado: "revision", etapa: "Prefiltro", score: 71, experiencia: "1 año", ubicacion: "Monterrey", aplicado: "hace 6 h", tono: 3, evidencia: "Experiencia limítrofe al mínimo requerido. Requiere validación de disponibilidad de turno nocturno." },
-  { id: "C-8804", nombre: "Luis Ángel Torres", puesto: "Desarrollador Full-Stack", vacanteId: "VAC-1038", fuente: "LinkedIn", estado: "cumple", etapa: "Entrevista", score: 95, experiencia: "6 años, React/Node", ubicacion: "Remoto", aplicado: "hace 1 día", tono: 2, evidencia: "Stack alineado con el perfil; portafolio verificado; pretensión salarial dentro de rango." },
+  { id: "C-8804", nombre: "Luis Ángel Torres", puesto: "Desarrollador Full-Stack", vacanteId: "VAC-1038", fuente: "LinkedIn", estado: "cumple", etapa: "Onboarding", score: 95, experiencia: "6 años, React/Node", ubicacion: "Remoto", aplicado: "hace 1 día", tono: 2, evidencia: "Stack alineado con el perfil; portafolio verificado; pretensión salarial dentro de rango." },
   { id: "C-8805", nombre: "Diana Karen Méndez", puesto: "Cajero(a) de sucursal", vacanteId: "VAC-1042", fuente: "WhatsApp", estado: "revision", etapa: "Prefiltro", score: 64, experiencia: "6 meses", ubicacion: "Zapopan", aplicado: "hace 3 h", tono: 1, evidencia: "Actitud positiva pero experiencia por debajo del mínimo. Sugerido para revisión humana." },
   { id: "C-8806", nombre: "Roberto Carlos Nava", puesto: "Ejecutivo(a) de ventas", vacanteId: "VAC-1041", fuente: "Indeed", estado: "no_cumple", etapa: "Prefiltro", score: 38, experiencia: "Sin experiencia comercial", ubicacion: "Toluca", aplicado: "hace 5 h", tono: 0, evidencia: "No cumple requisito indispensable de experiencia en ventas ni disponibilidad de horario." },
-  { id: "C-8807", nombre: "Gabriela Ruiz Ponce", puesto: "Analista de nómina", vacanteId: "VAC-1039", fuente: "Formulario", estado: "cumple", etapa: "Evaluación", score: 84, experiencia: "4 años, IMSS/ISR", ubicacion: "Querétaro", aplicado: "hace 8 h", tono: 1, evidencia: "Domina timbrado, IMSS e ISR; conocimiento de sistema de nómina confirmado." },
-  { id: "C-8808", nombre: "Emiliano Cruz Vega", puesto: "Auxiliar de almacén", vacanteId: "VAC-1040", fuente: "WhatsApp", estado: "cumple", etapa: "Contratación", score: 90, experiencia: "2 años", ubicacion: "Monterrey", aplicado: "hace 1 día", tono: 2, evidencia: "Cumple todos los requisitos; expediente en integración, pendiente comprobante de domicilio." },
-  { id: "C-8809", nombre: "Valeria Jiménez Soto", puesto: "Desarrollador Full-Stack", vacanteId: "VAC-1038", fuente: "LinkedIn", estado: "cumple", etapa: "Evaluación", score: 87, experiencia: "4 años, Next.js", ubicacion: "Remoto", aplicado: "hace 2 días", tono: 1, evidencia: "Fuerte en frontend; a validar experiencia en backend distribuido." },
+  { id: "C-8807", nombre: "Gabriela Ruiz Ponce", puesto: "Analista de nómina", vacanteId: "VAC-1039", fuente: "Formulario", estado: "cumple", etapa: "Onboarding", score: 84, experiencia: "4 años, IMSS/ISR", ubicacion: "Querétaro", aplicado: "hace 8 h", tono: 1, evidencia: "Domina timbrado, IMSS e ISR; conocimiento de sistema de nómina confirmado." },
+  { id: "C-8808", nombre: "Emiliano Cruz Vega", puesto: "Auxiliar de almacén", vacanteId: "VAC-1040", fuente: "WhatsApp", estado: "cumple", etapa: "Onboarding", score: 90, experiencia: "2 años", ubicacion: "Monterrey", aplicado: "hace 1 día", tono: 2, evidencia: "Cumple todos los requisitos; expediente en integración, pendiente comprobante de domicilio." },
+  { id: "C-8809", nombre: "Valeria Jiménez Soto", puesto: "Desarrollador Full-Stack", vacanteId: "VAC-1038", fuente: "LinkedIn", estado: "cumple", etapa: "Entrevista Humana", score: 87, experiencia: "4 años, Next.js", ubicacion: "Remoto", aplicado: "hace 2 días", tono: 1, evidencia: "Fuerte en frontend; a validar experiencia en backend distribuido." },
   { id: "C-8810", nombre: "Héctor Manuel Ríos", puesto: "Cajero(a) de sucursal", vacanteId: "VAC-1042", fuente: "WhatsApp", estado: "no_cumple", etapa: "Prefiltro", score: 29, experiencia: "N/D", ubicacion: "Tlaquepaque", aplicado: "hace 1 h", tono: 0, evidencia: "No completó el prefiltro; sin disponibilidad para el horario de la vacante." },
+  { id: "C-8811", nombre: "Fernando Castillo Prado", puesto: "Cajero(a) de sucursal", vacanteId: "VAC-1042", fuente: "OCC", estado: "cumple", etapa: "Contratación", score: 91, experiencia: "4 años en retail", ubicacion: "Guadalajara", aplicado: "hace 10 h", tono: 3, evidencia: "Entrevista humana con RH concluida; oferta en preparación, aún sin expediente abierto." },
 ];
 
 export const knowledgeBase = [

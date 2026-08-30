@@ -387,7 +387,7 @@ function Expediente({
               onClick={alta}
             >
               <FileCheck2 className="h-4 w-4" />
-              {n.estado === "alta" ? "Alta completada ✓" : ocupado === "alta" ? "Autorizando…" : "Validar y dar de alta"}
+              {n.estado === "alta" ? "Alta completada ✓" : ocupado === "alta" ? "Dando de alta…" : "Dar de alta como colaborador"}
             </Button>
           </div>
 

@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .database import Base, SessionLocal, engine
 from .migraciones import sincronizar
-from .routers import auth, candidatos, contratacion, empleados, entrevistas, metricas, requisiciones, vacantes, webhooks
+from .routers import auth, candidatos, colaboradores, contratacion, empleados, entrevistas, metricas, requisiciones, vacantes, webhooks
 from .seed import sembrar, sembrar_admin
 from .services.agenda import revisar_videollamadas_noshow
 from .services.avatar import avatar_activo
@@ -86,6 +86,7 @@ app.include_router(vacantes.router)
 app.include_router(candidatos.router)
 app.include_router(entrevistas.router)
 app.include_router(contratacion.router)
+app.include_router(colaboradores.router)
 app.include_router(metricas.router)
 app.include_router(webhooks.router)
 
