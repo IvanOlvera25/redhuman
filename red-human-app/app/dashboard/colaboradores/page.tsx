@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Briefcase, CalendarClock, ExternalLink, Mail, Phone, ShieldCheck, UserSquare2 } from "lucide-react";
+import { Building2, CalendarClock, ExternalLink, Mail, MapPin, Phone, ShieldCheck, Users, UserSquare2 } from "lucide-react";
 import { Card, Badge, Avatar, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
 import { fetchColaboradores, type Colaborador } from "@/lib/api";
@@ -67,25 +67,40 @@ export default function Colaboradores() {
                   </div>
                 </div>
                 <Badge tone={c.activo ? "good" : "neutral"} dot>
-                  {c.activo ? "Activo" : "Inactivo"}
+                  {c.estatus}
                 </Badge>
               </div>
 
-              <div className="flex flex-wrap gap-2 text-xs text-ink-2">
+              <div className="flex flex-wrap gap-2 text-xs">
                 {c.salario && (
                   <span className="inline-flex items-center gap-1.5 rounded-lg border border-border-soft bg-surface-2 px-2 py-1 font-mono text-brand">
                     {c.salario}
                   </span>
                 )}
-                {c.fechaIngreso && (
-                  <span className="inline-flex items-center gap-1.5">
-                    <CalendarClock className="h-3.5 w-3.5 text-ink-3" />
-                    Ingresó {new Date(c.fechaIngreso).toLocaleDateString("es-MX")}
+                {c.empresa && (
+                  <span className="inline-flex items-center gap-1.5 text-ink-2">
+                    <Building2 className="h-3.5 w-3.5 text-ink-3" /> {c.empresa}
+                  </span>
+                )}
+                {c.ubicacion && (
+                  <span className="inline-flex items-center gap-1.5 text-ink-2">
+                    <MapPin className="h-3.5 w-3.5 text-ink-3" /> {c.ubicacion}
                   </span>
                 )}
               </div>
 
               <div className="flex flex-col gap-1 text-xs text-ink-3">
+                {c.fechaIngreso && (
+                  <span className="flex items-center gap-1.5">
+                    <CalendarClock className="h-3.5 w-3.5" />
+                    Ingresó {new Date(c.fechaIngreso).toLocaleDateString("es-MX")}
+                  </span>
+                )}
+                {c.jefeDirecto && (
+                  <span className="flex items-center gap-1.5">
+                    <Users className="h-3.5 w-3.5" /> Jefe directo: {c.jefeDirecto}
+                  </span>
+                )}
                 {c.correo && (
                   <span className="flex items-center gap-1.5">
                     <Mail className="h-3.5 w-3.5" /> {c.correo}
@@ -99,28 +114,23 @@ export default function Colaboradores() {
               </div>
 
               <div className="mt-auto flex items-center justify-between border-t border-border-faint pt-3 text-[11px] text-ink-3">
+                <span className="font-mono">Folio {c.id}</span>
                 <span className="flex items-center gap-1.5">
                   <ShieldCheck className="h-3.5 w-3.5 text-human" /> Alta por {c.dadoDeAltaPor || "RH"}
                 </span>
-                {c.candidatoOrigenId && (
-                  <a
-                    href="/dashboard/candidatos"
-                    className="flex items-center gap-1 text-brand transition hover:underline"
-                  >
-                    <ExternalLink className="h-3 w-3" /> {c.candidatoOrigenId}
-                  </a>
-                )}
               </div>
+
+              {c.candidatoOrigenId && (
+                <a
+                  href="/dashboard/candidatos"
+                  className="flex items-center gap-1 self-start text-[11px] text-brand transition hover:underline"
+                >
+                  <ExternalLink className="h-3 w-3" /> Candidato de origen: {c.candidatoOrigenId}
+                </a>
+              )}
             </Card>
           ))}
         </div>
-      )}
-
-      {!cargando && (
-        <p className="mt-6 flex items-center gap-1.5 text-xs text-ink-3">
-          <Briefcase className="h-3.5 w-3.5" />
-          Este registro es independiente del módulo de Empleados (Requisiciones · Radar Interno).
-        </p>
       )}
     </div>
   );

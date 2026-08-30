@@ -262,8 +262,9 @@ async def recordatorio(exp_id: int, db: Session = Depends(get_db), _: Usuario = 
 
 
 def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colaborador]:
-    """Cierra el ciclo del candidato: crea el registro en `colaboradores` heredando nombre,
-    puesto, CV y salario. No toca `Empleado` (universo aparte del Radar Interno, módulo 4)."""
+    """Cierra el ciclo del candidato: crea el registro en `colaboradores` con los datos
+    definitivos capturados en el formulario de la etapa Contratación (sueldo, ubicación,
+    jefe directo, tipo de contratación) más nombre, puesto y CV heredados del candidato."""
     c = e.candidato
     if not c:
         return None
@@ -275,7 +276,10 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
         correo=c.correo,
         telefono=c.telefono,
         puesto=e.puesto or (c.vacante.titulo if c.vacante else ""),
-        salario=c.vacante.sueldo if c.vacante else "",
+        salario=e.sueldo or (c.vacante.sueldo if c.vacante else ""),
+        empresa=c.vacante.empresa if c.vacante else "",
+        ubicacion=e.ubicacion or (c.vacante.ubicacion if c.vacante else ""),
+        jefe_directo=e.jefe_directo,
         cv_ruta=cv.ruta if cv else "",
         cv_nombre=cv.nombre if cv else "",
         fecha_ingreso=e.fecha_ingreso,
@@ -355,7 +359,8 @@ class CancelarIn(BaseModel):
 
 @router.post("/expedientes/{exp_id}/cancelar")
 def cancelar(exp_id: int, datos: CancelarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    """Cierra un expediente que no llegó a alta y regresa al candidato a Evaluación."""
+    """Botón «Cancelar contratación» — cierra un expediente que no llegó a alta y regresa al
+    candidato a Entrevista Humana (la etapa manual inmediata anterior a Contratación)."""
     e = _expediente(db, exp_id)
     if not datos.motivo.strip():
         raise HTTPException(400, "La cancelación requiere un motivo.")
@@ -365,7 +370,7 @@ def cancelar(exp_id: int, datos: CancelarIn, db: Session = Depends(get_db), u: U
     c = e.candidato
     codigo = c.codigo if c else ""
     if c:
-        c.etapa = "Evaluación"
+        c.etapa = "Entrevista Humana"
     registrar(db, u.nombre, "expediente_cancelado", "expediente", str(e.id), {"motivo": datos.motivo, "candidato": codigo})
     db.delete(e)
     db.commit()

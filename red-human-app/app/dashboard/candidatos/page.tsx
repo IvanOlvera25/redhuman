@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   X,
   MapPin,
@@ -26,30 +26,40 @@ import {
   RotateCw,
   Mail,
   Phone,
+  CalendarClock,
 } from "lucide-react";
-import { Card, Badge, Button, Avatar, Eyebrow } from "@/components/ui";
+import { Card, Badge, Button, Avatar, Eyebrow, Progress } from "@/components/ui";
 import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
 import { Aviso, Dropzone, pesoLegible } from "@/components/dashboard/subida";
 import { candidatos as candidatosDemo, type Candidato, type EtapaCandidato, type Vacante } from "@/lib/data";
+import type { DocExpediente, NuevoIngreso } from "@/lib/phase2";
 import {
+  cancelarExpediente,
   decidirCandidato,
   enviarPrefiltro,
   fetchCandidato,
   fetchCandidatos,
+  fetchEntrevistadores,
+  fetchExpediente,
   fetchMensajes,
   fetchVacantes,
+  guardarCondicionesContratacion,
+  marcarEntrevistaHumanaRealizada,
   moverEtapaCandidato,
+  programarEntrevistaHumana,
   recordatorioDocumentosCandidato,
   registrarConsentimiento,
-  seleccionarCandidato,
   solicitarDocumentosCandidato,
   subirArchivoCandidato,
   subirCVs,
+  subirDocumento,
   urlArchivoCandidato,
+  urlDocumento,
   type CargaCV,
   type MensajePrefiltro,
+  type ModalidadEntrevistaHumana,
 } from "@/lib/api";
-import { useNombreRH, usePuedeDecidir } from "@/components/sesion";
+import { usePuedeDecidir } from "@/components/sesion";
 import { cn } from "@/lib/utils";
 
 const etapas: EtapaCandidato[] = [
@@ -69,9 +79,10 @@ const etapaColor: Record<EtapaCandidato, string> = {
   Onboarding: "var(--good)",
 };
 
-/** Destinos manuales a los que RH puede mandar una tarjeta con un botón explícito
- * (PATCH /candidatos/{codigo}/etapa). Onboarding queda fuera: se llega ahí solo por
- * «Seleccionar y crear expediente», nunca por un botón de avance genérico. */
+/** Destinos manuales a los que RH puede mandar una tarjeta con un botón explícito.
+ * "Entrevista Humana" abre el modal de agenda (no hace PATCH directo); el resto va por
+ * PATCH /candidatos/{codigo}/etapa. Onboarding queda fuera: solo se llega ahí con el botón
+ * "Enviar a Onboarding" de la propia etapa Contratación. */
 const ETAPAS_AVANCE_MANUAL: EtapaCandidato[] = ["Evaluación", "Entrevista Humana", "Contratación"];
 
 type FiltroEstado = "todos" | "en_proceso" | "aptos" | "contratados" | "descartados";
@@ -85,6 +96,9 @@ const FILTROS_ESTADO: { key: FiltroEstado; label: string }[] = [
 ];
 
 const ETAPAS_YA_CONTRATADO: EtapaCandidato[] = ["Contratación", "Onboarding"];
+
+const TIPOS_CONTRATACION = ["Tiempo indeterminado", "Tiempo determinado", "Por obra o proyecto", "Honorarios"];
+const MODALIDADES_ENTREVISTA_HUMANA: ModalidadEntrevistaHumana[] = ["Presencial", "Videollamada", "Llamada"];
 
 /** "Todos" excluye a los descartados a propósito: son un archivo aparte, no la vista por defecto. */
 function coincideEstado(c: Candidato, filtro: FiltroEstado): boolean {
@@ -373,13 +387,12 @@ function ModalCandidato({
   onClose: () => void;
   onCambio: (c: Candidato) => void;
 }) {
-  const yo = useNombreRH();
   const puedeDecidir = usePuedeDecidir();
   const [tab, setTab] = useState<"perfil_cv" | "whatsapp">("perfil_cv");
   const [aviso, setAviso] = useState<{ tono: "ok" | "error" | "warn"; texto: string } | null>(null);
   const [ocupado, setOcupado] = useState("");
   const [comentario, setComentario] = useState("");
-  const [seleccionar, setSeleccionar] = useState(false);
+  const [modalEntrevista, setModalEntrevista] = useState(false);
 
   function resolver<T>(r: { ok: true; data: T } | { ok: false; error: string }, exito: string) {
     setOcupado("");
@@ -535,12 +548,16 @@ function ModalCandidato({
             </Card>
           )}
 
+          {c.etapa === "Entrevista Humana" && <PanelEntrevistaHumana c={c} live={live} onCambio={onCambio} />}
+          {c.etapa === "Contratación" && <PanelContratacion c={c} live={live} onCambio={onCambio} setAviso={setAviso} />}
+
           {tab === "perfil_cv" && <PestanaPerfilYCV c={c} live={live} onCambio={onCambio} setAviso={setAviso} />}
           {tab === "whatsapp" && <PestanaWhatsApp c={c} live={live} onCambio={onCambio} />}
         </div>
 
-        {/* Footer Fijo con HITL y Acciones */}
-        {puedeDecidir && (
+        {/* Footer Fijo con HITL y Acciones — Entrevista Humana y Contratación tienen su propio
+            panel de acciones arriba; este footer genérico no aplica ahí. */}
+        {puedeDecidir && c.etapa !== "Contratación" && (c.etapa !== "Entrevista Humana" || c.entrevistaHumana?.realizada) && (
           <div className="border-t border-border-soft bg-surface px-6 py-4">
             <div className="flex flex-col gap-3">
               <input
@@ -563,13 +580,14 @@ function ModalCandidato({
                   </Button>
                 )}
 
-                {/* Botones explícitos de avance: cada uno dice a dónde manda la tarjeta */}
+                {/* Botones explícitos de avance: cada uno dice a dónde manda la tarjeta.
+                    "Entrevista Humana" abre el modal de agenda en vez de mover directo. */}
                 {siguientesEtapas.map((etapa) => (
                   <Button
                     key={etapa}
                     variant="secondary"
                     size="sm"
-                    onClick={() => enviarAEtapa(etapa)}
+                    onClick={() => (etapa === "Entrevista Humana" ? setModalEntrevista(true) : enviarAEtapa(etapa))}
                     disabled={Boolean(ocupado)}
                   >
                     <ThumbsUp className="h-4 w-4" /> Enviar a {etapa}
@@ -588,21 +606,13 @@ function ModalCandidato({
                   </>
                 )}
 
-                {c.expedienteId != null ? (
+                {c.expedienteId != null && (
                   <a
                     href="/dashboard/onboarding"
                     className="flex items-center gap-1.5 rounded-xl border border-good/30 bg-good-soft px-3 py-2 text-xs font-semibold text-good transition hover:brightness-105"
                   >
                     <UserCheck className="h-4 w-4" /> Expediente ({c.expedienteProgreso ?? 0}%)
                   </a>
-                ) : (
-                  <Button
-                    size="sm"
-                    onClick={() => setSeleccionar(true)}
-                    disabled={Boolean(ocupado) || !live}
-                  >
-                    <UserCheck className="h-4 w-4" /> Seleccionar y crear expediente
-                  </Button>
                 )}
               </div>
             </div>
@@ -610,13 +620,13 @@ function ModalCandidato({
         )}
       </div>
 
-      {seleccionar && (
-        <Seleccionar
+      {modalEntrevista && (
+        <ModalProgramarEntrevista
           c={c}
-          onClose={() => setSeleccionar(false)}
+          onClose={() => setModalEntrevista(false)}
           onListo={(actualizado) => {
-            setSeleccionar(false);
-            setAviso({ tono: "ok", texto: "Expediente creado. El agente ya solicitó los documentos." });
+            setModalEntrevista(false);
+            setAviso({ tono: "ok", texto: "Entrevista programada." });
             onCambio(actualizado);
           }}
         />
@@ -1212,9 +1222,119 @@ function CargarCVs({
 }
 
 /* ============================================================
-   MODAL DE SELECCIÓN (MÓDULO 2)
+   Confirmación genérica (checkbox "Entrevista realizada", etc.)
    ============================================================ */
-function Seleccionar({
+function ModalConfirmar({
+  titulo,
+  texto,
+  onCancelar,
+  onConfirmar,
+  cargando,
+}: {
+  titulo: string;
+  texto: string;
+  onCancelar: () => void;
+  onConfirmar: () => void;
+  cargando?: boolean;
+}) {
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+      <Card className="w-full max-w-sm p-5">
+        <h3 className="font-display text-lg font-bold">{titulo}</h3>
+        <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2">{texto}</p>
+        <div className="mt-5 flex gap-3">
+          <Button variant="outline" className="flex-1" onClick={onCancelar} disabled={cargando}>
+            Cancelar
+          </Button>
+          <Button className="flex-1" onClick={onConfirmar} disabled={cargando}>
+            {cargando ? "Confirmando…" : "Confirmar"}
+          </Button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ============================================================
+   Etapa: Entrevista Humana — datos programados + "Entrevista realizada"
+   ============================================================ */
+function PanelEntrevistaHumana({
+  c,
+  live,
+  onCambio,
+}: {
+  c: Candidato;
+  live: boolean;
+  onCambio: (c: Candidato) => void;
+}) {
+  const eh = c.entrevistaHumana;
+  const [confirmando, setConfirmando] = useState(false);
+  const [marcando, setMarcando] = useState(false);
+  const [error, setError] = useState("");
+
+  async function confirmarRealizada() {
+    setMarcando(true);
+    setError("");
+    const r = await marcarEntrevistaHumanaRealizada(c.id);
+    setMarcando(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
+    setConfirmando(false);
+    onCambio(r.data);
+  }
+
+  if (!eh) return null;
+
+  return (
+    <Card className="border-[color:var(--brand-2)]/30 bg-surface-2/40 p-4">
+      <Eyebrow>Entrevista Humana programada</Eyebrow>
+      <div className="mt-2.5 grid gap-2 sm:grid-cols-2">
+        <Info icon={UserCheck} v={`Entrevistador(a): ${eh.entrevistador || "sin asignar"}`} />
+        <Info
+          icon={CalendarClock}
+          v={eh.fecha ? new Date(eh.fecha).toLocaleString("es-MX", { dateStyle: "medium", timeStyle: "short" }) : "Sin fecha"}
+        />
+        <Info icon={Video} v={`Modalidad: ${eh.modalidad || "sin definir"}`} />
+      </div>
+      {eh.comentario && <p className="mt-2.5 text-[13px] leading-relaxed text-ink-2">{eh.comentario}</p>}
+
+      {error && (
+        <div className="mt-3">
+          <Aviso tono="error">{error}</Aviso>
+        </div>
+      )}
+
+      <div className="mt-3.5">
+        {eh.realizada ? (
+          <Badge tone="good" dot>
+            Entrevista realizada
+          </Badge>
+        ) : live ? (
+          <Button size="sm" variant="secondary" onClick={() => setConfirmando(true)} disabled={marcando}>
+            <CheckCircle2 className="h-4 w-4" /> Marcar entrevista realizada
+          </Button>
+        ) : null}
+      </div>
+
+      {confirmando && (
+        <ModalConfirmar
+          titulo="¿La entrevista ya se realizó?"
+          texto="Al confirmar se habilitan los botones «Descartar» y «Enviar a Contratación» para este candidato."
+          onCancelar={() => setConfirmando(false)}
+          onConfirmar={confirmarRealizada}
+          cargando={marcando}
+        />
+      )}
+    </Card>
+  );
+}
+
+/* ============================================================
+   Modal "Programar entrevista" (botón «Enviar a Entrevista Humana»)
+   ============================================================ */
+function ModalProgramarEntrevista({
   c,
   onClose,
   onListo,
@@ -1223,24 +1343,32 @@ function Seleccionar({
   onClose: () => void;
   onListo: (c: Candidato) => void;
 }) {
-  const yo = useNombreRH();
+  const [entrevistadores, setEntrevistadores] = useState<string[]>([]);
+  const [entrevistador, setEntrevistador] = useState("");
   const [fecha, setFecha] = useState("");
-  const [extra, setExtra] = useState("");
-  const [avisar, setAvisar] = useState(true);
+  const [hora, setHora] = useState("");
+  const [modalidad, setModalidad] = useState<ModalidadEntrevistaHumana>("Videollamada");
+  const [comentario, setComentario] = useState("");
   const [error, setError] = useState("");
   const [enviando, setEnviando] = useState(false);
 
-  async function confirmar() {
+  useEffect(() => {
+    fetchEntrevistadores().then((d) => {
+      if (d && d.length) {
+        setEntrevistadores(d);
+        setEntrevistador(d[0]);
+      }
+    });
+  }, []);
+
+  async function programar() {
+    if (!entrevistador.trim() || !fecha || !hora) {
+      setError("Completa entrevistador, fecha y hora.");
+      return;
+    }
     setEnviando(true);
     setError("");
-    const r = await seleccionarCandidato(c.id, {
-      fechaIngreso: fecha || undefined,
-      documentos: extra
-        .split(",")
-        .map((d) => d.trim())
-        .filter(Boolean),
-      avisarWhatsapp: avisar,
-    });
+    const r = await programarEntrevistaHumana(c.id, { entrevistador, fecha, hora, modalidad, comentario });
     setEnviando(false);
     if (!r.ok) {
       setError(r.error);
@@ -1252,42 +1380,80 @@ function Seleccionar({
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
       <Card className="w-full max-w-md p-5">
-        <h3 className="font-display text-lg font-bold">Seleccionar a {c.nombre.split(" ")[0]}</h3>
+        <h3 className="font-display text-lg font-bold">Programar entrevista humana</h3>
         <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-          Se abre el expediente de contratación y el agente le pide sus documentos. Queda registrado a nombre de{" "}
-          <b className="text-ink">{yo}</b>.
+          Con {c.nombre.split(" ")[0]}. Al guardar, la tarjeta se mueve a Entrevista Humana.
         </p>
 
         <div className="mt-4 flex flex-col gap-3">
           <label className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium text-ink-2">Fecha de ingreso</span>
-            <input
-              type="date"
-              value={fecha}
-              onChange={(e) => setFecha(e.target.value)}
-              className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
-            />
+            <span className="text-sm font-medium text-ink-2">Entrevistador(a)</span>
+            {entrevistadores.length > 0 ? (
+              <select
+                value={entrevistador}
+                onChange={(e) => setEntrevistador(e.target.value)}
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              >
+                {entrevistadores.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={entrevistador}
+                onChange={(e) => setEntrevistador(e.target.value)}
+                placeholder="Nombre de quien entrevista"
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            )}
           </label>
+
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Fecha</span>
+              <input
+                type="date"
+                value={fecha}
+                onChange={(e) => setFecha(e.target.value)}
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Hora</span>
+              <input
+                type="time"
+                value={hora}
+                onChange={(e) => setHora(e.target.value)}
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+          </div>
+
           <label className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium text-ink-2">Documentos adicionales</span>
-            <input
-              value={extra}
-              onChange={(e) => setExtra(e.target.value)}
-              placeholder="Título profesional, Licencia de conducir…"
-              className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
-            />
-            <span className="text-xs text-ink-3">
-              Además de INE, CURP, RFC, comprobante de domicilio y NSS. Sepáralos con comas.
-            </span>
+            <span className="text-sm font-medium text-ink-2">Modalidad</span>
+            <select
+              value={modalidad}
+              onChange={(e) => setModalidad(e.target.value as ModalidadEntrevistaHumana)}
+              className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+            >
+              {MODALIDADES_ENTREVISTA_HUMANA.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
           </label>
-          <label className="flex cursor-pointer items-center gap-2.5">
-            <input
-              type="checkbox"
-              checked={avisar}
-              onChange={(e) => setAvisar(e.target.checked)}
-              className="h-4 w-4 rounded border-border-soft accent-[var(--brand)]"
+
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-ink-2">Comentario (opcional)</span>
+            <textarea
+              value={comentario}
+              onChange={(e) => setComentario(e.target.value)}
+              rows={2}
+              className="rounded-xl border border-border-soft bg-surface px-3.5 py-2.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
             />
-            <span className="text-[13px] text-ink-2">Avisarle por WhatsApp y pedirle documentos</span>
           </label>
         </div>
 
@@ -1301,12 +1467,283 @@ function Seleccionar({
           <Button variant="outline" className="flex-1" onClick={onClose} disabled={enviando}>
             Cancelar
           </Button>
-          <Button className="flex-1" onClick={confirmar} disabled={enviando}>
-            {enviando ? "Creando…" : "Confirmar selección"}
+          <Button className="flex-1" onClick={programar} disabled={enviando}>
+            {enviando ? "Programando…" : "Programar entrevista"}
           </Button>
         </div>
       </Card>
     </div>
+  );
+}
+
+/* ============================================================
+   Etapa: Contratación — condiciones finales + expediente (6 documentos)
+   ============================================================ */
+function CampoTexto({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-sm font-medium text-ink-2">{label}</span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+      />
+    </label>
+  );
+}
+
+function CampoSelect({
+  label,
+  value,
+  onChange,
+  opciones,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  opciones: string[];
+}) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-sm font-medium text-ink-2">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+      >
+        <option value="">Selecciona…</option>
+        {opciones.map((o) => (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/** Fila de documento: Pendiente -> Subir documento -> Cargado -> Ver. */
+function FilaDocumentoSimple({
+  d,
+  expedienteId,
+  live,
+  onActualizado,
+}: {
+  d: DocExpediente;
+  expedienteId?: number;
+  live: boolean;
+  onActualizado: (e: NuevoIngreso) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [subiendo, setSubiendo] = useState(false);
+  const cargado = Boolean(d.tieneArchivo);
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !expedienteId) return;
+    setSubiendo(true);
+    const r = await subirDocumento(expedienteId, d.nombre, file);
+    setSubiendo(false);
+    if (r.ok) onActualizado(r.data.expediente);
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-2 rounded-xl border border-border-soft bg-surface px-3.5 py-2.5">
+      <span className="min-w-0 truncate text-sm">{d.nombre}</span>
+      <div className="flex shrink-0 items-center gap-2">
+        <Badge tone={cargado ? "good" : "neutral"}>{cargado ? "Cargado" : "Pendiente"}</Badge>
+        {cargado && expedienteId ? (
+          <a
+            href={urlDocumento(expedienteId, d.nombre)}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs font-semibold text-brand hover:underline"
+          >
+            Ver
+          </a>
+        ) : live && expedienteId ? (
+          <>
+            <input ref={inputRef} type="file" accept="image/*,application/pdf" className="hidden" onChange={onFile} />
+            <button
+              onClick={() => inputRef.current?.click()}
+              disabled={subiendo}
+              className="text-xs font-semibold text-brand hover:underline disabled:opacity-50"
+            >
+              {subiendo ? "Subiendo…" : "Subir documento"}
+            </button>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function PanelContratacion({
+  c,
+  live,
+  onCambio,
+  setAviso,
+}: {
+  c: Candidato;
+  live: boolean;
+  onCambio: (c: Candidato) => void;
+  setAviso: (a: { tono: "ok" | "error" | "warn"; texto: string } | null) => void;
+}) {
+  const cond = c.expedienteCondiciones;
+  const [puesto, setPuesto] = useState(cond?.puesto ?? c.puesto ?? "");
+  const [sueldo, setSueldo] = useState(cond?.sueldo ?? "");
+  const [tipo, setTipo] = useState(cond?.tipoContratacion ?? "");
+  const [fechaIngreso, setFechaIngreso] = useState(cond?.fechaIngreso ? cond.fechaIngreso.slice(0, 10) : "");
+  const [ubicacion, setUbicacion] = useState(cond?.ubicacion ?? "");
+  const [jefe, setJefe] = useState(cond?.jefeDirecto ?? "");
+  const [guardando, setGuardando] = useState(false);
+  const [expediente, setExpediente] = useState<NuevoIngreso | null>(null);
+  const [cancelando, setCancelando] = useState(false);
+  const [motivoCancelar, setMotivoCancelar] = useState("");
+  const [ocupado, setOcupado] = useState("");
+
+  const cargarExpediente = useCallback(() => {
+    if (!c.expedienteId) return;
+    fetchExpediente(c.expedienteId).then((e) => e && setExpediente(e));
+  }, [c.expedienteId]);
+
+  useEffect(() => {
+    cargarExpediente();
+  }, [cargarExpediente]);
+
+  async function guardar() {
+    setGuardando(true);
+    const r = await guardarCondicionesContratacion(c.id, {
+      puesto,
+      sueldo,
+      tipoContratacion: tipo,
+      fechaIngreso: fechaIngreso || undefined,
+      ubicacion,
+      jefeDirecto: jefe,
+    });
+    setGuardando(false);
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    setAviso({ tono: "ok", texto: "Condiciones de contratación guardadas." });
+    onCambio(r.data);
+  }
+
+  async function enviarOnboarding() {
+    setOcupado("onboarding");
+    const r = await moverEtapaCandidato(c.id, "Onboarding");
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    setAviso({ tono: "ok", texto: "Candidato enviado a Onboarding." });
+    onCambio(r.data);
+  }
+
+  async function confirmarCancelacion() {
+    if (!c.expedienteId || !motivoCancelar.trim()) return;
+    setOcupado("cancelar");
+    const r = await cancelarExpediente(c.expedienteId, motivoCancelar.trim());
+    if (!r.ok) {
+      setOcupado("");
+      return setAviso({ tono: "error", texto: r.error });
+    }
+    const actualizado = await fetchCandidato(c.id);
+    setOcupado("");
+    setCancelando(false);
+    if (actualizado) onCambio(actualizado);
+    setAviso({ tono: "ok", texto: "Contratación cancelada; el candidato regresó a Entrevista Humana." });
+  }
+
+  return (
+    <Card className="border-warn/25 bg-warn-soft/10 p-4">
+      <Eyebrow>Condiciones de contratación</Eyebrow>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <CampoTexto label="Puesto" value={puesto} onChange={setPuesto} />
+        <CampoTexto label="Sueldo" value={sueldo} onChange={setSueldo} placeholder="$14,000 mensuales" />
+        <CampoSelect label="Tipo de contratación" value={tipo} onChange={setTipo} opciones={TIPOS_CONTRATACION} />
+        <label className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium text-ink-2">Fecha de ingreso</span>
+          <input
+            type="date"
+            value={fechaIngreso}
+            onChange={(e) => setFechaIngreso(e.target.value)}
+            className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+          />
+        </label>
+        <CampoTexto label="Ubicación" value={ubicacion} onChange={setUbicacion} />
+        <CampoTexto label="Jefe directo" value={jefe} onChange={setJefe} />
+      </div>
+      {live && (
+        <Button size="sm" variant="secondary" className="mt-3" onClick={guardar} disabled={guardando}>
+          {guardando ? "Guardando…" : "Guardar condiciones"}
+        </Button>
+      )}
+
+      <div className="mt-5 border-t border-border-faint pt-4">
+        <div className="flex items-center justify-between gap-3">
+          <Eyebrow>Expediente · {c.expedienteProgreso ?? 0}%</Eyebrow>
+          <div className="w-32">
+            <Progress value={c.expedienteProgreso ?? 0} tone="good" />
+          </div>
+        </div>
+        <div className="mt-3 flex flex-col gap-2">
+          {(expediente?.documentos ?? []).map((d) => (
+            <FilaDocumentoSimple
+              key={d.nombre}
+              d={d}
+              expedienteId={c.expedienteId ?? undefined}
+              live={live}
+              onActualizado={setExpediente}
+            />
+          ))}
+        </div>
+      </div>
+
+      {live && (
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-border-faint pt-4">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setCancelando(true)}
+            disabled={Boolean(ocupado)}
+            className="border-bad/30 text-bad hover:bg-bad-soft"
+          >
+            Cancelar contratación
+          </Button>
+          <Button size="sm" onClick={enviarOnboarding} disabled={Boolean(ocupado)}>
+            Enviar a Onboarding
+          </Button>
+        </div>
+      )}
+
+      {cancelando && (
+        <div className="mt-3 flex flex-col gap-2 rounded-xl border border-bad/30 bg-bad-soft/40 p-3">
+          <input
+            value={motivoCancelar}
+            onChange={(e) => setMotivoCancelar(e.target.value)}
+            placeholder="Motivo de la cancelación…"
+            className="h-9 rounded-lg border border-border-soft bg-surface px-3 text-xs outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+          />
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => setCancelando(false)} disabled={ocupado === "cancelar"}>
+              Volver
+            </Button>
+            <Button size="sm" onClick={confirmarCancelacion} disabled={!motivoCancelar.trim() || ocupado === "cancelar"}>
+              {ocupado === "cancelar" ? "Cancelando…" : "Confirmar cancelación"}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

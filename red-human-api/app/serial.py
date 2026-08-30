@@ -119,10 +119,30 @@ def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
         "correo": c.correo,
         "consentimiento": c.consentimiento,
         "prefiltroCompleto": c.prefiltro_completo,
+        # --- Entrevista Humana (flujo manual) ---
+        "entrevistaHumana": {
+            "entrevistador": c.entrevista_humana_entrevistador,
+            "fecha": iso(c.entrevista_humana_fecha),
+            "modalidad": c.entrevista_humana_modalidad,
+            "comentario": c.entrevista_humana_comentario,
+            "realizada": c.entrevista_humana_realizada,
+        }
+        if c.entrevista_humana_fecha
+        else None,
         # --- puentes entre módulos ---
         "expedienteId": exp.id if exp else None,
         "expedienteProgreso": exp.progreso if exp else None,
         "expedienteEstado": exp.estado if exp else None,
+        "expedienteCondiciones": {
+            "puesto": exp.puesto,
+            "sueldo": exp.sueldo,
+            "tipoContratacion": exp.tipo_contratacion,
+            "ubicacion": exp.ubicacion,
+            "jefeDirecto": exp.jefe_directo,
+            "fechaIngreso": iso(exp.fecha_ingreso),
+        }
+        if exp
+        else None,
         "entrevistaId": ultima.codigo if ultima else None,
         "entrevistaEstado": ultima.estado if ultima else None,
         "entrevistaMatch": (ultima.evaluacion or {}).get("match_perfil") if ultima else None,
@@ -234,6 +254,11 @@ def expediente_dict(e: Expediente) -> dict:
         "ubicacion": (c.ubicacion if c else "") or "N/D",
         "ingreso": f"Ingresa el {fecha_corta(e.fecha_ingreso)}" if e.fecha_ingreso else "Fecha por definir",
         "fechaIngreso": iso(e.fecha_ingreso),
+        # --- condiciones finales de contratación (formulario de la etapa Contratación) ---
+        "sueldo": e.sueldo,
+        "tipoContratacion": e.tipo_contratacion,
+        "ubicacionTrabajo": e.ubicacion,
+        "jefeDirecto": e.jefe_directo,
         "progreso": e.progreso,
         "tono": (e.id or 0) % 4,
         "estado": estado,
@@ -271,6 +296,10 @@ def colaborador_dict(col: Colaborador) -> dict:
         "telefono": col.telefono,
         "puesto": col.puesto,
         "salario": col.salario,
+        "empresa": col.empresa,
+        "ubicacion": col.ubicacion,
+        "jefeDirecto": col.jefe_directo,
+        "estatus": "Activo" if col.activo else "Inactivo",
         "cvNombre": col.cv_nombre,
         "tieneCv": bool(col.cv_ruta),
         "fechaIngreso": iso(col.fecha_ingreso),
