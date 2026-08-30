@@ -83,6 +83,57 @@ def detalle(exp_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usu
 
 
 # ------------------------------------------------------------
+# Preparación de ingreso (Onboarding, bloque 4) — contrato, alta administrativa, equipo/accesos
+# ------------------------------------------------------------
+
+ESTADOS_CONTRATO = ("Pendiente", "Firmado")
+ESTADOS_ALTA_ADMIN = ("Pendiente", "Realizada")
+ESTADOS_EQUIPO_ACCESOS = ("Pendiente", "Listo", "No aplica")
+
+
+class PreparacionIn(BaseModel):
+    contrato: Optional[str] = None
+    alta_administrativa: Optional[str] = None
+    equipo_accesos: Optional[str] = None
+
+
+@router.patch("/expedientes/{exp_id}/preparacion")
+def actualizar_preparacion(
+    exp_id: int, datos: PreparacionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+):
+    """Bloque 4 de Onboarding — checklist de preparación de ingreso, independiente del
+    expediente documental (bloque 3)."""
+    e = _expediente(db, exp_id)
+    if e.estado == "alta":
+        raise HTTPException(409, "El expediente ya fue dado de alta; no admite cambios.")
+
+    cambios = []
+    if datos.contrato is not None:
+        if datos.contrato not in ESTADOS_CONTRATO:
+            raise HTTPException(400, f"contrato inválido. Usa uno de: {', '.join(ESTADOS_CONTRATO)}")
+        e.contrato = datos.contrato
+        cambios.append("contrato")
+    if datos.alta_administrativa is not None:
+        if datos.alta_administrativa not in ESTADOS_ALTA_ADMIN:
+            raise HTTPException(400, f"alta_administrativa inválida. Usa una de: {', '.join(ESTADOS_ALTA_ADMIN)}")
+        e.alta_administrativa = datos.alta_administrativa
+        cambios.append("alta_administrativa")
+    if datos.equipo_accesos is not None:
+        if datos.equipo_accesos not in ESTADOS_EQUIPO_ACCESOS:
+            raise HTTPException(400, f"equipo_accesos inválido. Usa uno de: {', '.join(ESTADOS_EQUIPO_ACCESOS)}")
+        e.equipo_accesos = datos.equipo_accesos
+        cambios.append("equipo_accesos")
+
+    if cambios:
+        registrar(
+            db, u.nombre, "preparacion_ingreso_actualizada", "expediente", str(e.id),
+            {"campos": cambios, "correo_rh": u.correo},
+        )
+        db.commit()
+    return expediente_dict(e)
+
+
+# ------------------------------------------------------------
 # Documentos: subir → validar con IA → estado (revisión humana si hay duda)
 # ------------------------------------------------------------
 

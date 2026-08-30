@@ -315,6 +315,10 @@ class Expediente(Base):
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
     jefe_directo: Mapped[str] = mapped_column(String(150), default="")
     fecha_ingreso: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # --- preparación de ingreso (Onboarding, bloque 4) ---
+    contrato: Mapped[str] = mapped_column(String(20), default="Pendiente")  # Pendiente | Firmado
+    alta_administrativa: Mapped[str] = mapped_column(String(20), default="Pendiente")  # Pendiente | Realizada
+    equipo_accesos: Mapped[str] = mapped_column(String(20), default="Pendiente")  # Pendiente | Listo | No aplica
     estado: Mapped[str] = mapped_column(String(20), default="integracion")  # integracion | completo | alta
     alta_autorizada_por: Mapped[str] = mapped_column(String(150), default="")
     alta_fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

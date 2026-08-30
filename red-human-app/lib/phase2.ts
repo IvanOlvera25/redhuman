@@ -49,6 +49,10 @@ export interface NuevoIngreso {
   tipoContratacion?: string;
   ubicacionTrabajo?: string;
   jefeDirecto?: string;
+  /* --- preparación de ingreso (Onboarding, bloque 4) --- */
+  contrato?: "Pendiente" | "Firmado";
+  altaAdministrativa?: "Pendiente" | "Realizada";
+  equipoAccesos?: "Pendiente" | "Listo" | "No aplica";
   pendientes?: string[];
   porRevisar?: string[];
   sinConfirmar?: string[];
@@ -61,6 +65,14 @@ export interface NuevoIngreso {
   score?: number;
   entrevistaMatch?: number | null;
   entrevistaRecomendacion?: string | null;
+  /* --- Bloque 2 (resumen de evaluación) --- */
+  evaluacion?: {
+    score: number;
+    requisitosCumplidos: string[];
+    brechas: string[];
+    alertas: string[];
+    evidencia: string;
+  } | null;
   /* trazabilidad HITL */
   seleccionadoPor?: string;
   altaAutorizadaPor?: string;
