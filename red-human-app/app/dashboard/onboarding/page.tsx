@@ -507,12 +507,10 @@ function Expediente({
           <p className="mb-3 text-[12px] leading-relaxed text-ink-3">{bloqueoAlta}</p>
         )}
 
-        <Button
-          size="lg"
-          className="w-full"
-          disabled={Boolean(ocupado) || !n.listoParaAlta || n.estado === "alta"}
-          onClick={alta}
-        >
+        {/* Siempre visible y habilitado en Onboarding — el progreso de documentos ya no lo
+            oculta ni lo deshabilita. Si faltan documentos obligatorios, el backend rechaza
+            la petición (409) y el mensaje aparece arriba en {aviso}; el botón nunca desaparece. */}
+        <Button size="lg" className="w-full" disabled={Boolean(ocupado) || n.estado === "alta"} onClick={alta}>
           <FileCheck2 className="h-5 w-5" />
           {n.estado === "alta" ? "Alta completada ✓" : ocupado === "alta" ? "Dando de alta…" : "DAR DE ALTA COMO COLABORADOR"}
         </Button>
