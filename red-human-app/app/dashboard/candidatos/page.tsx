@@ -34,6 +34,7 @@ import { Aviso, Dropzone, pesoLegible } from "@/components/dashboard/subida";
 import { candidatos as candidatosDemo, type Candidato, type EtapaCandidato, type Vacante } from "@/lib/data";
 import type { DocExpediente, NuevoIngreso } from "@/lib/phase2";
 import {
+  autorizarAlta,
   cancelarExpediente,
   decidirCandidato,
   enviarPrefiltro,
@@ -444,6 +445,23 @@ function ModalCandidato({
     if (data) onCambio(data.candidato);
   }
 
+  /** Botón principal de Onboarding — cierra el ciclo y mueve el registro a Colaboradores.
+   * Siempre visible y habilitado mientras esté en Onboarding: si faltan documentos
+   * obligatorios, el backend lo rechaza (409) y el motivo se muestra en {aviso}. */
+  async function darDeAltaComoColaborador() {
+    if (!live || !c.expedienteId) return setAviso({ tono: "warn", texto: "Levanta la API para dar de alta al candidato." });
+    setOcupado("alta");
+    const r = await autorizarAlta(c.expedienteId);
+    if (!r.ok) {
+      setOcupado("");
+      return setAviso({ tono: "error", texto: r.error });
+    }
+    const actualizado = await fetchCandidato(c.id);
+    setOcupado("");
+    if (actualizado) onCambio(actualizado);
+    setAviso({ tono: "ok", texto: "Alta registrada — el candidato se movió a Colaboradores." });
+  }
+
   async function consentir() {
     setOcupado("consentimiento");
     const r = await registrarConsentimiento(c.id, {
@@ -639,6 +657,22 @@ function ModalCandidato({
                   </a>
                 )}
               </div>
+
+              {/* Botón principal — siempre visible en Onboarding, sin importar el estado de los documentos */}
+              {c.etapa === "Onboarding" && (
+                <Button
+                  className="w-full"
+                  onClick={darDeAltaComoColaborador}
+                  disabled={Boolean(ocupado) || c.expedienteEstado === "alta"}
+                >
+                  <UserCheck className="h-4 w-4" />
+                  {c.expedienteEstado === "alta"
+                    ? "Alta completada ✓"
+                    : ocupado === "alta"
+                      ? "Dando de alta…"
+                      : "DAR DE ALTA COMO COLABORADOR"}
+                </Button>
+              )}
             </div>
           </div>
         )}
