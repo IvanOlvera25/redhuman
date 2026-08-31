@@ -162,6 +162,10 @@ class Entrevista(Base):
     consentimiento: Mapped[bool] = mapped_column(Boolean, default=False)
     consentimiento_fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     programada_para: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Videollamada de Google Meet generada a mano por RH (botones del panel) — independiente
+    # de `token`/avatar Anam de arriba. Usa el mismo generador mock que la herramienta
+    # agendar_videollamada del agente (ver services/ia.agendar_videollamada_mock).
+    liga_meet: Mapped[str] = mapped_column(String(300), default="")
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
     candidato: Mapped[Candidato] = relationship(back_populates="entrevistas")

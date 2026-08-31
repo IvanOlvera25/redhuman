@@ -203,6 +203,7 @@ def entrevista_dict(e: Entrevista) -> dict:
         "mensajes": len(e.transcript or []),
         "evaluacion": e.evaluacion or None,
         "tono": (c.id if c else 0) % 4,
+        "ligaMeet": e.liga_meet or "",
     }
 
 
