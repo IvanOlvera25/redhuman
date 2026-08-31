@@ -482,10 +482,23 @@ export interface Entrevista {
   mensajes: number;
   evaluacion: EvaluacionEntrevista | null;
   tono: number;
+  ligaMeet: string;
 }
 
 export function fetchEntrevistas() {
   return get<Entrevista[]>("/entrevistas");
+}
+
+/** Botón "Generar liga de Google Meet" — misma herramienta mock que usa Zero-Touch. */
+export function generarLigaMeet(codigo: string) {
+  return post<Entrevista>(`/entrevistas/${codigo}/generar-liga-meet`);
+}
+
+/** Botón "Enviar liga por WhatsApp" — requiere haber generado la liga primero. */
+export function enviarLigaMeetWhatsapp(codigo: string) {
+  return post<Entrevista & { whatsapp: { enviado: boolean; detalle?: string } }>(
+    `/entrevistas/${codigo}/enviar-liga-whatsapp`,
+  );
 }
 
 export function agendarEntrevista(candidato: string, avisarWhatsapp = true) {

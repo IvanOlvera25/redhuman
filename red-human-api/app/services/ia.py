@@ -567,14 +567,19 @@ HERRAMIENTA_AGENDAR_VIDEOLLAMADA = {
 LIGA_VIDEOLLAMADA_DEMO = "https://meet.google.com/redhuman-demo"
 
 
-def _agendar_videollamada_mock(nombre_candidato: str, fecha_hora: str) -> dict:
+def agendar_videollamada_mock(nombre_candidato: str, fecha_hora: str) -> dict:
     """Ejecuta la herramienta 'agendar_videollamada'. MOCK: todavía no hay integración real con
     un calendario, así que solo registra la intención y regresa una liga fija.
+
+    Sin guion bajo a propósito: además de `agenda_turno` (function calling del agente), la usa
+    directo `routers/entrevistas.py` para los botones manuales «Generar liga de Google Meet» —
+    misma herramienta, sin pasar por el modelo. Es la única función que ambos caminos comparten;
+    ninguno de los dos le cambia el comportamiento al otro.
 
     Para conectar Google Calendar más adelante: sustituir el cuerpo por la llamada real (crear
     evento, invitar al candidato con su correo, regresar la liga de Meet real que da la API). La
     firma — (nombre, fecha_hora) -> {"liga": str, "fecha_hora": str} — no debería cambiar, así
-    que ni `agenda_turno` ni el router que la llama (candidatos.py) se enteran del cambio.
+    que ningún llamador se entera del cambio.
     """
     print(f"[agendar_videollamada] Agendando videollamada para {nombre_candidato} el {fecha_hora}")
     return {"liga": LIGA_VIDEOLLAMADA_DEMO, "fecha_hora": fecha_hora}
@@ -624,7 +629,7 @@ def agenda_turno(nombre_candidato: str, vacante_titulo: str, historial: List[dic
 
     args = json.loads(llamada.arguments or "{}")
     fecha_hora = args.get("fecha_hora", "")
-    resultado_tool = _agendar_videollamada_mock(nombre_candidato, fecha_hora)
+    resultado_tool = agendar_videollamada_mock(nombre_candidato, fecha_hora)
 
     # Se reenvía resp.output completo (no solo el function_call): en modelos con razonamiento
     # la Responses API exige también el ítem de 'reasoning' que precedió a la llamada, o rechaza

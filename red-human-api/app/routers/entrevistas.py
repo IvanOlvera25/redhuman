@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import usuario_actual, usuario_decisor
-from ..models import Candidato, Entrevista, Usuario, Vacante, registrar
+from ..models import Candidato, Entrevista, Mensaje, Usuario, Vacante, registrar
 from ..serial import entrevista_dict
 from ..services import ia
 from ..services.avatar import avatar_activo, crear_sesion_avatar
@@ -28,6 +28,13 @@ router = APIRouter(prefix="/entrevistas", tags=["entrevistas"])
 
 def _por_token(db: Session, token: str) -> Entrevista:
     e = db.query(Entrevista).filter(Entrevista.token == token).first()
+    if not e:
+        raise HTTPException(404, "Entrevista no encontrada")
+    return e
+
+
+def _por_codigo(db: Session, codigo: str) -> Entrevista:
+    e = db.query(Entrevista).filter(Entrevista.codigo == codigo).first()
     if not e:
         raise HTTPException(404, "Entrevista no encontrada")
     return e
@@ -160,6 +167,66 @@ async def inmediata(datos: InmediataIn, db: Session = Depends(get_db), u: Usuari
         db.commit()
 
     return await agendar(AgendarIn(candidato=c.codigo, avisar_whatsapp=datos.avisar_whatsapp), db, u)
+
+
+# ------------------------------------------------------------
+# Videollamada manual de Google Meet — RH controla lo que hoy dispara solo el agente
+# ------------------------------------------------------------
+#
+# Misma herramienta que usa Zero-Touch (ia.agendar_videollamada_mock) y el mismo
+# services/whatsapp.py, pero disparados directo desde el botón de RH, sin pasar por el
+# modelo ni por el function calling — no le cambian el comportamiento a ninguno de los dos.
+
+
+@router.post("/{codigo}/generar-liga-meet")
+def generar_liga_meet(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+    """Botón «Generar liga de Google Meet»."""
+    e = _por_codigo(db, codigo)
+    c = e.candidato
+    nombre = (c.wa_nombre or c.nombre) if c else "candidato(a)"
+    fecha_hora = e.programada_para.isoformat() if e.programada_para else datetime.now(timezone.utc).isoformat()
+
+    resultado = ia.agendar_videollamada_mock(nombre, fecha_hora)
+    e.liga_meet = resultado["liga"]
+    registrar(
+        db, u.nombre, "liga_meet_generada", "entrevista", e.codigo,
+        {"candidato": c.codigo if c else "", "liga": e.liga_meet, "correo_rh": u.correo},
+    )
+    db.commit()
+    return entrevista_dict(e)
+
+
+@router.post("/{codigo}/enviar-liga-whatsapp")
+async def enviar_liga_whatsapp(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+    """Botón «Enviar liga por WhatsApp» — requiere haber generado la liga primero."""
+    e = _por_codigo(db, codigo)
+    if not e.liga_meet:
+        raise HTTPException(409, "Primero genera la liga de Google Meet.")
+    c = e.candidato
+    if not c or not c.telefono:
+        raise HTTPException(409, "El candidato no tiene WhatsApp registrado.")
+
+    puesto = c.vacante.titulo if c.vacante else "la vacante"
+    texto = (
+        f"¡Hola {c.nombre.split(' ')[0]}! 👋 Tu videollamada de entrevista para {puesto} está lista. "
+        f"Únete aquí a la hora acordada: {e.liga_meet}"
+    )
+    try:
+        envio = await enviar_mensaje(c.telefono, texto)
+    except Exception as ex:  # que WhatsApp falle no debe tumbar el flujo
+        print(f"[whatsapp-send-error] enviar_liga_whatsapp -> {e.codigo}: {ex}")
+        envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+
+    db.add(Mensaje(
+        candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
+        enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
+    ))
+    registrar(
+        db, u.nombre, "liga_meet_enviada_whatsapp", "entrevista", e.codigo,
+        {"whatsapp": envio, "correo_rh": u.correo},
+    )
+    db.commit()
+    return {"whatsapp": envio, **entrevista_dict(e)}
 
 
 # ------------------------------------------------------------
