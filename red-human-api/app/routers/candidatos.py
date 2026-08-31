@@ -334,9 +334,13 @@ async def _disparar_plantilla_inicio(db: Session, c: Candidato) -> dict:
         return {"enviado": False, "detalle": "El candidato no dejó WhatsApp."}
     primer_nombre = (c.nombre or "").split(" ")[0] or "candidato(a)"
     envio = await enviar_plantilla(c.telefono, PLANTILLA_INICIO_ENTREVISTA, [primer_nombre])
+    texto_mensaje = (
+        f"[Plantilla de WhatsApp «{PLANTILLA_INICIO_ENTREVISTA}»] Hola {primer_nombre}, ¡gracias por tu interés! Empecemos con tu proceso."
+        if envio.get("enviado")
+        else f"[Fallo de envío Meta] La plantilla «{PLANTILLA_INICIO_ENTREVISTA}» no pudo entregarse a {c.telefono}: {envio.get('detalle', 'sin detalle')}."
+    )
     db.add(Mensaje(
-        candidato_id=c.id, rol="assistant",
-        texto=f"[Plantilla de WhatsApp «{PLANTILLA_INICIO_ENTREVISTA}»] Hola {primer_nombre}, ¡gracias por tu interés! Empecemos con tu proceso.",
+        candidato_id=c.id, rol="assistant", texto=texto_mensaje,
         canal="whatsapp", enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
     ))
     registrar(

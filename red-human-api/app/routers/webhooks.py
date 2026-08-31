@@ -214,8 +214,11 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
         primer_nombre = nombre_ingresado.split()[0]
         saludo = f"¡Mucho gusto, {primer_nombre}! 👋 Vamos a iniciar con unas breves preguntas para tu postulación{puesto}."
         
-        await enviar_mensaje(telefono, saludo)
-        db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=saludo, canal="whatsapp", enviado=True))
+        envio_saludo = await enviar_mensaje(telefono, saludo)
+        db.add(Mensaje(
+            candidato_id=c.id, rol="assistant", texto=saludo, canal="whatsapp",
+            enviado=envio_saludo.get("enviado", False), wa_id=envio_saludo.get("wa_id", ""),
+        ))
         db.flush()
 
         mensaje_inicio = f"Mi nombre es {c.nombre} y me postulo a la vacante {vac.titulo if vac else ''}."
@@ -272,8 +275,11 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
             db.commit()
 
             pregunta_nombre = f"¡Excelente elección! Te postularás para *{vacante.titulo}*.\n\nAntes de comenzar, ¿cuál es tu *nombre completo*?"
-            await enviar_mensaje(telefono, pregunta_nombre)
-            db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=pregunta_nombre, canal="whatsapp", enviado=True))
+            envio_pregunta = await enviar_mensaje(telefono, pregunta_nombre)
+            db.add(Mensaje(
+                candidato_id=c.id, rol="assistant", texto=pregunta_nombre, canal="whatsapp",
+                enviado=envio_pregunta.get("enviado", False), wa_id=envio_pregunta.get("wa_id", ""),
+            ))
             db.commit()
             return {"ok": True, "accion": "solicitando_nombre", "candidato": c.codigo}
 
@@ -304,9 +310,12 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
 
         despedida = "¡Gracias! Tu pre-filtro ya está completo. El equipo de RH revisará tu información y te contactará pronto. 😊"
         print(f"[agente] Candidato {c.codigo} ya completó prefiltro. Enviando despedida a {telefono}")
-        await enviar_mensaje(telefono, despedida)
+        envio_despedida = await enviar_mensaje(telefono, despedida)
         db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal="whatsapp"))
-        db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=despedida, canal="whatsapp", enviado=True))
+        db.add(Mensaje(
+            candidato_id=c.id, rol="assistant", texto=despedida, canal="whatsapp",
+            enviado=envio_despedida.get("enviado", False), wa_id=envio_despedida.get("wa_id", ""),
+        ))
         db.commit()
         return {"ok": True, "accion": "prefiltro_ya_completo", "candidato": c.codigo}
 

@@ -114,6 +114,7 @@ async def _meta_post(cuerpo: dict) -> dict:
         async with httpx.AsyncClient(timeout=20) as cli:
             r = await cli.post(_meta_url(), headers=_meta_headers(), json=cuerpo)
     except Exception as e:  # red caída: no romper el flujo de RH
+        print(f"[whatsapp] Error de red al llamar a Meta: {e}")
         return _resultado(False, f"error de red: {e}")
 
     if r.status_code < 300:
@@ -122,6 +123,9 @@ async def _meta_post(cuerpo: dict) -> dict:
         return _resultado(True, r.status_code, wa_id=wamid)
 
     error = _meta_error(r)
+    # Silencioso para el candidato/RH: el detalle completo solo queda en logs del
+    # servidor para poder depurar (payload rechazado, plantilla no aprobada, etc.).
+    print(f"[whatsapp] Meta rechazó el mensaje ({r.status_code}): {r.text[:1000]}")
     return _resultado(False, f"{error['codigo']}: {error['mensaje']}", codigo=error["codigo"])
 
 
