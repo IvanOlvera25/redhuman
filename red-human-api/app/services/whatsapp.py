@@ -155,7 +155,7 @@ async def enviar_plantilla(
         "type": "template",
         "template": {
             "name": plantilla,
-            "language": {"code": idioma or settings.meta_plantilla_idioma},
+            "language": {"code": idioma or "es_MX"},
             **({"components": componentes} if componentes else {}),
         },
     }
