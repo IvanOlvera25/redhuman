@@ -27,6 +27,8 @@ import {
   Mail,
   Phone,
   CalendarClock,
+  FlaskConical,
+  ChevronDown,
 } from "lucide-react";
 import { Card, Badge, Button, Avatar, Eyebrow, Progress } from "@/components/ui";
 import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
@@ -45,6 +47,7 @@ import {
   fetchMensajes,
   fetchVacantes,
   guardarCondicionesContratacion,
+  liberarTelefonoCandidato,
   marcarEntrevistaHumanaRealizada,
   moverEtapaCandidato,
   programarEntrevistaHumana,
@@ -80,11 +83,17 @@ const etapaColor: Record<EtapaCandidato, string> = {
   Onboarding: "var(--good)",
 };
 
-/** Destinos manuales a los que RH puede mandar una tarjeta con un botón explícito.
- * "Entrevista Humana" abre el modal de agenda (no hace PATCH directo); el resto va por
- * PATCH /candidatos/{codigo}/etapa. Onboarding queda fuera: solo se llega ahí con el botón
- * "Enviar a Onboarding" de la propia etapa Contratación. */
-const ETAPAS_AVANCE_MANUAL: EtapaCandidato[] = ["Evaluación", "Entrevista Humana", "Contratación"];
+/** Zero-touch: la IA ya avanzó sola al candidato hasta aquí; esto es solo el siguiente
+ * checkpoint humano al que RH puede mandarlo con un botón explícito (no "cualquier etapa
+ * futura" — cada etapa tiene un único destino manual). "Entrevista Humana" abre el modal de
+ * agenda (no hace PATCH directo); el resto va por PATCH /candidatos/{codigo}/etapa. Prefiltro,
+ * Entrevista IA y Onboarding no tienen destino manual aquí — Prefiltro solo descarta (la IA
+ * dispara Entrevista IA sola), Entrevista IA solo descarta, y a Onboarding solo se llega con
+ * el botón "Enviar a Onboarding" de la propia etapa Contratación. */
+const SIGUIENTE_ETAPA_MANUAL: Partial<Record<EtapaCandidato, EtapaCandidato[]>> = {
+  Evaluación: ["Entrevista Humana"],
+  "Entrevista Humana": ["Contratación"],
+};
 
 type FiltroEstado = "todos" | "en_proceso" | "aptos" | "contratados" | "descartados";
 
@@ -394,6 +403,7 @@ function ModalCandidato({
   const [ocupado, setOcupado] = useState("");
   const [comentario, setComentario] = useState("");
   const [modalEntrevista, setModalEntrevista] = useState(false);
+  const [verEvaluacionIA, setVerEvaluacionIA] = useState(false);
 
   function resolver<T>(r: { ok: true; data: T } | { ok: false; error: string }, exito: string) {
     setOcupado("");
@@ -426,6 +436,20 @@ function ModalCandidato({
       setComentario("");
       onCambio(data);
     }
+  }
+
+  /** SOLO PRUEBAS: libera teléfono/wa_id para reutilizar el mismo número de WhatsApp en
+   * pruebas repetidas sin que el webhook lo asocie a este candidato. No confundir con las
+   * acciones normales del flujo — no borra mensajes, CV ni expediente. */
+  async function liberarTelefono() {
+    if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar la acción en la bitácora." });
+    if (!window.confirm(`Esto es solo para pruebas: se le va a quitar el teléfono y wa_id a ${c.nombre} (no se borra nada más). ¿Continuar?`)) {
+      return;
+    }
+    setOcupado("liberar-telefono");
+    const r = await liberarTelefonoCandidato(c.id);
+    const data = resolver(r, "Teléfono liberado — este candidato ya no está asociado a ese número.");
+    if (data) onCambio(data);
   }
 
   /** Onboarding · Zero-Touch fase 2 — RH detona, la IA da seguimiento por WhatsApp. */
@@ -472,7 +496,7 @@ function ModalCandidato({
     if (data) onCambio(data);
   }
 
-  const siguientesEtapas = ETAPAS_AVANCE_MANUAL.filter((e) => etapas.indexOf(e) > etapas.indexOf(c.etapa));
+  const siguientesEtapas = SIGUIENTE_ETAPA_MANUAL[c.etapa] ?? [];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-md animate-in fade-in duration-200">
@@ -573,8 +597,26 @@ function ModalCandidato({
           {tab === "whatsapp" && <PestanaWhatsApp c={c} live={live} onCambio={onCambio} />}
         </div>
 
-        {/* Etapa Prefiltro: exactamente 2 botones — fricción manual para forzar Entrevista IA
-            sin esperar a que el agente termine el prefiltro por su cuenta (Zero-Touch). */}
+        {/* SOLO PRUEBAS: independiente de la etapa — no es parte del flujo normal del candidato. */}
+        {puedeDecidir && (
+          <div className="border-t border-border-soft bg-surface px-6 py-2">
+            <div className="flex justify-end">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={liberarTelefono}
+                disabled={Boolean(ocupado)}
+                title="Solo para pruebas: quita el teléfono/wa_id de este candidato para reutilizar el número en otra prueba."
+                className="text-[11px] text-ink-3 opacity-70 hover:opacity-100"
+              >
+                <FlaskConical className="h-3.5 w-3.5" /> Liberar número (prueba)
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Etapa Prefiltro: solo Descartar — el paso a Entrevista IA es zero-touch, lo dispara
+            la IA sola por WhatsApp al completar el prefiltro (no hay botón manual). */}
         {puedeDecidir && c.etapa === "Prefiltro" && (
           <div className="border-t border-border-soft bg-surface px-6 py-4">
             <div className="flex flex-wrap items-center gap-2">
@@ -586,9 +628,6 @@ function ModalCandidato({
                 className="border-bad/30 text-bad hover:bg-bad-soft"
               >
                 <ThumbsDown className="h-4 w-4" /> Descartar candidato
-              </Button>
-              <Button variant="secondary" size="sm" onClick={() => enviarAEtapa("Entrevista IA")} disabled={Boolean(ocupado)}>
-                <ThumbsUp className="h-4 w-4" /> Enviar a Entrevista IA
               </Button>
             </div>
           </div>
@@ -608,6 +647,33 @@ function ModalCandidato({
                 placeholder="Nota de decisión para auditoría (opcional)…"
                 className="h-10 w-full rounded-xl border border-border-soft bg-bg px-3.5 text-xs sm:text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
               />
+
+              {/* Etapa Entrevista IA: resumen en línea de la evaluación del avatar, si ya existe. */}
+              {c.etapa === "Entrevista IA" && (c.entrevistaMatch != null || c.entrevistaRecomendacion) && (
+                <div>
+                  <button
+                    onClick={() => setVerEvaluacionIA((x) => !x)}
+                    className="flex items-center gap-1 text-xs font-semibold text-brand hover:underline"
+                  >
+                    <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", verEvaluacionIA && "rotate-180")} />
+                    {verEvaluacionIA ? "Ocultar evaluación" : "Ver evaluación"}
+                  </button>
+                  {verEvaluacionIA && (
+                    <div className="mt-2 rounded-xl border border-border-soft bg-bg p-3 text-xs text-ink-2">
+                      {c.entrevistaMatch != null && (
+                        <p>
+                          Match de la entrevista: <b className="text-ink">{c.entrevistaMatch}%</b>
+                        </p>
+                      )}
+                      {c.entrevistaRecomendacion && (
+                        <p>
+                          Recomendación de la IA: <b className="text-ink">{c.entrevistaRecomendacion}</b>
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="flex flex-wrap items-center gap-2">
                 {c.expedienteId == null && (
@@ -635,6 +701,13 @@ function ModalCandidato({
                     <ThumbsUp className="h-4 w-4" /> Enviar a {etapa}
                   </Button>
                 ))}
+
+                {/* Etapa Entrevista Humana: agendar una segunda ronda sin mover la tarjeta. */}
+                {c.etapa === "Entrevista Humana" && (
+                  <Button variant="outline" size="sm" onClick={() => setModalEntrevista(true)} disabled={Boolean(ocupado)}>
+                    <CalendarClock className="h-4 w-4" /> Agendar otra Entrevista Humana
+                  </Button>
+                )}
 
                 {/* Onboarding · Zero-Touch fase 2: RH detona por WhatsApp, la IA da seguimiento */}
                 {c.etapa === "Onboarding" && (

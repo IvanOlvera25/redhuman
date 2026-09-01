@@ -6,7 +6,6 @@ texto (modo demo) → al terminar, la IA evalúa y deja una RECOMENDACIÓN;
 la decisión de avanzar/descartar sigue siendo humana (LFPDPPP).
 """
 
-import secrets
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -21,6 +20,7 @@ from ..models import Candidato, Entrevista, Mensaje, Usuario, Vacante, registrar
 from ..serial import entrevista_dict
 from ..services import ia
 from ..services.avatar import avatar_activo, crear_sesion_avatar
+from ..services.entrevistas import crear_entrevista_para_candidato
 from ..services.whatsapp import enviar_mensaje
 
 router = APIRouter(prefix="/entrevistas", tags=["entrevistas"])
@@ -83,13 +83,6 @@ async def agendar(datos: AgendarIn, db: Session = Depends(get_db), u: Usuario = 
     if not c:
         raise HTTPException(404, "Candidato no encontrado")
 
-    v = c.vacante
-    guion, con_ia = ia.guion_entrevista(
-        v.titulo if v else "vacante general",
-        v.requisitos if v else "",
-        c.experiencia or "",
-    )
-
     fecha = None
     if datos.programada_para:
         try:
@@ -97,21 +90,9 @@ async def agendar(datos: AgendarIn, db: Session = Depends(get_db), u: Usuario = 
         except ValueError:
             raise HTTPException(400, "programada_para inválida (usa ISO: 2026-07-28T15:00)")
 
-    e = Entrevista(
-        codigo="TMP",
-        candidato_id=c.id,
-        token=secrets.token_urlsafe(24),
-        tipo="avatar" if avatar_activo() else "texto",
-        guion=guion.model_dump(),
-        programada_para=fecha,
-    )
-    db.add(e)
-    db.flush()
-    e.codigo = f"ENT-{300 + e.id}"
-    if c.etapa == "Prefiltro":
-        c.etapa = "Entrevista IA"  # ver ETAPAS_CANDIDATO — la entrevista con avatar también es "IA"
-    registrar(db, u.nombre, "entrevista_agendada", "entrevista", e.codigo, {"candidato": c.codigo, "ia": con_ia})
+    e, con_ia = crear_entrevista_para_candidato(db, c, u.nombre, programada_para=fecha)
 
+    v = c.vacante
     liga = f"{settings.app_url}/entrevista/{e.token}"
     envio = {"enviado": False, "proveedor": "demo"}
     if datos.avisar_whatsapp and c.telefono:
@@ -167,66 +148,6 @@ async def inmediata(datos: InmediataIn, db: Session = Depends(get_db), u: Usuari
         db.commit()
 
     return await agendar(AgendarIn(candidato=c.codigo, avisar_whatsapp=datos.avisar_whatsapp), db, u)
-
-
-# ------------------------------------------------------------
-# Videollamada manual de Google Meet — RH controla lo que hoy dispara solo el agente
-# ------------------------------------------------------------
-#
-# Misma herramienta que usa Zero-Touch (ia.agendar_videollamada_mock) y el mismo
-# services/whatsapp.py, pero disparados directo desde el botón de RH, sin pasar por el
-# modelo ni por el function calling — no le cambian el comportamiento a ninguno de los dos.
-
-
-@router.post("/{codigo}/generar-liga-meet")
-def generar_liga_meet(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    """Botón «Generar liga de Google Meet»."""
-    e = _por_codigo(db, codigo)
-    c = e.candidato
-    nombre = (c.wa_nombre or c.nombre) if c else "candidato(a)"
-    fecha_hora = e.programada_para.isoformat() if e.programada_para else datetime.now(timezone.utc).isoformat()
-
-    resultado = ia.agendar_videollamada_mock(nombre, fecha_hora)
-    e.liga_meet = resultado["liga"]
-    registrar(
-        db, u.nombre, "liga_meet_generada", "entrevista", e.codigo,
-        {"candidato": c.codigo if c else "", "liga": e.liga_meet, "correo_rh": u.correo},
-    )
-    db.commit()
-    return entrevista_dict(e)
-
-
-@router.post("/{codigo}/enviar-liga-whatsapp")
-async def enviar_liga_whatsapp(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    """Botón «Enviar liga por WhatsApp» — requiere haber generado la liga primero."""
-    e = _por_codigo(db, codigo)
-    if not e.liga_meet:
-        raise HTTPException(409, "Primero genera la liga de Google Meet.")
-    c = e.candidato
-    if not c or not c.telefono:
-        raise HTTPException(409, "El candidato no tiene WhatsApp registrado.")
-
-    puesto = c.vacante.titulo if c.vacante else "la vacante"
-    texto = (
-        f"¡Hola {c.nombre.split(' ')[0]}! 👋 Tu videollamada de entrevista para {puesto} está lista. "
-        f"Únete aquí a la hora acordada: {e.liga_meet}"
-    )
-    try:
-        envio = await enviar_mensaje(c.telefono, texto)
-    except Exception as ex:  # que WhatsApp falle no debe tumbar el flujo
-        print(f"[whatsapp-send-error] enviar_liga_whatsapp -> {e.codigo}: {ex}")
-        envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
-
-    db.add(Mensaje(
-        candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
-        enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
-    ))
-    registrar(
-        db, u.nombre, "liga_meet_enviada_whatsapp", "entrevista", e.codigo,
-        {"whatsapp": envio, "correo_rh": u.correo},
-    )
-    db.commit()
-    return {"whatsapp": envio, **entrevista_dict(e)}
 
 
 # ------------------------------------------------------------
@@ -335,8 +256,9 @@ class FinalizarIn(BaseModel):
 
 
 @router.post("/publica/{token}/finalizar")
-def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db)):
-    """Cierra la entrevista y corre la evaluación IA (recomendación para RH)."""
+async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db)):
+    """Cierra la entrevista, corre la evaluación IA (recomendación para RH) y mueve al
+    candidato a la etapa Evaluación — Zero-Touch, sin intervención manual de RH."""
     e = _por_token(db, token)
     if e.estado == "evaluada":
         return entrevista_dict(e)
@@ -364,5 +286,32 @@ def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db)):
         db, "agente-ia", "entrevista_evaluada", "entrevista", e.codigo,
         {"ia": con_ia, "recomendacion": ev.recomendacion, "match": ev.match_perfil},
     )
+
+    # Zero-Touch: mueve el Kanban a Evaluación — NO toca c.estado, la recomendación de la IA
+    # queda solo como dato para que RH decida a mano ahí, mismo patrón HITL que el resto del
+    # sistema (ver _auto_decision_zero_touch en candidatos.py).
+    if c and c.etapa == "Entrevista IA":
+        c.etapa = "Evaluación"
+        registrar(
+            db, "agente-ia", "auto_evaluacion_zero_touch", "candidato", c.codigo,
+            {"entrevista": e.codigo, "recomendacion": ev.recomendacion, "match": ev.match_perfil},
+        )
+
+        primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
+        texto = (
+            f"¡Gracias, {primer_nombre}! 🙌 Terminamos tu entrevista para {v.titulo if v else 'la vacante'}. "
+            "El equipo de RH va a revisar tus resultados y te contactará pronto."
+        )
+        if c.telefono:
+            try:
+                envio = await enviar_mensaje(c.telefono, texto)
+            except Exception as ex:  # que WhatsApp falle no debe tumbar el cierre de la entrevista
+                print(f"[whatsapp-send-error] finalizar -> {e.codigo}: {ex}")
+                envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+            db.add(Mensaje(
+                candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
+                enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
+            ))
+
     db.commit()
     return entrevista_dict(e)

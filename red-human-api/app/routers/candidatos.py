@@ -509,6 +509,20 @@ def asignar(codigo: str, datos: AsignarIn, db: Session = Depends(get_db), u: Usu
     return candidato_dict(c, detalle=True)
 
 
+@router.post("/{codigo}/liberar-telefono")
+def liberar_telefono(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+    """SOLO PRUEBAS: limpia teléfono y wa_id del candidato para poder reutilizar el mismo número
+    de WhatsApp en pruebas repetidas sin que `_buscar_o_crear_candidato` (webhooks.py) lo asocie
+    a este registro. No borra el candidato ni sus mensajes/CV/expediente."""
+    c = _por_codigo(db, codigo)
+    anterior = {"telefono": c.telefono, "wa_id": c.wa_id}
+    c.telefono = ""
+    c.wa_id = ""
+    registrar(db, u.nombre, "telefono_liberado_prueba", "candidato", c.codigo, anterior)
+    db.commit()
+    return candidato_dict(c, detalle=True)
+
+
 # ------------------------------------------------------------
 # Prefiltro conversacional (módulo 3.9)
 # ------------------------------------------------------------
@@ -616,7 +630,9 @@ async def _procesar_turno_agenda(db: Session, c: Candidato, historial: List[dict
     """Turno posterior a la clasificación: coordina la videollamada con la herramienta
     agendar_videollamada (function calling) — ver ia.agenda_turno."""
     v = c.vacante
-    turno, con_ia = ia.agenda_turno(c.wa_nombre or c.nombre.split(" ")[0], v.titulo if v else "", historial)
+    turno, con_ia = ia.agenda_turno(
+        c.wa_nombre or c.nombre.split(" ")[0], v.titulo if v else "", historial, db=db, candidato=c
+    )
 
     if turno.cita_fecha_hora and turno.cita_liga:
         fecha = _parsear_fecha_cita(turno.cita_fecha_hora)
