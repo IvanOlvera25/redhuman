@@ -46,6 +46,9 @@ export default function SalaEntrevista() {
   const anamRef = useRef<{ stopStreaming?: () => Promise<void> } | null>(null);
   const transcriptRef = useRef<Msg[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
+  // evita finalizar dos veces: el clic manual en "Terminar" también dispara CONNECTION_CLOSED
+  // como efecto de stopStreaming(), así que ambos caminos se guardan con la misma bandera.
+  const finalizadoRef = useRef(false);
 
   useEffect(() => {
     // precalienta el chunk del SDK del avatar; el clic solo tiene que iniciar el stream
@@ -74,15 +77,27 @@ export default function SalaEntrevista() {
       try {
         const { createClient, AnamEvent } = await import("@anam-ai/js-sdk");
         const client = createClient(s.session_token);
-        anamRef.current = client as unknown as { stopStreaming?: () => Promise<void> };
-        (client as unknown as {
-          addListener: (ev: string, cb: (m: { role: string; content: string }[]) => void) => void;
-        }).addListener(AnamEvent.MESSAGE_HISTORY_UPDATED, (historial) => {
+        const anam = client as unknown as {
+          stopStreaming?: () => Promise<void>;
+          addListener: (ev: string, cb: (...args: any[]) => void) => void;
+        };
+        anamRef.current = anam;
+        anam.addListener(AnamEvent.MESSAGE_HISTORY_UPDATED, (historial: { role: string; content: string }[]) => {
           transcriptRef.current = historial.map((m) => ({
             rol: m.role === "persona" ? "assistant" : "user",
             texto: m.content,
           }));
           setMensajes(transcriptRef.current.slice(-4));
+        });
+        // Respaldo automático: si Anam corta la conexión por cualquier motivo (fin normal,
+        // timeout de ANAM_MAX_SESION_SEG, falla de red) sin que el candidato haya dado clic en
+        // "Terminar entrevista", igual cerramos y evaluamos — no debe quedar como "en_curso" para
+        // siempre. El botón manual sigue funcionando igual, esto es solo un respaldo adicional.
+        anam.addListener(AnamEvent.CONNECTION_CLOSED, () => {
+          if (finalizadoRef.current) return;
+          finalizadoRef.current = true;
+          setFase("finalizando");
+          finalizarEntrevista(token, transcriptRef.current).then(() => setFase("fin"));
         });
         setModo("avatar");
         setFase("sala");
@@ -124,6 +139,8 @@ export default function SalaEntrevista() {
   }, [texto, pensando, token]);
 
   const terminar = useCallback(async () => {
+    if (finalizadoRef.current) return;
+    finalizadoRef.current = true;
     setFase("finalizando");
     try {
       await anamRef.current?.stopStreaming?.();

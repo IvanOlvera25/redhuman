@@ -7,11 +7,16 @@ para que la plataforma siga funcionando de punta a punta.
 """
 
 import json
-from typing import List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import settings
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+    from ..models import Candidato
 
 MODEL = settings.openai_model  # gpt-5.6-luna (configurable con OPENAI_MODEL en .env)
 
@@ -564,30 +569,46 @@ HERRAMIENTA_AGENDAR_VIDEOLLAMADA = {
     },
 }
 
-LIGA_VIDEOLLAMADA_DEMO = "https://meet.google.com/redhuman-demo"
+def agendar_videollamada_mock(
+    nombre_candidato: str,
+    fecha_hora: str,
+    *,
+    db: "Session",
+    candidato: "Candidato",
+) -> dict:
+    """Ejecuta la herramienta 'agendar_videollamada' (Zero-Touch, vía `agenda_turno`): crea una
+    `Entrevista` real con avatar de Anam — reusa `services.entrevistas.crear_entrevista_para_candidato`,
+    la misma función que usa RH al agendar a mano — y regresa su liga pública `/entrevista/{token}`.
 
+    Ya no es un mock ni tiene modo sin `db`/`candidato`: el único llamador que queda
+    (`agenda_turno`) siempre los manda. El botón manual «Generar liga de Google Meet» que antes
+    compartía esta función se eliminó — el flujo de entrevista con candidatos ya es 100%
+    automatizado por el avatar.
 
-def agendar_videollamada_mock(nombre_candidato: str, fecha_hora: str) -> dict:
-    """Ejecuta la herramienta 'agendar_videollamada'. MOCK: todavía no hay integración real con
-    un calendario, así que solo registra la intención y regresa una liga fija.
-
-    Sin guion bajo a propósito: además de `agenda_turno` (function calling del agente), la usa
-    directo `routers/entrevistas.py` para los botones manuales «Generar liga de Google Meet» —
-    misma herramienta, sin pasar por el modelo. Es la única función que ambos caminos comparten;
-    ninguno de los dos le cambia el comportamiento al otro.
-
-    Para conectar Google Calendar más adelante: sustituir el cuerpo por la llamada real (crear
-    evento, invitar al candidato con su correo, regresar la liga de Meet real que da la API). La
-    firma — (nombre, fecha_hora) -> {"liga": str, "fecha_hora": str} — no debería cambiar, así
-    que ningún llamador se entera del cambio.
+    Firma base — (nombre, fecha_hora) -> {"liga": str, "fecha_hora": str} — sin romper: `db` y
+    `candidato` son keyword-only, es lo único que ve el function-calling del modelo (el dict de
+    salida, vía `agenda_turno`); el modelo nunca ve estos dos parámetros.
     """
-    print(f"[agendar_videollamada] Agendando videollamada para {nombre_candidato} el {fecha_hora}")
-    return {"liga": LIGA_VIDEOLLAMADA_DEMO, "fecha_hora": fecha_hora}
+    from .entrevistas import crear_entrevista_para_candidato  # import local: evita el ciclo ia <-> entrevistas
+
+    e, _con_ia = crear_entrevista_para_candidato(db, candidato, "agente-ia")
+    liga = f"{settings.app_url}/entrevista/{e.token}"
+    print(f"[agendar_videollamada] Entrevista con avatar {e.codigo} creada para {nombre_candidato} el {fecha_hora}")
+    return {"liga": liga, "fecha_hora": fecha_hora}
 
 
-def agenda_turno(nombre_candidato: str, vacante_titulo: str, historial: List[dict]) -> Tuple[TurnoPrefiltro, bool]:
+def agenda_turno(
+    nombre_candidato: str,
+    vacante_titulo: str,
+    historial: List[dict],
+    *,
+    db: "Session",
+    candidato: "Candidato",
+) -> Tuple[TurnoPrefiltro, bool]:
     """Turno posterior a la clasificación para un candidato ya apto: pregunta disponibilidad y,
-    en cuanto el candidato confirma fecha/hora, invoca agendar_videollamada (function calling).
+    en cuanto el candidato confirma fecha/hora, invoca agendar_videollamada (function calling),
+    que crea la entrevista real con avatar (ver `agendar_videollamada_mock` y
+    `_procesar_turno_agenda` en candidatos.py, su único llamador).
 
     historial: [{"rol": "user"|"assistant", "texto": str}, ...] — el último es del candidato.
     """
@@ -629,7 +650,7 @@ def agenda_turno(nombre_candidato: str, vacante_titulo: str, historial: List[dic
 
     args = json.loads(llamada.arguments or "{}")
     fecha_hora = args.get("fecha_hora", "")
-    resultado_tool = agendar_videollamada_mock(nombre_candidato, fecha_hora)
+    resultado_tool = agendar_videollamada_mock(nombre_candidato, fecha_hora, db=db, candidato=candidato)
 
     # Se reenvía resp.output completo (no solo el function_call): en modelos con razonamiento
     # la Responses API exige también el ítem de 'reasoning' que precedió a la llamada, o rechaza

@@ -16,7 +16,6 @@ import {
   ExternalLink,
   UserPlus,
   Zap,
-  Link2,
 } from "lucide-react";
 import { Card, Badge, Button, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
@@ -28,8 +27,6 @@ import {
   agendarEntrevista,
   entrevistaInmediata,
   fetchMetricasEntrevistas,
-  generarLigaMeet,
-  enviarLigaMeetWhatsapp,
   type Entrevista,
   type EvaluacionEntrevista,
   type MetricasEntrevistas,
@@ -63,7 +60,6 @@ export default function Entrevistas() {
   const [apiViva, setApiViva] = useState(false);
   const [open, setOpen] = useState(false);
   const [seleccionada, setSeleccionada] = useState<string | null>(null);
-  const [gestionarLigaId, setGestionarLigaId] = useState<string | null>(null);
 
   const recargar = useCallback(() => {
     fetchEntrevistas().then((e) => {
@@ -261,13 +257,7 @@ export default function Entrevistas() {
             <div className="max-h-[24rem] divide-y divide-border-faint overflow-y-auto">
               {apiViva && entrevistas.length > 0 ? (
                 entrevistas.map((e) => (
-                  <FilaEntrevista
-                    key={e.id}
-                    e={e}
-                    activa={evaluada?.id === e.id}
-                    onVer={() => setSeleccionada(e.id)}
-                    onGestionarLiga={() => setGestionarLigaId(e.id)}
-                  />
+                  <FilaEntrevista key={e.id} e={e} activa={evaluada?.id === e.id} onVer={() => setSeleccionada(e.id)} />
                 ))
               ) : apiViva ? (
                 <p className="px-5 py-6 text-sm text-ink-3">
@@ -303,15 +293,6 @@ export default function Entrevistas() {
         />
       )}
 
-      {gestionarLigaId && (
-        <ModalLigaMeet
-          e={entrevistas.find((x) => x.id === gestionarLigaId) ?? null}
-          onClose={() => setGestionarLigaId(null)}
-          onActualizada={(act) => {
-            setEntrevistas((prev) => prev.map((x) => (x.id === act.id ? act : x)));
-          }}
-        />
-      )}
     </div>
   );
 }
@@ -320,12 +301,10 @@ function FilaEntrevista({
   e,
   activa,
   onVer,
-  onGestionarLiga,
 }: {
   e: Entrevista;
   activa: boolean;
   onVer: () => void;
-  onGestionarLiga: () => void;
 }) {
   const [copiada, setCopiada] = useState(false);
   const est = estadoEntrevista[e.estado];
@@ -358,31 +337,16 @@ function FilaEntrevista({
       </div>
       <Badge tone={est.tone}>{est.label}</Badge>
       {e.estado === "programada" || e.estado === "en_curso" ? (
-        <>
-          <button
-            onClick={(ev) => {
-              ev.stopPropagation();
-              onGestionarLiga();
-            }}
-            title={e.ligaMeet ? "Gestionar liga de Google Meet" : "Generar liga de Google Meet"}
-            className={cn(
-              "grid h-8 w-8 shrink-0 place-items-center rounded-lg transition hover:bg-surface-2 hover:text-brand",
-              e.ligaMeet ? "text-good" : "text-ink-3",
-            )}
-          >
-            <Link2 className="h-4 w-4" />
-          </button>
-          <button
-            onClick={(ev) => {
-              ev.stopPropagation();
-              copiar();
-            }}
-            title="Copiar liga para el candidato"
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-ink-3 transition hover:bg-surface-2 hover:text-brand"
-          >
-            {copiada ? <Check className="h-4 w-4 text-good" /> : <Copy className="h-4 w-4" />}
-          </button>
-        </>
+        <button
+          onClick={(ev) => {
+            ev.stopPropagation();
+            copiar();
+          }}
+          title="Copiar liga para el candidato"
+          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-ink-3 transition hover:bg-surface-2 hover:text-brand"
+        >
+          {copiada ? <Check className="h-4 w-4 text-good" /> : <Copy className="h-4 w-4" />}
+        </button>
       ) : (
         <a
           href={liga}
@@ -395,102 +359,6 @@ function FilaEntrevista({
           <ExternalLink className="h-4 w-4" />
         </a>
       )}
-    </div>
-  );
-}
-
-/* ---------------- Modal: videollamada manual de Google Meet ----------------
-   Botones "Generar liga de Google Meet" / "Enviar liga por WhatsApp" — misma
-   herramienta mock y el mismo services/whatsapp.py que usa Zero-Touch, ahora bajo
-   control directo de RH desde este módulo. */
-function ModalLigaMeet({
-  e,
-  onClose,
-  onActualizada,
-}: {
-  e: Entrevista | null;
-  onClose: () => void;
-  onActualizada: (e: Entrevista) => void;
-}) {
-  const [generando, setGenerando] = useState(false);
-  const [enviando, setEnviando] = useState(false);
-  const [aviso, setAviso] = useState<{ tono: "ok" | "error"; texto: string } | null>(null);
-
-  if (!e) return null;
-
-  async function generar() {
-    if (!e) return;
-    setGenerando(true);
-    setAviso(null);
-    const r = await generarLigaMeet(e.id);
-    setGenerando(false);
-    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
-    onActualizada(r.data);
-    setAviso({ tono: "ok", texto: "Liga de Google Meet generada." });
-  }
-
-  async function enviar() {
-    if (!e) return;
-    setEnviando(true);
-    setAviso(null);
-    const r = await enviarLigaMeetWhatsapp(e.id);
-    setEnviando(false);
-    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
-    onActualizada(r.data);
-    setAviso(
-      r.data.whatsapp?.enviado
-        ? { tono: "ok", texto: "Liga enviada por WhatsApp." }
-        : { tono: "error", texto: r.data.whatsapp?.detalle || "No se pudo enviar por WhatsApp." },
-    );
-  }
-
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onClose}>
-      <Card className="w-full max-w-md p-5" onClick={(ev) => ev.stopPropagation()}>
-        <div className="flex items-start justify-between">
-          <div>
-            <Eyebrow>Videollamada manual</Eyebrow>
-            <h3 className="font-display text-lg font-bold">Google Meet con {e.nombre.split(" ")[0]}</h3>
-          </div>
-          <button onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-ink-3 hover:bg-surface-2">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2">
-          Misma herramienta que usa el agente en Zero-Touch — aquí queda bajo control de RH.
-        </p>
-
-        <div className="mt-4 flex flex-col gap-3">
-          <Button variant="secondary" onClick={generar} disabled={generando}>
-            <Video className="h-4 w-4" />
-            {generando ? "Generando…" : e.ligaMeet ? "Regenerar liga de Google Meet" : "Generar liga de Google Meet"}
-          </Button>
-
-          {e.ligaMeet && (
-            <div className="flex items-center gap-2">
-              <input
-                readOnly
-                value={e.ligaMeet}
-                className="h-10 flex-1 rounded-xl border border-border-soft bg-surface-2 px-3 font-mono text-xs text-ink-2 outline-none"
-              />
-              <Button variant="outline" size="sm" href={e.ligaMeet}>
-                <ExternalLink className="h-4 w-4" />
-              </Button>
-            </div>
-          )}
-
-          <Button onClick={enviar} disabled={!e.ligaMeet || enviando}>
-            <MessageCircle className="h-4 w-4" />
-            {enviando ? "Enviando…" : "Enviar liga por WhatsApp"}
-          </Button>
-        </div>
-
-        {aviso && (
-          <p className={cn("mt-3 text-[13px] leading-relaxed", aviso.tono === "ok" ? "text-good" : "text-bad")}>
-            {aviso.texto}
-          </p>
-        )}
-      </Card>
     </div>
   );
 }
@@ -508,7 +376,6 @@ function NuevaEntrevistaModal({ onClose, onCreada }: { onClose: () => void; onCr
   const [state, setState] = useState<"form" | "loading" | "done" | "sin_api">("form");
   const [resultado, setResultado] = useState<(Entrevista & { liga: string; ia: boolean }) | null>(null);
   const [copiada, setCopiada] = useState(false);
-  const [gestionarMeet, setGestionarMeet] = useState(false);
 
   useEffect(() => {
     fetchCandidatos().then((c) => {
@@ -727,16 +594,6 @@ function NuevaEntrevistaModal({ onClose, onCreada }: { onClose: () => void; onCr
                 </div>
               )}
 
-              <div className="rounded-xl border border-dashed border-border-soft p-4">
-                <p className="text-xs leading-relaxed text-ink-3">
-                  ¿Prefieres una videollamada normal en vez del avatar? Genera una liga de Google Meet y mándasela
-                  por WhatsApp — misma herramienta que usa Zero-Touch, aquí bajo tu control.
-                </p>
-                <Button variant="outline" size="sm" className="mt-3" onClick={() => setGestionarMeet(true)}>
-                  <Video className="h-4 w-4" /> Gestionar Google Meet
-                </Button>
-              </div>
-
               <Button variant="secondary" className="w-full" onClick={onClose}>
                 Listo
               </Button>
@@ -751,14 +608,6 @@ function NuevaEntrevistaModal({ onClose, onCreada }: { onClose: () => void; onCr
           </p>
         </div>
       </div>
-
-      {gestionarMeet && resultado && (
-        <ModalLigaMeet
-          e={resultado}
-          onClose={() => setGestionarMeet(false)}
-          onActualizada={(act) => setResultado((prev) => (prev ? { ...prev, ...act } : prev))}
-        />
-      )}
     </div>
   );
 }

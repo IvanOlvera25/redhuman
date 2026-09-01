@@ -364,6 +364,12 @@ export function asignarVacante(codigo: string, vacante: string) {
   return post<Candidato>(`/candidatos/${codigo}/asignar`, { vacante, reevaluar: true });
 }
 
+/** SOLO PRUEBAS: limpia teléfono/wa_id para reutilizar el mismo número de WhatsApp en pruebas
+ * repetidas sin que quede asociado a este candidato. No borra nada más de su registro. */
+export function liberarTelefonoCandidato(codigo: string) {
+  return post<Candidato>(`/candidatos/${codigo}/liberar-telefono`);
+}
+
 /* ============================================================
    Entrevista Humana — modal "Programar entrevista" y checkbox "Entrevista realizada"
    ============================================================ */
@@ -487,18 +493,6 @@ export interface Entrevista {
 
 export function fetchEntrevistas() {
   return get<Entrevista[]>("/entrevistas");
-}
-
-/** Botón "Generar liga de Google Meet" — misma herramienta mock que usa Zero-Touch. */
-export function generarLigaMeet(codigo: string) {
-  return post<Entrevista>(`/entrevistas/${codigo}/generar-liga-meet`);
-}
-
-/** Botón "Enviar liga por WhatsApp" — requiere haber generado la liga primero. */
-export function enviarLigaMeetWhatsapp(codigo: string) {
-  return post<Entrevista & { whatsapp: { enviado: boolean; detalle?: string } }>(
-    `/entrevistas/${codigo}/enviar-liga-whatsapp`,
-  );
 }
 
 export function agendarEntrevista(candidato: string, avisarWhatsapp = true) {
