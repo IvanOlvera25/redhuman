@@ -125,7 +125,12 @@ async def _meta_post(cuerpo: dict) -> dict:
     error = _meta_error(r)
     # Silencioso para el candidato/RH: el detalle completo solo queda en logs del
     # servidor para poder depurar (payload rechazado, plantilla no aprobada, etc.).
-    print(f"[whatsapp] Meta rechazó el mensaje ({r.status_code}): {r.text[:1000]}")
+    template = cuerpo.get("template") or {}
+    contexto_plantilla = (
+        f" (idioma enviado: {(template.get('language') or {}).get('code')}, plantilla: {template.get('name')})"
+        if template else ""
+    )
+    print(f"[whatsapp] Meta rechazó el mensaje{contexto_plantilla} ({r.status_code}): {r.text[:1000]}")
     return _resultado(False, f"{error['codigo']}: {error['mensaje']}", codigo=error["codigo"])
 
 
