@@ -52,6 +52,7 @@ import {
   moverEtapaCandidato,
   programarEntrevistaHumana,
   recordatorioDocumentosCandidato,
+  recordatorioEntrevistaHumana,
   registrarConsentimiento,
   solicitarDocumentosCandidato,
   subirArchivoCandidato,
@@ -799,6 +800,11 @@ function PestanaPerfilYCV({
   const alertas = (cv.alertas as string[]) || (a.alertas || []);
   const faltantes = (cv.datos_faltantes as string[]) || (a.datos_faltantes || []);
   const listaArchivos = c.listaArchivos ?? [];
+  const ultimaEntrevista = c.entrevistas?.[c.entrevistas.length - 1];
+  const evalAvatar = ultimaEntrevista?.evaluacion as
+    | { resumen?: string; fortalezas?: string[]; riesgos?: string[] }
+    | null
+    | undefined;
 
   async function subirCV(archivos: File[]) {
     setCargandoCV(true);
@@ -843,6 +849,39 @@ function PestanaPerfilYCV({
           </div>
         </div>
       </Card>
+
+      {/* Tarjeta de la evaluación del avatar de entrevista — solo texto descriptivo, sin score:
+          el número de afinidad es de Luna (arriba); esto es lo que se habló en la entrevista. */}
+      {evalAvatar?.resumen && (
+        <Card className="border-human/30 bg-human-soft/20 p-5">
+          <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-human">
+            Evaluación de Entrevista de IA (Avatar)
+          </span>
+          <p className="mt-2 text-sm leading-relaxed text-ink">{evalAvatar.resumen}</p>
+
+          {Boolean(evalAvatar.fortalezas?.length) && (
+            <div className="mt-3">
+              <p className="font-mono text-[11px] uppercase tracking-wider text-good font-bold">Fortalezas observadas</p>
+              <ul className="mt-1.5 space-y-1">
+                {evalAvatar.fortalezas!.map((x, i) => (
+                  <li key={i} className="text-xs leading-relaxed text-ink-2">• {x}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {Boolean(evalAvatar.riesgos?.length) && (
+            <div className="mt-3">
+              <p className="font-mono text-[11px] uppercase tracking-wider text-warn font-bold">Puntos de atención</p>
+              <ul className="mt-1.5 space-y-1">
+                {evalAvatar.riesgos!.map((x, i) => (
+                  <li key={i} className="text-xs leading-relaxed text-ink-2">• {x}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* Requisitos Cumplidos vs Brechas */}
       {(a.requisitos_cumplidos?.length || a.brechas?.length) ? (
@@ -1406,6 +1445,8 @@ function PanelEntrevistaHumana({
   const [confirmando, setConfirmando] = useState(false);
   const [marcando, setMarcando] = useState(false);
   const [error, setError] = useState("");
+  const [recordando, setRecordando] = useState(false);
+  const [avisoRecordatorio, setAvisoRecordatorio] = useState<{ tono: "ok" | "error"; texto: string } | null>(null);
 
   async function confirmarRealizada() {
     setMarcando(true);
@@ -1418,6 +1459,22 @@ function PanelEntrevistaHumana({
     }
     setConfirmando(false);
     onCambio(r.data);
+  }
+
+  async function enviarRecordatorio() {
+    setRecordando(true);
+    setAvisoRecordatorio(null);
+    const r = await recordatorioEntrevistaHumana(c.id);
+    setRecordando(false);
+    if (!r.ok) {
+      setAvisoRecordatorio({ tono: "error", texto: r.error });
+      return;
+    }
+    setAvisoRecordatorio({
+      tono: r.data.enviado ? "ok" : "error",
+      texto: r.data.enviado ? "Recordatorio enviado por WhatsApp." : "No se pudo enviar por WhatsApp.",
+    });
+    onCambio(r.data.candidato);
   }
 
   if (!eh) return null;
@@ -1441,15 +1498,26 @@ function PanelEntrevistaHumana({
         </div>
       )}
 
-      <div className="mt-3.5">
+      {avisoRecordatorio && (
+        <div className="mt-3">
+          <Aviso tono={avisoRecordatorio.tono}>{avisoRecordatorio.texto}</Aviso>
+        </div>
+      )}
+
+      <div className="mt-3.5 flex flex-wrap items-center gap-2">
         {eh.realizada ? (
           <Badge tone="good" dot>
             Entrevista realizada
           </Badge>
         ) : live ? (
-          <Button size="sm" variant="secondary" onClick={() => setConfirmando(true)} disabled={marcando}>
-            <CheckCircle2 className="h-4 w-4" /> Marcar entrevista realizada
-          </Button>
+          <>
+            <Button size="sm" variant="secondary" onClick={() => setConfirmando(true)} disabled={marcando}>
+              <CheckCircle2 className="h-4 w-4" /> Marcar entrevista realizada
+            </Button>
+            <Button size="sm" variant="outline" onClick={enviarRecordatorio} disabled={recordando}>
+              <RotateCw className="h-4 w-4" /> {recordando ? "Enviando…" : "Enviar recordatorio"}
+            </Button>
+          </>
         ) : null}
       </div>
 

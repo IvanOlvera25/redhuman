@@ -279,9 +279,10 @@ async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db
     )
     e.evaluacion = ev.model_dump()
     e.estado = "evaluada"
-    if c and ev.match_perfil:
-        c.score = max(c.score, ev.match_perfil)
-        c.evidencia = ev.evidencia
+    # c.score / c.evidencia son el resultado de Luna sobre el CV (ver ia.AjustePerfil,
+    # candidatos._aplicar_cv) — NUNCA se tocan aquí. El resultado del avatar vive completo y
+    # aparte en Entrevista.evaluacion (match_perfil, evidencia, recomendación, etc.); el
+    # frontend lo lee de ahí sin mezclarlo con lo de Luna.
     registrar(
         db, "agente-ia", "entrevista_evaluada", "entrevista", e.codigo,
         {"ia": con_ia, "recomendacion": ev.recomendacion, "match": ev.match_perfil},
