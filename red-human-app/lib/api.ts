@@ -387,6 +387,10 @@ export function marcarEntrevistaHumanaRealizada(codigo: string) {
   return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/realizada`);
 }
 
+export function recordatorioEntrevistaHumana(codigo: string) {
+  return post<{ enviado: boolean; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana/recordatorio`);
+}
+
 /* ============================================================
    Contratación — condiciones finales (Puesto/Sueldo/Tipo/Fecha/Ubicación/Jefe directo)
    ============================================================ */

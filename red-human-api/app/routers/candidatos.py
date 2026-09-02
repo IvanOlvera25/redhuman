@@ -10,6 +10,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -959,27 +960,58 @@ async def mover_etapa(codigo: str, datos: EtapaIn, db: Session = Depends(get_db)
 
 MODALIDADES_ENTREVISTA_HUMANA = ("Presencial", "Videollamada", "Llamada")
 
+# RH captura fecha/hora pensando en hora de México — nunca vienen con offset. Igual que el fix
+# de _parsear_fecha_cita (Zero-Touch), hay que convertir a UTC explícitamente antes de guardar:
+# SQLite descarta el offset de un DateTime(timezone=True) y se queda con los números de reloj
+# tal cual, así que un "11:00" sin convertir se compara después como si ya fuera UTC.
+TZ_MEXICO = ZoneInfo("America/Mexico_City")
+
+_MESES_LARGO = [
+    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+]
+
+
+def _fecha_hora_legible_mx(dt: datetime) -> str:
+    """UTC guardado -> texto en hora de México, para mensajes al candidato."""
+    local = dt.astimezone(TZ_MEXICO)
+    return f"{local.day} de {_MESES_LARGO[local.month - 1]} a las {local.strftime('%H:%M')}"
+
+
+def _texto_cita_entrevista_humana(c: Candidato) -> str:
+    """Fragmento reusado por el aviso automático al programar y por el recordatorio manual."""
+    cuando = _fecha_hora_legible_mx(c.entrevista_humana_fecha) if c.entrevista_humana_fecha else "fecha por confirmar"
+    texto = (
+        f"con {c.entrevista_humana_entrevistador or 'nuestro equipo de RH'} el {cuando}, "
+        f"modalidad {c.entrevista_humana_modalidad or 'por confirmar'}."
+    )
+    if c.entrevista_humana_comentario:
+        texto += f" {c.entrevista_humana_comentario}"
+    return texto
+
 
 class EntrevistaHumanaIn(BaseModel):
     entrevistador: str
     fecha: str  # ISO: 2026-09-05
-    hora: str  # HH:MM
+    hora: str  # HH:MM, hora de México
     modalidad: str  # Presencial | Videollamada | Llamada
     comentario: str = ""
 
 
 @router.post("/{codigo}/entrevista-humana", status_code=201)
-def programar_entrevista_humana(
+async def programar_entrevista_humana(
     codigo: str, datos: EntrevistaHumanaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
 ):
-    """Botón «Programar entrevista» del modal — agenda y mueve la tarjeta a Entrevista Humana."""
+    """Botón «Programar entrevista» del modal — agenda, mueve la tarjeta a Entrevista Humana y
+    avisa al candidato por WhatsApp."""
     c = _por_codigo(db, codigo)
     if not datos.entrevistador.strip():
         raise HTTPException(400, "Indica quién entrevista.")
     if datos.modalidad not in MODALIDADES_ENTREVISTA_HUMANA:
         raise HTTPException(400, f"Modalidad inválida. Usa una de: {', '.join(MODALIDADES_ENTREVISTA_HUMANA)}")
     try:
-        fecha_hora = datetime.fromisoformat(f"{datos.fecha}T{datos.hora}").replace(tzinfo=timezone.utc)
+        # Se captura en hora de México y se normaliza a UTC antes de guardar (ver TZ_MEXICO).
+        fecha_hora = datetime.fromisoformat(f"{datos.fecha}T{datos.hora}").replace(tzinfo=TZ_MEXICO).astimezone(timezone.utc)
     except ValueError:
         raise HTTPException(400, "Fecha u hora inválida (fecha ISO: 2026-09-05, hora: 14:30).")
 
@@ -997,6 +1029,23 @@ def programar_entrevista_humana(
             "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
         },
     )
+
+    if c.telefono:
+        primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
+        texto = (
+            f"¡Hola {primer_nombre}! 📅 En base a tu entrevista con nuestro asistente de IA, te "
+            f"programamos una entrevista {_texto_cita_entrevista_humana(c)}"
+        )
+        try:
+            envio = await enviar_mensaje(c.telefono, texto)
+        except Exception as ex:  # que WhatsApp falle no debe tumbar el agendado
+            print(f"[whatsapp-send-error] programar_entrevista_humana -> {c.codigo}: {ex}")
+            envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+        db.add(Mensaje(
+            candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
+            enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
+        ))
+
     db.commit()
     return candidato_dict(c, detalle=True)
 
@@ -1012,6 +1061,37 @@ def marcar_entrevista_humana_realizada(codigo: str, db: Session = Depends(get_db
     registrar(db, u.nombre, "entrevista_humana_realizada", "candidato", c.codigo, {"correo_rh": u.correo})
     db.commit()
     return candidato_dict(c, detalle=True)
+
+
+@router.post("/{codigo}/entrevista-humana/recordatorio")
+async def recordatorio_entrevista_humana(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+    """Botón «Enviar recordatorio» — seguimiento manual junto a «Marcar entrevista realizada»,
+    mismo patrón que candidatos._disparar_mensaje_onboarding (enviar_mensaje + Mensaje + bitácora)."""
+    c = _por_codigo(db, codigo)
+    if c.etapa != "Entrevista Humana":
+        raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
+    if c.entrevista_humana_realizada:
+        raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
+    if not c.telefono:
+        raise HTTPException(409, "El candidato no tiene WhatsApp registrado.")
+
+    primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
+    texto = f"¡Hola de nuevo, {primer_nombre}! 👋 Te recordamos tu entrevista {_texto_cita_entrevista_humana(c)}"
+    try:
+        envio = await enviar_mensaje(c.telefono, texto)
+    except Exception as ex:  # que WhatsApp falle no debe tumbar el recordatorio manual de RH
+        print(f"[whatsapp-send-error] recordatorio_entrevista_humana -> {c.codigo}: {ex}")
+        envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+    db.add(Mensaje(
+        candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
+        enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
+    ))
+    registrar(
+        db, u.nombre, "recordatorio_entrevista_humana_enviado", "candidato", c.codigo,
+        {"whatsapp": envio, "correo_rh": u.correo},
+    )
+    db.commit()
+    return {"enviado": envio.get("enviado", False), "whatsapp": envio, "candidato": candidato_dict(c, detalle=True)}
 
 
 # ------------------------------------------------------------
