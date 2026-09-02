@@ -618,12 +618,23 @@ async def _auto_decision_zero_touch(db: Session, c: Candidato) -> None:
 
 def _parsear_fecha_cita(valor: str) -> Optional[datetime]:
     """agendar_videollamada debe regresar ISO 8601; si el modelo se equivocó de formato, se
-    ignora la fecha — mejor no programar el aviso de no-show que programarlo mal."""
+    ignora la fecha — mejor no programar el aviso de no-show que programarlo mal.
+
+    Se normaliza a UTC en automático antes de regresar. SQLite (el motor de esta base, ver
+    database.py) no preserva el offset de un DateTime(timezone=True): al releerlo pierde la
+    zona horaria pero conserva los mismos números de reloj con los que se guardó. Si aquí se
+    devolviera tal cual "09:55:00-06:00" (hora de México), en SQLite quedaría guardado como
+    "09:55:00" a secas, y services/agenda.py lo compararía contra un "ahora" en UTC como si
+    esas 9:55 ya fueran UTC — el aviso de no-show se dispararía varias horas antes de la cita
+    real. Convertir a UTC aquí, antes de guardar, hace que el valor absoluto sea correcto
+    aunque SQLite le quite la etiqueta de zona horaria."""
     try:
         dt = datetime.fromisoformat(valor)
     except (TypeError, ValueError):
         return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    if not dt.tzinfo:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 async def _procesar_turno_agenda(db: Session, c: Candidato, historial: List[dict], canal: str) -> dict:
@@ -685,11 +696,18 @@ async def _procesar_turno_onboarding(db: Session, c: Candidato, historial: List[
 async def _procesar_turno_post_completo(db: Session, c: Candidato, texto: str, canal: str) -> dict:
     """No queda nada pendiente que la IA deba coordinar (no_cumple ya avisado, o cumple con
     videollamada ya agendada) — se responde con un mensaje fijo, sin volver a llamar al modelo."""
-    respuesta = (
-        "¡Ya tienes tu videollamada agendada! Si necesitas reagendar, avísame y lo vemos. 🙌"
-        if c.videollamada_agendada_en
-        else "¡Gracias! Tu pre-filtro ya está completo. El equipo de RH revisará tu información y te contactará pronto. 😊"
-    )
+    if c.videollamada_agendada_en:
+        respuesta = "¡Ya tienes tu videollamada agendada! Si necesitas reagendar, avísame y lo vemos. 🙌"
+    elif c.estado == "no_cumple":
+        # Ya se le avisó el rechazo desde _auto_decision_zero_touch — este mensaje NO debe sonar
+        # a que su proceso sigue activo ni prometer contacto próximo, solo confirmar que ya se
+        # cerró y que sus datos quedan guardados.
+        respuesta = (
+            "Gracias por escribirnos de nuevo. Ya revisamos tu perfil para esta vacante y por ahora "
+            "no avanza en el proceso, pero tus datos quedan en nuestra base para futuras oportunidades."
+        )
+    else:
+        respuesta = "¡Gracias! Ya tengo tu información. Estoy procesando tu perfil y en breve te contactamos con los siguientes pasos. 😊"
     envio = {"enviado": False, "proveedor": "demo"}
     if canal == "whatsapp" and c.telefono:
         try:

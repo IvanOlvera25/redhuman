@@ -648,8 +648,12 @@ function ModalCandidato({
                 className="h-10 w-full rounded-xl border border-border-soft bg-bg px-3.5 text-xs sm:text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
               />
 
-              {/* Etapa Entrevista IA: resumen en línea de la evaluación del avatar, si ya existe. */}
-              {c.etapa === "Entrevista IA" && (c.entrevistaMatch != null || c.entrevistaRecomendacion) && (
+              {/* Entrevista IA y Evaluación: resumen en línea de la evaluación del avatar, si ya
+                  existe. En cuanto se evalúa, Zero-Touch mueve al candidato a Evaluación en la
+                  misma transacción — sin esta segunda etapa el desplegable casi nunca alcanza a
+                  mostrarse. */}
+              {(c.etapa === "Entrevista IA" || c.etapa === "Evaluación") &&
+                (c.entrevistaMatch != null || c.entrevistaRecomendacion) && (
                 <div>
                   <button
                     onClick={() => setVerEvaluacionIA((x) => !x)}

@@ -292,35 +292,13 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
         print(f"[agente] Prefiltro iniciado exitosamente para {c.codigo}: {resultado.get('respuesta')}")
         return {"ok": True, "accion": "prefiltro_iniciado", "candidato": c.codigo, **resultado}
 
-    # ── 5. Si ya completó el prefiltro ──
-    if c.prefiltro_completo:
-        # Zero-Touch fase 2: en Onboarding -> el agente ya no evalúa ni agenda, solo acompaña
-        # documentos. Se revisa ANTES que la fase 1 (mismo orden que procesar_prefiltro).
-        if c.etapa == "Onboarding":
-            print(f"[agente] Candidato {c.codigo} en Onboarding, acompañando documentos...")
-            resultado = await procesar_prefiltro(db, c, texto, "whatsapp")
-            return {"ok": True, "accion": "turno_onboarding", "candidato": c.codigo, **resultado}
-
-        # Zero-Touch fase 1: apto y aún sin videollamada agendada -> dejamos pasar el mensaje
-        # para que el agente siga coordinando la cita (herramienta agendar_videollamada).
-        if c.estado == "cumple" and not c.videollamada_agendada_en:
-            print(f"[agente] Candidato {c.codigo} apto, coordinando videollamada...")
-            resultado = await procesar_prefiltro(db, c, texto, "whatsapp")
-            return {"ok": True, "accion": "turno_agenda", "candidato": c.codigo, **resultado}
-
-        despedida = "¡Gracias! Tu pre-filtro ya está completo. El equipo de RH revisará tu información y te contactará pronto. 😊"
-        print(f"[agente] Candidato {c.codigo} ya completó prefiltro. Enviando despedida a {telefono}")
-        envio_despedida = await enviar_mensaje(telefono, despedida)
-        db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal="whatsapp"))
-        db.add(Mensaje(
-            candidato_id=c.id, rol="assistant", texto=despedida, canal="whatsapp",
-            enviado=envio_despedida.get("enviado", False), wa_id=envio_despedida.get("wa_id", ""),
-        ))
-        db.commit()
-        return {"ok": True, "accion": "prefiltro_ya_completo", "candidato": c.codigo}
-
-    # ── 6. Turno conversacional de prefiltro (respuestas del candidato a las preguntas) ──
-    print(f"[agente] Procesando turno de prefiltro con IA para {c.codigo}...")
+    # ── 5. Turno conversacional — una sola fuente de verdad ──
+    # procesar_prefiltro ya resuelve internamente si el candidato está en Onboarding,
+    # coordinando videollamada, con el prefiltro completo (cita agendada o no) o si le toca
+    # una pregunta más (ver su propio enrutamiento en candidatos.py). Antes este webhook
+    # reimplementaba esa misma decisión a mano — se desincronizó con el original y mandaba
+    # un mensaje de despedida que ya no reflejaba en qué iba el candidato. No la dupliques.
+    print(f"[agente] Procesando turno con IA para {c.codigo} (etapa={c.etapa}, estado={c.estado})...")
     resultado = await procesar_prefiltro(db, c, texto, "whatsapp")
     print(f"[agente] Turno completado para {c.codigo}: ia={resultado.get('ia')}, clasificacion={resultado.get('clasificacion')}")
     return {"ok": True, "accion": "turno_prefiltro", "candidato": c.codigo, **resultado}
