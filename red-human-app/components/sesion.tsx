@@ -63,3 +63,8 @@ export function useNombreRH() {
 export function usePuedeDecidir() {
   return useSesion().usuario?.puedeDecidir ?? false;
 }
+
+/** `true` solo para admin — el servidor es quien realmente lo exige (Depends(usuario_admin)). */
+export function useEsAdmin() {
+  return useSesion().usuario?.rol === "admin";
+}

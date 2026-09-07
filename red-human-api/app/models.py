@@ -121,6 +121,8 @@ class Candidato(Base):
     wa_nombre: Mapped[str] = mapped_column(String(200), default="")  # nombre del perfil de WhatsApp
     wa_id: Mapped[str] = mapped_column(String(30), default="", index=True)  # ID de WhatsApp (tel tal como lo envía Meta)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    # Modo Prueba (solo admin, ver ConfiguracionSistema): nunca aparece en listados/reportes de RH.
+    es_prueba: Mapped[bool] = mapped_column(Boolean, default=False)
 
     vacante_id: Mapped[Optional[int]] = mapped_column(ForeignKey("vacantes.id"), nullable=True)
     vacante: Mapped[Optional[Vacante]] = relationship(back_populates="candidatos")
@@ -503,3 +505,14 @@ def registrar(db: Session, actor: str, accion: str, entidad: str, entidad_id: st
     ev = Bitacora(ts=ts, actor=actor, accion=accion, entidad=entidad, entidad_id=entidad_id, detalle=detalle or {}, hash_prev=hash_prev, hash=h)
     db.add(ev)
     return ev
+
+
+class ConfiguracionSistema(Base):
+    """Configuración global editable solo por admins. Fila única (id=1) — ver services/configuracion.py."""
+
+    __tablename__ = "configuracion_sistema"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Modo Prueba: mientras esté activo, webhooks._buscar_o_crear_candidato deja de deduplicar
+    # conversaciones frías (Candidato.es_prueba=True); nunca aparecen en listados/reportes de RH.
+    modo_prueba: Mapped[bool] = mapped_column(Boolean, default=False)

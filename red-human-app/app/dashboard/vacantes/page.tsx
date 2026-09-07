@@ -246,13 +246,13 @@ export default function Vacantes() {
    ============================================================ */
 function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado: (codigo: string) => void }) {
   const [f, setF] = useState({
-    titulo: "Repartidor(a) en motocicleta",
-    area: "Logística",
-    ubicacion: "Guadalajara, JAL",
-    sueldo: "$10,500 + bonos",
-    empresa: "Grupo Carbe",
+    titulo: "",
+    area: "",
+    ubicacion: "",
+    sueldo: "",
+    empresa: "",
     modalidad: "Presencial",
-    requisitos: "Licencia vigente, moto propia, disponibilidad de horario.",
+    requisitos: "",
     notas: "",
   });
   const set = (k: keyof typeof f) => (v: string) => setF((prev) => ({ ...prev, [k]: v }));
@@ -319,11 +319,11 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
     <Panel titulo="Nueva vacante" eyebrow="Distribuidor de vacantes" onClose={onClose} ancho="max-w-3xl">
       <div className="flex flex-col gap-5 p-6">
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Título del puesto" value={f.titulo} onChange={set("titulo")} full />
-          <Field label="Área" value={f.area} onChange={set("area")} />
-          <Field label="Empresa" value={f.empresa} onChange={set("empresa")} />
-          <Field label="Ubicación" value={f.ubicacion} onChange={set("ubicacion")} />
-          <Field label="Sueldo" value={f.sueldo} onChange={set("sueldo")} />
+          <Field label="Título del puesto" value={f.titulo} onChange={set("titulo")} placeholder="Ej. Repartidor en motocicleta" full />
+          <Field label="Área" value={f.area} onChange={set("area")} placeholder="Ej. Logística" />
+          <Field label="Empresa" value={f.empresa} onChange={set("empresa")} placeholder="Ej. Red Human S.A. de C.V." />
+          <Field label="Ubicación" value={f.ubicacion} onChange={set("ubicacion")} placeholder="Ej. Ciudad de México, CDMX" />
+          <Field label="Sueldo" value={f.sueldo} onChange={set("sueldo")} placeholder="Ej. $12,000 - $15,000 mensuales" />
           <Selector
             label="Modalidad"
             value={f.modalidad}
@@ -336,6 +336,7 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
           label="Requisitos indispensables"
           value={f.requisitos}
           onChange={set("requisitos")}
+          placeholder="Ej. Licencia de conducir vigente, disponibilidad de horario"
           ayuda="Sepáralos con comas. La IA quita cualquier criterio discriminatorio (edad, sexo, estado civil) y te avisa."
         />
         <Area
@@ -873,11 +874,13 @@ function Field({
   label,
   value,
   onChange,
+  placeholder,
   full,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
+  placeholder?: string;
   full?: boolean;
 }) {
   return (
@@ -886,6 +889,7 @@ function Field({
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
         className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
       />
     </label>
@@ -927,12 +931,14 @@ function Area({
   onChange,
   rows = 3,
   ayuda,
+  placeholder,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   rows?: number;
   ayuda?: string;
+  placeholder?: string;
 }) {
   return (
     <div>
@@ -941,6 +947,7 @@ function Area({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         rows={rows}
+        placeholder={placeholder}
         className="w-full rounded-xl border border-border-soft bg-surface px-3.5 py-2.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
       />
       {ayuda && <p className="mt-1.5 text-xs leading-relaxed text-ink-3">{ayuda}</p>}
