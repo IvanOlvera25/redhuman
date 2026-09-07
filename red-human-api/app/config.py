@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     evolution_api_key: str = ""
     evolution_instance: str = "redhuman"
 
+    # --- Correo (Resend) ---
+    # Vacío = modo demo (el envío se registra en bitácora como "no enviado"). El remitente
+    # de sandbox (onboarding@resend.dev) solo entrega al correo con el que se creó la cuenta;
+    # al verificar un dominio propio en Resend basta con cambiar RESEND_FROM, sin tocar código.
+    resend_api_key: str = ""
+    resend_from: str = "Red Human AI <onboarding@resend.dev>"
+
     cors_origins: str = "http://localhost:3000"
 
 

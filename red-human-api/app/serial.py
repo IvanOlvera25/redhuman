@@ -122,10 +122,18 @@ def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
         # --- Entrevista Humana (flujo manual) ---
         "entrevistaHumana": {
             "entrevistador": c.entrevista_humana_entrevistador,
+            "tipo": c.entrevista_humana_tipo,
+            "usuarioId": c.entrevista_humana_usuario_id,
+            "correoExterno": c.entrevista_humana_correo_externo,
             "fecha": iso(c.entrevista_humana_fecha),
             "modalidad": c.entrevista_humana_modalidad,
+            "liga": c.entrevista_humana_liga,
+            "ubicacion": c.entrevista_humana_ubicacion,
+            "telefonoContacto": c.entrevista_humana_telefono_contacto,
             "comentario": c.entrevista_humana_comentario,
             "realizada": c.entrevista_humana_realizada,
+            "resultado": c.entrevista_humana_resultado or None,
+            "recomendacion": c.entrevista_humana_recomendacion or None,
         }
         if c.entrevista_humana_fecha
         else None,

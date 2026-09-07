@@ -21,6 +21,10 @@ export interface RespuestaPrefiltro {
   cumple?: boolean | null;
 }
 
+export type TipoEntrevistador = "interno" | "externo";
+export type ResultadoEntrevistaHumana = "aprobado" | "no_aprobado";
+export type RecomendacionEntrevistaHumana = "avanzar" | "no_avanzar" | "segunda_entrevista";
+
 export interface Candidato {
   id: string;
   nombre: string;
@@ -43,10 +47,18 @@ export interface Candidato {
   /* --- Entrevista Humana (flujo manual) --- */
   entrevistaHumana?: {
     entrevistador: string;
+    tipo: TipoEntrevistador | "";
+    usuarioId: number | null;
+    correoExterno: string;
     fecha: string | null;
     modalidad: "Presencial" | "Videollamada" | "Llamada" | "";
+    liga: string;
+    ubicacion: string;
+    telefonoContacto: string;
     comentario: string;
     realizada: boolean;
+    resultado: ResultadoEntrevistaHumana | null;
+    recomendacion: RecomendacionEntrevistaHumana | null;
   } | null;
   /* puentes hacia los otros módulos */
   expedienteId?: number | null;

@@ -33,7 +33,15 @@ import {
 import { Card, Badge, Button, Avatar, Eyebrow, Progress } from "@/components/ui";
 import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
 import { Aviso, Dropzone, pesoLegible } from "@/components/dashboard/subida";
-import { candidatos as candidatosDemo, type Candidato, type EtapaCandidato, type Vacante } from "@/lib/data";
+import {
+  candidatos as candidatosDemo,
+  type Candidato,
+  type EtapaCandidato,
+  type RecomendacionEntrevistaHumana,
+  type ResultadoEntrevistaHumana,
+  type TipoEntrevistador,
+  type Vacante,
+} from "@/lib/data";
 import type { DocExpediente, NuevoIngreso } from "@/lib/phase2";
 import {
   autorizarAlta,
@@ -1448,10 +1456,14 @@ function PanelEntrevistaHumana({
   const [recordando, setRecordando] = useState(false);
   const [avisoRecordatorio, setAvisoRecordatorio] = useState<{ tono: "ok" | "error"; texto: string } | null>(null);
 
-  async function confirmarRealizada() {
+  async function confirmarRealizada(datos: {
+    resultado: ResultadoEntrevistaHumana;
+    recomendacion: RecomendacionEntrevistaHumana;
+    comentario: string;
+  }) {
     setMarcando(true);
     setError("");
-    const r = await marcarEntrevistaHumanaRealizada(c.id);
+    const r = await marcarEntrevistaHumanaRealizada(c.id, datos);
     setMarcando(false);
     if (!r.ok) {
       setError(r.error);
@@ -1479,16 +1491,37 @@ function PanelEntrevistaHumana({
 
   if (!eh) return null;
 
+  const detalleModalidad =
+    eh.modalidad === "Videollamada"
+      ? eh.liga && `Liga: ${eh.liga}`
+      : eh.modalidad === "Presencial"
+        ? eh.ubicacion && `Ubicación: ${eh.ubicacion}`
+        : eh.modalidad === "Llamada"
+          ? (eh.telefonoContacto || c.telefono) && `Teléfono: ${eh.telefonoContacto || c.telefono}`
+          : "";
+
+  const IconoModalidad = eh.modalidad === "Presencial" ? MapPin : eh.modalidad === "Llamada" ? Phone : Video;
+
+  const RECOMENDACION_LABEL: Record<RecomendacionEntrevistaHumana, string> = {
+    avanzar: "Avanzar",
+    no_avanzar: "No avanzar",
+    segunda_entrevista: "Segunda entrevista",
+  };
+
   return (
     <Card className="border-[color:var(--brand-2)]/30 bg-surface-2/40 p-4">
       <Eyebrow>Entrevista Humana programada</Eyebrow>
       <div className="mt-2.5 grid gap-2 sm:grid-cols-2">
-        <Info icon={UserCheck} v={`Entrevistador(a): ${eh.entrevistador || "sin asignar"}`} />
+        <Info
+          icon={UserCheck}
+          v={`Entrevistador(a): ${eh.entrevistador || "sin asignar"}${eh.tipo ? ` (${eh.tipo === "interno" ? "interno" : "externo"})` : ""}`}
+        />
         <Info
           icon={CalendarClock}
           v={eh.fecha ? new Date(eh.fecha).toLocaleString("es-MX", { dateStyle: "medium", timeStyle: "short" }) : "Sin fecha"}
         />
-        <Info icon={Video} v={`Modalidad: ${eh.modalidad || "sin definir"}`} />
+        <Info icon={IconoModalidad} v={`Modalidad: ${eh.modalidad || "sin definir"}`} />
+        {detalleModalidad && <Info icon={Mail} v={detalleModalidad} />}
       </div>
       {eh.comentario && <p className="mt-2.5 text-[13px] leading-relaxed text-ink-2">{eh.comentario}</p>}
 
@@ -1506,9 +1539,12 @@ function PanelEntrevistaHumana({
 
       <div className="mt-3.5 flex flex-wrap items-center gap-2">
         {eh.realizada ? (
-          <Badge tone="good" dot>
-            Entrevista realizada
-          </Badge>
+          <>
+            <Badge tone={eh.resultado === "aprobado" ? "good" : "bad"} dot>
+              {eh.resultado === "aprobado" ? "Aprobado" : "No aprobado"}
+            </Badge>
+            {eh.recomendacion && <Badge tone="brand">{RECOMENDACION_LABEL[eh.recomendacion]}</Badge>}
+          </>
         ) : live ? (
           <>
             <Button size="sm" variant="secondary" onClick={() => setConfirmando(true)} disabled={marcando}>
@@ -1522,15 +1558,126 @@ function PanelEntrevistaHumana({
       </div>
 
       {confirmando && (
-        <ModalConfirmar
-          titulo="¿La entrevista ya se realizó?"
-          texto="Al confirmar se habilitan los botones «Descartar» y «Enviar a Contratación» para este candidato."
+        <ModalCerrarEntrevistaHumana
           onCancelar={() => setConfirmando(false)}
           onConfirmar={confirmarRealizada}
           cargando={marcando}
         />
       )}
     </Card>
+  );
+}
+
+/* ============================================================
+   Modal "Marcar entrevista realizada" — Resultado + Recomendación obligatorios
+   ============================================================ */
+function ModalCerrarEntrevistaHumana({
+  onCancelar,
+  onConfirmar,
+  cargando,
+}: {
+  onCancelar: () => void;
+  onConfirmar: (datos: {
+    resultado: ResultadoEntrevistaHumana;
+    recomendacion: RecomendacionEntrevistaHumana;
+    comentario: string;
+  }) => void;
+  cargando?: boolean;
+}) {
+  const [resultado, setResultado] = useState<ResultadoEntrevistaHumana | "">("");
+  const [recomendacion, setRecomendacion] = useState<RecomendacionEntrevistaHumana | "">("");
+  const [comentario, setComentario] = useState("");
+
+  const comentarioObligatorio = resultado === "no_aprobado" || recomendacion === "segunda_entrevista";
+  const listo = !!resultado && !!recomendacion && (!comentarioObligatorio || comentario.trim().length > 0);
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+      <Card className="w-full max-w-md p-5">
+        <h3 className="font-display text-lg font-bold">Marcar entrevista realizada</h3>
+        <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
+          Al confirmar se habilitan los botones «Descartar» y «Enviar a Contratación» para este candidato.
+        </p>
+
+        <div className="mt-4 flex flex-col gap-4">
+          <div>
+            <span className="text-sm font-medium text-ink-2">Resultado</span>
+            <div className="mt-1.5 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setResultado("aprobado")}
+                className={`h-10 rounded-xl border text-sm font-medium transition ${
+                  resultado === "aprobado" ? "border-good/25 bg-good-soft text-good" : "border-border-soft text-ink-2"
+                }`}
+              >
+                Aprobado
+              </button>
+              <button
+                type="button"
+                onClick={() => setResultado("no_aprobado")}
+                className={`h-10 rounded-xl border text-sm font-medium transition ${
+                  resultado === "no_aprobado" ? "border-bad/25 bg-bad-soft text-bad" : "border-border-soft text-ink-2"
+                }`}
+              >
+                No aprobado
+              </button>
+            </div>
+          </div>
+
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-ink-2">Recomendación</span>
+            <select
+              value={recomendacion}
+              onChange={(e) => setRecomendacion(e.target.value as RecomendacionEntrevistaHumana)}
+              className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+            >
+              <option value="" disabled>
+                Selecciona una opción
+              </option>
+              <option value="avanzar">Avanzar</option>
+              <option value="no_avanzar">No avanzar</option>
+              <option value="segunda_entrevista">Segunda entrevista</option>
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-ink-2">
+              Comentarios{" "}
+              {comentarioObligatorio ? (
+                <span className="text-bad">(obligatorio)</span>
+              ) : (
+                <span className="text-ink-3">(opcional)</span>
+              )}
+            </span>
+            <textarea
+              value={comentario}
+              onChange={(e) => setComentario(e.target.value)}
+              rows={3}
+              className="rounded-xl border border-border-soft bg-surface px-3.5 py-2.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+            />
+          </label>
+        </div>
+
+        <div className="mt-5 flex gap-3">
+          <Button variant="outline" className="flex-1" onClick={onCancelar} disabled={cargando}>
+            Cancelar
+          </Button>
+          <Button
+            className="flex-1"
+            onClick={() =>
+              onConfirmar({
+                resultado: resultado as ResultadoEntrevistaHumana,
+                recomendacion: recomendacion as RecomendacionEntrevistaHumana,
+                comentario,
+              })
+            }
+            disabled={cargando || !listo}
+          >
+            {cargando ? "Guardando…" : "Confirmar"}
+          </Button>
+        </div>
+      </Card>
+    </div>
   );
 }
 
@@ -1546,11 +1693,17 @@ function ModalProgramarEntrevista({
   onClose: () => void;
   onListo: (c: Candidato) => void;
 }) {
-  const [entrevistadores, setEntrevistadores] = useState<string[]>([]);
-  const [entrevistador, setEntrevistador] = useState("");
+  const [entrevistadores, setEntrevistadores] = useState<{ id: number; nombre: string }[]>([]);
+  const [tipoEntrevistador, setTipoEntrevistador] = useState<TipoEntrevistador>("interno");
+  const [entrevistadorUsuarioId, setEntrevistadorUsuarioId] = useState<number | null>(null);
+  const [entrevistadorNombre, setEntrevistadorNombre] = useState("");
+  const [entrevistadorCorreo, setEntrevistadorCorreo] = useState("");
   const [fecha, setFecha] = useState("");
   const [hora, setHora] = useState("");
   const [modalidad, setModalidad] = useState<ModalidadEntrevistaHumana>("Videollamada");
+  const [liga, setLiga] = useState("");
+  const [ubicacion, setUbicacion] = useState("");
+  const [telefonoContacto, setTelefonoContacto] = useState("");
   const [comentario, setComentario] = useState("");
   const [error, setError] = useState("");
   const [enviando, setEnviando] = useState(false);
@@ -1559,19 +1712,47 @@ function ModalProgramarEntrevista({
     fetchEntrevistadores().then((d) => {
       if (d && d.length) {
         setEntrevistadores(d);
-        setEntrevistador(d[0]);
+        setEntrevistadorUsuarioId(d[0].id);
       }
     });
   }, []);
 
   async function programar() {
-    if (!entrevistador.trim() || !fecha || !hora) {
-      setError("Completa entrevistador, fecha y hora.");
+    if (!fecha || !hora) {
+      setError("Completa fecha y hora.");
+      return;
+    }
+    if (tipoEntrevistador === "interno" && !entrevistadorUsuarioId) {
+      setError("Selecciona quién entrevista.");
+      return;
+    }
+    if (tipoEntrevistador === "externo" && (!entrevistadorNombre.trim() || !entrevistadorCorreo.trim())) {
+      setError("Indica nombre y correo del entrevistador externo.");
+      return;
+    }
+    if (modalidad === "Videollamada" && !liga.trim()) {
+      setError("Falta la liga de la videollamada.");
+      return;
+    }
+    if (modalidad === "Presencial" && !ubicacion.trim()) {
+      setError("Falta la ubicación de la entrevista.");
       return;
     }
     setEnviando(true);
     setError("");
-    const r = await programarEntrevistaHumana(c.id, { entrevistador, fecha, hora, modalidad, comentario });
+    const r = await programarEntrevistaHumana(c.id, {
+      tipoEntrevistador,
+      entrevistadorUsuarioId: tipoEntrevistador === "interno" ? entrevistadorUsuarioId : null,
+      entrevistadorNombre: tipoEntrevistador === "externo" ? entrevistadorNombre : "",
+      entrevistadorCorreo: tipoEntrevistador === "externo" ? entrevistadorCorreo : "",
+      fecha,
+      hora,
+      modalidad,
+      liga,
+      ubicacion,
+      telefonoContacto,
+      comentario,
+    });
     setEnviando(false);
     if (!r.ok) {
       setError(r.error);
@@ -1589,29 +1770,69 @@ function ModalProgramarEntrevista({
         </p>
 
         <div className="mt-4 flex flex-col gap-3">
-          <label className="flex flex-col gap-1.5">
+          <div>
             <span className="text-sm font-medium text-ink-2">Entrevistador(a)</span>
-            {entrevistadores.length > 0 ? (
+            <div className="mt-1.5 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setTipoEntrevistador("interno")}
+                className={`h-10 rounded-xl border text-sm font-medium transition ${
+                  tipoEntrevistador === "interno" ? "border-brand/25 bg-brand-soft text-brand" : "border-border-soft text-ink-2"
+                }`}
+              >
+                Interno
+              </button>
+              <button
+                type="button"
+                onClick={() => setTipoEntrevistador("externo")}
+                className={`h-10 rounded-xl border text-sm font-medium transition ${
+                  tipoEntrevistador === "externo" ? "border-brand/25 bg-brand-soft text-brand" : "border-border-soft text-ink-2"
+                }`}
+              >
+                Externo
+              </button>
+            </div>
+          </div>
+
+          {tipoEntrevistador === "interno" ? (
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Persona de RH</span>
               <select
-                value={entrevistador}
-                onChange={(e) => setEntrevistador(e.target.value)}
+                value={entrevistadorUsuarioId ?? ""}
+                onChange={(e) => setEntrevistadorUsuarioId(Number(e.target.value))}
                 className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
               >
-                {entrevistadores.map((n) => (
-                  <option key={n} value={n}>
-                    {n}
+                {entrevistadores.length === 0 && <option value="">Sin personas de RH activas</option>}
+                {entrevistadores.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.nombre}
                   </option>
                 ))}
               </select>
-            ) : (
-              <input
-                value={entrevistador}
-                onChange={(e) => setEntrevistador(e.target.value)}
-                placeholder="Nombre de quien entrevista"
-                className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
-              />
-            )}
-          </label>
+            </label>
+          ) : (
+            <div className="grid grid-cols-2 gap-3">
+              <label className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium text-ink-2">Nombre</span>
+                <input
+                  value={entrevistadorNombre}
+                  onChange={(e) => setEntrevistadorNombre(e.target.value)}
+                  placeholder="Nombre completo"
+                  className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                />
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium text-ink-2">Correo</span>
+                <input
+                  type="email"
+                  value={entrevistadorCorreo}
+                  onChange={(e) => setEntrevistadorCorreo(e.target.value)}
+                  placeholder="correo@empresa.com"
+                  className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                />
+              </label>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-3">
             <label className="flex flex-col gap-1.5">
@@ -1648,6 +1869,40 @@ function ModalProgramarEntrevista({
               ))}
             </select>
           </label>
+
+          {modalidad === "Videollamada" && (
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Liga de la videollamada</span>
+              <input
+                value={liga}
+                onChange={(e) => setLiga(e.target.value)}
+                placeholder="https://meet.google.com/…"
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+          )}
+          {modalidad === "Presencial" && (
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Ubicación / instrucciones</span>
+              <input
+                value={ubicacion}
+                onChange={(e) => setUbicacion(e.target.value)}
+                placeholder="Dirección o cómo llegar"
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+          )}
+          {modalidad === "Llamada" && (
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Teléfono de contacto (opcional)</span>
+              <input
+                value={telefonoContacto}
+                onChange={(e) => setTelefonoContacto(e.target.value)}
+                placeholder={c.telefono || "Si lo dejas vacío, se usa el teléfono del candidato"}
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+          )}
 
           <label className="flex flex-col gap-1.5">
             <span className="text-sm font-medium text-ink-2">Comentario (opcional)</span>

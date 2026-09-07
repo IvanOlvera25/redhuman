@@ -35,6 +35,7 @@ from ..models import (
 from ..serial import archivo_dict, candidato_dict, expediente_dict
 from ..services import archivos as fs
 from ..services import ia
+from ..services.correo import enviar_correo
 from ..services.whatsapp import enviar_mensaje, enviar_plantilla
 
 router = APIRouter(prefix="/candidatos", tags=["candidatos"])
@@ -978,6 +979,22 @@ def _fecha_hora_legible_mx(dt: datetime) -> str:
     return f"{local.day} de {_MESES_LARGO[local.month - 1]} a las {local.strftime('%H:%M')}"
 
 
+_RE_CORREO = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _detalle_modalidad(c: Candidato) -> str:
+    """Dato específico de la modalidad — se usa en el WhatsApp y en ambos correos."""
+    if c.entrevista_humana_modalidad == "Videollamada" and c.entrevista_humana_liga:
+        return f"Liga de la videollamada: {c.entrevista_humana_liga}"
+    if c.entrevista_humana_modalidad == "Presencial" and c.entrevista_humana_ubicacion:
+        return f"Ubicación: {c.entrevista_humana_ubicacion}"
+    if c.entrevista_humana_modalidad == "Llamada":
+        tel = c.entrevista_humana_telefono_contacto or c.telefono
+        if tel:
+            return f"Te contactaremos al {tel}"
+    return ""
+
+
 def _texto_cita_entrevista_humana(c: Candidato) -> str:
     """Fragmento reusado por el aviso automático al programar y por el recordatorio manual."""
     cuando = _fecha_hora_legible_mx(c.entrevista_humana_fecha) if c.entrevista_humana_fecha else "fecha por confirmar"
@@ -985,16 +1002,56 @@ def _texto_cita_entrevista_humana(c: Candidato) -> str:
         f"con {c.entrevista_humana_entrevistador or 'nuestro equipo de RH'} el {cuando}, "
         f"modalidad {c.entrevista_humana_modalidad or 'por confirmar'}."
     )
+    detalle = _detalle_modalidad(c)
+    if detalle:
+        texto += f" {detalle}."
     if c.entrevista_humana_comentario:
         texto += f" {c.entrevista_humana_comentario}"
     return texto
 
 
+def _html_correo_candidato(c: Candidato) -> str:
+    cuando = _fecha_hora_legible_mx(c.entrevista_humana_fecha) if c.entrevista_humana_fecha else "fecha por confirmar"
+    detalle = _detalle_modalidad(c)
+    primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
+    return (
+        f"<p>¡Hola {primer_nombre}!</p>"
+        f"<p>Te confirmamos tu entrevista con <strong>{c.entrevista_humana_entrevistador or 'nuestro equipo de RH'}</strong> "
+        f"el <strong>{cuando}</strong>, modalidad <strong>{c.entrevista_humana_modalidad}</strong>.</p>"
+        + (f"<p>{detalle}.</p>" if detalle else "")
+        + (f"<p>{c.entrevista_humana_comentario}</p>" if c.entrevista_humana_comentario else "")
+        + "<p>Saludos,<br>Red Human AI</p>"
+    )
+
+
+def _html_correo_entrevistador(c: Candidato) -> str:
+    cuando = _fecha_hora_legible_mx(c.entrevista_humana_fecha) if c.entrevista_humana_fecha else "fecha por confirmar"
+    detalle = _detalle_modalidad(c)
+    return (
+        f"<p>Tienes una entrevista programada con <strong>{c.nombre}</strong> "
+        f"({c.vacante.titulo if c.vacante else 'vacante sin especificar'}) "
+        f"el <strong>{cuando}</strong>, modalidad <strong>{c.entrevista_humana_modalidad}</strong>.</p>"
+        + (f"<p>{detalle}.</p>" if detalle else "")
+        + (f"<p>Teléfono del candidato: {c.telefono}</p>" if c.telefono else "")
+        + (f"<p>{c.entrevista_humana_comentario}</p>" if c.entrevista_humana_comentario else "")
+        + "<p>Saludos,<br>Red Human AI</p>"
+    )
+
+
+TIPOS_ENTREVISTADOR = ("interno", "externo")
+
+
 class EntrevistaHumanaIn(BaseModel):
-    entrevistador: str
+    tipo_entrevistador: str  # interno | externo
+    entrevistador_usuario_id: Optional[int] = None  # requerido si tipo_entrevistador == interno
+    entrevistador_nombre: str = ""  # requerido si tipo_entrevistador == externo
+    entrevistador_correo: str = ""  # requerido si tipo_entrevistador == externo
     fecha: str  # ISO: 2026-09-05
     hora: str  # HH:MM, hora de México
     modalidad: str  # Presencial | Videollamada | Llamada
+    liga: str = ""  # obligatoria si modalidad == Videollamada
+    ubicacion: str = ""  # obligatoria si modalidad == Presencial
+    telefono_contacto: str = ""  # opcional si modalidad == Llamada (si falta, se usa c.telefono)
     comentario: str = ""
 
 
@@ -1003,12 +1060,48 @@ async def programar_entrevista_humana(
     codigo: str, datos: EntrevistaHumanaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
 ):
     """Botón «Programar entrevista» del modal — agenda, mueve la tarjeta a Entrevista Humana y
-    avisa al candidato por WhatsApp."""
+    avisa al candidato por WhatsApp y por correo (Resend); también avisa por correo a quien
+    entrevista (interno o externo)."""
     c = _por_codigo(db, codigo)
-    if not datos.entrevistador.strip():
-        raise HTTPException(400, "Indica quién entrevista.")
+
+    if datos.tipo_entrevistador not in TIPOS_ENTREVISTADOR:
+        raise HTTPException(400, f"Tipo de entrevistador inválido. Usa uno de: {', '.join(TIPOS_ENTREVISTADOR)}")
+
+    entrevistador_usuario: Optional[Usuario] = None
+    correo_entrevistador = ""
+    if datos.tipo_entrevistador == "interno":
+        if not datos.entrevistador_usuario_id:
+            raise HTTPException(400, "Selecciona quién entrevista.")
+        entrevistador_usuario = (
+            db.query(Usuario)
+            .filter(
+                Usuario.id == datos.entrevistador_usuario_id,
+                Usuario.activo.is_(True),
+                Usuario.rol.in_(("admin", "rh")),
+            )
+            .first()
+        )
+        if not entrevistador_usuario:
+            raise HTTPException(400, "El usuario seleccionado no existe o no está activo.")
+        nombre_entrevistador = entrevistador_usuario.nombre
+        correo_entrevistador = entrevistador_usuario.correo
+    else:
+        nombre_entrevistador = datos.entrevistador_nombre.strip()
+        if not nombre_entrevistador:
+            raise HTTPException(400, "Indica el nombre de quien entrevista.")
+        correo_entrevistador = datos.entrevistador_correo.strip()
+        if not _RE_CORREO.match(correo_entrevistador):
+            raise HTTPException(400, "El correo del entrevistador externo no tiene un formato válido.")
+
     if datos.modalidad not in MODALIDADES_ENTREVISTA_HUMANA:
         raise HTTPException(400, f"Modalidad inválida. Usa una de: {', '.join(MODALIDADES_ENTREVISTA_HUMANA)}")
+    liga = datos.liga.strip()
+    ubicacion = datos.ubicacion.strip()
+    if datos.modalidad == "Videollamada" and not liga:
+        raise HTTPException(400, "Falta la liga de la videollamada.")
+    if datos.modalidad == "Presencial" and not ubicacion:
+        raise HTTPException(400, "Falta la ubicación de la entrevista.")
+
     try:
         # Se captura en hora de México y se normaliza a UTC antes de guardar (ver TZ_MEXICO).
         fecha_hora = datetime.fromisoformat(f"{datos.fecha}T{datos.hora}").replace(tzinfo=TZ_MEXICO).astimezone(timezone.utc)
@@ -1017,19 +1110,22 @@ async def programar_entrevista_humana(
 
     anterior = c.etapa
     c.etapa = "Entrevista Humana"
-    c.entrevista_humana_entrevistador = datos.entrevistador.strip()
+    c.entrevista_humana_tipo = datos.tipo_entrevistador
+    c.entrevista_humana_usuario_id = entrevistador_usuario.id if entrevistador_usuario else None
+    c.entrevista_humana_correo_externo = correo_entrevistador if datos.tipo_entrevistador == "externo" else ""
+    c.entrevista_humana_entrevistador = nombre_entrevistador
     c.entrevista_humana_fecha = fecha_hora
     c.entrevista_humana_modalidad = datos.modalidad
+    c.entrevista_humana_liga = liga if datos.modalidad == "Videollamada" else ""
+    c.entrevista_humana_ubicacion = ubicacion if datos.modalidad == "Presencial" else ""
+    c.entrevista_humana_telefono_contacto = datos.telefono_contacto.strip() if datos.modalidad == "Llamada" else ""
     c.entrevista_humana_comentario = datos.comentario.strip()
     c.entrevista_humana_realizada = False
-    registrar(
-        db, u.nombre, "entrevista_humana_programada", "candidato", c.codigo,
-        {
-            "de": anterior, "entrevistador": c.entrevista_humana_entrevistador,
-            "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
-        },
-    )
+    # limpios por si se reprograma después de un cierre previo
+    c.entrevista_humana_resultado = ""
+    c.entrevista_humana_recomendacion = ""
 
+    envio_whatsapp = {"enviado": False, "proveedor": "demo", "detalle": "sin teléfono"}
     if c.telefono:
         primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
         texto = (
@@ -1037,28 +1133,83 @@ async def programar_entrevista_humana(
             f"programamos una entrevista {_texto_cita_entrevista_humana(c)}"
         )
         try:
-            envio = await enviar_mensaje(c.telefono, texto)
+            envio_whatsapp = await enviar_mensaje(c.telefono, texto)
         except Exception as ex:  # que WhatsApp falle no debe tumbar el agendado
             print(f"[whatsapp-send-error] programar_entrevista_humana -> {c.codigo}: {ex}")
-            envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+            envio_whatsapp = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
         db.add(Mensaje(
             candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
-            enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
+            enviado=envio_whatsapp.get("enviado", False), wa_id=envio_whatsapp.get("wa_id", ""),
         ))
+
+    try:
+        correo_candidato = await enviar_correo(c.correo, "Tu entrevista con Red Human AI", _html_correo_candidato(c))
+    except Exception as ex:  # que Resend falle no debe tumbar el agendado
+        print(f"[correo-send-error] programar_entrevista_humana (candidato) -> {c.codigo}: {ex}")
+        correo_candidato = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+    try:
+        correo_entrevistador_resultado = await enviar_correo(
+            correo_entrevistador, f"Entrevista programada con {c.nombre}", _html_correo_entrevistador(c)
+        )
+    except Exception as ex:
+        print(f"[correo-send-error] programar_entrevista_humana (entrevistador) -> {c.codigo}: {ex}")
+        correo_entrevistador_resultado = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+
+    registrar(
+        db, u.nombre, "entrevista_humana_programada", "candidato", c.codigo,
+        {
+            "de": anterior, "entrevistador": c.entrevista_humana_entrevistador,
+            "tipo_entrevistador": datos.tipo_entrevistador,
+            "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
+            "whatsapp": envio_whatsapp,
+            "correo_candidato": correo_candidato,
+            "correo_entrevistador": correo_entrevistador_resultado,
+        },
+    )
 
     db.commit()
     return candidato_dict(c, detalle=True)
 
 
+RESULTADOS_ENTREVISTA_HUMANA = ("aprobado", "no_aprobado")
+RECOMENDACIONES_ENTREVISTA_HUMANA = ("avanzar", "no_avanzar", "segunda_entrevista")
+
+
+class EntrevistaHumanaRealizadaIn(BaseModel):
+    resultado: str  # aprobado | no_aprobado
+    recomendacion: str  # avanzar | no_avanzar | segunda_entrevista
+    comentario: str = ""
+
+
 @router.post("/{codigo}/entrevista-humana/realizada")
-def marcar_entrevista_humana_realizada(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    """Checkbox «Entrevista realizada» (el frontend pide confirmación antes de llamar esto) —
-    habilita los botones Descartar y Enviar a Contratación."""
+def marcar_entrevista_humana_realizada(
+    codigo: str, datos: EntrevistaHumanaRealizadaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+):
+    """Modal «Marcar entrevista realizada» — exige Resultado y Recomendación (y comentario si el
+    resultado es negativo o hay segunda entrevista) antes de habilitar Descartar/Contratación."""
     c = _por_codigo(db, codigo)
     if c.etapa != "Entrevista Humana":
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
+    if datos.resultado not in RESULTADOS_ENTREVISTA_HUMANA:
+        raise HTTPException(400, f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_ENTREVISTA_HUMANA)}")
+    if datos.recomendacion not in RECOMENDACIONES_ENTREVISTA_HUMANA:
+        raise HTTPException(400, f"Recomendación inválida. Usa una de: {', '.join(RECOMENDACIONES_ENTREVISTA_HUMANA)}")
+    comentario = datos.comentario.strip()
+    if (datos.resultado == "no_aprobado" or datos.recomendacion == "segunda_entrevista") and not comentario:
+        raise HTTPException(
+            400,
+            "Agrega un comentario: es obligatorio cuando el resultado es 'No aprobado' o la "
+            "recomendación es 'Segunda entrevista'.",
+        )
+
     c.entrevista_humana_realizada = True
-    registrar(db, u.nombre, "entrevista_humana_realizada", "candidato", c.codigo, {"correo_rh": u.correo})
+    c.entrevista_humana_resultado = datos.resultado
+    c.entrevista_humana_recomendacion = datos.recomendacion
+    c.entrevista_humana_comentario = comentario
+    registrar(
+        db, u.nombre, "entrevista_humana_realizada", "candidato", c.codigo,
+        {"resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario, "correo_rh": u.correo},
+    )
     db.commit()
     return candidato_dict(c, detalle=True)
 
