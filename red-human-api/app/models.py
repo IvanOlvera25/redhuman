@@ -105,11 +105,19 @@ class Candidato(Base):
     # true en cuanto se manda el mensaje de rescate por inasistencia — evita reenviarlo cada 5 min
     videollamada_aviso_noshow_enviado: Mapped[bool] = mapped_column(Boolean, default=False)
     # --- Entrevista Humana (flujo manual de RH, ver ETAPAS_CANDIDATO) ---
-    entrevista_humana_entrevistador: Mapped[str] = mapped_column(String(150), default="")
+    entrevista_humana_entrevistador: Mapped[str] = mapped_column(String(150), default="")  # nombre a mostrar (usuario.nombre si es interno, tecleado si es externo)
+    entrevista_humana_tipo: Mapped[str] = mapped_column(String(20), default="")  # interno | externo
+    entrevista_humana_usuario_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
+    entrevista_humana_correo_externo: Mapped[str] = mapped_column(String(200), default="")
     entrevista_humana_fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     entrevista_humana_modalidad: Mapped[str] = mapped_column(String(20), default="")  # Presencial|Videollamada|Llamada
+    entrevista_humana_liga: Mapped[str] = mapped_column(String(300), default="")  # obligatoria si modalidad=Videollamada
+    entrevista_humana_ubicacion: Mapped[str] = mapped_column(String(300), default="")  # obligatoria si modalidad=Presencial
+    entrevista_humana_telefono_contacto: Mapped[str] = mapped_column(String(30), default="")  # opcional si modalidad=Llamada
     entrevista_humana_comentario: Mapped[str] = mapped_column(Text, default="")
     entrevista_humana_realizada: Mapped[bool] = mapped_column(Boolean, default=False)
+    entrevista_humana_resultado: Mapped[str] = mapped_column(String(20), default="")  # aprobado | no_aprobado
+    entrevista_humana_recomendacion: Mapped[str] = mapped_column(String(30), default="")  # avanzar | no_avanzar | segunda_entrevista
     wa_nombre: Mapped[str] = mapped_column(String(200), default="")  # nombre del perfil de WhatsApp
     wa_id: Mapped[str] = mapped_column(String(30), default="", index=True)  # ID de WhatsApp (tel tal como lo envía Meta)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)

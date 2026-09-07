@@ -89,15 +89,16 @@ def yo(u: Usuario = Depends(usuario_actual)):
 
 @router.get("/entrevistadores")
 def entrevistadores(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-   """Lista ligera de nombres para el select de 'Entrevistador' — a diferencia de /usuarios,
-   cualquier persona con sesión la puede pedir (no expone correo, rol ni otros datos)."""
+   """Lista ligera de personas de RH activas para el selector de 'Entrevistador interno' —
+   a diferencia de /usuarios, cualquier persona con sesión la puede pedir (no expone correo,
+   rol ni otros datos; el id solo sirve para referenciar quién entrevista)."""
    filas = (
-       db.query(Usuario.nombre)
+       db.query(Usuario.id, Usuario.nombre)
        .filter(Usuario.activo.is_(True), Usuario.rol.in_(("admin", "rh")))
        .order_by(Usuario.nombre)
        .all()
    )
-   return [nombre for (nombre,) in filas]
+   return [{"id": id_, "nombre": nombre} for (id_, nombre) in filas]
 
 class CambiarPassIn(BaseModel):
    actual: str

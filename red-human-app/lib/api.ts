@@ -8,7 +8,13 @@
      human-in-the-loop tienen que verse en pantalla.
    ============================================================ */
 
-import type { Candidato, Vacante } from "@/lib/data";
+import type {
+  Candidato,
+  RecomendacionEntrevistaHumana,
+  ResultadoEntrevistaHumana,
+  TipoEntrevistador,
+  Vacante,
+} from "@/lib/data";
 import type { NuevoIngreso } from "@/lib/phase2";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -378,13 +384,44 @@ export type ModalidadEntrevistaHumana = "Presencial" | "Videollamada" | "Llamada
 
 export function programarEntrevistaHumana(
   codigo: string,
-  datos: { entrevistador: string; fecha: string; hora: string; modalidad: ModalidadEntrevistaHumana; comentario?: string },
+  datos: {
+    tipoEntrevistador: TipoEntrevistador;
+    entrevistadorUsuarioId?: number | null;
+    entrevistadorNombre?: string;
+    entrevistadorCorreo?: string;
+    fecha: string;
+    hora: string;
+    modalidad: ModalidadEntrevistaHumana;
+    liga?: string;
+    ubicacion?: string;
+    telefonoContacto?: string;
+    comentario?: string;
+  },
 ) {
-  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana`, datos);
+  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana`, {
+    tipo_entrevistador: datos.tipoEntrevistador,
+    entrevistador_usuario_id: datos.entrevistadorUsuarioId ?? null,
+    entrevistador_nombre: datos.entrevistadorNombre ?? "",
+    entrevistador_correo: datos.entrevistadorCorreo ?? "",
+    fecha: datos.fecha,
+    hora: datos.hora,
+    modalidad: datos.modalidad,
+    liga: datos.liga ?? "",
+    ubicacion: datos.ubicacion ?? "",
+    telefono_contacto: datos.telefonoContacto ?? "",
+    comentario: datos.comentario ?? "",
+  });
 }
 
-export function marcarEntrevistaHumanaRealizada(codigo: string) {
-  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/realizada`);
+export function marcarEntrevistaHumanaRealizada(
+  codigo: string,
+  datos: { resultado: ResultadoEntrevistaHumana; recomendacion: RecomendacionEntrevistaHumana; comentario?: string },
+) {
+  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/realizada`, {
+    resultado: datos.resultado,
+    recomendacion: datos.recomendacion,
+    comentario: datos.comentario ?? "",
+  });
 }
 
 export function recordatorioEntrevistaHumana(codigo: string) {
@@ -409,9 +446,9 @@ export function guardarCondicionesContratacion(
   });
 }
 
-/** Nombres de personas de RH activas, para el select de "Entrevistador". */
+/** Personas de RH activas (id + nombre), para el select de "Entrevistador interno". */
 export function fetchEntrevistadores() {
-  return get<string[]>("/auth/entrevistadores");
+  return get<{ id: number; nombre: string }[]>("/auth/entrevistadores");
 }
 
 /** Postulación pública desde /aplicar/[slug]: alta + consentimiento + CV + prefiltro en un paso. */

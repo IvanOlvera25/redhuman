@@ -187,14 +187,22 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
 
     print(f"[agente] Procesando mensaje de {nombre_wa} ({telefono}): '{texto}' (id_sel='{id_seleccionado}')")
 
-    # ── 1. Detectar vacante (por código, id seleccionado, título, slug o número) ──
-    vacante_detectada = _detectar_vacante(texto, db, id_seleccionado)
+    # ── 1. Buscar o crear candidato (todavía sin vacante: hace falta saber su estado
+    # actual antes de decidir si corresponde detectar/reasignar vacante) ──────────
+    c = _buscar_o_crear_candidato(db, telefono, nombre_wa, None)
+    print(f"[agente] Candidato asociado: {c.codigo} ({c.nombre}), consentimiento={c.consentimiento}, vacante_id={c.vacante_id}")
+
+    # ── 2. Detectar vacante SOLO si el candidato sigue en proceso de selección
+    # (sin vacante_id todavía, o con vacante pero sin consentimiento otorgado — sigue
+    # respondiendo el menú inicial). Con vacante_id + consentimiento ya confirmados,
+    # ninguna respuesta del prefiltro (p.ej. "3" años de experiencia) puede reasignar
+    # la vacante del candidato — antes _detectar_vacante corría en cada turno y un
+    # número de un dígito se interpretaba como "selección #N de la lista", pisando
+    # silenciosamente c.vacante_id con una vacante ajena a su postulación.
+    en_seleccion_vacante = not c.vacante_id or not c.consentimiento
+    vacante_detectada = _detectar_vacante(texto, db, id_seleccionado) if en_seleccion_vacante else None
     if vacante_detectada:
         print(f"[agente] Vacante detectada: {vacante_detectada.codigo} - {vacante_detectada.titulo}")
-
-    # ── 2. Buscar o crear candidato ──────────────────────────
-    c = _buscar_o_crear_candidato(db, telefono, nombre_wa, vacante_detectada)
-    print(f"[agente] Candidato asociado: {c.codigo} ({c.nombre}), consentimiento={c.consentimiento}, vacante_id={c.vacante_id}")
 
     analisis_c = dict(c.analisis or {})
 
