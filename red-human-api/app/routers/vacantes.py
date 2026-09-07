@@ -46,7 +46,7 @@ def _embudo(db: Session, vacante_id: int) -> dict:
     """Conteo por etapa y por clasificación del agente — alimenta la tarjeta de la vacante."""
     filas = (
         db.query(Candidato.etapa, Candidato.estado, func.count(Candidato.id))
-        .filter(Candidato.vacante_id == vacante_id)
+        .filter(Candidato.vacante_id == vacante_id, Candidato.es_prueba.is_(False))
         .group_by(Candidato.etapa, Candidato.estado)
         .all()
     )
@@ -59,9 +59,11 @@ def _embudo(db: Session, vacante_id: int) -> dict:
 
 
 def _conteos(db: Session, v: Vacante):
-    total = db.query(Candidato).filter(Candidato.vacante_id == v.id).count()
+    total = db.query(Candidato).filter(Candidato.vacante_id == v.id, Candidato.es_prueba.is_(False)).count()
     hace_24h = datetime.now(timezone.utc) - timedelta(days=1)
-    nuevos = db.query(Candidato).filter(Candidato.vacante_id == v.id, Candidato.creado_en >= hace_24h).count()
+    nuevos = db.query(Candidato).filter(
+        Candidato.vacante_id == v.id, Candidato.creado_en >= hace_24h, Candidato.es_prueba.is_(False)
+    ).count()
     return total, nuevos
 
 

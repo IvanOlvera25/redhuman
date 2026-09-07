@@ -149,6 +149,36 @@ export function actualizarUsuario(
 }
 
 /* ============================================================
+   Configuración global (solo admin) — hoy solo Modo Prueba
+   ============================================================ */
+
+export interface ConfiguracionSistema {
+  modoPrueba: boolean;
+  candidatosPrueba: number;
+}
+
+export function fetchConfiguracion() {
+  return get<ConfiguracionSistema>("/configuracion");
+}
+
+export function actualizarConfiguracion(modoPrueba: boolean) {
+  return patch<ConfiguracionSistema>("/configuracion", { modo_prueba: modoPrueba });
+}
+
+export interface ResumenBorradoPrueba {
+  candidatos: number;
+  mensajes: number;
+  entrevistas: number;
+  expedientes: number;
+  documentos: number;
+}
+
+/** Botón «Eliminar postulaciones de prueba» — borra TODOS los candidatos con es_prueba=True. */
+export function eliminarCandidatosPrueba() {
+  return post<ResumenBorradoPrueba>("/candidatos/prueba/eliminar");
+}
+
+/* ============================================================
    Módulo 1 · Vacantes
    ============================================================ */
 

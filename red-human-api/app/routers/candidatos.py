@@ -19,13 +19,14 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..deps import usuario_actual, usuario_decisor
+from ..deps import usuario_actual, usuario_admin, usuario_decisor
 from ..models import (
     DOCUMENTOS_BASE,
     ETAPAS_CANDIDATO,
     Archivo,
     Candidato,
     Documento,
+    Entrevista,
     Expediente,
     Mensaje,
     Usuario,
@@ -100,7 +101,7 @@ def listar(
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
 ):
-    q = db.query(Candidato).order_by(Candidato.id.desc())
+    q = db.query(Candidato).filter(Candidato.es_prueba.is_(False)).order_by(Candidato.id.desc())
     if vacante:
         v = _vacante(db, vacante)
         q = q.filter(Candidato.vacante_id == v.id)
@@ -109,6 +110,39 @@ def listar(
     if estado:
         q = q.filter(Candidato.estado == estado)
     return [candidato_dict(c) for c in q.all()]
+
+
+@router.post("/prueba/eliminar")
+def eliminar_candidatos_prueba(db: Session = Depends(get_db), u: Usuario = Depends(usuario_admin)):
+    """Botón «Eliminar postulaciones de prueba» (solo admin) — borra TODOS los candidatos
+    con `es_prueba=True` y lo que cuelga de ellos. Mismo patrón de cascada que
+    scripts/borrar_demo_candidatos.py (que borra por prefijo de código en vez de por flag)."""
+    candidatos = db.query(Candidato).filter(Candidato.es_prueba.is_(True)).all()
+    if not candidatos:
+        return {"candidatos": 0, "mensajes": 0, "entrevistas": 0, "expedientes": 0, "documentos": 0}
+
+    ids = [c.id for c in candidatos]
+    n_msj = db.query(Mensaje).filter(Mensaje.candidato_id.in_(ids)).delete(synchronize_session=False)
+    n_ent = db.query(Entrevista).filter(Entrevista.candidato_id.in_(ids)).delete(synchronize_session=False)
+
+    # Expediente uno por uno (no bulk delete) para que la cascada del ORM se lleve
+    # también sus Documento — Expediente.documentos tiene cascade="all, delete-orphan".
+    expedientes = db.query(Expediente).filter(Expediente.candidato_id.in_(ids)).all()
+    n_doc = sum(len(e.documentos) for e in expedientes)
+    for e in expedientes:
+        db.delete(e)
+    db.flush()
+
+    codigos = [c.codigo for c in candidatos]
+    for c in candidatos:
+        db.delete(c)  # Candidato.archivos también tiene cascade="all, delete-orphan"
+
+    registrar(
+        db, u.nombre, "candidatos_prueba_borrados", "sistema", "modo_prueba",
+        {"candidatos": codigos, "correo_rh": u.correo},
+    )
+    db.commit()
+    return {"candidatos": len(candidatos), "mensajes": n_msj, "entrevistas": n_ent, "expedientes": len(expedientes), "documentos": n_doc}
 
 
 @router.get("/{codigo}")

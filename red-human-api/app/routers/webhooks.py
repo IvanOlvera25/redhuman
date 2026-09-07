@@ -1,7 +1,7 @@
 import json
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -13,7 +13,12 @@ from ..config import settings
 from ..database import get_db
 from ..deps import usuario_actual
 from ..models import Bitacora, Candidato, Mensaje, Usuario, Vacante, registrar
+from ..services.configuracion import modo_prueba_activo
 from ..services.whatsapp import enviar_mensaje, enviar_lista_interactiva, parsear_webhook
+
+# Modo Prueba: una conversación con actividad más vieja que esta ventana ya no se
+# reutiliza — se trata como una postulación nueva e independiente (ver _buscar_o_crear_candidato).
+VENTANA_MODO_PRUEBA = timedelta(minutes=60)
 
 router = APIRouter(tags=["webhooks"])
 
@@ -87,25 +92,42 @@ def _detectar_vacante(texto: str, db: Session, id_seleccionado: Optional[str] = 
 
 
 def _buscar_o_crear_candidato(
-    db: Session, wa_id: str, nombre: str, vacante: Optional[Vacante]
+    db: Session, wa_id: str, nombre: str, vacante: Optional[Vacante], prueba: bool = False
 ) -> Candidato:
-    """Dedup por wa_id (exacto) o por teléfono normalizado; crea si no existe."""
-    # 1. Buscar por wa_id (el más confiable)
-    c = db.query(Candidato).filter(Candidato.wa_id == wa_id).first()
-    if c:
-        return c
+    """Dedup por wa_id (exacto) o por teléfono normalizado; crea si no existe.
+
+    Con Modo Prueba activo (`prueba=True`), una conversación ya fría (sin actividad en
+    VENTANA_MODO_PRUEBA) deja de reutilizarse: se trata como una postulación nueva e
+    independiente, marcada `es_prueba=True`. Una conversación en curso (mensajes recientes)
+    se sigue reutilizando igual que siempre, para no romper un flujo de prueba de varios
+    turnos. Con Modo Prueba apagado el comportamiento es exactamente el de siempre.
+    """
+    # 1. Buscar por wa_id (el más confiable). order_by id desc: con Modo Prueba puede haber
+    # más de un candidato con el mismo wa_id — nos quedamos con el más reciente.
+    existente = db.query(Candidato).filter(Candidato.wa_id == wa_id).order_by(Candidato.id.desc()).first()
 
     # 2. Buscar por teléfono normalizado
     tel = _normalizar_telefono(wa_id)
-    if tel:
-        c = db.query(Candidato).filter(Candidato.telefono == tel).first()
-        if c:
+    if not existente and tel:
+        existente = db.query(Candidato).filter(Candidato.telefono == tel).order_by(Candidato.id.desc()).first()
+
+    if existente:
+        ultima_actividad = existente.mensajes[-1].creado_en if existente.mensajes else existente.creado_en
+        # SQLite descarta el offset de un DateTime(timezone=True) y regresa un datetime naive
+        # con los mismos números de reloj UTC (mismo caso que _parsear_fecha_cita) — hay que
+        # reponerle el tzinfo antes de restar contra un aware, si no truena.
+        if ultima_actividad.tzinfo is None:
+            ultima_actividad = ultima_actividad.replace(tzinfo=timezone.utc)
+        reciente = datetime.now(timezone.utc) - ultima_actividad < VENTANA_MODO_PRUEBA
+        if not prueba or reciente:
             # Llenar wa_id si faltaba
-            if not c.wa_id:
-                c.wa_id = wa_id
-            if nombre and not c.wa_nombre:
-                c.wa_nombre = nombre
-            return c
+            if not existente.wa_id:
+                existente.wa_id = wa_id
+            if nombre and not existente.wa_nombre:
+                existente.wa_nombre = nombre
+            return existente
+        # Modo Prueba activo y la conversación anterior ya está fría: no se reutiliza,
+        # sigue abajo para crear una postulación nueva e independiente.
 
     # 3. Crear candidato nuevo
     c = Candidato(
@@ -116,11 +138,15 @@ def _buscar_o_crear_candidato(
         wa_id=wa_id,
         wa_nombre=nombre,
         vacante_id=vacante.id if vacante else None,
+        es_prueba=prueba,
     )
     db.add(c)
     db.flush()
     c.codigo = f"C-{8800 + c.id}"
-    registrar(db, "sistema", "candidato_ingresado", "candidato", c.codigo, {"fuente": "WhatsApp", "wa_id": wa_id})
+    registrar(
+        db, "sistema", "candidato_ingresado", "candidato", c.codigo,
+        {"fuente": "WhatsApp", "wa_id": wa_id, "es_prueba": prueba},
+    )
     return c
 
 
@@ -189,7 +215,7 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
 
     # ── 1. Buscar o crear candidato (todavía sin vacante: hace falta saber su estado
     # actual antes de decidir si corresponde detectar/reasignar vacante) ──────────
-    c = _buscar_o_crear_candidato(db, telefono, nombre_wa, None)
+    c = _buscar_o_crear_candidato(db, telefono, nombre_wa, None, prueba=modo_prueba_activo(db))
     print(f"[agente] Candidato asociado: {c.codigo} ({c.nombre}), consentimiento={c.consentimiento}, vacante_id={c.vacante_id}")
 
     # ── 2. Detectar vacante SOLO si el candidato sigue en proceso de selección

@@ -17,15 +17,20 @@ from ..models import ETAPAS_CANDIDATO, Candidato, Entrevista, Expediente, Vacant
 router = APIRouter(prefix="/metricas", tags=["metricas"], dependencies=[Depends(usuario_actual)])
 
 
+def _candidatos(db: Session):
+    """Base de todo conteo de Candidato en este módulo — nunca cuenta postulaciones de Modo Prueba."""
+    return db.query(Candidato).filter(Candidato.es_prueba.is_(False))
+
+
 @router.get("/pipeline")
 def pipeline(db: Session = Depends(get_db)):
     """Embudo de punta a punta: captación → prefiltro → entrevista → expediente → alta."""
-    total_candidatos = db.query(Candidato).count()
-    por_etapa = dict(db.query(Candidato.etapa, func.count(Candidato.id)).group_by(Candidato.etapa).all())
-    por_estado = dict(db.query(Candidato.estado, func.count(Candidato.id)).group_by(Candidato.estado).all())
-    por_fuente = dict(db.query(Candidato.fuente, func.count(Candidato.id)).group_by(Candidato.fuente).all())
+    total_candidatos = _candidatos(db).count()
+    por_etapa = dict(_candidatos(db).with_entities(Candidato.etapa, func.count(Candidato.id)).group_by(Candidato.etapa).all())
+    por_estado = dict(_candidatos(db).with_entities(Candidato.estado, func.count(Candidato.id)).group_by(Candidato.estado).all())
+    por_fuente = dict(_candidatos(db).with_entities(Candidato.fuente, func.count(Candidato.id)).group_by(Candidato.fuente).all())
 
-    prefiltrados = db.query(Candidato).filter(Candidato.prefiltro_completo.is_(True)).count()
+    prefiltrados = _candidatos(db).filter(Candidato.prefiltro_completo.is_(True)).count()
     entrevistas_evaluadas = db.query(Entrevista).filter(Entrevista.estado == "evaluada").count()
     expedientes = db.query(Expediente).all()
     altas = [e for e in expedientes if e.estado == "alta"]
@@ -50,11 +55,11 @@ def pipeline(db: Session = Depends(get_db)):
         },
         "candidatos": {
             "total": total_candidatos,
-            "nuevos_7d": db.query(Candidato).filter(Candidato.creado_en >= hace_7d).count(),
+            "nuevos_7d": _candidatos(db).filter(Candidato.creado_en >= hace_7d).count(),
             "por_etapa": {e: por_etapa.get(e, 0) for e in ETAPAS_CANDIDATO},
             "por_estado": por_estado,
             "por_fuente": por_fuente,
-            "sin_consentimiento": db.query(Candidato).filter(Candidato.consentimiento.is_(False)).count(),
+            "sin_consentimiento": _candidatos(db).filter(Candidato.consentimiento.is_(False)).count(),
         },
         "contratacion": {
             "expedientes": len(expedientes),
@@ -73,7 +78,7 @@ def pipeline(db: Session = Depends(get_db)):
 def _acciones(db: Session, expedientes) -> list:
     salida = []
 
-    por_decidir = db.query(Candidato).filter(
+    por_decidir = _candidatos(db).filter(
         Candidato.prefiltro_completo.is_(True), Candidato.etapa == "Prefiltro", Candidato.estado != "no_cumple"
     ).count()
     if por_decidir:
@@ -85,7 +90,7 @@ def _acciones(db: Session, expedientes) -> list:
             "ruta": "/dashboard/candidatos",
         })
 
-    sin_consentimiento = db.query(Candidato).filter(
+    sin_consentimiento = _candidatos(db).filter(
         Candidato.consentimiento.is_(False), Candidato.etapa != "Prefiltro"
     ).count()
     if sin_consentimiento:

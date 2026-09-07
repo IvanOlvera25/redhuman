@@ -18,6 +18,7 @@ import {
   Menu,
   Plus,
   Search,
+  Settings,
   Sparkles,
   Target,
   UserSquare2,
@@ -54,6 +55,8 @@ const navColaborador: NavItem[] = [
   { href: "/dashboard/conocimiento", label: "Base de conocimiento", icon: BookOpen },
 ];
 
+const navAdmin: NavItem[] = [{ href: "/dashboard/configuracion", label: "Configuración", icon: Settings }];
+
 function NavList({ items, onNavigate }: { items: NavItem[]; onNavigate?: () => void }) {
   const path = usePathname();
   return (
@@ -86,6 +89,7 @@ function NavList({ items, onNavigate }: { items: NavItem[]; onNavigate?: () => v
 }
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+  const { usuario } = useSesion();
   return (
     <div className="flex h-full flex-col gap-6 p-4">
       <div className="px-2 pt-1">
@@ -119,6 +123,12 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           <p className="px-3 pb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-ink-3">Colaborador</p>
           <NavList items={navColaborador} onNavigate={onNavigate} />
         </div>
+        {usuario?.rol === "admin" && (
+          <div>
+            <p className="px-3 pb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-ink-3">Administración</p>
+            <NavList items={navAdmin} onNavigate={onNavigate} />
+          </div>
+        )}
       </div>
 
       {/* Agente card */}
