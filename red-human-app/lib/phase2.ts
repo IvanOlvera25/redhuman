@@ -131,28 +131,11 @@ export const nuevosIngresos: NuevoIngreso[] = [
   },
 ];
 
-/* -------------------- Capacitación (3.14) -------------------- */
-export interface Curso {
-  id: string;
-  titulo: string;
-  categoria: string;
-  duracion: string;
-  modulos: number;
-  inscritos: number;
-  completado: number;
-  estado: "Publicado" | "Borrador";
-  obligatorio: boolean;
-}
-
-export const cursos: Curso[] = [
-  { id: "CUR-01", titulo: "Inducción a Grupo Carbe", categoria: "Onboarding", duracion: "2 h", modulos: 6, inscritos: 142, completado: 88, estado: "Publicado", obligatorio: true },
-  { id: "CUR-02", titulo: "Manejo de efectivo y arqueo", categoria: "Operaciones", duracion: "1.5 h", modulos: 4, inscritos: 96, completado: 74, estado: "Publicado", obligatorio: true },
-  { id: "CUR-03", titulo: "Atención al cliente y ventas", categoria: "Comercial", duracion: "3 h", modulos: 8, inscritos: 210, completado: 61, estado: "Publicado", obligatorio: false },
-  { id: "CUR-04", titulo: "Seguridad e higiene (NOM-035)", categoria: "Cumplimiento", duracion: "2 h", modulos: 5, inscritos: 318, completado: 92, estado: "Publicado", obligatorio: true },
-  { id: "CUR-05", titulo: "Prevención de lavado de dinero", categoria: "Cumplimiento", duracion: "1 h", modulos: 3, inscritos: 54, completado: 40, estado: "Publicado", obligatorio: false },
-  { id: "CUR-06", titulo: "Liderazgo para supervisores", categoria: "Desarrollo", duracion: "4 h", modulos: 10, inscritos: 0, completado: 0, estado: "Borrador", obligatorio: false },
-];
-
+/* -------------------- Capacitación (3.14) --------------------
+   `Curso`/`cursos` ya no viven aquí: son datos reales del backend (ver lib/api.ts
+   fetchCursos()/fetchCurso() y app/dashboard/capacitacion/page.tsx). `capacitacionKpis`
+   se queda como fallback — la página recalcula "Cursos activos" y "Colaboradores en
+   formación" con datos reales; las otras dos siguen aproximadas por ahora. */
 export const capacitacionKpis = [
   { label: "Cursos activos", value: "18", tone: "brand" },
   { label: "Colaboradores en formación", value: "624", tone: "human" },

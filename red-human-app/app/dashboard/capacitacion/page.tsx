@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   GraduationCap,
   Users,
@@ -15,11 +16,33 @@ import {
 } from "lucide-react";
 import { Card, Badge, Button, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
-import { cursos, capacitacionKpis, type Curso } from "@/lib/phase2";
+import { Aviso } from "@/components/dashboard/subida";
+import { capacitacionKpis } from "@/lib/phase2";
+import { fetchCursos, generarCurso, type Curso } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export default function Capacitacion() {
   const [open, setOpen] = useState(false);
+  const [cursos, setCursos] = useState<Curso[]>([]);
+  const [cargando, setCargando] = useState(true);
+
+  async function recargar() {
+    const c = await fetchCursos();
+    if (c) setCursos(c);
+    setCargando(false);
+  }
+
+  useEffect(() => {
+    recargar();
+  }, []);
+
+  const activos = cursos.filter((c) => c.estado === "Publicado").length;
+  const enFormacion = cursos.reduce((acc, c) => acc + (c.asignados - c.completados), 0);
+  const kpis = capacitacionKpis.map((k) => {
+    if (k.label === "Cursos activos") return { ...k, value: String(activos) };
+    if (k.label === "Colaboradores en formación") return { ...k, value: String(enFormacion) };
+    return k;
+  });
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
@@ -31,7 +54,7 @@ export default function Capacitacion() {
 
       {/* KPIs */}
       <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {capacitacionKpis.map((k) => (
+        {kpis.map((k) => (
           <Card key={k.label} className="p-5">
             <p className="text-sm text-ink-2">{k.label}</p>
             <p className="font-display mt-1.5 text-3xl font-extrabold tabular">{k.value}</p>
@@ -41,6 +64,11 @@ export default function Capacitacion() {
 
       {/* Catálogo */}
       <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {!cargando && cursos.length === 0 && (
+          <p className="col-span-full py-8 text-center text-sm text-ink-3">
+            Todavía no hay cursos. Genera el primero con IA.
+          </p>
+        )}
         {cursos.map((c) => (
           <CursoCard key={c.id} c={c} />
         ))}
@@ -58,60 +86,82 @@ export default function Capacitacion() {
         </button>
       </div>
 
-      {open && <GenerarCurso onClose={() => setOpen(false)} />}
+      {open && (
+        <GenerarCurso
+          onClose={() => setOpen(false)}
+          onListo={() => {
+            setOpen(false);
+            recargar();
+          }}
+        />
+      )}
     </div>
   );
 }
 
 function CursoCard({ c }: { c: Curso }) {
+  const avance = c.asignados > 0 ? Math.round((c.completados / c.asignados) * 100) : 0;
   return (
-    <Card hover className="flex flex-col p-5">
-      <div className="flex items-start justify-between">
-        <span className="grid h-11 w-11 place-items-center rounded-xl bg-brand-soft text-brand">
-          <BookOpen className="h-5 w-5" />
-        </span>
-        <div className="flex gap-1.5">
-          {c.obligatorio && <Badge tone="human">Obligatorio</Badge>}
-          <Badge tone={c.estado === "Publicado" ? "good" : "neutral"} dot>{c.estado}</Badge>
+    <Link href={`/dashboard/capacitacion/${c.id}`}>
+      <Card hover className="flex h-full flex-col p-5">
+        <div className="flex items-start justify-between">
+          <span className="grid h-11 w-11 place-items-center rounded-xl bg-brand-soft text-brand">
+            <BookOpen className="h-5 w-5" />
+          </span>
+          <div className="flex gap-1.5">
+            {c.obligatorio && <Badge tone="human">Obligatorio</Badge>}
+            <Badge tone={c.estado === "Publicado" ? "good" : "neutral"} dot>{c.estado}</Badge>
+          </div>
         </div>
-      </div>
 
-      <h3 className="font-display mt-4 text-lg font-bold leading-snug">{c.titulo}</h3>
-      <p className="mt-1 text-sm text-ink-3">{c.categoria}</p>
+        <h3 className="font-display mt-4 text-lg font-bold leading-snug">{c.titulo}</h3>
+        <p className="mt-1 text-sm text-ink-3">{c.categoria || "Sin categoría"}</p>
 
-      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-2">
-        <span className="flex items-center gap-1.5"><Clock className="h-4 w-4 text-ink-3" /> {c.duracion}</span>
-        <span className="flex items-center gap-1.5"><GraduationCap className="h-4 w-4 text-ink-3" /> {c.modulos} módulos</span>
-        <span className="flex items-center gap-1.5"><Users className="h-4 w-4 text-ink-3" /> {c.inscritos}</span>
-      </div>
-
-      <div className="mt-auto pt-4">
-        <div className="mb-1.5 flex items-center justify-between text-xs">
-          <span className="text-ink-3">Avance del grupo</span>
-          <span className="font-mono font-semibold tabular">{c.completado}%</span>
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-2">
+          <span className="flex items-center gap-1.5"><Clock className="h-4 w-4 text-ink-3" /> {c.duracionHoras} h</span>
+          <span className="flex items-center gap-1.5"><GraduationCap className="h-4 w-4 text-ink-3" /> {c.modulos} módulos</span>
+          <span className="flex items-center gap-1.5"><Users className="h-4 w-4 text-ink-3" /> {c.asignados}</span>
         </div>
-        <div className="h-2 overflow-hidden rounded-full bg-surface-2">
-          <div className={cn("h-full rounded-full bg-gradient-to-r", c.completado >= 80 ? "from-good to-good" : "from-brand to-brand-2")} style={{ width: `${c.completado}%` }} />
+
+        <div className="mt-auto pt-4">
+          <div className="mb-1.5 flex items-center justify-between text-xs">
+            <span className="text-ink-3">Avance del grupo</span>
+            <span className="font-mono font-semibold tabular">{avance}%</span>
+          </div>
+          <div className="h-2 overflow-hidden rounded-full bg-surface-2">
+            <div className={cn("h-full rounded-full bg-gradient-to-r", avance >= 80 ? "from-good to-good" : "from-brand to-brand-2")} style={{ width: `${avance}%` }} />
+          </div>
         </div>
-      </div>
-    </Card>
+      </Card>
+    </Link>
   );
 }
 
 /* ---------------- Generar curso con IA ---------------- */
-function GenerarCurso({ onClose }: { onClose: () => void }) {
-  const [tema, setTema] = useState("Servicio al cliente en piso de venta");
-  const [duracion, setDuracion] = useState("2 h");
-  const [state, setState] = useState<"form" | "loading" | "done">("form");
+function GenerarCurso({ onClose, onListo }: { onClose: () => void; onListo: () => void }) {
+  const [tema, setTema] = useState("");
+  const [duracionHoras, setDuracionHoras] = useState(2);
+  const [categoria, setCategoria] = useState("");
+  const [obligatorio, setObligatorio] = useState(false);
+  const [generando, setGenerando] = useState(false);
+  const [error, setError] = useState("");
+  const [curso, setCurso] = useState<Curso | null>(null);
 
-  const temario = [
-    "Bienvenida y objetivos del curso",
-    "Principios del servicio al cliente",
-    "Protocolo de atención en piso",
-    "Manejo de objeciones y quejas",
-    "Cierre de venta y post-venta",
-    "Evaluación final",
-  ];
+  async function generar() {
+    if (!tema.trim()) {
+      setError("Escribe el tema del curso.");
+      return;
+    }
+    setGenerando(true);
+    setError("");
+    const r = await generarCurso({ tema, duracionHoras, categoria, obligatorio });
+    setGenerando(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
+    setCurso(r.data);
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
@@ -128,43 +178,78 @@ function GenerarCurso({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="flex flex-col gap-5 p-6">
-          <label className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium text-ink-2">Tema del curso</span>
-            <input value={tema} onChange={(e) => setTema(e.target.value)} className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
-          </label>
-          <label className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium text-ink-2">Duración estimada</span>
-            <input value={duracion} onChange={(e) => setDuracion(e.target.value)} className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
-          </label>
+          {!curso && (
+            <>
+              <label className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium text-ink-2">Tema del curso</span>
+                <input
+                  value={tema}
+                  onChange={(e) => setTema(e.target.value)}
+                  placeholder="Ej. Seguridad e higiene en almacén"
+                  className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-sm font-medium text-ink-2">Duración estimada (horas)</span>
+                  <input
+                    type="number"
+                    min={0.5}
+                    step={0.5}
+                    value={duracionHoras}
+                    onChange={(e) => setDuracionHoras(Number(e.target.value))}
+                    className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                  />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-sm font-medium text-ink-2">Categoría (opcional)</span>
+                  <input
+                    value={categoria}
+                    onChange={(e) => setCategoria(e.target.value)}
+                    placeholder="Ej. Cumplimiento"
+                    className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                  />
+                </label>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-ink-2">
+                <input type="checkbox" checked={obligatorio} onChange={(e) => setObligatorio(e.target.checked)} className="h-4 w-4 rounded border-border-soft" />
+                Obligatorio
+              </label>
 
-          <Button onClick={() => { setState("loading"); setTimeout(() => setState("done"), 1500); }} disabled={state === "loading"} className="w-full">
-            {state === "loading" ? (
-              <><span className="h-4 w-4 animate-spin rounded-full border-2 border-brand-ink/40 border-t-brand-ink" /> Generando temario…</>
-            ) : (
-              <><Sparkles className="h-4 w-4" /> Generar objetivos y temario</>
-            )}
-          </Button>
+              {error && <Aviso tono="error">{error}</Aviso>}
 
-          {state === "done" && (
+              <Button onClick={generar} disabled={generando} className="w-full">
+                {generando ? (
+                  <><span className="h-4 w-4 animate-spin rounded-full border-2 border-brand-ink/40 border-t-brand-ink" /> Generando temario…</>
+                ) : (
+                  <><Sparkles className="h-4 w-4" /> Generar objetivos y temario</>
+                )}
+              </Button>
+            </>
+          )}
+
+          {curso && (
             <div className="flex flex-col gap-4">
               <Card className="p-4">
                 <div className="flex items-center gap-2">
                   <Award className="h-4 w-4 text-brand" />
                   <span className="text-sm font-semibold">Objetivo del curso</span>
                 </div>
-                <p className="mt-2 text-sm leading-relaxed text-ink-2">
-                  Al finalizar, el colaborador aplicará un protocolo de atención al cliente que mejore
-                  la experiencia en piso de venta y aumente la conversión, con base en {tema.toLowerCase()}.
-                </p>
+                <p className="mt-2 text-sm leading-relaxed text-ink-2">{curso.objetivo}</p>
               </Card>
 
               <div>
-                <p className="mb-2 font-mono text-[11px] uppercase tracking-wider text-ink-3">Temario generado · {duracion}</p>
+                <p className="mb-2 font-mono text-[11px] uppercase tracking-wider text-ink-3">
+                  Temario generado · {curso.duracionHoras} h
+                </p>
                 <div className="space-y-2">
-                  {temario.map((t, i) => (
-                    <div key={i} className="flex items-center gap-3 rounded-xl border border-border-soft bg-surface p-3">
-                      <span className="grid h-7 w-7 place-items-center rounded-lg bg-brand-soft font-mono text-xs font-bold text-brand">{i + 1}</span>
-                      <span className="text-sm">{t}</span>
+                  {(curso.listaModulos ?? []).map((m) => (
+                    <div key={m.orden} className="rounded-xl border border-border-soft bg-surface p-3">
+                      <div className="flex items-center gap-3">
+                        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-brand-soft font-mono text-xs font-bold text-brand">{m.orden}</span>
+                        <span className="text-sm font-medium">{m.titulo}</span>
+                      </div>
+                      <p className="mt-2 pl-10 text-xs leading-relaxed text-ink-3">{m.contenido}</p>
                     </div>
                   ))}
                 </div>
@@ -174,10 +259,7 @@ function GenerarCurso({ onClose }: { onClose: () => void }) {
                 <Check className="h-4 w-4" /> Incluye ejercicios y evaluación con criterios de aprobación.
               </div>
 
-              <div className="flex gap-3">
-                <Button variant="outline" className="flex-1" onClick={onClose}>Guardar borrador</Button>
-                <Button className="flex-1" onClick={onClose}>Enviar a autorización</Button>
-              </div>
+              <Button className="w-full" onClick={onListo}>Listo — quedó guardado como borrador</Button>
             </div>
           )}
         </div>
