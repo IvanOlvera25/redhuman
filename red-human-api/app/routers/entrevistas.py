@@ -20,6 +20,7 @@ from ..models import Candidato, Entrevista, Mensaje, Usuario, Vacante, registrar
 from ..serial import entrevista_dict
 from ..services import ia
 from ..services.avatar import avatar_activo, crear_sesion_avatar
+from ..services.configuracion import modo_prueba_activo
 from ..services.entrevistas import crear_entrevista_para_candidato
 from ..services.whatsapp import enviar_mensaje
 
@@ -124,11 +125,14 @@ async def inmediata(datos: InmediataIn, db: Session = Depends(get_db), u: Usuari
     if not datos.nombre.strip():
         raise HTTPException(400, "El nombre del prospecto es obligatorio.")
 
+    prueba = modo_prueba_activo(db)
+
     c = None
-    if datos.telefono:
-        c = db.query(Candidato).filter(Candidato.telefono == datos.telefono).first()
-    if not c and datos.correo:
-        c = db.query(Candidato).filter(Candidato.correo == datos.correo).first()
+    if not prueba:
+        if datos.telefono:
+            c = db.query(Candidato).filter(Candidato.telefono == datos.telefono, Candidato.es_prueba.is_(False)).first()
+        if not c and datos.correo:
+            c = db.query(Candidato).filter(Candidato.correo == datos.correo, Candidato.es_prueba.is_(False)).first()
 
     if not c:
         vac = db.query(Vacante).filter(Vacante.codigo == datos.vacante).first() if datos.vacante else None
@@ -140,6 +144,7 @@ async def inmediata(datos: InmediataIn, db: Session = Depends(get_db), u: Usuari
             fuente="RH",
             etapa="Entrevista IA",
             vacante_id=vac.id if vac else None,
+            es_prueba=prueba,
         )
         db.add(c)
         db.flush()
