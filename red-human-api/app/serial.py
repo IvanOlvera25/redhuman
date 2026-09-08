@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from .models import Archivo, Candidato, Colaborador, Documento, Entrevista, Expediente, Vacante
+from .models import AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Vacante
 from .services.ia import texto_preguntas
 
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
@@ -213,6 +213,54 @@ def entrevista_dict(e: Entrevista) -> dict:
         "evaluacion": e.evaluacion or None,
         "tono": (c.id if c else 0) % 4,
         "ligaMeet": e.liga_meet or "",
+    }
+
+
+# ------------------------------------------------------------
+# Capacitación (Fase 1)
+# ------------------------------------------------------------
+
+
+def curso_dict(c: Curso, detalle: bool = False) -> dict:
+    base = {
+        "id": c.codigo,
+        "titulo": c.titulo,
+        "categoria": c.categoria,
+        "duracionHoras": c.duracion_horas,
+        "objetivo": c.objetivo,
+        "estado": c.estado,
+        "obligatorio": c.obligatorio,
+        "creadoPor": c.creado_por,
+        "creado": hace(c.creado_en),
+        "modulos": len(c.modulos),
+        "asignados": len(c.asignaciones),
+        "completados": sum(1 for a in c.asignaciones if a.estado == "completado"),
+    }
+    if detalle:
+        base["listaModulos"] = [
+            {
+                "orden": m.orden,
+                "titulo": m.titulo,
+                "contenido": m.contenido,
+                "preguntasVerificacion": m.preguntas_verificacion or [],
+            }
+            for m in sorted(c.modulos, key=lambda m: m.orden)
+        ]
+    return base
+
+
+def asignacion_dict(a: AsignacionCurso) -> dict:
+    col = a.colaborador
+    return {
+        "id": a.codigo,
+        "cursoId": a.curso.codigo if a.curso else "",
+        "colaboradorId": col.codigo if col else "",
+        "colaboradorNombre": col.nombre if col else "",
+        "estado": a.estado,
+        "moduloActual": a.modulo_actual,
+        "asignado": hace(a.asignado_en),
+        "completado": iso(a.completado_en),
+        "token": a.token,
     }
 
 

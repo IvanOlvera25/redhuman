@@ -634,6 +634,79 @@ export function finalizarEntrevista(token: string, transcript?: { rol: string; t
 }
 
 /* ============================================================
+   Módulo 1 · Capacitación (Fase 1 — sin avatar todavía)
+   ============================================================ */
+
+export interface PreguntaVerificacion {
+  pregunta: string;
+  criterio_respuesta_correcta: string;
+}
+
+export interface ModuloCurso {
+  orden: number;
+  titulo: string;
+  contenido: string;
+  preguntasVerificacion: PreguntaVerificacion[];
+}
+
+export interface Curso {
+  id: string;
+  titulo: string;
+  categoria: string;
+  duracionHoras: number;
+  objetivo: string;
+  estado: "Borrador" | "Publicado";
+  obligatorio: boolean;
+  creadoPor: string;
+  creado: string;
+  modulos: number;
+  asignados: number;
+  completados: number;
+  listaModulos?: ModuloCurso[];
+}
+
+export interface AsignacionCurso {
+  id: string;
+  cursoId: string;
+  colaboradorId: string;
+  colaboradorNombre: string;
+  estado: "pendiente" | "en_curso" | "completado";
+  moduloActual: number;
+  asignado: string;
+  completado: string | null;
+  token: string;
+}
+
+export function fetchCursos() {
+  return get<Curso[]>("/capacitacion");
+}
+
+export function fetchCurso(codigo: string) {
+  return get<Curso>(`/capacitacion/${codigo}`);
+}
+
+export function generarCurso(datos: { tema: string; duracionHoras: number; categoria?: string; obligatorio?: boolean }) {
+  return post<Curso>("/capacitacion/generar", {
+    tema: datos.tema,
+    duracion_horas: datos.duracionHoras,
+    categoria: datos.categoria ?? "",
+    obligatorio: datos.obligatorio ?? false,
+  });
+}
+
+export function publicarCurso(codigo: string) {
+  return patch<Curso>(`/capacitacion/${codigo}/publicar`, {});
+}
+
+export function asignarCurso(codigo: string, colaboradorIds: string[]) {
+  return post<AsignacionCurso[]>(`/capacitacion/${codigo}/asignar`, { colaborador_ids: colaboradorIds });
+}
+
+export function fetchAsignacionesCurso(codigo: string) {
+  return get<AsignacionCurso[]>(`/capacitacion/${codigo}/asignaciones`);
+}
+
+/* ============================================================
    Módulo 2 · Contratación e integración
    ============================================================ */
 

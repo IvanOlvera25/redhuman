@@ -516,3 +516,63 @@ class ConfiguracionSistema(Base):
     # Modo Prueba: mientras esté activo, webhooks._buscar_o_crear_candidato deja de deduplicar
     # conversaciones frías (Candidato.es_prueba=True); nunca aparecen en listados/reportes de RH.
     modo_prueba: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+# ============================================================
+# Capacitación (Fase 1) — modelo, generación con IA, asignación.
+# El avatar (Fase 2) queda pendiente: AsignacionCurso.token ya se genera con el mismo patrón
+# que Entrevista.token, pero todavía no hay ninguna ruta pública que lo sirva.
+# ============================================================
+
+
+class Curso(Base):
+    __tablename__ = "cursos"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    titulo: Mapped[str] = mapped_column(String(200))
+    categoria: Mapped[str] = mapped_column(String(100), default="")
+    duracion_horas: Mapped[float] = mapped_column(Float, default=0)
+    objetivo: Mapped[str] = mapped_column(Text, default="")  # generado por IA
+    estado: Mapped[str] = mapped_column(String(20), default="Borrador")  # Borrador | Publicado
+    obligatorio: Mapped[bool] = mapped_column(Boolean, default=False)
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+    modulos: Mapped[List["ModuloCurso"]] = relationship(
+        back_populates="curso", order_by="ModuloCurso.orden", cascade="all, delete-orphan"
+    )
+    asignaciones: Mapped[List["AsignacionCurso"]] = relationship(back_populates="curso", cascade="all, delete-orphan")
+
+
+class ModuloCurso(Base):
+    __tablename__ = "modulos_curso"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    curso_id: Mapped[int] = mapped_column(ForeignKey("cursos.id"), index=True)
+    orden: Mapped[int] = mapped_column(Integer)
+    titulo: Mapped[str] = mapped_column(String(200))
+    contenido: Mapped[str] = mapped_column(Text, default="")  # guion que explicará el avatar (Fase 2)
+    # [{"pregunta": str, "criterio_respuesta_correcta": str}] — con qué evaluar la comprensión (Fase 2)
+    preguntas_verificacion: Mapped[list] = mapped_column(JSON, default=list)
+
+    curso: Mapped["Curso"] = relationship(back_populates="modulos")
+
+
+class AsignacionCurso(Base):
+    __tablename__ = "asignaciones_curso"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    curso_id: Mapped[int] = mapped_column(ForeignKey("cursos.id"), index=True)
+    colaborador_id: Mapped[int] = mapped_column(ForeignKey("colaboradores.id"), index=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # liga pública (Fase 2, sin servir aún)
+    estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # pendiente | en_curso | completado
+    modulo_actual: Mapped[int] = mapped_column(Integer, default=0)
+    transcript: Mapped[list] = mapped_column(JSON, default=list)
+    resultado_evaluacion: Mapped[dict] = mapped_column(JSON, default=dict)
+    asignado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    completado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    curso: Mapped["Curso"] = relationship(back_populates="asignaciones")
+    colaborador: Mapped["Colaborador"] = relationship()

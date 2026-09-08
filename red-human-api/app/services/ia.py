@@ -860,6 +860,98 @@ def evaluar_entrevista(titulo: str, requisitos: str, transcript: List[dict]) -> 
 
 
 # ============================================================
+# 3.5) Capacitación (Fase 1) — generación de curso con IA
+# ============================================================
+
+
+class PreguntaVerificacion(BaseModel):
+    pregunta: str = Field(description="Pregunta breve para verificar que se entendió el módulo.")
+    criterio_respuesta_correcta: str = Field(
+        description="Qué debe incluir una respuesta correcta, para poder evaluarla después."
+    )
+
+
+class ModuloCursoGenerado(BaseModel):
+    titulo: str
+    contenido: str = Field(
+        description="Guion completo del módulo, listo para explicarse en voz alta o mostrarse como "
+        "material — español mexicano."
+    )
+    preguntas_verificacion: List[PreguntaVerificacion] = Field(description="1 a 2 preguntas de comprensión.")
+
+
+class GuionCurso(BaseModel):
+    objetivo: str = Field(
+        description="Objetivo del curso en 2-3 frases: qué sabrá o podrá hacer el colaborador al terminar."
+    )
+    modulos: List[ModuloCursoGenerado] = Field(
+        description="Módulos ordenados: el primero SIEMPRE de bienvenida, el último SIEMPRE de evaluación final."
+    )
+
+
+def _guion_curso_demo(tema: str, duracion_horas: float) -> GuionCurso:
+    """Plantilla determinista para modo demo (sin OPENAI_API_KEY) — misma estructura que la salida de IA."""
+    return GuionCurso(
+        objetivo=f"Modo demo: agrega OPENAI_API_KEY para generar el objetivo real de «{tema}».",
+        modulos=[
+            ModuloCursoGenerado(
+                titulo="Bienvenida y objetivos",
+                contenido=f"Introducción al curso «{tema}» y a lo que se espera lograr en {duracion_horas} horas.",
+                preguntas_verificacion=[
+                    PreguntaVerificacion(
+                        pregunta="¿Cuál es el objetivo principal de este curso?",
+                        criterio_respuesta_correcta="Menciona el propósito general del curso con sus propias palabras.",
+                    )
+                ],
+            ),
+            ModuloCursoGenerado(
+                titulo=tema,
+                contenido="Modo demo: agrega OPENAI_API_KEY para generar el contenido real de este módulo.",
+                preguntas_verificacion=[
+                    PreguntaVerificacion(
+                        pregunta=f"¿Qué aprendiste sobre {tema.lower()}?",
+                        criterio_respuesta_correcta="Respuesta registrada en modo demo.",
+                    )
+                ],
+            ),
+            ModuloCursoGenerado(
+                titulo="Evaluación final",
+                contenido="Repaso de los puntos clave del curso y cierre.",
+                preguntas_verificacion=[
+                    PreguntaVerificacion(
+                        pregunta="¿Te sientes preparado(a) para aplicar lo aprendido?",
+                        criterio_respuesta_correcta="Respuesta registrada en modo demo.",
+                    )
+                ],
+            ),
+        ],
+    )
+
+
+def guion_curso(tema: str, duracion_horas: float) -> Tuple[GuionCurso, bool]:
+    client = _client()
+    if client is None:
+        return _guion_curso_demo(tema, duracion_horas), False
+
+    resp = client.responses.parse(
+        model=MODEL,
+        instructions=(
+            "Diseñas cursos de capacitación corporativa para Red Human AI (RH en México), pensados "
+            "para impartirse por un instructor o, más adelante, un avatar de IA. Reglas: (1) el primer "
+            "módulo SIEMPRE es 'Bienvenida y objetivos'; (2) el último módulo SIEMPRE es 'Evaluación "
+            "final'; (3) los módulos intermedios cubren el tema de forma práctica y aplicable al "
+            "trabajo diario, en español mexicano; (4) el número de módulos es proporcional a la "
+            "duración (aprox. un módulo por cada 20-30 minutos); (5) cada módulo trae 1-2 preguntas "
+            "de verificación de comprensión con su criterio de respuesta correcta; (6) nunca pidas ni "
+            "menciones datos sensibles (salud, embarazo, religión, estado civil, orientación)."
+        ),
+        input=f"Tema del curso: {tema}\nDuración estimada: {duracion_horas} horas",
+        text_format=GuionCurso,
+    )
+    return resp.output_parsed, True
+
+
+# ============================================================
 # 4) Validador de documentos del expediente (módulo 3.11)
 # ============================================================
 
