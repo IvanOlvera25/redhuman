@@ -20,6 +20,7 @@ import {
   Loader2,
   CheckCircle2,
   Filter,
+  Search,
   GraduationCap,
   Award,
   Globe,
@@ -119,6 +120,11 @@ const ETAPAS_YA_CONTRATADO: EtapaCandidato[] = ["Contratación", "Onboarding"];
 const TIPOS_CONTRATACION = ["Tiempo indeterminado", "Tiempo determinado", "Por obra o proyecto", "Honorarios"];
 const MODALIDADES_ENTREVISTA_HUMANA: ModalidadEntrevistaHumana[] = ["Presencial", "Videollamada", "Llamada"];
 
+/** Quita acentos y pasa a minúsculas para que "jose" encuentre "José" en la búsqueda por nombre. */
+function normalizarTexto(s: string): string {
+  return s.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+}
+
 /** "Todos" excluye a los descartados a propósito: son un archivo aparte, no la vista por defecto. */
 function coincideEstado(c: Candidato, filtro: FiltroEstado): boolean {
   const yaContratado = ETAPAS_YA_CONTRATADO.includes(c.etapa);
@@ -144,6 +150,7 @@ export default function Candidatos() {
   const [vacantes, setVacantes] = useState<Vacante[]>([]);
   const [filtroVacante, setFiltroVacante] = useState<string>("");
   const [filtroEstado, setFiltroEstado] = useState<FiltroEstado>("todos");
+  const [busqueda, setBusqueda] = useState("");
   const [live, setLive] = useState(false);
   const [carga, setCarga] = useState(false);
 
@@ -176,7 +183,10 @@ export default function Candidatos() {
 
   const sinConsentimiento = datos.filter((c) => c.consentimiento === false).length;
   const datosFiltrados = datos.filter(
-    (c) => (!filtroVacante || c.vacanteId === filtroVacante) && coincideEstado(c, filtroEstado),
+    (c) =>
+      (!filtroVacante || c.vacanteId === filtroVacante) &&
+      coincideEstado(c, filtroEstado) &&
+      (!busqueda.trim() || normalizarTexto(c.nombre).includes(normalizarTexto(busqueda))),
   );
   const vacanteSeleccionada = vacantes.find((v) => v.id === filtroVacante);
 
@@ -216,6 +226,28 @@ export default function Candidatos() {
             ))}
           </select>
         </div>
+
+        {/* Búsqueda por nombre — se combina con el filtro de vacante, no lo reemplaza */}
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
+          <input
+            type="text"
+            value={busqueda}
+            onChange={(e) => setBusqueda(e.target.value)}
+            placeholder="Buscar por nombre…"
+            className="h-11 min-w-[220px] rounded-xl border border-border-soft bg-surface pl-9 pr-8 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+          />
+          {busqueda && (
+            <button
+              onClick={() => setBusqueda("")}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-ink-3 hover:text-ink"
+              aria-label="Limpiar búsqueda"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+
         {/* Barra de filtro por estado */}
         <div className="flex flex-wrap items-center gap-1 rounded-xl border border-border-soft bg-surface-2/60 p-1">
           {FILTROS_ESTADO.map((f) => (
@@ -284,7 +316,14 @@ export default function Candidatos() {
                         <ScoreRing score={c.score} />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-semibold group-hover:text-brand">{c.nombre}</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="truncate text-sm font-semibold group-hover:text-brand">{c.nombre}</p>
+                          {c.esPrueba && (
+                            <span className="shrink-0 rounded bg-brand-soft px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide text-brand">
+                              Prueba
+                            </span>
+                          )}
+                        </div>
                         <p className="truncate text-xs text-ink-3">{c.puesto || "Sin vacante asignada"}</p>
                         <div className="mt-1 flex items-center gap-1.5">
                           <span className="rounded bg-brand/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand">
