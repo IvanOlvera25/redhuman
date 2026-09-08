@@ -706,6 +706,52 @@ export function fetchAsignacionesCurso(codigo: string) {
   return get<AsignacionCurso[]>(`/capacitacion/${codigo}/asignaciones`);
 }
 
+/* ---------------- Fase 3 — KPIs globales y reporte por curso ---------------- */
+
+export interface CapacitacionKpis {
+  cursosActivos: number;
+  colaboradoresEnFormacion: number;
+  tasaFinalizacionGlobal: number;
+  horasImpartidas: number;
+}
+
+export function fetchCapacitacionKpis() {
+  return get<CapacitacionKpis>("/capacitacion/kpis");
+}
+
+export interface ReporteModulo {
+  orden: number;
+  titulo: string;
+  totalEvaluados: number;
+  comprendioPct: number | null;
+}
+
+export interface ReporteColaborador {
+  asignacionId: string;
+  colaboradorId: string;
+  colaboradorNombre: string;
+  estado: "pendiente" | "en_curso" | "completado";
+  moduloActual: number;
+  asignado: string;
+  completado: string | null;
+  resultadoEvaluacion: AsignacionPublica["resultadoEvaluacion"];
+}
+
+export interface ReporteCurso {
+  totalAsignados: number;
+  completados: number;
+  enCurso: number;
+  pendientes: number;
+  tasaFinalizacion: number;
+  duracionPromedioHoras: number | null;
+  porModulo: ReporteModulo[];
+  colaboradores: ReporteColaborador[];
+}
+
+export function fetchReporteCurso(codigo: string) {
+  return get<ReporteCurso>(`/capacitacion/${codigo}/reporte`);
+}
+
 /* ---------------- Fase 2 — sala pública (colaborador) ---------------- */
 
 export interface ModuloCursoPublico {

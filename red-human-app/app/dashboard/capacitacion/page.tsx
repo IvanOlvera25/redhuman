@@ -17,18 +17,19 @@ import {
 import { Card, Badge, Button, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
 import { Aviso } from "@/components/dashboard/subida";
-import { capacitacionKpis } from "@/lib/phase2";
-import { fetchCursos, generarCurso, type Curso } from "@/lib/api";
+import { fetchCursos, fetchCapacitacionKpis, generarCurso, type Curso, type CapacitacionKpis } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export default function Capacitacion() {
   const [open, setOpen] = useState(false);
   const [cursos, setCursos] = useState<Curso[]>([]);
+  const [kpis, setKpis] = useState<CapacitacionKpis | null>(null);
   const [cargando, setCargando] = useState(true);
 
   async function recargar() {
-    const c = await fetchCursos();
+    const [c, k] = await Promise.all([fetchCursos(), fetchCapacitacionKpis()]);
     if (c) setCursos(c);
+    if (k) setKpis(k);
     setCargando(false);
   }
 
@@ -36,13 +37,12 @@ export default function Capacitacion() {
     recargar();
   }, []);
 
-  const activos = cursos.filter((c) => c.estado === "Publicado").length;
-  const enFormacion = cursos.reduce((acc, c) => acc + (c.asignados - c.completados), 0);
-  const kpis = capacitacionKpis.map((k) => {
-    if (k.label === "Cursos activos") return { ...k, value: String(activos) };
-    if (k.label === "Colaboradores en formación") return { ...k, value: String(enFormacion) };
-    return k;
-  });
+  const tarjetasKpi = [
+    { label: "Cursos activos", value: kpis?.cursosActivos ?? 0 },
+    { label: "Colaboradores en formación", value: kpis?.colaboradoresEnFormacion ?? 0 },
+    { label: "Tasa de finalización", value: `${kpis?.tasaFinalizacionGlobal ?? 0}%` },
+    { label: "Horas impartidas", value: kpis?.horasImpartidas ?? 0 },
+  ];
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
@@ -54,7 +54,7 @@ export default function Capacitacion() {
 
       {/* KPIs */}
       <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {kpis.map((k) => (
+        {tarjetasKpi.map((k) => (
           <Card key={k.label} className="p-5">
             <p className="text-sm text-ink-2">{k.label}</p>
             <p className="font-display mt-1.5 text-3xl font-extrabold tabular">{k.value}</p>
