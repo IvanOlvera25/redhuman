@@ -119,6 +119,7 @@ def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
         "correo": c.correo,
         "consentimiento": c.consentimiento,
         "prefiltroCompleto": c.prefiltro_completo,
+        "esPrueba": c.es_prueba,
         # --- Entrevista Humana (flujo manual) ---
         "entrevistaHumana": {
             "entrevistador": c.entrevista_humana_entrevistador,

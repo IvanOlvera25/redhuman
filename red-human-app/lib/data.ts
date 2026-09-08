@@ -44,6 +44,7 @@ export interface Candidato {
   correo?: string;
   consentimiento?: boolean;
   prefiltroCompleto?: boolean;
+  esPrueba?: boolean;
   /* --- Entrevista Humana (flujo manual) --- */
   entrevistaHumana?: {
     entrevistador: string;

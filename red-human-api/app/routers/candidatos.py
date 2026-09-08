@@ -104,7 +104,10 @@ def listar(
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
 ):
-    q = db.query(Candidato).filter(Candidato.es_prueba.is_(False)).order_by(Candidato.id.desc())
+    # A diferencia de /metricas y los conteos por vacante, este listado (el Kanban de RH) SÍ
+    # incluye a los candidatos de Modo Prueba (es_prueba=True) — el frontend los distingue con
+    # un badge "Prueba" para que un admin pueda seguir su propio flujo de pruebas visualmente.
+    q = db.query(Candidato).order_by(Candidato.id.desc())
     if vacante:
         v = _vacante(db, vacante)
         q = q.filter(Candidato.vacante_id == v.id)
