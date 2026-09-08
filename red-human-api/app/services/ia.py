@@ -951,6 +951,80 @@ def guion_curso(tema: str, duracion_horas: float) -> Tuple[GuionCurso, bool]:
     return resp.output_parsed, True
 
 
+class TurnoCurso(BaseModel):
+    respuesta: str = Field(description="Siguiente mensaje del instructor, breve, español mexicano.")
+
+
+def curso_turno(system_prompt: str, historial: List[dict]) -> Tuple[TurnoCurso, bool]:
+    """Modo texto (demo o fallback sin avatar) para un módulo de capacitación. historial:
+    [{"rol","texto"}], el último es de la persona. A diferencia de entrevista_turno, no hay
+    flag `terminada` — el avance de módulo siempre lo dispara el botón "Continuar", nunca la IA
+    (ver services/entrevistas.py y la decisión de diseño en el plan de Fase 2)."""
+    client = _client()
+    if client is None:
+        return TurnoCurso(respuesta="Modo demo: agrega OPENAI_API_KEY para conversar con el instructor real."), False
+
+    mensajes = [{"role": ("user" if m["rol"] == "user" else "assistant"), "content": m["texto"]} for m in historial]
+    resp = client.responses.parse(
+        model=MODEL,
+        instructions=system_prompt,
+        input=mensajes,
+        text_format=TurnoCurso,
+    )
+    return resp.output_parsed, True
+
+
+class EvaluacionPregunta(BaseModel):
+    pregunta: str
+    respondida_correctamente: bool
+    evidencia: str = Field(description="Cita o paráfrasis de la respuesta que sustenta la calificación.")
+
+
+class EvaluacionModulo(BaseModel):
+    comprendio: bool = Field(description="true si en general demostró haber entendido el módulo.")
+    preguntas: List[EvaluacionPregunta]
+    comentario: str = Field(description="1-2 frases de retroalimentación para la persona.")
+
+
+def evaluar_modulo_curso(
+    titulo: str, contenido: str, preguntas_verificacion: list, transcript: List[dict]
+) -> Tuple[EvaluacionModulo, bool]:
+    """Evalúa las respuestas de un módulo de capacitación contra sus criterios — mismo patrón
+    que evaluar_entrevista, pero contra `criterio_respuesta_correcta` en vez del perfil del puesto."""
+    client = _client()
+    if client is None:
+        return (
+            EvaluacionModulo(
+                comprendio=True,
+                preguntas=[
+                    EvaluacionPregunta(pregunta=p["pregunta"], respondida_correctamente=True, evidencia="Modo demo")
+                    for p in preguntas_verificacion
+                ],
+                comentario="Modo demo: agrega OPENAI_API_KEY para evaluar la comprensión real.",
+            ),
+            False,
+        )
+
+    dialogo = "\n".join(f"{'Instructor' if m['rol'] == 'assistant' else 'Persona'}: {m['texto']}" for m in transcript)
+    preguntas_txt = "\n".join(
+        f"- Pregunta: {p['pregunta']}\n  Criterio de respuesta correcta: {p['criterio_respuesta_correcta']}"
+        for p in preguntas_verificacion
+    )
+    resp = client.responses.parse(
+        model=MODEL,
+        instructions=(
+            "Evalúas la comprensión de un módulo de capacitación corporativa para Red Human AI "
+            "(México). Califica SOLO con base en lo dicho en la transcripción — nunca inventes ni "
+            "infieras. Para cada pregunta de verificación, compárala contra su criterio de respuesta "
+            "correcta y decide si la persona la respondió correctamente, citando evidencia concreta "
+            "de lo que dijo. Sé constructivo en el comentario final."
+        ),
+        input=f"Módulo: {titulo}\nContenido explicado:\n{contenido}\n\nPreguntas de verificación:\n{preguntas_txt}\n\nTranscripción:\n{dialogo}",
+        text_format=EvaluacionModulo,
+    )
+    return resp.output_parsed, True
+
+
 # ============================================================
 # 4) Validador de documentos del expediente (módulo 3.11)
 # ============================================================

@@ -706,6 +706,54 @@ export function fetchAsignacionesCurso(codigo: string) {
   return get<AsignacionCurso[]>(`/capacitacion/${codigo}/asignaciones`);
 }
 
+/* ---------------- Fase 2 — sala pública (colaborador) ---------------- */
+
+export interface ModuloCursoPublico {
+  orden: number;
+  titulo: string;
+  completado: boolean;
+  contenido?: string;
+  preguntasVerificacion?: PreguntaVerificacion[];
+}
+
+export interface AsignacionPublica {
+  colaborador: string;
+  curso: string;
+  empresa: string;
+  estado: "pendiente" | "en_curso" | "completado";
+  moduloActual: number;
+  totalModulos: number;
+  avatarDisponible: boolean;
+  modulos: ModuloCursoPublico[];
+  resultadoEvaluacion: {
+    modulos: {
+      modulo: number;
+      titulo: string;
+      comprendio: boolean;
+      comentario: string;
+      preguntas: { pregunta: string; respondida_correctamente: boolean; evidencia: string }[];
+    }[];
+  } | null;
+}
+
+export function fetchAsignacionPublica(token: string) {
+  return get<AsignacionPublica>(`/capacitacion/publica/${token}`);
+}
+
+export function iniciarSesionCurso(token: string) {
+  return post<{ modo: "avatar" | "texto"; session_token?: string; mensajes?: { rol: string; texto: string }[] } & AsignacionPublica>(
+    `/capacitacion/publica/${token}/sesion`,
+  );
+}
+
+export function turnoCurso(token: string, texto: string) {
+  return post<{ respuesta: string; ia: boolean }>(`/capacitacion/publica/${token}/turno`, { texto });
+}
+
+export function avanzarModulo(token: string, transcript?: { rol: string; texto: string }[]) {
+  return post<AsignacionPublica>(`/capacitacion/publica/${token}/avanzar`, { transcript: transcript ?? null });
+}
+
 /* ============================================================
    Módulo 2 · Contratación e integración
    ============================================================ */
