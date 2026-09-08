@@ -36,6 +36,7 @@ from ..models import (
 from ..serial import archivo_dict, candidato_dict, expediente_dict
 from ..services import archivos as fs
 from ..services import ia
+from ..services.configuracion import modo_prueba_activo
 from ..services.correo import enviar_correo
 from ..services.whatsapp import enviar_mensaje, enviar_plantilla
 
@@ -81,7 +82,9 @@ def _distinto(a: str, b: str) -> bool:
 
 
 def _duplicado(db: Session, telefono: str, correo: str, excluir: Optional[int] = None) -> Optional[Candidato]:
-    q = db.query(Candidato)
+    """Nunca empareja contra un candidato de Modo Prueba (`es_prueba=True`): una postulación de
+    prueba con este mismo teléfono/correo no debe bloquear ni mezclarse con una real."""
+    q = db.query(Candidato).filter(Candidato.es_prueba.is_(False))
     if excluir:
         q = q.filter(Candidato.id != excluir)
     if telefono:
@@ -172,11 +175,14 @@ def ingresar(datos: IngresarIn, db: Session = Depends(get_db), _: Usuario = Depe
         raise HTTPException(400, "El nombre del candidato es obligatorio.")
     vac = _vacante(db, datos.vacante)
     telefono = _telefono(datos.telefono)
+    prueba = modo_prueba_activo(db)
 
-    # dedup básico por teléfono o correo (módulo 3.6)
-    existente = _duplicado(db, telefono, datos.correo)
-    if existente:
-        return {"duplicado": True, **candidato_dict(existente)}
+    # dedup básico por teléfono o correo (módulo 3.6) — con Modo Prueba activo se salta siempre:
+    # cada alta es una postulación nueva e independiente marcada es_prueba=True.
+    if not prueba:
+        existente = _duplicado(db, telefono, datos.correo)
+        if existente:
+            return {"duplicado": True, **candidato_dict(existente)}
 
     c = Candidato(
         codigo="TMP",
@@ -189,6 +195,7 @@ def ingresar(datos: IngresarIn, db: Session = Depends(get_db), _: Usuario = Depe
         vacante_id=vac.id if vac else None,
         consentimiento=datos.consentimiento,
         consentimiento_fecha=datetime.now(timezone.utc) if datos.consentimiento else None,
+        es_prueba=prueba,
     )
     db.add(c)
     db.flush()
@@ -258,7 +265,8 @@ async def _procesar_cv(
     c = candidato
     duplicado = False
     avisos: List[str] = []
-    if c is None:
+    prueba = modo_prueba_activo(db)
+    if c is None and not prueba:
         telefono = _telefono(datos.telefono)
         c = _duplicado(db, telefono, datos.correo or "")
         duplicado = c is not None
@@ -274,6 +282,7 @@ async def _procesar_cv(
             nombre=datos.nombre or archivo.nombre.rsplit(".", 1)[0],
             fuente=fuente,
             vacante_id=vac.id if vac else None,
+            es_prueba=prueba,
         )
         db.add(c)
         db.flush()
@@ -417,10 +426,28 @@ async def postular(
         raise HTTPException(404, f"Vacante '{vacante}' no encontrada")
 
     tel = _telefono(telefono)
-    c = _duplicado(db, tel, correo)
+    prueba = modo_prueba_activo(db)
+
+    c = None
+    if not prueba:
+        c = _duplicado(db, tel, correo)
+        if c and c.etapa != "Prefiltro":
+            # Ya avanzó del prefiltro (en esta vacante o en otra): no lo mezclamos con una
+            # postulación nueva — antes esto pisaba silenciosamente su vacante_id.
+            raise HTTPException(
+                409,
+                f"Ya tienes un proceso en curso para la vacante «{c.vacante.titulo if c.vacante else 'otra posición'}» "
+                f"(etapa: {c.etapa}). Contacta a RH si necesitas darle seguimiento.",
+            )
+    # Con Modo Prueba activo, `c` siempre queda en None aquí: cada llamada es una postulación
+    # nueva e independiente, sin importar cuánto pasó desde la anterior ni la etapa de esa otra.
+
     nuevo = c is None
     if c is None:
-        c = Candidato(codigo="TMP", nombre=nombre.strip(), telefono=tel, correo=correo.strip(), fuente="Formulario")
+        c = Candidato(
+            codigo="TMP", nombre=nombre.strip(), telefono=tel, correo=correo.strip(),
+            fuente="Formulario", es_prueba=prueba,
+        )
         db.add(c)
         db.flush()
         c.codigo = f"C-{8800 + c.id}"
@@ -437,8 +464,10 @@ async def postular(
     if nuevo:
         await _disparar_plantilla_inicio(db, c)
 
-    if not c.vacante_id:
-        c.vacante_id = vac.id
+    # Antes: `if not c.vacante_id: ...` — se quedaba pegado a la primera vacante para siempre.
+    # El guard de arriba ya garantiza que solo llegamos aquí si es seguro reasignar: candidato
+    # nuevo, o uno existente que sigue en Prefiltro sin avance real.
+    c.vacante_id = vac.id
 
     c.consentimiento = True
     c.consentimiento_fecha = datetime.now(timezone.utc)
