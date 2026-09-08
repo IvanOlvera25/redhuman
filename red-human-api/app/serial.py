@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .models import AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Vacante
+from .services.avatar import avatar_activo
 from .services.ia import texto_preguntas
 
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
@@ -261,6 +262,32 @@ def asignacion_dict(a: AsignacionCurso) -> dict:
         "asignado": hace(a.asignado_en),
         "completado": iso(a.completado_en),
         "token": a.token,
+    }
+
+
+def asignacion_publica_dict(a: AsignacionCurso) -> dict:
+    """Forma que consume la sala pública (Fase 2) — a diferencia de `asignacion_dict`, nunca
+    expone `contenido`/`preguntasVerificacion` de módulos que la persona todavía no alcanza."""
+    curso = a.curso
+    modulos = sorted(curso.modulos, key=lambda m: m.orden) if curso else []
+    total = len(modulos)
+    salida_modulos = []
+    for i, m in enumerate(modulos):
+        item = {"orden": m.orden, "titulo": m.titulo, "completado": i < a.modulo_actual}
+        if i <= a.modulo_actual:  # módulo actual y anteriores: sí traen contenido
+            item["contenido"] = m.contenido
+            item["preguntasVerificacion"] = m.preguntas_verificacion or []
+        salida_modulos.append(item)
+    return {
+        "colaborador": a.colaborador.nombre if a.colaborador else "",
+        "curso": curso.titulo if curso else "",
+        "empresa": "Red Human",
+        "estado": a.estado,
+        "moduloActual": min(a.modulo_actual + 1, total) if total else 0,
+        "totalModulos": total,
+        "avatarDisponible": avatar_activo(),
+        "modulos": salida_modulos,
+        "resultadoEvaluacion": a.resultado_evaluacion or None,
     }
 
 

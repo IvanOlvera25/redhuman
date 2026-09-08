@@ -1,7 +1,8 @@
-"""Capacitación (Fase 1) — modelo real, generación con IA, ver/asignar. Sin avatar todavía:
-`AsignacionCurso.token` se genera pero ninguna ruta pública lo sirve aún (eso es Fase 2)."""
+"""Capacitación — Fase 1 (modelo, generación con IA, ver/asignar) y Fase 2 (sala pública con
+avatar, módulo por módulo — rutas `/publica/{token}/...`, mismo patrón que entrevistas.py)."""
 
 import secrets
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,8 +12,9 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import usuario_actual, usuario_decisor
 from ..models import AsignacionCurso, Colaborador, Curso, ModuloCurso, Usuario, registrar
-from ..serial import asignacion_dict, curso_dict
+from ..serial import asignacion_dict, asignacion_publica_dict, curso_dict
 from ..services import ia
+from ..services.avatar import crear_sesion_avatar
 
 router = APIRouter(prefix="/capacitacion", tags=["capacitacion"])
 
@@ -147,3 +149,167 @@ def asignaciones(codigo: str, db: Session = Depends(get_db), _: Usuario = Depend
         .all()
     )
     return [asignacion_dict(a) for a in filas]
+
+
+# ------------------------------------------------------------
+# Fase 2 — sala pública: la persona asignada toma el curso con el avatar, módulo por módulo.
+# Sin auth (como /entrevistas/publica/{token}): el token es la credencial.
+# ------------------------------------------------------------
+
+
+def _asignacion_por_token(db: Session, token: str) -> AsignacionCurso:
+    a = db.query(AsignacionCurso).filter(AsignacionCurso.token == token).first()
+    if not a:
+        raise HTTPException(404, "Asignación no encontrada")
+    return a
+
+
+def _modulos_ordenados(a: AsignacionCurso) -> List[ModuloCurso]:
+    return sorted(a.curso.modulos, key=lambda m: m.orden) if a.curso else []
+
+
+def _modulo_actual(a: AsignacionCurso) -> ModuloCurso:
+    modulos = _modulos_ordenados(a)
+    if a.modulo_actual >= len(modulos):
+        raise HTTPException(409, "No quedan módulos pendientes en este curso.")
+    return modulos[a.modulo_actual]
+
+
+def _prompt_modulo(a: AsignacionCurso, m: ModuloCurso, total: int) -> str:
+    preguntas = "\n".join(f"- {p['pregunta']}" for p in (m.preguntas_verificacion or []))
+    nombre = a.colaborador.nombre.split(" ")[0] if a.colaborador else "la persona"
+    return (
+        f"Eres un instructor virtual de Red Human AI (México) impartiendo el curso "
+        f"«{a.curso.titulo if a.curso else ''}» a {nombre}. Estás en el módulo «{m.titulo}» "
+        f"({m.orden} de {total}).\n\n"
+        f"Contenido que debes explicar:\n{m.contenido}\n\n"
+        "Instrucciones: (1) explica este contenido de forma conversacional, cálida y clara, en "
+        "español mexicano — no lo leas tal cual, adáptalo como si fueras un instructor hablando; "
+        "(2) puedes dividirlo en varios mensajes cortos, no lo digas todo de una vez; (3) AL "
+        "TERMINAR de explicar todo el contenido, haz esta(s) pregunta(s) de verificación, una a "
+        f"la vez, y espera la respuesta antes de la siguiente:\n{preguntas}\n"
+        "(4) NO des por terminado el módulo sin haber hecho todas las preguntas y recibido una "
+        "respuesta a cada una; (5) en cuanto ya hayas hecho todas las preguntas y la persona haya "
+        "respondido, dile explícitamente que ya puede dar clic en 'Continuar' para seguir; "
+        "(6) nunca pidas ni menciones datos sensibles (salud, embarazo, religión, estado civil, "
+        "orientación)."
+    )
+
+
+@router.get("/publica/{token}")
+def publica(token: str, db: Session = Depends(get_db)):
+    a = _asignacion_por_token(db, token)
+    return asignacion_publica_dict(a)
+
+
+@router.post("/publica/{token}/sesion")
+async def sesion(token: str, db: Session = Depends(get_db)):
+    """Crea (o reinicia, para el módulo que toque) la sesión del avatar — token de Anam, o modo
+    texto si no hay clave. El frontend la vuelve a llamar después de cada /avanzar exitoso."""
+    a = _asignacion_por_token(db, token)
+    if a.estado == "completado":
+        raise HTTPException(409, "Este curso ya fue completado.")
+
+    modulos = _modulos_ordenados(a)
+    m = _modulo_actual(a)
+    a.estado = "en_curso"
+
+    saludo = f"¡Hola! Vamos a ver el módulo «{m.titulo}» del curso «{a.curso.titulo if a.curso else ''}»."
+    prompt = _prompt_modulo(a, m, len(modulos))
+
+    ses = None
+    try:
+        ses = await crear_sesion_avatar("Instructor", prompt, saludo)
+    except Exception as ex:  # el avatar nunca debe tumbar la sesión: cae a modo texto
+        registrar(db, "sistema", "avatar_error", "asignacion_curso", a.codigo, {"error": str(ex)[:300]})
+
+    if ses is None:
+        db.commit()
+        return {"modo": "texto", "mensajes": [{"rol": "assistant", "texto": saludo}], **asignacion_publica_dict(a)}
+
+    db.commit()
+    return {"modo": "avatar", **ses, **asignacion_publica_dict(a)}
+
+
+class TurnoIn(BaseModel):
+    texto: str
+
+
+@router.post("/publica/{token}/turno")
+def turno(token: str, datos: TurnoIn, db: Session = Depends(get_db)):
+    """Un turno en modo texto (demo o fallback sin avatar) para el módulo actual."""
+    a = _asignacion_por_token(db, token)
+    if a.estado != "en_curso":
+        raise HTTPException(403, "El curso no está en curso.")
+    m = _modulo_actual(a)
+
+    # Historial del módulo actual: el último bloque de `transcript` si ya es de este módulo.
+    bloques = list(a.transcript or [])
+    if bloques and bloques[-1].get("modulo") == m.orden:
+        historial = list(bloques[-1].get("mensajes", []))
+    else:
+        historial = []
+    historial = historial + [{"rol": "user", "texto": datos.texto}]
+
+    t, con_ia = ia.curso_turno(_prompt_modulo(a, m, len(_modulos_ordenados(a))), historial)
+    historial = historial + [{"rol": "assistant", "texto": t.respuesta}]
+
+    if bloques and bloques[-1].get("modulo") == m.orden:
+        bloques[-1]["mensajes"] = historial
+    else:
+        bloques.append({"modulo": m.orden, "titulo": m.titulo, "mensajes": historial})
+    a.transcript = bloques
+
+    db.commit()
+    return {"respuesta": t.respuesta, "ia": con_ia}
+
+
+class AvanzarIn(BaseModel):
+    transcript: Optional[List[dict]] = None  # mensajes del módulo que se cierra (modo avatar los manda el navegador)
+
+
+@router.post("/publica/{token}/avanzar")
+def avanzar(token: str, datos: AvanzarIn, db: Session = Depends(get_db)):
+    """Cierra el módulo actual: evalúa las respuestas contra criterio_respuesta_correcta,
+    guarda transcript/resultado_evaluacion, y avanza modulo_actual (o completa el curso)."""
+    a = _asignacion_por_token(db, token)
+    if a.estado == "completado":
+        return asignacion_publica_dict(a)  # idempotente: no reprocesa
+
+    m = _modulo_actual(a)
+
+    if datos.transcript is not None:
+        mensajes = [
+            {"rol": ("assistant" if x.get("rol") == "assistant" else "user"), "texto": str(x.get("texto", ""))[:2000]}
+            for x in datos.transcript
+        ]
+    else:
+        # modo texto: ya se fue acumulando en /turno
+        bloques_previos = list(a.transcript or [])
+        mensajes = bloques_previos[-1]["mensajes"] if bloques_previos and bloques_previos[-1].get("modulo") == m.orden else []
+
+    evaluacion, con_ia = ia.evaluar_modulo_curso(m.titulo, m.contenido, m.preguntas_verificacion or [], mensajes)
+
+    bloques = list(a.transcript or [])
+    if bloques and bloques[-1].get("modulo") == m.orden:
+        bloques[-1]["mensajes"] = mensajes
+    else:
+        bloques.append({"modulo": m.orden, "titulo": m.titulo, "mensajes": mensajes})
+    a.transcript = bloques
+
+    resultados = list((a.resultado_evaluacion or {}).get("modulos", []))
+    resultados.append({"modulo": m.orden, "titulo": m.titulo, **evaluacion.model_dump()})
+    a.resultado_evaluacion = {"modulos": resultados}
+
+    a.modulo_actual += 1
+    total = len(_modulos_ordenados(a))
+    actor = a.colaborador.codigo if a.colaborador else "colaborador"
+    if a.modulo_actual >= total:
+        a.estado = "completado"
+        a.completado_en = datetime.now(timezone.utc)
+        registrar(db, actor, "curso_completado", "asignacion_curso", a.codigo, {"curso": a.curso.codigo if a.curso else "", "ia": con_ia})
+    else:
+        registrar(db, actor, "modulo_completado", "asignacion_curso", a.codigo, {"modulo": m.orden, "ia": con_ia})
+
+    db.commit()
+    return asignacion_publica_dict(a)
