@@ -9,12 +9,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
 from ..deps import usuario_actual, usuario_decisor
 from ..models import AsignacionCurso, Colaborador, Curso, ModuloCurso, Usuario, registrar
 from ..serial import asignacion_dict, asignacion_publica_dict, curso_dict
 from ..services import ia
 from ..services.avatar import crear_sesion_avatar
+from ..services.correo import enviar_correo
+from ..services.whatsapp import enviar_mensaje
 
 router = APIRouter(prefix="/capacitacion", tags=["capacitacion"])
 
@@ -94,8 +97,19 @@ class AsignarCursoIn(BaseModel):
     colaborador_ids: List[str]  # códigos de Colaborador (p.ej. "COL-12"), no ids numéricos
 
 
+def _html_correo_asignacion(col: Colaborador, curso: Curso, liga: str) -> str:
+    primer_nombre = col.nombre.split(" ")[0] if col.nombre else "colaborador(a)"
+    return (
+        f"<p>¡Hola {primer_nombre}!</p>"
+        f"<p>Te asignamos el curso <strong>{curso.titulo}</strong> "
+        f"(duración aproximada: {curso.duracion_horas} horas).</p>"
+        f"<p>Puedes comenzarlo cuando gustes desde esta liga: <a href=\"{liga}\">{liga}</a></p>"
+        "<p>Saludos,<br>Red Human AI</p>"
+    )
+
+
 @router.post("/{codigo}/asignar", status_code=201)
-def asignar(codigo: str, datos: AsignarCursoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+async def asignar(codigo: str, datos: AsignarCursoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
     curso = _por_codigo(db, codigo)
     if curso.estado != "Publicado":
         raise HTTPException(409, "Solo se pueden asignar cursos publicados.")
@@ -104,6 +118,7 @@ def asignar(codigo: str, datos: AsignarCursoIn, db: Session = Depends(get_db), u
 
     resultado: List[AsignacionCurso] = []
     encontrados: List[str] = []
+    nuevas: List[AsignacionCurso] = []
     for cod_col in datos.colaborador_ids:
         col = db.query(Colaborador).filter(Colaborador.codigo == cod_col).first()
         if not col:
@@ -130,11 +145,51 @@ def asignar(codigo: str, datos: AsignarCursoIn, db: Session = Depends(get_db), u
         db.flush()
         a.codigo = f"ASIG-{5000 + a.id}"
         resultado.append(a)
+        nuevas.append(a)
 
     if not encontrados:
         raise HTTPException(404, "Ninguno de los colaboradores indicados existe.")
 
-    registrar(db, u.nombre, "curso_asignado", "curso", curso.codigo, {"colaboradores": encontrados})
+    # Aviso por WhatsApp y correo — solo para asignaciones NUEVAS (si ya estaba asignado, no se
+    # reavisa en un reintento/doble clic; ver el guard de arriba). Ninguno de los dos envíos debe
+    # tumbar el 201: mismo try/except que ya se usa en programar_entrevista_humana.
+    notificaciones = []
+    for a in nuevas:
+        col = a.colaborador
+        liga = f"{settings.app_url}/capacitacion/{a.token}"
+        primer_nombre = col.nombre.split(" ")[0] if col.nombre else "colaborador(a)"
+        texto = (
+            f"¡Hola {primer_nombre}! 📚 Te asignamos el curso *{curso.titulo}* "
+            f"(duración aprox. {curso.duracion_horas} h). Puedes comenzarlo cuando gustes en esta liga: {liga}"
+        )
+
+        envio_whatsapp = {"enviado": False, "proveedor": "demo", "detalle": "sin teléfono"}
+        if col.telefono:
+            try:
+                envio_whatsapp = await enviar_mensaje(col.telefono, texto)
+            except Exception as ex:  # que WhatsApp falle no debe tumbar la asignación
+                print(f"[whatsapp-send-error] asignar_curso -> {a.codigo}: {ex}")
+                envio_whatsapp = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+
+        try:
+            envio_correo = await enviar_correo(
+                col.correo, f"Nuevo curso asignado: {curso.titulo}", _html_correo_asignacion(col, curso, liga),
+            )
+        except Exception as ex:  # que Resend falle no debe tumbar la asignación
+            print(f"[correo-send-error] asignar_curso -> {a.codigo}: {ex}")
+            envio_correo = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+
+        notificaciones.append({
+            "colaborador": col.codigo,
+            "asignacion": a.codigo,
+            "whatsapp": envio_whatsapp,
+            "correo": envio_correo,
+        })
+
+    registrar(
+        db, u.nombre, "curso_asignado", "curso", curso.codigo,
+        {"colaboradores": encontrados, "notificaciones": notificaciones},
+    )
     db.commit()
     return [asignacion_dict(a) for a in resultado]
 
