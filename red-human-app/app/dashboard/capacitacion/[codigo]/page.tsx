@@ -24,11 +24,12 @@ import {
   fetchColaboradores,
   publicarCurso,
   asignarCurso,
-  fetchAsignacionesCurso,
+  fetchReporteCurso,
   type Curso,
-  type AsignacionCurso,
+  type ReporteCurso,
   type Colaborador,
 } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 function normalizarTexto(s: string): string {
   return s.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
@@ -39,16 +40,16 @@ export default function DetalleCurso() {
   const codigo = String(params?.codigo ?? "");
 
   const [curso, setCurso] = useState<Curso | null>(null);
-  const [asignaciones, setAsignaciones] = useState<AsignacionCurso[]>([]);
+  const [reporte, setReporte] = useState<ReporteCurso | null>(null);
   const [cargando, setCargando] = useState(true);
   const [publicando, setPublicando] = useState(false);
   const [asignarAbierto, setAsignarAbierto] = useState(false);
   const [error, setError] = useState("");
 
   async function cargar() {
-    const [c, asigs] = await Promise.all([fetchCurso(codigo), fetchAsignacionesCurso(codigo)]);
+    const [c, rep] = await Promise.all([fetchCurso(codigo), fetchReporteCurso(codigo)]);
     if (c) setCurso(c);
-    if (asigs) setAsignaciones(asigs);
+    if (rep) setReporte(rep);
     setCargando(false);
   }
 
@@ -154,27 +155,12 @@ export default function DetalleCurso() {
         </div>
       </div>
 
-      {asignaciones.length > 0 && (
-        <div className="mt-6">
-          <p className="mb-2 font-mono text-[11px] uppercase tracking-wider text-ink-3">Asignado a</p>
-          <div className="space-y-2">
-            {asignaciones.map((a) => (
-              <div key={a.id} className="flex items-center justify-between rounded-xl border border-border-soft bg-surface p-3 text-sm">
-                <span className="font-medium">{a.colaboradorNombre}</span>
-                <span className="flex items-center gap-2 text-xs text-ink-3">
-                  {a.estado === "completado" && <CheckCircle2 className="h-3.5 w-3.5 text-good" />}
-                  {a.estado}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {reporte && reporte.totalAsignados > 0 && <SeccionProgreso reporte={reporte} />}
 
       {asignarAbierto && (
         <ModalAsignar
           codigo={codigo}
-          yaAsignados={new Set(asignaciones.map((a) => a.colaboradorId))}
+          yaAsignados={new Set((reporte?.colaboradores ?? []).map((c) => c.colaboradorId))}
           onClose={() => setAsignarAbierto(false)}
           onListo={() => {
             setAsignarAbierto(false);
@@ -182,6 +168,127 @@ export default function DetalleCurso() {
           }}
         />
       )}
+    </div>
+  );
+}
+
+const ESTADO_LABEL: Record<string, string> = {
+  pendiente: "Pendiente",
+  en_curso: "En curso",
+  completado: "Completado",
+};
+
+function SeccionProgreso({ reporte }: { reporte: ReporteCurso }) {
+  const [expandidos, setExpandidos] = useState<Set<string>>(new Set());
+
+  function alternar(id: string) {
+    setExpandidos((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  return (
+    <div className="mt-6">
+      <p className="mb-2 font-mono text-[11px] uppercase tracking-wider text-ink-3">Progreso</p>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {[
+          { l: "Asignados", v: reporte.totalAsignados },
+          { l: "Completados", v: reporte.completados },
+          { l: "En curso", v: reporte.enCurso },
+          { l: "Pendientes", v: reporte.pendientes },
+        ].map((s) => (
+          <Card key={s.l} className="p-4 text-center">
+            <div className="font-display text-2xl font-bold tabular">{s.v}</div>
+            <div className="mt-0.5 text-xs text-ink-3">{s.l}</div>
+          </Card>
+        ))}
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        <Card className="p-4">
+          <p className="text-sm text-ink-2">Tasa de finalización</p>
+          <p className="font-display mt-1 text-2xl font-bold tabular">{reporte.tasaFinalizacion}%</p>
+        </Card>
+        <Card className="p-4">
+          <p className="text-sm text-ink-2">Duración promedio real</p>
+          <p className="font-display mt-1 text-2xl font-bold tabular">
+            {reporte.duracionPromedioHoras != null ? `${reporte.duracionPromedioHoras} h` : "—"}
+          </p>
+        </Card>
+      </div>
+
+      {reporte.porModulo.length > 0 && (
+        <div className="mt-4">
+          <p className="mb-2 text-sm font-semibold">Comprensión por módulo</p>
+          <div className="space-y-2">
+            {reporte.porModulo.map((m) => (
+              <div key={m.orden} className="rounded-xl border border-border-soft bg-surface p-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-medium">{m.orden}. {m.titulo}</span>
+                  <span className="font-mono text-xs text-ink-3">
+                    {m.comprendioPct != null ? `${m.comprendioPct}% comprendió · ${m.totalEvaluados} evaluado(s)` : "Sin datos todavía"}
+                  </span>
+                </div>
+                {m.comprendioPct != null && (
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface-2">
+                    <div
+                      className={cn("h-full rounded-full", m.comprendioPct >= 70 ? "bg-good" : "bg-warn")}
+                      style={{ width: `${m.comprendioPct}%` }}
+                    />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-4">
+        <p className="mb-2 text-sm font-semibold">Colaboradores asignados</p>
+        <div className="space-y-2">
+          {reporte.colaboradores.map((c) => {
+            const abierto = expandidos.has(c.asignacionId);
+            return (
+              <div key={c.asignacionId} className="rounded-xl border border-border-soft bg-surface">
+                <button
+                  onClick={() => c.resultadoEvaluacion && alternar(c.asignacionId)}
+                  className={cn(
+                    "flex w-full items-center justify-between p-3 text-left text-sm",
+                    c.resultadoEvaluacion && "hover:bg-surface-2",
+                  )}
+                >
+                  <span className="font-medium">{c.colaboradorNombre}</span>
+                  <span className="flex items-center gap-2 text-xs text-ink-3">
+                    {c.estado === "completado" && <CheckCircle2 className="h-3.5 w-3.5 text-good" />}
+                    {ESTADO_LABEL[c.estado] ?? c.estado}
+                    {c.estado !== "pendiente" && ` · módulo ${c.moduloActual}`}
+                  </span>
+                </button>
+                {abierto && c.resultadoEvaluacion && (
+                  <div className="space-y-1.5 border-t border-border-faint px-3 py-2.5">
+                    {c.resultadoEvaluacion.modulos.map((m) => (
+                      <div key={m.modulo} className="flex items-start gap-2 text-xs text-ink-2">
+                        {m.comprendio ? (
+                          <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-good" />
+                        ) : (
+                          <span className="mt-0.5 h-3.5 w-3.5 shrink-0 rounded-full border-2 border-warn" />
+                        )}
+                        <span>
+                          <b>{m.titulo}:</b> {m.comentario}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

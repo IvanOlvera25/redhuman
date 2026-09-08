@@ -13,7 +13,7 @@ from ..config import settings
 from ..database import get_db
 from ..deps import usuario_actual, usuario_decisor
 from ..models import AsignacionCurso, Colaborador, Curso, ModuloCurso, Usuario, registrar
-from ..serial import asignacion_dict, asignacion_publica_dict, curso_dict
+from ..serial import asignacion_dict, asignacion_publica_dict, curso_dict, hace, iso
 from ..services import ia
 from ..services.avatar import crear_sesion_avatar
 from ..services.correo import enviar_correo
@@ -79,9 +79,96 @@ def listar(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
     return [curso_dict(c) for c in db.query(Curso).order_by(Curso.id.desc()).all()]
 
 
+@router.get("/kpis")
+def kpis(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
+    """KPIs globales del dashboard — antes de la ruta /{codigo} a propósito: 'kpis' no es un
+    código de curso válido, pero si esta ruta se registrara después, /{codigo} la interceptaría
+    primero (mismo cuidado que con /prueba/eliminar en candidatos.py)."""
+    cursos = db.query(Curso).all()
+    asignaciones = db.query(AsignacionCurso).all()
+    completadas = [a for a in asignaciones if a.estado == "completado"]
+
+    cursos_activos = sum(1 for c in cursos if c.estado == "Publicado")
+    en_formacion = sum(1 for a in asignaciones if a.estado in ("pendiente", "en_curso"))
+    tasa_finalizacion = round(len(completadas) / len(asignaciones) * 100) if asignaciones else 0
+    horas_impartidas = sum((a.curso.duracion_horas if a.curso else 0) for a in completadas)
+
+    return {
+        "cursosActivos": cursos_activos,
+        "colaboradoresEnFormacion": en_formacion,
+        "tasaFinalizacionGlobal": tasa_finalizacion,
+        "horasImpartidas": round(horas_impartidas, 1),
+    }
+
+
 @router.get("/{codigo}")
 def detalle(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
     return curso_dict(_por_codigo(db, codigo), detalle=True)
+
+
+@router.get("/{codigo}/reporte")
+def reporte(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
+    """Vista agregada del curso: avance por estado, tasa de finalización, duración promedio
+    real, % de comprensión por módulo (primer y único intento — no hay mecanismo de reintento),
+    y el detalle por colaborador para la sección "Progreso" del panel."""
+    curso = _por_codigo(db, codigo)
+    asignaciones = db.query(AsignacionCurso).filter(AsignacionCurso.curso_id == curso.id).all()
+
+    total = len(asignaciones)
+    completadas = [a for a in asignaciones if a.estado == "completado"]
+    en_curso = sum(1 for a in asignaciones if a.estado == "en_curso")
+    pendientes = sum(1 for a in asignaciones if a.estado == "pendiente")
+
+    duraciones_horas = []
+    for a in completadas:
+        if a.asignado_en and a.completado_en:
+            inicio = a.asignado_en if a.asignado_en.tzinfo else a.asignado_en.replace(tzinfo=timezone.utc)
+            fin = a.completado_en if a.completado_en.tzinfo else a.completado_en.replace(tzinfo=timezone.utc)
+            duraciones_horas.append((fin - inicio).total_seconds() / 3600)
+    duracion_promedio = round(sum(duraciones_horas) / len(duraciones_horas), 1) if duraciones_horas else None
+
+    por_modulo = []
+    for m in sorted(curso.modulos, key=lambda m: m.orden):
+        evaluados = 0
+        comprendieron = 0
+        for a in asignaciones:
+            entradas = (a.resultado_evaluacion or {}).get("modulos", [])
+            entrada = next((e for e in entradas if e.get("modulo") == m.orden), None)
+            if entrada is not None:
+                evaluados += 1
+                if entrada.get("comprendio"):
+                    comprendieron += 1
+        por_modulo.append({
+            "orden": m.orden,
+            "titulo": m.titulo,
+            "totalEvaluados": evaluados,
+            "comprendioPct": round(comprendieron / evaluados * 100) if evaluados else None,
+        })
+
+    colaboradores = []
+    for a in sorted(asignaciones, key=lambda a: a.id, reverse=True):
+        col = a.colaborador
+        colaboradores.append({
+            "asignacionId": a.codigo,
+            "colaboradorId": col.codigo if col else "",
+            "colaboradorNombre": col.nombre if col else "",
+            "estado": a.estado,
+            "moduloActual": a.modulo_actual,
+            "asignado": hace(a.asignado_en),
+            "completado": iso(a.completado_en),
+            "resultadoEvaluacion": a.resultado_evaluacion or None,
+        })
+
+    return {
+        "totalAsignados": total,
+        "completados": len(completadas),
+        "enCurso": en_curso,
+        "pendientes": pendientes,
+        "tasaFinalizacion": round(len(completadas) / total * 100) if total else 0,
+        "duracionPromedioHoras": duracion_promedio,
+        "porModulo": por_modulo,
+        "colaboradores": colaboradores,
+    }
 
 
 @router.patch("/{codigo}/publicar")

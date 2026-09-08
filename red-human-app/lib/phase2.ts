@@ -132,16 +132,10 @@ export const nuevosIngresos: NuevoIngreso[] = [
 ];
 
 /* -------------------- Capacitación (3.14) --------------------
-   `Curso`/`cursos` ya no viven aquí: son datos reales del backend (ver lib/api.ts
-   fetchCursos()/fetchCurso() y app/dashboard/capacitacion/page.tsx). `capacitacionKpis`
-   se queda como fallback — la página recalcula "Cursos activos" y "Colaboradores en
-   formación" con datos reales; las otras dos siguen aproximadas por ahora. */
-export const capacitacionKpis = [
-  { label: "Cursos activos", value: "18", tone: "brand" },
-  { label: "Colaboradores en formación", value: "624", tone: "human" },
-  { label: "Tasa de finalización", value: "78%", tone: "good" },
-  { label: "Horas impartidas (mes)", value: "1,940", tone: "brand" },
-];
+   Todo lo de este módulo ya es real: `Curso`/`cursos` viven en lib/api.ts
+   (fetchCursos()/fetchCurso()), y los 4 KPIs del dashboard vienen de
+   fetchCapacitacionKpis() (GET /capacitacion/kpis) — ver
+   app/dashboard/capacitacion/page.tsx. Nada mockeado queda en este archivo. */
 
 /* -------------------- Desempeño (3.15) -------------------- */
 export const competencias = [
