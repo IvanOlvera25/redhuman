@@ -67,6 +67,17 @@ export default function Aplicar() {
     [vacante],
   );
 
+  /** Rangos por pregunta cuando el criterio es numérico (ej. años de experiencia); todo lo
+   * demás (si_no, o preguntas sin criterio asociado como las de PREGUNTAS_BASE) sigue usando
+   * los botones fijos Sí/No/Parcial. */
+  const opcionesPorPregunta = useMemo(() => {
+    const m: Record<string, string[]> = {};
+    for (const c of vacante?.criterios ?? []) {
+      if (c.tipo === "numero" && c.opciones?.length) m[c.pregunta] = c.opciones;
+    }
+    return m;
+  }, [vacante]);
+
   const puedeAvanzar =
     step === 0 ? datos.nombre.trim().length > 2 && (datos.telefono.trim() || datos.correo.trim()) : step === 1 ? consent && cv !== null : true;
 
@@ -277,30 +288,33 @@ export default function Aplicar() {
 
                   {step === 2 && (
                     <div className="flex flex-col gap-4">
-                      {preguntas.map((q, i) => (
-                        <div key={i}>
-                          <p className="mb-2 text-sm font-medium">{q}</p>
-                          <div className="flex gap-2">
-                            {["Sí", "No", "Parcial"].map((op) => {
-                              const activa = respuestas[q] === op;
-                              return (
-                                <button
-                                  key={op}
-                                  onClick={() => setRespuestas((r) => ({ ...r, [q]: op }))}
-                                  className={cn(
-                                    "flex-1 rounded-xl border py-2.5 text-sm transition",
-                                    activa
-                                      ? "border-brand bg-brand-soft font-medium text-brand"
-                                      : "border-border-soft bg-surface hover:border-brand hover:bg-brand-soft",
-                                  )}
-                                >
-                                  {op}
-                                </button>
-                              );
-                            })}
+                      {preguntas.map((q, i) => {
+                        const opciones = opcionesPorPregunta[q] ?? ["Sí", "No", "Parcial"];
+                        return (
+                          <div key={i}>
+                            <p className="mb-2 text-sm font-medium">{q}</p>
+                            <div className="flex flex-wrap gap-2">
+                              {opciones.map((op) => {
+                                const activa = respuestas[q] === op;
+                                return (
+                                  <button
+                                    key={op}
+                                    onClick={() => setRespuestas((r) => ({ ...r, [q]: op }))}
+                                    className={cn(
+                                      "flex-1 rounded-xl border py-2.5 text-sm transition",
+                                      activa
+                                        ? "border-brand bg-brand-soft font-medium text-brand"
+                                        : "border-border-soft bg-surface hover:border-brand hover:bg-brand-soft",
+                                    )}
+                                  >
+                                    {op}
+                                  </button>
+                                );
+                              })}
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </motion.div>
