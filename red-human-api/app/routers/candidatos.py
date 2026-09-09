@@ -462,11 +462,6 @@ async def postular(
         if correo.strip() and not c.correo:
             c.correo = correo.strip()
 
-    # Zero-Touch: dispara la plantilla de Meta apenas se guarda el registro — solo para
-    # candidatos nuevos, para no volver a "romper el hielo" con alguien que ya nos escribió.
-    if nuevo:
-        await _disparar_plantilla_inicio(db, c)
-
     # Antes: `if not c.vacante_id: ...` — se quedaba pegado a la primera vacante para siempre.
     # El guard de arriba ya garantiza que solo llegamos aquí si es seguro reasignar: candidato
     # nuevo, o uno existente que sigue en Prefiltro sin avance real.
@@ -489,6 +484,18 @@ async def postular(
 
     registrar(db, "sistema", "postulacion_recibida", "candidato", c.codigo, {"vacante": vac.codigo, "nuevo": nuevo})
     db.commit()
+
+    # Zero-Touch: dispara la plantilla de Meta ("recibimos tu postulación") ya con el candidato
+    # comprometido a disco — vacante_id y consentimiento incluidos — solo para candidatos nuevos,
+    # para no volver a "romper el hielo" con alguien que ya nos escribió. Antes se mandaba ANTES
+    # del commit: si el candidato respondía muy rápido (p. ej. mientras _procesar_cv seguía
+    # llamando a la IA), el webhook corría en otra transacción que todavía no veía este registro
+    # y creaba un candidato duplicado sin vacante — el agente le mandaba el menú de vacantes en
+    # vez de continuar el prefiltro.
+    if nuevo:
+        await _disparar_plantilla_inicio(db, c)
+        db.commit()
+
     return {
         "ok": True,
         "candidato": c.codigo,
@@ -713,6 +720,7 @@ async def _procesar_turno_agenda(db: Session, c: Candidato, historial: List[dict
         c.wa_nombre or c.nombre.split(" ")[0], v.titulo if v else "", historial, db=db, candidato=c
     )
 
+    respuesta_final = turno.respuesta
     if turno.cita_fecha_hora and turno.cita_liga:
         fecha = _parsear_fecha_cita(turno.cita_fecha_hora)
         c.videollamada_agendada_en = fecha or datetime.now(timezone.utc)
@@ -722,19 +730,23 @@ async def _procesar_turno_agenda(db: Session, c: Candidato, historial: List[dict
             db, "agente-ia", "videollamada_agendada", "candidato", c.codigo,
             {"fecha_hora": turno.cita_fecha_hora, "liga": turno.cita_liga, "fecha_parseada": bool(fecha)},
         )
+        # La liga real se agrega aquí, textual — nunca se manda la que el modelo haya escrito
+        # dentro de turno.respuesta: un token de 32+ caracteres es fácil de transcribir mal, y
+        # eso deja al candidato con una liga que da 404 sin que nadie se entere.
+        respuesta_final = f"{turno.respuesta}\n\n{turno.cita_liga}"
 
     envio = {"enviado": False, "proveedor": "demo"}
     if canal == "whatsapp" and c.telefono:
         try:
-            envio = await enviar_mensaje(c.telefono, turno.respuesta)
+            envio = await enviar_mensaje(c.telefono, respuesta_final)
         except Exception as e:  # que WhatsApp falle no debe tumbar la conversación
             print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
             envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
-    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal,
+    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=respuesta_final, canal=canal,
                    enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
     db.commit()
     return {
-        "respuesta": turno.respuesta,
+        "respuesta": respuesta_final,
         "clasificacion": None,
         "ia": con_ia,
         "whatsapp": envio,

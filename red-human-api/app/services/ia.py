@@ -629,7 +629,8 @@ def agenda_turno(
         "pregúntasela en un mensaje breve y cálido; (2) en cuanto el candidato te dé una fecha/hora "
         "concreta, DEBES invocar la herramienta agendar_videollamada con esa fecha/hora en ISO 8601 "
         "— nunca confirmes una cita sin haberla invocado; (3) después de invocarla, confirma la fecha "
-        "y comparte la liga que te regresó la herramienta; (4) tono cálido, una sola idea por mensaje."
+        "con calidez, pero NO escribas tú la liga ni intentes transcribirla — el sistema la agrega "
+        "textualmente al final del mensaje; (4) tono cálido, una sola idea por mensaje."
     )
     mensajes = [{"role": ("user" if m["rol"] == "user" else "assistant"), "content": m["texto"]} for m in historial]
 
