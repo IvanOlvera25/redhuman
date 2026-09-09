@@ -149,6 +149,7 @@ export interface Vacante {
     valida: string;
     respuesta_esperada: string;
     descarta: boolean;
+    opciones?: string[];
   }[];
   embudo?: { etapas?: Record<string, number>; estados?: Record<string, number> };
   creada?: string;

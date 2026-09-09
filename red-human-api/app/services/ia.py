@@ -66,6 +66,14 @@ class PreguntaFiltro(BaseModel):
     valida: str = Field(description="Requisito indispensable que valida esta pregunta.")
     respuesta_esperada: str = Field(description="Respuesta que indica que la persona cumple (ej. 'Sí', '>= 2 años').")
     descarta: bool = Field(description="true si NO cumplirla es motivo de descarte (knock-out) para este puesto.")
+    opciones: List[str] = Field(
+        default_factory=list,
+        description=(
+            "SOLO para tipo='numero': 4 rangos ordenados de menor a mayor que el candidato puede "
+            "elegir (ej. 'Menos de 1 año', '1-2 años', '2-3 años', 'Más de 3 años'), ajustados al "
+            "nivel de experiencia que pide la vacante. Para tipo='si_no' u 'opcion' déjalo vacío."
+        ),
+    )
 
 
 class VacanteGenerada(BaseModel):
@@ -129,6 +137,11 @@ _REGLAS = (
     "un dato falta, simplemente omítelo del texto público y anótalo en avisos_cumplimiento.\n"
     "7. El seniority que elijas debe ser el mismo en los títulos de todas las plataformas; no lo contradigas."
 )
+
+
+# Respaldo genérico cuando una pregunta tipo='numero' (típicamente años de experiencia) se queda
+# sin `opciones` — tanto en modo demo como si la IA real no las llenó.
+_RANGO_ANOS_GENERICO = ["Menos de 1 año", "1-2 años", "2-3 años", "Más de 3 años"]
 
 
 def _demo_vacante(titulo: str, area: str, ubicacion: str, sueldo: str, requisitos: str, empresa: str) -> VacanteGenerada:
@@ -220,6 +233,7 @@ def _demo_vacante(titulo: str, area: str, ubicacion: str, sueldo: str, requisito
             PreguntaFiltro(
                 pregunta="¿Cuántos años de experiencia tienes en un puesto similar?",
                 tipo="numero", valida="Experiencia previa", respuesta_esperada=">= 1 año", descarta=False,
+                opciones=_RANGO_ANOS_GENERICO,
             ),
             PreguntaFiltro(
                 pregunta=f"¿Vives en {ubicacion} o puedes trasladarte diariamente?",
@@ -260,7 +274,14 @@ def generar_vacante(
         ),
         text_format=VacanteGenerada,
     )
-    return resp.output_parsed, True
+    salida = resp.output_parsed
+    # Respaldo: si la IA marcó tipo='numero' pero no llenó `opciones`, no dejamos la pregunta
+    # sin rangos seleccionables — usamos el patrón genérico en vez de que el frontend caiga a
+    # Sí/No/Parcial para una pregunta numérica.
+    for p in salida.preguntas_filtro:
+        if p.tipo == "numero" and not p.opciones:
+            p.opciones = _RANGO_ANOS_GENERICO
+    return salida, True
 
 
 def texto_preguntas(preguntas: Optional[list]) -> List[str]:
