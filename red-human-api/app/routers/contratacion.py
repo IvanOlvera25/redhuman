@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,7 @@ from ..models import Colaborador, Documento, Expediente, Mensaje, Usuario, regis
 from ..serial import colaborador_dict, expediente_dict
 from ..services import archivos as fs
 from ..services import ia
+from ..services.configuracion import puede_forzar_prueba
 from ..services.whatsapp import enviar_mensaje
 
 router = APIRouter(prefix="/contratacion", tags=["contratacion"])
@@ -155,15 +156,11 @@ def _resolver_estado(v: ia.DocumentoValidado, con_ia: bool) -> tuple[str, str]:
     return "recibido", v.observaciones
 
 
-@router.post("/expedientes/{exp_id}/documentos")
-async def subir_documento(
-    exp_id: int,
-    tipo: str = Form(...),
-    archivo: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    u: Usuario = Depends(usuario_decisor),
-):
-    e = _expediente(db, exp_id)
+async def subir_documento_interno(db: Session, e: Expediente, tipo: str, archivo: UploadFile, subido_por: str) -> dict:
+    """Lógica compartida entre el endpoint autenticado de RH (subir_documento) y la liga
+    pública del candidato (routers/expediente_publico.py) — el "ya fue dado de alta" se queda
+    duro para los dos, sin forzar_prueba: no es fricción de secuencia, es una guarda de
+    integridad (ver Lote 4)."""
     if e.estado == "alta":
         raise HTTPException(409, "El expediente ya fue dado de alta; no admite cambios.")
     doc = _documento(e, tipo)
@@ -184,7 +181,7 @@ async def subir_documento(
     _sincronizar_estado(e)
     registrar(
         db, "agente-ia", "documento_validado", "documento", f"{e.id}:{doc.tipo}",
-        {"ia": con_ia, "estado": doc.estado, "tipo_detectado": v.tipo_detectado, "subido_por": u.nombre},
+        {"ia": con_ia, "estado": doc.estado, "tipo_detectado": v.tipo_detectado, "subido_por": subido_por},
     )
     db.commit()
     return {
@@ -192,6 +189,18 @@ async def subir_documento(
         "documento": {"tipo": doc.tipo, "estado": doc.estado, "notas": doc.notas_ia},
         "expediente": expediente_dict(e),
     }
+
+
+@router.post("/expedientes/{exp_id}/documentos")
+async def subir_documento(
+    exp_id: int,
+    tipo: str = Form(...),
+    archivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    u: Usuario = Depends(usuario_decisor),
+):
+    e = _expediente(db, exp_id)
+    return await subir_documento_interno(db, e, tipo, archivo, subido_por=u.nombre)
 
 
 @router.get("/expedientes/{exp_id}/documentos/{tipo}/archivo")
@@ -354,14 +363,20 @@ class AltaIn(BaseModel):
 
 
 @router.post("/expedientes/{exp_id}/alta")
-async def alta(exp_id: int, datos: AltaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+async def alta(
+    exp_id: int, datos: AltaIn, forzar_prueba: bool = False,
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+):
+    """`forzar_prueba` (Lote 4) deja saltar los bloqueos de completitud de abajo, pero NUNCA el
+    de "ya fue dado de alta" — _crear_colaborador() no es idempotente, forzar ese en particular
+    crearía un Colaborador duplicado, así que se queda tan duro como el gate de consentimiento."""
     e = _expediente(db, exp_id)
     if e.estado == "alta":
         raise HTTPException(409, f"El expediente ya fue dado de alta por {e.alta_autorizada_por}.")
-    if e.progreso < 100:
+    if e.progreso < 100 and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, f"El expediente está al {e.progreso}%. Faltan: {', '.join(e.pendientes)}.")
     sin_revisar = [d.tipo for d in e.obligatorios if d.estado == "recibido" and not d.revisado_por]
-    if sin_revisar:
+    if sin_revisar and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(
             409,
             "Antes del alta, una persona de RH debe confirmar los documentos validados por la IA: "
@@ -402,6 +417,118 @@ async def alta(exp_id: int, datos: AltaIn, db: Session = Depends(get_db), u: Usu
         "expediente": expediente_dict(e),
         "colaborador": colaborador_dict(colaborador) if colaborador else None,
     }
+
+
+_MESES_LARGO = [
+    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+]
+
+
+def _fecha_larga(dt: Optional[datetime]) -> str:
+    if not dt:
+        return "por definir"
+    return f"{dt.day} de {_MESES_LARGO[dt.month - 1]} de {dt.year}"
+
+
+def _html_carta_intencion(e: Expediente) -> str:
+    """HTML de la carta de intención — mismo estilo de f-strings con datos reales y fallback
+    ('por definir') que ya usa candidatos._html_correo_candidato, pero con estructura de
+    documento formal (encabezado, cuerpo, firma) porque esto se imprime/firma, no se lee en un
+    correo."""
+    c = e.candidato
+    nombre = c.nombre if c else "[Nombre del colaborador]"
+    empresa = (c.vacante.empresa if c and c.vacante else "") or "la empresa"
+    puesto = e.puesto or (c.vacante.titulo if c and c.vacante else "") or "el puesto"
+    sueldo = e.sueldo or "por definir"
+    tipo_contratacion = e.tipo_contratacion or "por definir"
+    ubicacion = e.ubicacion or (c.ubicacion if c else "") or "por definir"
+    jefe = e.jefe_directo or "por definir"
+    fecha_ingreso = _fecha_larga(e.fecha_ingreso)
+    hoy = _fecha_larga(datetime.now(timezone.utc))
+
+    return f"""
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <style>
+        body {{ font-family: 'Helvetica', 'Arial', sans-serif; font-size: 12pt; color: #1a1a1a; line-height: 1.6; }}
+        h1 {{ font-size: 16pt; margin-bottom: 0; }}
+        .subtitulo {{ color: #555; margin-top: 4px; }}
+        .condiciones {{ margin: 24px 0; border-collapse: collapse; width: 100%; }}
+        .condiciones td {{ padding: 6px 0; border-bottom: 1px solid #ddd; }}
+        .condiciones td:first-child {{ font-weight: bold; width: 40%; }}
+        .firma {{ margin-top: 64px; }}
+        .linea-firma {{ margin-top: 48px; border-top: 1px solid #1a1a1a; width: 280px; padding-top: 4px; }}
+      </style>
+    </head>
+    <body>
+      <h1>Carta de Intención de Contratación</h1>
+      <p class="subtitulo">{empresa} · {hoy}</p>
+
+      <p>Estimado(a) <strong>{nombre}</strong>,</p>
+      <p>
+        Nos da mucho gusto confirmarte que, tras concluir el proceso de selección, {empresa} te
+        extiende esta carta de intención para incorporarte a nuestro equipo bajo las siguientes
+        condiciones:
+      </p>
+
+      <table class="condiciones">
+        <tr><td>Puesto</td><td>{puesto}</td></tr>
+        <tr><td>Sueldo</td><td>{sueldo}</td></tr>
+        <tr><td>Tipo de contratación</td><td>{tipo_contratacion}</td></tr>
+        <tr><td>Ubicación de trabajo</td><td>{ubicacion}</td></tr>
+        <tr><td>Jefe directo</td><td>{jefe}</td></tr>
+        <tr><td>Fecha de ingreso</td><td>{fecha_ingreso}</td></tr>
+      </table>
+
+      <p>
+        Esta carta es una manifestación de intención y no constituye por sí misma un contrato
+        laboral; las condiciones definitivas quedarán formalizadas en el contrato individual de
+        trabajo correspondiente.
+      </p>
+
+      <div class="firma">
+        <p>Saludos cordiales,</p>
+        <div class="linea-firma">{empresa} · Recursos Humanos</div>
+      </div>
+    </body>
+    </html>
+    """
+
+
+@router.get("/expedientes/{exp_id}/carta-intencion")
+def carta_intencion(exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+    """Genera la carta de intención en PDF a partir de las condiciones ya capturadas en el
+    expediente. GET (no POST) a propósito: mismo patrón que urlArchivoCandidato/urlDocumento —
+    un <a href> autenticado por cookie de sesión, sin manejo de blobs en el frontend.
+
+    Import perezoso de weasyprint a propósito: necesita librerías nativas de sistema (Pango,
+    Cairo, GDK-PixBuf) que Linux (producción) resuelve con apt-get, pero que no vienen en
+    Windows — si `import weasyprint` estuviera a nivel de módulo, tumbaría el arranque de TODA
+    la API en una máquina sin esas librerías, no solo este endpoint."""
+    try:
+        import weasyprint
+    except OSError as ex:
+        raise HTTPException(
+            503,
+            "La generación de PDF no está disponible en este servidor: faltan librerías del "
+            f"sistema que requiere WeasyPrint (Pango/Cairo/GDK-PixBuf). Detalle: {ex}",
+        )
+    e = _expediente(db, exp_id)
+    html = _html_carta_intencion(e)
+    pdf = weasyprint.HTML(string=html).write_pdf()
+    registrar(
+        db, u.nombre, "carta_intencion_generada", "expediente", str(e.id),
+        {"candidato": e.candidato.codigo if e.candidato else "", "correo_rh": u.correo},
+    )
+    db.commit()
+    nombre_archivo = f"carta-intencion-{e.candidato.codigo if e.candidato else exp_id}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{nombre_archivo}"'},
+    )
 
 
 class CancelarIn(BaseModel):

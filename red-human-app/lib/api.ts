@@ -382,9 +382,10 @@ export function decidirCandidato(codigo: string, accion: "descartar", comentario
   return post<Candidato>(`/candidatos/${codigo}/decision`, { accion, comentario });
 }
 
-/** Botones explícitos del Kanban ("Enviar a X") — mueve la tarjeta a una etapa exacta. */
-export function moverEtapaCandidato(codigo: string, etapa: string, comentario = "") {
-  return patch<Candidato>(`/candidatos/${codigo}/etapa`, { etapa, comentario });
+/** Botones explícitos del Kanban ("Enviar a X") — mueve la tarjeta a una etapa exacta.
+ * `forzarPrueba` (Lote 4): inerte salvo que Modo Prueba esté activo en el servidor. */
+export function moverEtapaCandidato(codigo: string, etapa: string, comentario = "", forzarPrueba = false) {
+  return patch<Candidato>(`/candidatos/${codigo}/etapa${forzarPrueba ? "?forzar_prueba=true" : ""}`, { etapa, comentario });
 }
 
 /** Onboarding · Zero-Touch fase 2 — RH detona el mensaje, la IA da seguimiento por WhatsApp. */
@@ -444,9 +445,12 @@ export function programarEntrevistaHumana(
 }
 
 /** Ya no pide resultado — solo confirma que la entrevista ocurrió y dispara el correo con la
- * liga pública al entrevistador (ver registrarResultadoEntrevistaHumana para la captura manual). */
-export function marcarEntrevistaHumanaRealizada(codigo: string) {
-  return post<{ enviado: boolean; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana/realizada`);
+ * liga pública al entrevistador (ver registrarResultadoEntrevistaHumana para la captura manual).
+ * `forzarPrueba` (Lote 4): inerte salvo que Modo Prueba esté activo en el servidor. */
+export function marcarEntrevistaHumanaRealizada(codigo: string, forzarPrueba = false) {
+  return post<{ enviado: boolean; candidato: Candidato }>(
+    `/candidatos/${codigo}/entrevista-humana/realizada${forzarPrueba ? "?forzar_prueba=true" : ""}`,
+  );
 }
 
 /** Respaldo manual de RH (Eje 1: coexiste con la liga del entrevistador) — también sirve para
@@ -454,16 +458,19 @@ export function marcarEntrevistaHumanaRealizada(codigo: string) {
 export function registrarResultadoEntrevistaHumana(
   codigo: string,
   datos: { resultado: ResultadoEntrevistaHumana; recomendacion: RecomendacionEntrevistaHumana; comentario?: string },
+  forzarPrueba = false,
 ) {
-  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/resultado`, {
+  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/resultado${forzarPrueba ? "?forzar_prueba=true" : ""}`, {
     resultado: datos.resultado,
     recomendacion: datos.recomendacion,
     comentario: datos.comentario ?? "",
   });
 }
 
-export function recordatorioEntrevistaHumana(codigo: string) {
-  return post<{ enviado: boolean; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana/recordatorio`);
+export function recordatorioEntrevistaHumana(codigo: string, forzarPrueba = false) {
+  return post<{ enviado: boolean; candidato: Candidato }>(
+    `/candidatos/${codigo}/entrevista-humana/recordatorio${forzarPrueba ? "?forzar_prueba=true" : ""}`,
+  );
 }
 
 /* Liga pública del entrevistador (sin sesión, un solo submit) */
@@ -895,16 +902,54 @@ export function enviarRecordatorio(expedienteId: number) {
   );
 }
 
-export function autorizarAlta(expedienteId: number, fechaIngreso?: string) {
-  return post<{ ok: boolean; expediente: NuevoIngreso }>(`/contratacion/expedientes/${expedienteId}/alta`, {
-    fecha_ingreso: fechaIngreso ?? null,
-    avisar_whatsapp: true,
-  });
+/** `forzarPrueba` (Lote 4): inerte salvo que Modo Prueba esté activo en el servidor — el
+ * bloqueo de "expediente ya dado de alta" NUNCA se salta, ni con este flag. */
+export function autorizarAlta(expedienteId: number, fechaIngreso?: string, forzarPrueba = false) {
+  return post<{ ok: boolean; expediente: NuevoIngreso }>(
+    `/contratacion/expedientes/${expedienteId}/alta${forzarPrueba ? "?forzar_prueba=true" : ""}`,
+    { fecha_ingreso: fechaIngreso ?? null, avisar_whatsapp: true },
+  );
+}
+
+/** Liga de descarga de la carta de intención en PDF — mismo patrón que urlDocumento: <a href>
+ * autenticado por cookie de sesión, sin manejo de blobs en el frontend. */
+export function urlCartaIntencion(expedienteId: number) {
+  return urlArchivo(`/contratacion/expedientes/${expedienteId}/carta-intencion`);
 }
 
 /** Botón "Cancelar contratación" — cierra el expediente y regresa al candidato a Entrevista Humana. */
 export function cancelarExpediente(expedienteId: number, motivo: string) {
   return post<{ ok: boolean; candidato: string }>(`/contratacion/expedientes/${expedienteId}/cancelar`, { motivo });
+}
+
+/* Liga pública del candidato para subir sus documentos (Lote 4) — sin sesión, token como
+ * credencial; a diferencia de la de Entrevista Humana, no es de un solo uso. */
+
+export interface DocumentoExpedientePublico {
+  tipo: string;
+  estado: "pendiente" | "revision" | "recibido" | "rechazado";
+  obligatorio: boolean;
+}
+
+export interface ExpedientePublico {
+  candidato: string;
+  puesto: string;
+  estado: "integracion" | "completo" | "alta";
+  documentos: DocumentoExpedientePublico[];
+}
+
+export function fetchExpedientePublico(token: string) {
+  return get<ExpedientePublico>(`/expedientes/publica/${token}`);
+}
+
+export function subirDocumentoPublico(token: string, tipo: string, archivo: File) {
+  const form = new FormData();
+  form.append("tipo", tipo);
+  form.append("archivo", archivo);
+  return subir<{ ia: boolean; documento: { tipo: string; estado: string; notas: string }; expediente: NuevoIngreso }>(
+    `/expedientes/publica/${token}/documentos`,
+    form,
+  );
 }
 
 /** Onboarding · Bloque 4 (Preparación de ingreso) — contrato, alta administrativa, equipo/accesos. */

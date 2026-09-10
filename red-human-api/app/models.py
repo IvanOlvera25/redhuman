@@ -375,6 +375,11 @@ class Expediente(Base):
     alta_autorizada_por: Mapped[str] = mapped_column(String(150), default="")
     alta_fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     seleccionado_por: Mapped[str] = mapped_column(String(150), default="")
+    # Liga pública para que el candidato suba sus documentos sin sesión (Lote 4). Nullable:
+    # los expedientes creados antes de este lote no tienen uno hasta que se genera perezosamente
+    # (ver candidatos._disparar_mensaje_onboarding) — no es de un solo uso como el de
+    # EntrevistaHumana, sigue válido hasta que el expediente llega a estado "alta".
+    token: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True, nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
     candidato: Mapped[Candidato] = relationship(back_populates="expediente")
