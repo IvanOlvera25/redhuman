@@ -11,8 +11,10 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from .database import get_db
-from .models import Usuario
+from .models import Cuenta, Usuario, UsuarioCuenta
 from .services import auth
+
+CABECERA_CUENTA = "X-Cuenta-Id"
 
 
 def _token(request: Request) -> Optional[str]:
@@ -45,6 +47,29 @@ def usuario_decisor(u: Usuario = Depends(usuario_actual)) -> Usuario:
 
 
 def usuario_admin(u: Usuario = Depends(usuario_actual)) -> Usuario:
-    if u.rol != "admin":
+    if u.rol != "Administrador":
         raise HTTPException(403, "Solo un administrador puede hacer esto.")
     return u
+
+
+def cuenta_actual(request: Request, db: Session = Depends(get_db), u: Usuario = Depends(usuario_actual)) -> Cuenta:
+    """Cuenta sobre la que opera esta request. Si el usuario solo tiene una, se resuelve
+    sola — el frontend no manda nada. Si tiene varias, debe mandar la cabecera X-Cuenta-Id."""
+    cuentas = (
+        db.query(Cuenta)
+        .join(UsuarioCuenta, UsuarioCuenta.cuenta_id == Cuenta.id)
+        .filter(UsuarioCuenta.usuario_id == u.id, Cuenta.estado == "Activa")
+        .order_by(Cuenta.id)
+        .all()
+    )
+    if not cuentas:
+        raise HTTPException(403, "Tu usuario no tiene ninguna Cuenta activa asignada.")
+    if len(cuentas) == 1:
+        return cuentas[0]
+    solicitada = request.headers.get(CABECERA_CUENTA)
+    if not solicitada:
+        raise HTTPException(400, f"Tienes acceso a varias Cuentas: manda la cabecera {CABECERA_CUENTA}.")
+    for c in cuentas:
+        if str(c.id) == solicitada:
+            return c
+    raise HTTPException(403, "No tienes acceso a esa Cuenta.")

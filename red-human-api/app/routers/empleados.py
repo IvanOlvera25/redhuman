@@ -15,14 +15,14 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..deps import usuario_actual, usuario_decisor
-from ..models import Candidato, Empleado, Usuario, registrar
+from ..deps import cuenta_actual, usuario_actual, usuario_decisor
+from ..models import Candidato, Cuenta, Empleado, Usuario, registrar
 
 router = APIRouter(prefix="/empleados", tags=["empleados"])
 
 
-def _por_codigo(db: Session, codigo: str) -> Empleado:
-    e = db.query(Empleado).filter(Empleado.codigo == codigo).first()
+def _por_codigo(db: Session, codigo: str, cuenta_id: int) -> Empleado:
+    e = db.query(Empleado).filter(Empleado.codigo == codigo, Empleado.cuenta_id == cuenta_id).first()
     if not e:
         raise HTTPException(404, "Empleado no encontrado")
     return e
@@ -62,8 +62,9 @@ def listar(
     q: Optional[str] = None,
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    query = db.query(Empleado).order_by(Empleado.id.desc())
+    query = db.query(Empleado).filter(Empleado.cuenta_id == cuenta.id).order_by(Empleado.id.desc())
     if activo is not None:
         query = query.filter(Empleado.activo == activo)
     if area:
@@ -95,15 +96,20 @@ class CrearIn(BaseModel):
 
 
 @router.post("", status_code=201)
-def crear(datos: CrearIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def crear(
+    datos: CrearIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     if not datos.nombre.strip():
         raise HTTPException(400, "El nombre del empleado es obligatorio.")
 
-    jefe = _por_codigo(db, datos.jefe_directo_codigo) if datos.jefe_directo_codigo else None
+    jefe = _por_codigo(db, datos.jefe_directo_codigo, cuenta.id) if datos.jefe_directo_codigo else None
 
     candidato = None
     if datos.candidato_origen_codigo:
-        candidato = db.query(Candidato).filter(Candidato.codigo == datos.candidato_origen_codigo).first()
+        candidato = db.query(Candidato).filter(
+            Candidato.codigo == datos.candidato_origen_codigo, Candidato.cuenta_id == cuenta.id
+        ).first()
         if not candidato:
             raise HTTPException(404, f"Candidato '{datos.candidato_origen_codigo}' no encontrado")
 
@@ -116,6 +122,7 @@ def crear(datos: CrearIn, db: Session = Depends(get_db), u: Usuario = Depends(us
 
     e = Empleado(
         codigo="TMP",
+        cuenta_id=cuenta.id,
         nombre=datos.nombre.strip(),
         correo=datos.correo.strip(),
         telefono=datos.telefono,
@@ -138,8 +145,10 @@ def crear(datos: CrearIn, db: Session = Depends(get_db), u: Usuario = Depends(us
 
 
 @router.get("/{codigo}")
-def detalle(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    return _salida(_por_codigo(db, codigo))
+def detalle(
+    codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    return _salida(_por_codigo(db, codigo, cuenta.id))
 
 
 class ActualizarIn(BaseModel):
@@ -157,8 +166,11 @@ class ActualizarIn(BaseModel):
 
 
 @router.patch("/{codigo}")
-def actualizar(codigo: str, datos: ActualizarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    e = _por_codigo(db, codigo)
+def actualizar(
+    codigo: str, datos: ActualizarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    e = _por_codigo(db, codigo, cuenta.id)
     campos_tocados: List[str] = []
 
     genericos = datos.model_dump(exclude_none=True, exclude={"jefe_directo_codigo", "fecha_ingreso"})
@@ -169,7 +181,7 @@ def actualizar(codigo: str, datos: ActualizarIn, db: Session = Depends(get_db), 
     if datos.jefe_directo_codigo is not None:
         if datos.jefe_directo_codigo == e.codigo:
             raise HTTPException(400, "Un empleado no puede ser su propio jefe directo.")
-        jefe = _por_codigo(db, datos.jefe_directo_codigo) if datos.jefe_directo_codigo else None
+        jefe = _por_codigo(db, datos.jefe_directo_codigo, cuenta.id) if datos.jefe_directo_codigo else None
         e.jefe_directo_id = jefe.id if jefe else None
         campos_tocados.append("jefe_directo")
 
@@ -191,8 +203,10 @@ def actualizar(codigo: str, datos: ActualizarIn, db: Session = Depends(get_db), 
 
 
 @router.post("/{codigo}/baja")
-def dar_de_baja(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    e = _por_codigo(db, codigo)
+def dar_de_baja(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    e = _por_codigo(db, codigo, cuenta.id)
     e.activo = False
     registrar(db, u.nombre, "empleado_baja", "empleado", e.codigo, {})
     db.commit()
@@ -200,8 +214,10 @@ def dar_de_baja(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends
 
 
 @router.post("/{codigo}/reactivar")
-def reactivar(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    e = _por_codigo(db, codigo)
+def reactivar(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    e = _por_codigo(db, codigo, cuenta.id)
     e.activo = True
     registrar(db, u.nombre, "empleado_reactivado", "empleado", e.codigo, {})
     db.commit()

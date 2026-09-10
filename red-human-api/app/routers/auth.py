@@ -6,8 +6,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
-from ..deps import usuario_actual, usuario_admin
-from ..models import ROLES, Usuario, registrar
+from ..deps import cuenta_actual, usuario_actual, usuario_admin
+from ..models import ROLES, Cuenta, Usuario, UsuarioCuenta, registrar
 from ..services import auth
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -88,13 +88,15 @@ def yo(u: Usuario = Depends(usuario_actual)):
    return usuario_dict(u)
 
 @router.get("/entrevistadores")
-def entrevistadores(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-   """Lista ligera de personas de RH activas para el selector de 'Entrevistador interno' —
-   a diferencia de /usuarios, cualquier persona con sesión la puede pedir (no expone correo,
-   rol ni otros datos; el id solo sirve para referenciar quién entrevista)."""
+def entrevistadores(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+   """Lista ligera de personas de RH activas de la Cuenta actual para el selector de
+   'Entrevistador interno' — a diferencia de /usuarios, cualquier persona con sesión la puede
+   pedir (no expone correo, rol ni otros datos; el id solo sirve para referenciar quién
+   entrevista)."""
    filas = (
        db.query(Usuario.id, Usuario.nombre)
-       .filter(Usuario.activo.is_(True), Usuario.rol.in_(("admin", "rh")))
+       .join(UsuarioCuenta, UsuarioCuenta.usuario_id == Usuario.id)
+       .filter(Usuario.activo.is_(True), UsuarioCuenta.cuenta_id == cuenta.id)
        .order_by(Usuario.nombre)
        .all()
    )
@@ -125,17 +127,27 @@ def cambiar_password(datos: CambiarPassIn, request: Request, response: Response,
 # ------------------------------------------------------------
 
 @router.get("/usuarios")
-def listar(db: Session = Depends(get_db), _: Usuario = Depends(usuario_admin)) -> List[dict]:
-   return [usuario_dict(x) for x in db.query(Usuario).order_by(Usuario.id).all()]
+def listar(db: Session = Depends(get_db), _: Usuario = Depends(usuario_admin), cuenta: Cuenta = Depends(cuenta_actual)) -> List[dict]:
+   filas = (
+       db.query(Usuario)
+       .join(UsuarioCuenta, UsuarioCuenta.usuario_id == Usuario.id)
+       .filter(UsuarioCuenta.cuenta_id == cuenta.id)
+       .order_by(Usuario.id)
+       .all()
+   )
+   return [usuario_dict(x) for x in filas]
 
 class CrearUsuarioIn(BaseModel):
    correo: str
    nombre: str = Field(min_length=3)
    puesto: str = ""
-   rol: str = "rh"
+   rol: str = "Usuario"
    password: str
 @router.post("/usuarios", status_code=201)
-def crear(datos: CrearUsuarioIn, db: Session = Depends(get_db), admin: Usuario = Depends(usuario_admin)):
+def crear(
+   datos: CrearUsuarioIn, db: Session = Depends(get_db), admin: Usuario = Depends(usuario_admin),
+   cuenta: Cuenta = Depends(cuenta_actual),
+):
    correo = str(datos.correo).strip().lower()
    if not CORREO_RE.match(correo):
        raise HTTPException(400, "El correo no tiene un formato válido.")
@@ -156,6 +168,9 @@ def crear(datos: CrearUsuarioIn, db: Session = Depends(get_db), admin: Usuario =
    )
    db.add(u)
    db.flush()
+   # el usuario nuevo queda con acceso a la Cuenta desde la que lo creó el admin — sin esto,
+   # cuenta_actual le daría 403 en su primer login por no tener ninguna Cuenta asignada.
+   db.add(UsuarioCuenta(usuario_id=u.id, cuenta_id=cuenta.id))
    registrar(db, admin.nombre, "usuario_creado", "usuario", correo, {"rol": u.rol})
    db.commit()
    return usuario_dict(u)
@@ -168,18 +183,34 @@ class ActualizarUsuarioIn(BaseModel):
    password: Optional[str] = None
 
 @router.patch("/usuarios/{usuario_id}")
-def actualizar(usuario_id: int, datos: ActualizarUsuarioIn, db: Session = Depends(get_db), admin: Usuario = Depends(usuario_admin)):
-   u = db.get(Usuario, usuario_id)
+def actualizar(
+   usuario_id: int, datos: ActualizarUsuarioIn, db: Session = Depends(get_db), admin: Usuario = Depends(usuario_admin),
+   cuenta: Cuenta = Depends(cuenta_actual),
+):
+   u = (
+       db.query(Usuario)
+       .join(UsuarioCuenta, UsuarioCuenta.usuario_id == Usuario.id)
+       .filter(Usuario.id == usuario_id, UsuarioCuenta.cuenta_id == cuenta.id)
+       .first()
+   )
    if not u:
        raise HTTPException(404, "Usuario no encontrado")
    if datos.rol is not None and datos.rol not in ROLES:
        raise HTTPException(400, f"Rol inválido. Usa uno de: {', '.join(ROLES)}")
-   # no dejar la instalación sin quien administre
-   quita_admin = (datos.rol is not None and datos.rol != "admin") or datos.activo is False
-   if u.rol == "admin" and quita_admin:
-       otros = db.query(Usuario).filter(Usuario.rol == "admin", Usuario.activo.is_(True), Usuario.id != u.id).count()
+   # no dejar la Cuenta sin quien administre
+   quita_admin = (datos.rol is not None and datos.rol != "Administrador") or datos.activo is False
+   if u.rol == "Administrador" and quita_admin:
+       otros = (
+           db.query(Usuario)
+           .join(UsuarioCuenta, UsuarioCuenta.usuario_id == Usuario.id)
+           .filter(
+               Usuario.rol == "Administrador", Usuario.activo.is_(True), Usuario.id != u.id,
+               UsuarioCuenta.cuenta_id == cuenta.id,
+           )
+           .count()
+       )
        if otros == 0:
-           raise HTTPException(409, "Es el único administrador activo: nombra otro antes de cambiarlo o desactivarlo.")
+           raise HTTPException(409, "Es el único administrador activo de esta Cuenta: nombra otro antes de cambiarlo o desactivarlo.")
    cambios = []
    for campo in ("nombre", "puesto", "rol", "activo"):
        valor = getattr(datos, campo)

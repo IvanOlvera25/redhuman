@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..deps import usuario_actual, usuario_decisor
-from ..models import AsignacionCurso, Colaborador, Curso, ModuloCurso, Usuario, registrar
+from ..deps import cuenta_actual, usuario_actual, usuario_decisor
+from ..models import AsignacionCurso, Colaborador, Cuenta, Curso, ModuloCurso, Usuario, registrar
 from ..serial import asignacion_dict, asignacion_publica_dict, curso_dict, hace, iso
 from ..services import ia
 from ..services.avatar import crear_sesion_avatar
@@ -22,8 +22,8 @@ from ..services.whatsapp import enviar_mensaje
 router = APIRouter(prefix="/capacitacion", tags=["capacitacion"])
 
 
-def _por_codigo(db: Session, codigo: str) -> Curso:
-    c = db.query(Curso).filter(Curso.codigo == codigo).first()
+def _por_codigo(db: Session, codigo: str, cuenta_id: int) -> Curso:
+    c = db.query(Curso).filter(Curso.codigo == codigo, Curso.cuenta_id == cuenta_id).first()
     if not c:
         raise HTTPException(404, "Curso no encontrado")
     return c
@@ -37,7 +37,10 @@ class GenerarCursoIn(BaseModel):
 
 
 @router.post("/generar", status_code=201)
-def generar(datos: GenerarCursoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def generar(
+    datos: GenerarCursoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     if not datos.tema.strip():
         raise HTTPException(400, "El tema del curso es obligatorio.")
 
@@ -45,6 +48,7 @@ def generar(datos: GenerarCursoIn, db: Session = Depends(get_db), u: Usuario = D
 
     c = Curso(
         codigo="TMP",
+        cuenta_id=cuenta.id,
         titulo=datos.tema.strip(),
         categoria=datos.categoria.strip(),
         duracion_horas=datos.duracion_horas,
@@ -75,17 +79,22 @@ def generar(datos: GenerarCursoIn, db: Session = Depends(get_db), u: Usuario = D
 
 
 @router.get("")
-def listar(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    return [curso_dict(c) for c in db.query(Curso).order_by(Curso.id.desc()).all()]
+def listar(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    return [curso_dict(c) for c in db.query(Curso).filter(Curso.cuenta_id == cuenta.id).order_by(Curso.id.desc()).all()]
 
 
 @router.get("/kpis")
-def kpis(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
+def kpis(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
     """KPIs globales del dashboard — antes de la ruta /{codigo} a propósito: 'kpis' no es un
     código de curso válido, pero si esta ruta se registrara después, /{codigo} la interceptaría
     primero (mismo cuidado que con /prueba/eliminar en candidatos.py)."""
-    cursos = db.query(Curso).all()
-    asignaciones = db.query(AsignacionCurso).all()
+    cursos = db.query(Curso).filter(Curso.cuenta_id == cuenta.id).all()
+    asignaciones = (
+        db.query(AsignacionCurso)
+        .join(Curso, AsignacionCurso.curso_id == Curso.id)
+        .filter(Curso.cuenta_id == cuenta.id)
+        .all()
+    )
     completadas = [a for a in asignaciones if a.estado == "completado"]
 
     cursos_activos = sum(1 for c in cursos if c.estado == "Publicado")
@@ -102,16 +111,20 @@ def kpis(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
 
 
 @router.get("/{codigo}")
-def detalle(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    return curso_dict(_por_codigo(db, codigo), detalle=True)
+def detalle(
+    codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    return curso_dict(_por_codigo(db, codigo, cuenta.id), detalle=True)
 
 
 @router.get("/{codigo}/reporte")
-def reporte(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
+def reporte(
+    codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
     """Vista agregada del curso: avance por estado, tasa de finalización, duración promedio
     real, % de comprensión por módulo (primer y único intento — no hay mecanismo de reintento),
     y el detalle por colaborador para la sección "Progreso" del panel."""
-    curso = _por_codigo(db, codigo)
+    curso = _por_codigo(db, codigo, cuenta.id)
     asignaciones = db.query(AsignacionCurso).filter(AsignacionCurso.curso_id == curso.id).all()
 
     total = len(asignaciones)
@@ -172,8 +185,10 @@ def reporte(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usu
 
 
 @router.patch("/{codigo}/publicar")
-def publicar(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    c = _por_codigo(db, codigo)
+def publicar(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    c = _por_codigo(db, codigo, cuenta.id)
     c.estado = "Publicado"
     registrar(db, u.nombre, "curso_publicado", "curso", c.codigo, {})
     db.commit()
@@ -196,8 +211,11 @@ def _html_correo_asignacion(col: Colaborador, curso: Curso, liga: str) -> str:
 
 
 @router.post("/{codigo}/asignar", status_code=201)
-async def asignar(codigo: str, datos: AsignarCursoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    curso = _por_codigo(db, codigo)
+async def asignar(
+    codigo: str, datos: AsignarCursoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    curso = _por_codigo(db, codigo, cuenta.id)
     if curso.estado != "Publicado":
         raise HTTPException(409, "Solo se pueden asignar cursos publicados.")
     if not datos.colaborador_ids:
@@ -207,7 +225,7 @@ async def asignar(codigo: str, datos: AsignarCursoIn, db: Session = Depends(get_
     encontrados: List[str] = []
     nuevas: List[AsignacionCurso] = []
     for cod_col in datos.colaborador_ids:
-        col = db.query(Colaborador).filter(Colaborador.codigo == cod_col).first()
+        col = db.query(Colaborador).filter(Colaborador.codigo == cod_col, Colaborador.cuenta_id == cuenta.id).first()
         if not col:
             continue
         encontrados.append(cod_col)
@@ -282,8 +300,10 @@ async def asignar(codigo: str, datos: AsignarCursoIn, db: Session = Depends(get_
 
 
 @router.get("/{codigo}/asignaciones")
-def asignaciones(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    curso = _por_codigo(db, codigo)
+def asignaciones(
+    codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    curso = _por_codigo(db, codigo, cuenta.id)
     filas = (
         db.query(AsignacionCurso)
         .filter(AsignacionCurso.curso_id == curso.id)

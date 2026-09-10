@@ -5,7 +5,7 @@ import unicodedata
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from .database import Base
@@ -73,6 +73,12 @@ class Vacante(Base):
     requisicion_id: Mapped[Optional[int]] = mapped_column(ForeignKey("requisiciones.id"), nullable=True)
     requisicion: Mapped[Optional["Requisicion"]] = relationship(back_populates="vacante")
 
+    # --- Cuenta/Cliente (Fase A multi-cuenta) — nullable a nivel de esquema (SQLite sin Alembic
+    # no puede agregar NOT NULL retroactivo); la obligatoriedad de cuenta_id se aplica en capa de
+    # aplicación. cliente_id es opcional de verdad: una Cuenta sin Clientes recluta directo.
+    cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
+    cliente_id: Mapped[Optional[int]] = mapped_column(ForeignKey("clientes.id"), nullable=True, index=True)
+
     candidatos: Mapped[List["Candidato"]] = relationship(back_populates="vacante")
 
 
@@ -125,6 +131,9 @@ class Candidato(Base):
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
     # Modo Prueba (solo admin, ver ConfiguracionSistema): nunca aparece en listados/reportes de RH.
     es_prueba: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Cuenta (Fase A multi-cuenta) — directo, no vía join a Vacante: vacante_id es nullable y no
+    # todo candidato tiene una vacante asignada.
+    cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
 
     vacante_id: Mapped[Optional[int]] = mapped_column(ForeignKey("vacantes.id"), nullable=True)
     vacante: Mapped[Optional[Vacante]] = relationship(back_populates="candidatos")
@@ -284,6 +293,11 @@ class Requisicion(Base):
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
     actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
 
+    # Cuenta/Cliente (Fase A multi-cuenta) — la Vacante que nace de esta Requisición hereda
+    # estos valores automáticamente (regla de Fase E).
+    cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
+    cliente_id: Mapped[Optional[int]] = mapped_column(ForeignKey("clientes.id"), nullable=True, index=True)
+
     solicitante: Mapped[Optional["Usuario"]] = relationship()
     vacante: Mapped[Optional["Vacante"]] = relationship(back_populates="requisicion", uselist=False)
     sugerencias: Mapped[List["SugerenciaMovilidad"]] = relationship(
@@ -314,6 +328,10 @@ class Empleado(Base):
     # si esta persona fue contratada a través de la plataforma, queda la trazabilidad completa
     candidato_origen_id: Mapped[Optional[int]] = mapped_column(ForeignKey("candidatos.id"), nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    # Cuenta/Cliente (Fase A multi-cuenta) — el Radar Interno compara Requisición contra
+    # Empleados del mismo Cliente.
+    cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
+    cliente_id: Mapped[Optional[int]] = mapped_column(ForeignKey("clientes.id"), nullable=True, index=True)
 
     jefe_directo: Mapped[Optional["Empleado"]] = relationship(remote_side=[id])
     candidato_origen: Mapped[Optional["Candidato"]] = relationship()
@@ -456,11 +474,87 @@ class Colaborador(Base):
     candidato_origen_id: Mapped[Optional[int]] = mapped_column(ForeignKey("candidatos.id"), nullable=True)
     expediente_id: Mapped[Optional[int]] = mapped_column(ForeignKey("expedientes.id"), nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    # Cuenta/Cliente (Fase A multi-cuenta) — hereda de la Vacante/Candidato de origen al dar de alta.
+    cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
+    cliente_id: Mapped[Optional[int]] = mapped_column(ForeignKey("clientes.id"), nullable=True, index=True)
 
     candidato_origen: Mapped[Optional["Candidato"]] = relationship()
 
 
-ROLES = ("admin", "rh", "lectura")
+# ============================================================
+# Cuentas y Clientes (Fase A · reestructuración multi-cuenta)
+# ============================================================
+#
+# Cuenta = empresa reclutadora que opera la plataforma (puede tener cero o varios
+# Clientes: empresas para las que recluta). Un Usuario puede tener acceso a varias
+# Cuentas (ver UsuarioCuenta) — si solo tiene una, el frontend no muestra ningún selector.
+
+
+class Cuenta(Base):
+    __tablename__ = "cuentas"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    nombre_comercial: Mapped[str] = mapped_column(String(200))
+    razon_social: Mapped[str] = mapped_column(String(200), default="")
+    logo: Mapped[str] = mapped_column(String(400), default="")  # ruta en disco
+    contacto_nombre: Mapped[str] = mapped_column(String(150), default="")
+    correo_comunicacion: Mapped[str] = mapped_column(String(200), default="")
+    whatsapp_comunicacion: Mapped[str] = mapped_column(String(30), default="")
+    estado: Mapped[str] = mapped_column(String(20), default="Activa")  # Activa | Inactiva
+    creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+    clientes: Mapped[List["Cliente"]] = relationship(back_populates="cuenta")
+    usuarios: Mapped[List["UsuarioCuenta"]] = relationship(back_populates="cuenta")
+
+
+class Cliente(Base):
+    """Empresa para la que recluta una Cuenta."""
+
+    __tablename__ = "clientes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
+    nombre: Mapped[str] = mapped_column(String(200))
+    estado: Mapped[str] = mapped_column(String(20), default="Activo")  # Activo | Inactivo
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+    cuenta: Mapped["Cuenta"] = relationship(back_populates="clientes")
+    contactos: Mapped[List["ClienteContacto"]] = relationship(
+        back_populates="cliente", cascade="all, delete-orphan"
+    )
+
+
+class ClienteContacto(Base):
+    """Persona de contacto en el Cliente — NO es un usuario del sistema."""
+
+    __tablename__ = "cliente_contactos"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cliente_id: Mapped[int] = mapped_column(ForeignKey("clientes.id"), index=True)
+    nombre: Mapped[str] = mapped_column(String(150))
+    puesto: Mapped[str] = mapped_column(String(120), default="")
+    correo: Mapped[str] = mapped_column(String(200), default="")
+    telefono: Mapped[str] = mapped_column(String(30), default="")
+
+    cliente: Mapped["Cliente"] = relationship(back_populates="contactos")
+
+
+class UsuarioCuenta(Base):
+    """Puente muchos-a-muchos: qué Cuenta(s) puede ver cada Usuario."""
+
+    __tablename__ = "usuario_cuentas"
+    __table_args__ = (UniqueConstraint("usuario_id", "cuenta_id", name="uq_usuario_cuenta"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    usuario_id: Mapped[int] = mapped_column(ForeignKey("usuarios.id"), index=True)
+    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
+
+    usuario: Mapped["Usuario"] = relationship(back_populates="cuentas")
+    cuenta: Mapped["Cuenta"] = relationship(back_populates="usuarios")
+
+
+ROLES = ("Administrador", "Usuario")
 
 
 class Usuario(Base):
@@ -477,7 +571,7 @@ class Usuario(Base):
     correo: Mapped[str] = mapped_column(String(200), unique=True, index=True)
     nombre: Mapped[str] = mapped_column(String(150))
     puesto: Mapped[str] = mapped_column(String(120), default="")
-    rol: Mapped[str] = mapped_column(String(20), default="rh")  # admin | rh | lectura
+    rol: Mapped[str] = mapped_column(String(20), default="Usuario")  # Administrador | Usuario
     hash_pass: Mapped[str] = mapped_column(String(255))
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
     debe_cambiar_pass: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -485,8 +579,13 @@ class Usuario(Base):
     bloqueado_hasta: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     ultimo_acceso: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    # Visibilidad automática (Fase A): si puede alternar Mío/Mi equipo, y a quién reporta.
+    ve_equipo: Mapped[bool] = mapped_column(Boolean, default=False)
+    reporta_a_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
 
     sesiones: Mapped[List["Sesion"]] = relationship(back_populates="usuario", cascade="all, delete-orphan")
+    cuentas: Mapped[List["UsuarioCuenta"]] = relationship(back_populates="usuario", cascade="all, delete-orphan")
+    reporta_a: Mapped[Optional["Usuario"]] = relationship(remote_side=[id])
 
     @property
     def bloqueado(self) -> bool:
@@ -498,8 +597,10 @@ class Usuario(Base):
         return limite > ahora()
 
     def puede_decidir(self) -> bool:
-        """El rol 'lectura' consulta pero no firma decisiones."""
-        return self.rol in ("admin", "rh")
+        """Ya no hay perfil de solo lectura (Fase A): Administrador y Usuario deciden por
+        igual, la diferencia entre ellos es de alcance de visibilidad. Se deja el método
+        para no tocar los call-sites existentes de `usuario_decisor`."""
+        return True
 
 
 class Sesion(Base):
@@ -532,6 +633,10 @@ class Bitacora(Base):
     detalle: Mapped[dict] = mapped_column(JSON, default=dict)
     hash_prev: Mapped[str] = mapped_column(String(64))
     hash: Mapped[str] = mapped_column(String(64))
+    # Cuenta (Fase A multi-cuenta) — informativa, fuera del payload que se hashea en registrar():
+    # agregarla no rompe la cadena. Nullable: eventos de sistema (login fallido antes de resolver
+    # usuario, semilla) pueden no tener una Cuenta a la que atribuirse.
+    cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
 
 
 def registrar(db: Session, actor: str, accion: str, entidad: str, entidad_id: str, detalle: Optional[dict] = None) -> Bitacora:
@@ -581,6 +686,9 @@ class Curso(Base):
     obligatorio: Mapped[bool] = mapped_column(Boolean, default=False)
     creado_por: Mapped[str] = mapped_column(String(150), default="")
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    # Cuenta (Fase A multi-cuenta) — a diferencia del resto, Curso no cuelga de ningún
+    # Candidato/Vacante, así que necesita su propia columna en vez de resolverse por join.
+    cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
 
     modulos: Mapped[List["ModuloCurso"]] = relationship(
         back_populates="curso", order_by="ModuloCurso.orden", cascade="all, delete-orphan"

@@ -183,13 +183,13 @@ def sembrar_admin(db: Session) -> None:
     from .models import Usuario
     from .services import auth
 
-    if db.query(Usuario).filter(Usuario.rol == "admin", Usuario.activo.is_(True)).count() > 0:
+    if db.query(Usuario).filter(Usuario.rol == "Administrador", Usuario.activo.is_(True)).count() > 0:
         return
 
     correo = settings.admin_email.strip().lower()
     existente = db.query(Usuario).filter(Usuario.correo == correo).first()
     if existente:  # existía pero sin rol admin (o desactivado): se restituye
-        existente.rol, existente.activo = "admin", True
+        existente.rol, existente.activo = "Administrador", True
         db.commit()
         return
 
@@ -200,12 +200,12 @@ def sembrar_admin(db: Session) -> None:
             correo=correo,
             nombre=settings.admin_nombre,
             puesto="Administrador de la plataforma",
-            rol="admin",
+            rol="Administrador",
             hash_pass=auth.hashear(password),
             debe_cambiar_pass=True,
         )
     )
-    registrar(db, "sistema", "usuario_creado", "usuario", correo, {"rol": "admin", "via": "arranque inicial"})
+    registrar(db, "sistema", "usuario_creado", "usuario", correo, {"rol": "Administrador", "via": "arranque inicial"})
     db.commit()
 
     if generada:

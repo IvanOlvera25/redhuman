@@ -15,10 +15,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..deps import usuario_actual, usuario_decisor
+from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import (
     ESTADOS_SUGERENCIA,
     MOTIVOS_REQUISICION,
+    Cuenta,
     Empleado,
     Requisicion,
     SugerenciaMovilidad,
@@ -33,8 +34,8 @@ router = APIRouter(prefix="/requisiciones", tags=["requisiciones"])
 UMBRAL_SUGERENCIA = 50  # % mínimo de habilidades en común para sugerir un match interno
 
 
-def _por_codigo(db: Session, codigo: str) -> Requisicion:
-    r = db.query(Requisicion).filter(Requisicion.codigo == codigo).first()
+def _por_codigo(db: Session, codigo: str, cuenta_id: int) -> Requisicion:
+    r = db.query(Requisicion).filter(Requisicion.codigo == codigo, Requisicion.cuenta_id == cuenta_id).first()
     if not r:
         raise HTTPException(404, "Requisición no encontrada")
     return r
@@ -95,8 +96,9 @@ def listar(
     area: Optional[str] = None,
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    q = db.query(Requisicion).order_by(Requisicion.id.desc())
+    q = db.query(Requisicion).filter(Requisicion.cuenta_id == cuenta.id).order_by(Requisicion.id.desc())
     if estado:
         q = q.filter(Requisicion.estado == estado)
     if area:
@@ -125,7 +127,10 @@ class CrearIn(BaseModel):
 
 
 @router.post("", status_code=201)
-def crear(datos: CrearIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def crear(
+    datos: CrearIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     if not datos.puesto.strip():
         raise HTTPException(400, "El puesto es obligatorio.")
     if datos.motivo not in MOTIVOS_REQUISICION:
@@ -135,6 +140,7 @@ def crear(datos: CrearIn, db: Session = Depends(get_db), u: Usuario = Depends(us
 
     r = Requisicion(
         codigo="TMP",
+        cuenta_id=cuenta.id,
         solicitante_id=u.id,
         solicitante_nombre=datos.solicitante_nombre.strip() or u.nombre,
         area=datos.area,
@@ -158,8 +164,10 @@ def crear(datos: CrearIn, db: Session = Depends(get_db), u: Usuario = Depends(us
 
 
 @router.get("/{codigo}")
-def detalle(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    r = _por_codigo(db, codigo)
+def detalle(
+    codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    r = _por_codigo(db, codigo, cuenta.id)
     return {**_salida(db, r), "sugerencias": [_sugerencia_dict(s) for s in r.sugerencias]}
 
 
@@ -178,9 +186,12 @@ class ActualizarIn(BaseModel):
 
 
 @router.patch("/{codigo}")
-def actualizar(codigo: str, datos: ActualizarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def actualizar(
+    codigo: str, datos: ActualizarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     """Edición manual — solo mientras la requisición no haya sido autorizada/rechazada."""
-    r = _por_codigo(db, codigo)
+    r = _por_codigo(db, codigo, cuenta.id)
     if r.estado not in ("borrador", "pendiente_autorizacion"):
         raise HTTPException(409, f"No se puede editar una requisición en estado '{r.estado}'.")
 
@@ -202,9 +213,11 @@ def actualizar(codigo: str, datos: ActualizarIn, db: Session = Depends(get_db), 
 
 
 @router.post("/{codigo}/enviar")
-def enviar(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def enviar(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
     """Pasa de borrador a pendiente de autorización."""
-    r = _por_codigo(db, codigo)
+    r = _por_codigo(db, codigo, cuenta.id)
     if r.estado != "borrador":
         raise HTTPException(409, f"Solo se puede enviar a autorización una requisición en borrador. Estado actual: {r.estado}")
     r.estado = "pendiente_autorizacion"
@@ -233,9 +246,12 @@ def _match_habilidades(requeridas: List[str], skills_empleado: List[str]):
 
 
 @router.post("/{codigo}/autorizar")
-def autorizar(codigo: str, datos: AutorizarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def autorizar(
+    codigo: str, datos: AutorizarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     """Autoriza la requisición y corre el Radar Interno antes de considerar buscar afuera."""
-    r = _por_codigo(db, codigo)
+    r = _por_codigo(db, codigo, cuenta.id)
     if r.estado not in ("borrador", "pendiente_autorizacion"):
         raise HTTPException(409, f"Solo se puede autorizar una requisición en borrador o pendiente. Estado actual: {r.estado}")
 
@@ -244,7 +260,9 @@ def autorizar(codigo: str, datos: AutorizarIn, db: Session = Depends(get_db), u:
     r.autorizada_en = datetime.now(timezone.utc)
     r.comentario_autorizacion = datos.comentario
 
-    empleados = db.query(Empleado).filter(Empleado.activo == True).all()
+    # Radar Interno: solo compara contra empleados de la MISMA Cuenta — nunca sugiere personal
+    # de otra empresa reclutadora en la plataforma.
+    empleados = db.query(Empleado).filter(Empleado.activo == True, Empleado.cuenta_id == cuenta.id).all()
     nuevas = 0
     for emp in empleados:
         porcentaje, coincidentes, faltantes = _match_habilidades(r.habilidades_requeridas, emp.skills)
@@ -272,8 +290,11 @@ class RechazarIn(BaseModel):
 
 
 @router.post("/{codigo}/rechazar")
-def rechazar(codigo: str, datos: RechazarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    r = _por_codigo(db, codigo)
+def rechazar(
+    codigo: str, datos: RechazarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    r = _por_codigo(db, codigo, cuenta.id)
     if r.estado not in ("pendiente_autorizacion", "borrador"):
         raise HTTPException(409, f"No se puede rechazar una requisición en estado '{r.estado}'.")
     r.estado = "rechazada"
@@ -289,8 +310,10 @@ def rechazar(codigo: str, datos: RechazarIn, db: Session = Depends(get_db), u: U
 
 
 @router.get("/{codigo}/sugerencias")
-def sugerencias(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    r = _por_codigo(db, codigo)
+def sugerencias(
+    codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    r = _por_codigo(db, codigo, cuenta.id)
     return [_sugerencia_dict(s) for s in r.sugerencias]
 
 
@@ -306,8 +329,9 @@ def decidir_sugerencia(
     datos: DecidirSugerenciaIn,
     db: Session = Depends(get_db),
     u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    r = _por_codigo(db, codigo)
+    r = _por_codigo(db, codigo, cuenta.id)
     s = next((x for x in r.sugerencias if x.id == sugerencia_id), None)
     if not s:
         raise HTTPException(404, "Sugerencia no encontrada")
@@ -340,10 +364,11 @@ def convertir_vacante(
     datos: ConvertirVacanteIn,
     db: Session = Depends(get_db),
     u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Crea la Vacante pública ligada a esta requisición ya autorizada — de aquí en
     adelante corre el mismo pipeline de generación, prefiltro y CVs que ya existe."""
-    r = _por_codigo(db, codigo)
+    r = _por_codigo(db, codigo, cuenta.id)
     if r.estado != "autorizada":
         raise HTTPException(409, f"Solo se puede convertir una requisición autorizada. Estado actual: {r.estado}")
     if r.vacante:
@@ -351,6 +376,8 @@ def convertir_vacante(
 
     v = Vacante(
         codigo="TMP",
+        cuenta_id=r.cuenta_id,
+        cliente_id=r.cliente_id,
         titulo=r.puesto,
         area=r.area,
         ubicacion=r.ubicacion,

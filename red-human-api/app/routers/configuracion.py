@@ -5,22 +5,24 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..deps import usuario_admin
-from ..models import Candidato, Usuario, registrar
+from ..deps import cuenta_actual, usuario_admin
+from ..models import Candidato, Cuenta, Usuario, registrar
 from ..services import configuracion as cfg_service
 
 router = APIRouter(prefix="/configuracion", tags=["configuracion"])
 
 
-def _salida(db: Session) -> dict:
+def _salida(db: Session, cuenta_id: int) -> dict:
+    # ConfiguracionSistema es una fila única global (Fase A no la vuelve por-Cuenta) — solo el
+    # conteo de candidatos de prueba se acota a la Cuenta de quien consulta.
     cfg = cfg_service.obtener(db)
-    candidatos_prueba = db.query(Candidato).filter(Candidato.es_prueba.is_(True)).count()
+    candidatos_prueba = db.query(Candidato).filter(Candidato.es_prueba.is_(True), Candidato.cuenta_id == cuenta_id).count()
     return {"modoPrueba": cfg.modo_prueba, "candidatosPrueba": candidatos_prueba}
 
 
 @router.get("")
-def obtener(db: Session = Depends(get_db), _: Usuario = Depends(usuario_admin)):
-    return _salida(db)
+def obtener(db: Session = Depends(get_db), _: Usuario = Depends(usuario_admin), cuenta: Cuenta = Depends(cuenta_actual)):
+    return _salida(db, cuenta.id)
 
 
 class ConfiguracionIn(BaseModel):
@@ -28,7 +30,10 @@ class ConfiguracionIn(BaseModel):
 
 
 @router.patch("")
-def actualizar(datos: ConfiguracionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_admin)):
+def actualizar(
+    datos: ConfiguracionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_admin),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     cfg = cfg_service.obtener(db)
     cfg.modo_prueba = datos.modo_prueba
     registrar(
@@ -36,4 +41,4 @@ def actualizar(datos: ConfiguracionIn, db: Session = Depends(get_db), u: Usuario
         "sistema", "configuracion", {"correo_rh": u.correo},
     )
     db.commit()
-    return _salida(db)
+    return _salida(db, cuenta.id)
