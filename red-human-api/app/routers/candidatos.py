@@ -7,6 +7,7 @@ crea el expediente de contratación y arranca la solicitud de documentos.
 import base64
 import json
 import re
+import secrets
 import unicodedata
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -18,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
 from ..deps import usuario_actual, usuario_admin, usuario_decisor
 from ..models import (
@@ -27,6 +29,7 @@ from ..models import (
     Candidato,
     Documento,
     Entrevista,
+    EntrevistaHumana,
     Expediente,
     Mensaje,
     Usuario,
@@ -1079,59 +1082,79 @@ def _fecha_hora_legible_mx(dt: datetime) -> str:
 _RE_CORREO = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-def _detalle_modalidad(c: Candidato) -> str:
+def _detalle_modalidad(eh: EntrevistaHumana, c: Candidato) -> str:
     """Dato específico de la modalidad — se usa en el WhatsApp y en ambos correos."""
-    if c.entrevista_humana_modalidad == "Videollamada" and c.entrevista_humana_liga:
-        return f"Liga de la videollamada: {c.entrevista_humana_liga}"
-    if c.entrevista_humana_modalidad == "Presencial" and c.entrevista_humana_ubicacion:
-        return f"Ubicación: {c.entrevista_humana_ubicacion}"
-    if c.entrevista_humana_modalidad == "Llamada":
-        tel = c.entrevista_humana_telefono_contacto or c.telefono
+    if eh.modalidad == "Videollamada" and eh.liga:
+        return f"Liga de la videollamada: {eh.liga}"
+    if eh.modalidad == "Presencial" and eh.ubicacion:
+        return f"Ubicación: {eh.ubicacion}"
+    if eh.modalidad == "Llamada":
+        tel = eh.telefono_contacto or c.telefono
         if tel:
             return f"Te contactaremos al {tel}"
     return ""
 
 
-def _texto_cita_entrevista_humana(c: Candidato) -> str:
+def _texto_cita_entrevista_humana(eh: EntrevistaHumana, c: Candidato) -> str:
     """Fragmento reusado por el aviso automático al programar y por el recordatorio manual."""
-    cuando = _fecha_hora_legible_mx(c.entrevista_humana_fecha) if c.entrevista_humana_fecha else "fecha por confirmar"
+    cuando = _fecha_hora_legible_mx(eh.fecha) if eh.fecha else "fecha por confirmar"
     texto = (
-        f"con {c.entrevista_humana_entrevistador or 'nuestro equipo de RH'} el {cuando}, "
-        f"modalidad {c.entrevista_humana_modalidad or 'por confirmar'}."
+        f"con {eh.entrevistador or 'nuestro equipo de RH'} el {cuando}, "
+        f"modalidad {eh.modalidad or 'por confirmar'}."
     )
-    detalle = _detalle_modalidad(c)
+    detalle = _detalle_modalidad(eh, c)
     if detalle:
         texto += f" {detalle}."
-    if c.entrevista_humana_comentario:
-        texto += f" {c.entrevista_humana_comentario}"
+    if eh.comentario:
+        texto += f" {eh.comentario}"
     return texto
 
 
-def _html_correo_candidato(c: Candidato) -> str:
-    cuando = _fecha_hora_legible_mx(c.entrevista_humana_fecha) if c.entrevista_humana_fecha else "fecha por confirmar"
-    detalle = _detalle_modalidad(c)
+def _html_correo_candidato(eh: EntrevistaHumana, c: Candidato) -> str:
+    cuando = _fecha_hora_legible_mx(eh.fecha) if eh.fecha else "fecha por confirmar"
+    detalle = _detalle_modalidad(eh, c)
     primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
     return (
         f"<p>¡Hola {primer_nombre}!</p>"
-        f"<p>Te confirmamos tu entrevista con <strong>{c.entrevista_humana_entrevistador or 'nuestro equipo de RH'}</strong> "
-        f"el <strong>{cuando}</strong>, modalidad <strong>{c.entrevista_humana_modalidad}</strong>.</p>"
+        f"<p>Te confirmamos tu entrevista con <strong>{eh.entrevistador or 'nuestro equipo de RH'}</strong> "
+        f"el <strong>{cuando}</strong>, modalidad <strong>{eh.modalidad}</strong>.</p>"
         + (f"<p>{detalle}.</p>" if detalle else "")
-        + (f"<p>{c.entrevista_humana_comentario}</p>" if c.entrevista_humana_comentario else "")
+        + (f"<p>{eh.comentario}</p>" if eh.comentario else "")
         + "<p>Saludos,<br>Red Human AI</p>"
     )
 
 
-def _html_correo_entrevistador(c: Candidato) -> str:
-    cuando = _fecha_hora_legible_mx(c.entrevista_humana_fecha) if c.entrevista_humana_fecha else "fecha por confirmar"
-    detalle = _detalle_modalidad(c)
+def _html_correo_entrevistador(eh: EntrevistaHumana, c: Candidato) -> str:
+    cuando = _fecha_hora_legible_mx(eh.fecha) if eh.fecha else "fecha por confirmar"
+    detalle = _detalle_modalidad(eh, c)
     return (
         f"<p>Tienes una entrevista programada con <strong>{c.nombre}</strong> "
         f"({c.vacante.titulo if c.vacante else 'vacante sin especificar'}) "
-        f"el <strong>{cuando}</strong>, modalidad <strong>{c.entrevista_humana_modalidad}</strong>.</p>"
+        f"el <strong>{cuando}</strong>, modalidad <strong>{eh.modalidad}</strong>.</p>"
         + (f"<p>{detalle}.</p>" if detalle else "")
         + (f"<p>Teléfono del candidato: {c.telefono}</p>" if c.telefono else "")
-        + (f"<p>{c.entrevista_humana_comentario}</p>" if c.entrevista_humana_comentario else "")
+        + (f"<p>{eh.comentario}</p>" if eh.comentario else "")
         + "<p>Saludos,<br>Red Human AI</p>"
+    )
+
+
+def _correo_entrevistador(db: Session, eh: EntrevistaHumana) -> str:
+    """Resuelve el correo del entrevistador de esta ronda — el interno se busca en Usuario (RH
+    no lo vuelve a teclear y puede haber cambiado desde que se programó); el externo ya viene
+    guardado en la propia fila."""
+    if eh.tipo == "interno" and eh.usuario_id:
+        entrevistador = db.query(Usuario).filter(Usuario.id == eh.usuario_id).first()
+        return entrevistador.correo if entrevistador else ""
+    return eh.correo_externo
+
+
+def _html_correo_evaluacion_entrevistador(eh: EntrevistaHumana, c: Candidato, liga: str) -> str:
+    return (
+        f"<p>Gracias por entrevistar a <strong>{c.nombre}</strong> "
+        f"({c.vacante.titulo if c.vacante else 'vacante sin especificar'}).</p>"
+        "<p>Ayúdanos a registrar tu evaluación — te toma menos de un minuto:</p>"
+        f"<p><a href=\"{liga}\">{liga}</a></p>"
+        "<p>Saludos,<br>Red Human AI</p>"
     )
 
 
@@ -1156,9 +1179,11 @@ class EntrevistaHumanaIn(BaseModel):
 async def programar_entrevista_humana(
     codigo: str, datos: EntrevistaHumanaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
 ):
-    """Botón «Programar entrevista» del modal — agenda, mueve la tarjeta a Entrevista Humana y
-    avisa al candidato por WhatsApp y por correo (Resend); también avisa por correo a quien
-    entrevista (interno o externo)."""
+    """Botón «Programar entrevista» del modal — agenda una ronda NUEVA (ver EntrevistaHumana:
+    cada llamada crea su propia fila, nunca sobreescribe una anterior — así "Agendar otra
+    Entrevista Humana" no borra el resultado de la ronda previa), mueve la tarjeta a Entrevista
+    Humana y avisa al candidato por WhatsApp y por correo (Resend); también avisa por correo a
+    quien entrevista (interno o externo)."""
     c = _por_codigo(db, codigo)
 
     if datos.tipo_entrevistador not in TIPOS_ENTREVISTADOR:
@@ -1207,27 +1232,30 @@ async def programar_entrevista_humana(
 
     anterior = c.etapa
     c.etapa = "Entrevista Humana"
-    c.entrevista_humana_tipo = datos.tipo_entrevistador
-    c.entrevista_humana_usuario_id = entrevistador_usuario.id if entrevistador_usuario else None
-    c.entrevista_humana_correo_externo = correo_entrevistador if datos.tipo_entrevistador == "externo" else ""
-    c.entrevista_humana_entrevistador = nombre_entrevistador
-    c.entrevista_humana_fecha = fecha_hora
-    c.entrevista_humana_modalidad = datos.modalidad
-    c.entrevista_humana_liga = liga if datos.modalidad == "Videollamada" else ""
-    c.entrevista_humana_ubicacion = ubicacion if datos.modalidad == "Presencial" else ""
-    c.entrevista_humana_telefono_contacto = datos.telefono_contacto.strip() if datos.modalidad == "Llamada" else ""
-    c.entrevista_humana_comentario = datos.comentario.strip()
-    c.entrevista_humana_realizada = False
-    # limpios por si se reprograma después de un cierre previo
-    c.entrevista_humana_resultado = ""
-    c.entrevista_humana_recomendacion = ""
+
+    eh = EntrevistaHumana(
+        candidato_id=c.id,
+        tipo=datos.tipo_entrevistador,
+        usuario_id=entrevistador_usuario.id if entrevistador_usuario else None,
+        correo_externo=correo_entrevistador if datos.tipo_entrevistador == "externo" else "",
+        entrevistador=nombre_entrevistador,
+        fecha=fecha_hora,
+        modalidad=datos.modalidad,
+        liga=liga if datos.modalidad == "Videollamada" else "",
+        ubicacion=ubicacion if datos.modalidad == "Presencial" else "",
+        telefono_contacto=datos.telefono_contacto.strip() if datos.modalidad == "Llamada" else "",
+        comentario=datos.comentario.strip(),
+        token=secrets.token_urlsafe(24),
+    )
+    db.add(eh)
+    db.flush()
 
     envio_whatsapp = {"enviado": False, "proveedor": "demo", "detalle": "sin teléfono"}
     if c.telefono:
         primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
         texto = (
             f"¡Hola {primer_nombre}! 📅 En base a tu entrevista con nuestro asistente de IA, te "
-            f"programamos una entrevista {_texto_cita_entrevista_humana(c)}"
+            f"programamos una entrevista {_texto_cita_entrevista_humana(eh, c)}"
         )
         try:
             envio_whatsapp = await enviar_mensaje(c.telefono, texto)
@@ -1240,13 +1268,13 @@ async def programar_entrevista_humana(
         ))
 
     try:
-        correo_candidato = await enviar_correo(c.correo, "Tu entrevista con Red Human AI", _html_correo_candidato(c))
+        correo_candidato = await enviar_correo(c.correo, "Tu entrevista con Red Human AI", _html_correo_candidato(eh, c))
     except Exception as ex:  # que Resend falle no debe tumbar el agendado
         print(f"[correo-send-error] programar_entrevista_humana (candidato) -> {c.codigo}: {ex}")
         correo_candidato = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
     try:
         correo_entrevistador_resultado = await enviar_correo(
-            correo_entrevistador, f"Entrevista programada con {c.nombre}", _html_correo_entrevistador(c)
+            correo_entrevistador, f"Entrevista programada con {c.nombre}", _html_correo_entrevistador(eh, c)
         )
     except Exception as ex:
         print(f"[correo-send-error] programar_entrevista_humana (entrevistador) -> {c.codigo}: {ex}")
@@ -1255,7 +1283,7 @@ async def programar_entrevista_humana(
     registrar(
         db, u.nombre, "entrevista_humana_programada", "candidato", c.codigo,
         {
-            "de": anterior, "entrevistador": c.entrevista_humana_entrevistador,
+            "de": anterior, "entrevistador": eh.entrevistador,
             "tipo_entrevistador": datos.tipo_entrevistador,
             "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
             "whatsapp": envio_whatsapp,
@@ -1272,18 +1300,64 @@ RESULTADOS_ENTREVISTA_HUMANA = ("aprobado", "no_aprobado")
 RECOMENDACIONES_ENTREVISTA_HUMANA = ("avanzar", "no_avanzar", "segunda_entrevista")
 
 
-class EntrevistaHumanaRealizadaIn(BaseModel):
+def _ultima_entrevista_humana(c: Candidato) -> EntrevistaHumana:
+    if not c.entrevistas_humanas:
+        raise HTTPException(409, "El candidato no tiene ninguna Entrevista Humana programada.")
+    return c.entrevistas_humanas[-1]
+
+
+@router.post("/{codigo}/entrevista-humana/realizada")
+async def marcar_entrevista_humana_realizada(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+    """Botón «Marcar entrevista realizada» — ya no le pide el resultado a RH: marca que la
+    entrevista ocurrió y le manda al entrevistador la liga pública para que registre su propia
+    evaluación (Aprobado/No aprobado, recomendación, comentario). RH conserva la opción de
+    capturarlo/corregirlo a mano como respaldo — ver POST .../entrevista-humana/resultado."""
+    c = _por_codigo(db, codigo)
+    if c.etapa != "Entrevista Humana":
+        raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
+    eh = _ultima_entrevista_humana(c)
+
+    eh.realizada = True
+
+    liga = f"{settings.app_url}/entrevista-humana/{eh.token}"
+    correo_destino = _correo_entrevistador(db, eh)
+    envio_correo = {"enviado": False, "proveedor": "demo", "detalle": "sin correo del entrevistador"}
+    if correo_destino:
+        try:
+            envio_correo = await enviar_correo(
+                correo_destino, f"Tu evaluación de la entrevista con {c.nombre}",
+                _html_correo_evaluacion_entrevistador(eh, c, liga),
+            )
+        except Exception as ex:  # que Resend falle no debe tumbar el marcado
+            print(f"[correo-send-error] marcar_entrevista_humana_realizada -> {c.codigo}: {ex}")
+            envio_correo = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+
+    registrar(
+        db, u.nombre, "entrevista_humana_marcada_realizada", "candidato", c.codigo,
+        {"correo_entrevistador": envio_correo, "correo_rh": u.correo},
+    )
+    db.commit()
+    return {
+        "enviado": envio_correo.get("enviado", False),
+        "correo": envio_correo,
+        "candidato": candidato_dict(c, detalle=True),
+    }
+
+
+class EntrevistaHumanaResultadoIn(BaseModel):
     resultado: str  # aprobado | no_aprobado
     recomendacion: str  # avanzar | no_avanzar | segunda_entrevista
     comentario: str = ""
 
 
-@router.post("/{codigo}/entrevista-humana/realizada")
-def marcar_entrevista_humana_realizada(
-    codigo: str, datos: EntrevistaHumanaRealizadaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+@router.post("/{codigo}/entrevista-humana/resultado")
+def registrar_resultado_entrevista_humana(
+    codigo: str, datos: EntrevistaHumanaResultadoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
 ):
-    """Modal «Marcar entrevista realizada» — exige Resultado y Recomendación (y comentario si el
-    resultado es negativo o hay segunda entrevista) antes de habilitar Descartar/Contratación."""
+    """Respaldo manual de RH junto a la liga del entrevistador (Eje 1 del Lote 3: gana quien
+    llegue primero, pero RH siempre puede usar este mismo endpoint después para corregir —
+    a diferencia de POST /entrevista-humana/publica/{token}, que si ya está capturada regresa
+    409 sin tocar nada)."""
     c = _por_codigo(db, codigo)
     if c.etapa != "Entrevista Humana":
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
@@ -1299,13 +1373,19 @@ def marcar_entrevista_humana_realizada(
             "recomendación es 'Segunda entrevista'.",
         )
 
-    c.entrevista_humana_realizada = True
-    c.entrevista_humana_resultado = datos.resultado
-    c.entrevista_humana_recomendacion = datos.recomendacion
-    c.entrevista_humana_comentario = comentario
+    eh = _ultima_entrevista_humana(c)
+    ya_capturada = bool(eh.resultado_capturado_por)
+    eh.realizada = True
+    eh.resultado = datos.resultado
+    eh.recomendacion = datos.recomendacion
+    eh.comentario = comentario
+    eh.resultado_capturado_por = "rh"
     registrar(
-        db, u.nombre, "entrevista_humana_realizada", "candidato", c.codigo,
-        {"resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario, "correo_rh": u.correo},
+        db, u.nombre, "entrevista_humana_resultado_capturado_rh", "candidato", c.codigo,
+        {
+            "resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario,
+            "corrigio_captura_previa": ya_capturada, "correo_rh": u.correo,
+        },
     )
     db.commit()
     return candidato_dict(c, detalle=True)
@@ -1318,13 +1398,14 @@ async def recordatorio_entrevista_humana(codigo: str, db: Session = Depends(get_
     c = _por_codigo(db, codigo)
     if c.etapa != "Entrevista Humana":
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
-    if c.entrevista_humana_realizada:
+    eh = _ultima_entrevista_humana(c)
+    if eh.realizada:
         raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
     if not c.telefono:
         raise HTTPException(409, "El candidato no tiene WhatsApp registrado.")
 
     primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
-    texto = f"¡Hola de nuevo, {primer_nombre}! 👋 Te recordamos tu entrevista {_texto_cita_entrevista_humana(c)}"
+    texto = f"¡Hola de nuevo, {primer_nombre}! 👋 Te recordamos tu entrevista {_texto_cita_entrevista_humana(eh, c)}"
     try:
         envio = await enviar_mensaje(c.telefono, texto)
     except Exception as ex:  # que WhatsApp falle no debe tumbar el recordatorio manual de RH

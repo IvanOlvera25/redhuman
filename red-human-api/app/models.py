@@ -104,7 +104,9 @@ class Candidato(Base):
     videollamada_liga: Mapped[str] = mapped_column(String(300), default="")
     # true en cuanto se manda el mensaje de rescate por inasistencia — evita reenviarlo cada 5 min
     videollamada_aviso_noshow_enviado: Mapped[bool] = mapped_column(Boolean, default=False)
-    # --- Entrevista Humana (flujo manual de RH, ver ETAPAS_CANDIDATO) ---
+    # --- Entrevista Humana: LEGADO — puente para scripts/migrar_entrevistas_humanas.py.
+    # Reemplazadas por la tabla EntrevistaHumana (uno a muchos, ver abajo); ya no las lee ni
+    # las escribe ningún endpoint. Se conservan sin tocar hasta correr la migración de datos.
     entrevista_humana_entrevistador: Mapped[str] = mapped_column(String(150), default="")  # nombre a mostrar (usuario.nombre si es interno, tecleado si es externo)
     entrevista_humana_tipo: Mapped[str] = mapped_column(String(20), default="")  # interno | externo
     entrevista_humana_usuario_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
@@ -129,9 +131,45 @@ class Candidato(Base):
     mensajes: Mapped[List["Mensaje"]] = relationship(back_populates="candidato", order_by="Mensaje.id")
     expediente: Mapped[Optional["Expediente"]] = relationship(back_populates="candidato", uselist=False)
     entrevistas: Mapped[List["Entrevista"]] = relationship(back_populates="candidato", order_by="Entrevista.id")
+    entrevistas_humanas: Mapped[List["EntrevistaHumana"]] = relationship(
+        back_populates="candidato", order_by="EntrevistaHumana.id", cascade="all, delete-orphan"
+    )
     archivos: Mapped[List["Archivo"]] = relationship(
         back_populates="candidato", order_by="Archivo.id", cascade="all, delete-orphan"
     )
+
+
+class EntrevistaHumana(Base):
+    """Una ronda de entrevista humana (flujo manual de RH, ver ETAPAS_CANDIDATO). Un candidato
+    puede tener varias a lo largo del proceso — cada "Agendar otra Entrevista Humana" crea una
+    fila nueva en vez de sobreescribir la anterior, para no perder el resultado de rondas
+    previas."""
+
+    __tablename__ = "entrevistas_humanas"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidato_id: Mapped[int] = mapped_column(ForeignKey("candidatos.id"), index=True)
+    entrevistador: Mapped[str] = mapped_column(String(150), default="")  # nombre a mostrar (usuario.nombre si es interno, tecleado si es externo)
+    tipo: Mapped[str] = mapped_column(String(20), default="")  # interno | externo
+    usuario_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
+    correo_externo: Mapped[str] = mapped_column(String(200), default="")
+    fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    modalidad: Mapped[str] = mapped_column(String(20), default="")  # Presencial|Videollamada|Llamada
+    liga: Mapped[str] = mapped_column(String(300), default="")  # obligatoria si modalidad=Videollamada
+    ubicacion: Mapped[str] = mapped_column(String(300), default="")  # obligatoria si modalidad=Presencial
+    telefono_contacto: Mapped[str] = mapped_column(String(30), default="")  # opcional si modalidad=Llamada
+    comentario: Mapped[str] = mapped_column(Text, default="")
+    realizada: Mapped[bool] = mapped_column(Boolean, default=False)
+    resultado: Mapped[str] = mapped_column(String(20), default="")  # aprobado | no_aprobado
+    recomendacion: Mapped[str] = mapped_column(String(30), default="")  # avanzar | no_avanzar | segunda_entrevista
+    # --- evaluación del entrevistador por liga (Lote 3) ---
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # liga pública para que el entrevistador registre su evaluación
+    # "" hasta que alguien capture el resultado; "rh" | "entrevistador" según quién ganó la
+    # carrera (ver candidatos.py: RH siempre puede sobreescribir después, para corregir).
+    resultado_capturado_por: Mapped[str] = mapped_column(String(20), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+    candidato: Mapped["Candidato"] = relationship(back_populates="entrevistas_humanas")
 
 
 class Archivo(Base):

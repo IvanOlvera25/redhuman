@@ -63,6 +63,7 @@ import {
   recordatorioDocumentosCandidato,
   recordatorioEntrevistaHumana,
   registrarConsentimiento,
+  registrarResultadoEntrevistaHumana,
   solicitarDocumentosCandidato,
   subirArchivoCandidato,
   subirCVs,
@@ -887,7 +888,7 @@ function PestanaEvaluaciones({ c }: { c: Candidato }) {
     | { resumen?: string; fortalezas?: string[]; riesgos?: string[] }
     | null
     | undefined;
-  const eh = c.entrevistaHumana;
+  const historialEh = c.entrevistasHumanas ?? [];
 
   return (
     <div className="flex flex-col gap-5">
@@ -1042,20 +1043,46 @@ function PestanaEvaluaciones({ c }: { c: Candidato }) {
         </div>
       )}
 
-      {/* Resultado de Entrevista Humana — solo lectura; agendar/reprogramar/marcar realizada y
-          el recordatorio siguen viviendo exclusivamente en PanelEntrevistaHumana (acción
-          activa, no se duplica aquí). Esto es únicamente el veredicto ya cerrado. */}
-      {eh?.realizada && (
-        <Card className="border-[color:var(--brand-2)]/30 bg-surface-2/40 p-4">
-          <Eyebrow>Resultado de Entrevista Humana</Eyebrow>
-          <div className="mt-2.5 flex flex-wrap items-center gap-2">
-            <Badge tone={eh.resultado === "aprobado" ? "good" : "bad"} dot>
-              {eh.resultado === "aprobado" ? "Aprobado" : "No aprobado"}
-            </Badge>
-            {eh.recomendacion && <Badge tone="brand">{RECOMENDACION_LABEL[eh.recomendacion]}</Badge>}
+      {/* Historial de Entrevistas Humanas — puede haber varias rondas (ver EntrevistaHumana);
+          agendar, marcar realizada y el recordatorio siguen viviendo exclusivamente en
+          PanelEntrevistaHumana (acción activa sobre la ronda más reciente, no se duplica
+          aquí). Esto es únicamente el historial de solo lectura, más reciente primero. */}
+      {historialEh.length > 0 && (
+        <div>
+          <Eyebrow>Historial de Entrevistas Humanas ({historialEh.length})</Eyebrow>
+          <div className="mt-2 flex flex-col gap-2.5">
+            {historialEh.map((eh, i) => (
+              <Card key={i} className="border-[color:var(--brand-2)]/30 bg-surface-2/40 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-ink">
+                    {eh.entrevistador || "Sin asignar"}
+                    {eh.fecha && (
+                      <span className="ml-2 font-normal text-ink-3">
+                        {new Date(eh.fecha).toLocaleString("es-MX", { dateStyle: "medium", timeStyle: "short" })}
+                      </span>
+                    )}
+                  </p>
+                  {eh.resultado ? (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Badge tone={eh.resultado === "aprobado" ? "good" : "bad"} dot>
+                        {eh.resultado === "aprobado" ? "Aprobado" : "No aprobado"}
+                      </Badge>
+                      {eh.recomendacion && <Badge tone="brand">{RECOMENDACION_LABEL[eh.recomendacion]}</Badge>}
+                    </div>
+                  ) : (
+                    <Badge tone="neutral">{eh.realizada ? "Esperando evaluación" : "Programada"}</Badge>
+                  )}
+                </div>
+                <p className="mt-1 text-[11px] text-ink-3">
+                  {eh.modalidad || "Modalidad sin definir"}
+                  {eh.resultado &&
+                    ` · Registrado por ${eh.resultadoCapturadoPor === "entrevistador" ? "el entrevistador" : "RH"}`}
+                </p>
+                {eh.comentario && <p className="mt-2 text-[13px] leading-relaxed text-ink-2">{eh.comentario}</p>}
+              </Card>
+            ))}
           </div>
-          {eh.comentario && <p className="mt-2.5 text-[13px] leading-relaxed text-ink-2">{eh.comentario}</p>}
-        </Card>
+        </div>
       )}
     </div>
   );
@@ -1555,26 +1582,50 @@ function PanelEntrevistaHumana({
   onCambio: (c: Candidato) => void;
 }) {
   const eh = c.entrevistaHumana;
-  const [confirmando, setConfirmando] = useState(false);
+  const [modalResultado, setModalResultado] = useState(false);
   const [marcando, setMarcando] = useState(false);
+  const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState("");
   const [recordando, setRecordando] = useState(false);
   const [avisoRecordatorio, setAvisoRecordatorio] = useState<{ tono: "ok" | "error"; texto: string } | null>(null);
 
-  async function confirmarRealizada(datos: {
-    resultado: ResultadoEntrevistaHumana;
-    recomendacion: RecomendacionEntrevistaHumana;
-    comentario: string;
-  }) {
+  /** Ya no pide resultado (Lote 3, Eje 2): solo confirma que la entrevista ocurrió y dispara el
+   * correo con la liga al entrevistador. */
+  async function marcarRealizada() {
+    if (
+      !window.confirm(
+        "¿Confirmas que la entrevista ya se llevó a cabo? Se le mandará al entrevistador una liga por correo para que registre su evaluación.",
+      )
+    ) {
+      return;
+    }
     setMarcando(true);
     setError("");
-    const r = await marcarEntrevistaHumanaRealizada(c.id, datos);
+    const r = await marcarEntrevistaHumanaRealizada(c.id);
     setMarcando(false);
     if (!r.ok) {
       setError(r.error);
       return;
     }
-    setConfirmando(false);
+    onCambio(r.data.candidato);
+  }
+
+  /** Respaldo manual de RH — captura la primera vez o corrige un resultado ya capturado
+   * (por RH o por el entrevistador vía su liga). */
+  async function guardarResultado(datos: {
+    resultado: ResultadoEntrevistaHumana;
+    recomendacion: RecomendacionEntrevistaHumana;
+    comentario: string;
+  }) {
+    setGuardando(true);
+    setError("");
+    const r = await registrarResultadoEntrevistaHumana(c.id, datos);
+    setGuardando(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
+    setModalResultado(false);
     onCambio(r.data);
   }
 
@@ -1637,17 +1688,19 @@ function PanelEntrevistaHumana({
       )}
 
       <div className="mt-3.5 flex flex-wrap items-center gap-2">
-        {eh.realizada ? (
+        {eh.resultado ? (
           <>
             <Badge tone={eh.resultado === "aprobado" ? "good" : "bad"} dot>
               {eh.resultado === "aprobado" ? "Aprobado" : "No aprobado"}
             </Badge>
             {eh.recomendacion && <Badge tone="brand">{RECOMENDACION_LABEL[eh.recomendacion]}</Badge>}
           </>
+        ) : eh.realizada ? (
+          <span className="text-xs text-ink-3">Esperando evaluación del entrevistador…</span>
         ) : live ? (
           <>
-            <Button size="sm" variant="secondary" onClick={() => setConfirmando(true)} disabled={marcando}>
-              <CheckCircle2 className="h-4 w-4" /> Marcar entrevista realizada
+            <Button size="sm" variant="secondary" onClick={marcarRealizada} disabled={marcando}>
+              <CheckCircle2 className="h-4 w-4" /> {marcando ? "Enviando…" : "Marcar entrevista realizada"}
             </Button>
             <Button size="sm" variant="outline" onClick={enviarRecordatorio} disabled={recordando}>
               <RotateCw className="h-4 w-4" /> {recordando ? "Enviando…" : "Enviar recordatorio"}
@@ -1656,11 +1709,35 @@ function PanelEntrevistaHumana({
         ) : null}
       </div>
 
-      {confirmando && (
+      {/* Respaldo manual de RH (Eje 1) — solo aparece una vez marcada realizada, ya sea para
+          capturar el resultado si el entrevistador no ha contestado, o para corregirlo. */}
+      {eh.realizada && live && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-2.5">
+          {eh.resultado && (
+            <span className="text-[11px] text-ink-3">
+              Registrado por {eh.resultadoCapturadoPor === "entrevistador" ? "el entrevistador" : "RH"}.
+            </span>
+          )}
+          <button
+            onClick={() => setModalResultado(true)}
+            disabled={guardando}
+            className="text-[11px] font-semibold text-brand hover:underline"
+          >
+            {eh.resultado ? "Corregir resultado" : "Registrar resultado manualmente"}
+          </button>
+        </div>
+      )}
+
+      {modalResultado && (
         <ModalCerrarEntrevistaHumana
-          onCancelar={() => setConfirmando(false)}
-          onConfirmar={confirmarRealizada}
-          cargando={marcando}
+          inicial={
+            eh.resultado
+              ? { resultado: eh.resultado, recomendacion: eh.recomendacion, comentario: eh.comentario }
+              : undefined
+          }
+          onCancelar={() => setModalResultado(false)}
+          onConfirmar={guardarResultado}
+          cargando={guardando}
         />
       )}
     </Card>
@@ -1671,10 +1748,18 @@ function PanelEntrevistaHumana({
    Modal "Marcar entrevista realizada" — Resultado + Recomendación obligatorios
    ============================================================ */
 function ModalCerrarEntrevistaHumana({
+  inicial,
   onCancelar,
   onConfirmar,
   cargando,
 }: {
+  /** Presente cuando ya había un resultado capturado — el modal pasa a modo "corregir" y
+   * precarga los valores actuales. */
+  inicial?: {
+    resultado: ResultadoEntrevistaHumana | null;
+    recomendacion: RecomendacionEntrevistaHumana | null;
+    comentario: string;
+  };
   onCancelar: () => void;
   onConfirmar: (datos: {
     resultado: ResultadoEntrevistaHumana;
@@ -1683,9 +1768,9 @@ function ModalCerrarEntrevistaHumana({
   }) => void;
   cargando?: boolean;
 }) {
-  const [resultado, setResultado] = useState<ResultadoEntrevistaHumana | "">("");
-  const [recomendacion, setRecomendacion] = useState<RecomendacionEntrevistaHumana | "">("");
-  const [comentario, setComentario] = useState("");
+  const [resultado, setResultado] = useState<ResultadoEntrevistaHumana | "">(inicial?.resultado ?? "");
+  const [recomendacion, setRecomendacion] = useState<RecomendacionEntrevistaHumana | "">(inicial?.recomendacion ?? "");
+  const [comentario, setComentario] = useState(inicial?.comentario ?? "");
 
   const comentarioObligatorio = resultado === "no_aprobado" || recomendacion === "segunda_entrevista";
   const listo = !!resultado && !!recomendacion && (!comentarioObligatorio || comentario.trim().length > 0);
@@ -1693,9 +1778,11 @@ function ModalCerrarEntrevistaHumana({
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
       <Card className="w-full max-w-md p-5">
-        <h3 className="font-display text-lg font-bold">Marcar entrevista realizada</h3>
+        <h3 className="font-display text-lg font-bold">{inicial ? "Corregir resultado" : "Registrar resultado de la entrevista"}</h3>
         <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-          Al confirmar se habilitan los botones «Descartar» y «Enviar a Contratación» para este candidato.
+          {inicial
+            ? "Vas a sobreescribir el resultado ya registrado para esta entrevista."
+            : "Al confirmar se habilitan los botones «Descartar» y «Enviar a Contratación» para este candidato."}
         </p>
 
         <div className="mt-4 flex flex-col gap-4">
