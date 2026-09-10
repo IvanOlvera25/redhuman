@@ -99,9 +99,29 @@ def archivo_dict(a: Archivo) -> dict:
     }
 
 
+def _entrevista_humana_dict(eh) -> dict:
+    return {
+        "entrevistador": eh.entrevistador,
+        "tipo": eh.tipo,
+        "usuarioId": eh.usuario_id,
+        "correoExterno": eh.correo_externo,
+        "fecha": iso(eh.fecha),
+        "modalidad": eh.modalidad,
+        "liga": eh.liga,
+        "ubicacion": eh.ubicacion,
+        "telefonoContacto": eh.telefono_contacto,
+        "comentario": eh.comentario,
+        "realizada": eh.realizada,
+        "resultado": eh.resultado or None,
+        "recomendacion": eh.recomendacion or None,
+        "resultadoCapturadoPor": eh.resultado_capturado_por or None,
+    }
+
+
 def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
     exp = c.expediente
     ultima = c.entrevistas[-1] if c.entrevistas else None
+    ultima_eh = c.entrevistas_humanas[-1] if c.entrevistas_humanas else None
     base = {
         "id": c.codigo,
         "nombre": c.nombre,
@@ -121,24 +141,11 @@ def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
         "consentimiento": c.consentimiento,
         "prefiltroCompleto": c.prefiltro_completo,
         "esPrueba": c.es_prueba,
-        # --- Entrevista Humana (flujo manual) ---
-        "entrevistaHumana": {
-            "entrevistador": c.entrevista_humana_entrevistador,
-            "tipo": c.entrevista_humana_tipo,
-            "usuarioId": c.entrevista_humana_usuario_id,
-            "correoExterno": c.entrevista_humana_correo_externo,
-            "fecha": iso(c.entrevista_humana_fecha),
-            "modalidad": c.entrevista_humana_modalidad,
-            "liga": c.entrevista_humana_liga,
-            "ubicacion": c.entrevista_humana_ubicacion,
-            "telefonoContacto": c.entrevista_humana_telefono_contacto,
-            "comentario": c.entrevista_humana_comentario,
-            "realizada": c.entrevista_humana_realizada,
-            "resultado": c.entrevista_humana_resultado or None,
-            "recomendacion": c.entrevista_humana_recomendacion or None,
-        }
-        if c.entrevista_humana_fecha
-        else None,
+        # --- Entrevista Humana (flujo manual) — puede haber varias rondas, ver EntrevistaHumana.
+        # "entrevistaHumana" es la más reciente (compatibilidad con lo que ya lee el frontend);
+        # "entrevistasHumanas" es el historial completo, más reciente primero.
+        "entrevistaHumana": _entrevista_humana_dict(ultima_eh) if ultima_eh else None,
+        "entrevistasHumanas": [_entrevista_humana_dict(eh) for eh in reversed(c.entrevistas_humanas)],
         # --- puentes entre módulos ---
         "expedienteId": exp.id if exp else None,
         "expedienteProgreso": exp.progreso if exp else None,

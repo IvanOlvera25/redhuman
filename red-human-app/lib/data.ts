@@ -24,6 +24,25 @@ export interface RespuestaPrefiltro {
 export type TipoEntrevistador = "interno" | "externo";
 export type ResultadoEntrevistaHumana = "aprobado" | "no_aprobado";
 export type RecomendacionEntrevistaHumana = "avanzar" | "no_avanzar" | "segunda_entrevista";
+export type CapturadoPor = "rh" | "entrevistador";
+
+/** Una ronda de Entrevista Humana — un candidato puede tener varias (ver PestanaEvaluaciones). */
+export interface EntrevistaHumana {
+  entrevistador: string;
+  tipo: TipoEntrevistador | "";
+  usuarioId: number | null;
+  correoExterno: string;
+  fecha: string | null;
+  modalidad: "Presencial" | "Videollamada" | "Llamada" | "";
+  liga: string;
+  ubicacion: string;
+  telefonoContacto: string;
+  comentario: string;
+  realizada: boolean;
+  resultado: ResultadoEntrevistaHumana | null;
+  recomendacion: RecomendacionEntrevistaHumana | null;
+  resultadoCapturadoPor: CapturadoPor | null;
+}
 
 export interface Candidato {
   id: string;
@@ -45,22 +64,11 @@ export interface Candidato {
   consentimiento?: boolean;
   prefiltroCompleto?: boolean;
   esPrueba?: boolean;
-  /* --- Entrevista Humana (flujo manual) --- */
-  entrevistaHumana?: {
-    entrevistador: string;
-    tipo: TipoEntrevistador | "";
-    usuarioId: number | null;
-    correoExterno: string;
-    fecha: string | null;
-    modalidad: "Presencial" | "Videollamada" | "Llamada" | "";
-    liga: string;
-    ubicacion: string;
-    telefonoContacto: string;
-    comentario: string;
-    realizada: boolean;
-    resultado: ResultadoEntrevistaHumana | null;
-    recomendacion: RecomendacionEntrevistaHumana | null;
-  } | null;
+  /* --- Entrevista Humana (flujo manual) — puede haber varias rondas, ver EntrevistaHumana.
+   * entrevistaHumana es la más reciente; entrevistasHumanas es el historial completo (más
+   * reciente primero). Se mantienen ambas para no romper a quien ya lee "la actual". --- */
+  entrevistaHumana?: EntrevistaHumana | null;
+  entrevistasHumanas?: EntrevistaHumana[];
   /* puentes hacia los otros módulos */
   expedienteId?: number | null;
   expedienteProgreso?: number | null;

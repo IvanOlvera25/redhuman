@@ -443,11 +443,19 @@ export function programarEntrevistaHumana(
   });
 }
 
-export function marcarEntrevistaHumanaRealizada(
+/** Ya no pide resultado — solo confirma que la entrevista ocurrió y dispara el correo con la
+ * liga pública al entrevistador (ver registrarResultadoEntrevistaHumana para la captura manual). */
+export function marcarEntrevistaHumanaRealizada(codigo: string) {
+  return post<{ enviado: boolean; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana/realizada`);
+}
+
+/** Respaldo manual de RH (Eje 1: coexiste con la liga del entrevistador) — también sirve para
+ * corregir un resultado ya capturado, por eso mismo endpoint para "capturar" y "corregir". */
+export function registrarResultadoEntrevistaHumana(
   codigo: string,
   datos: { resultado: ResultadoEntrevistaHumana; recomendacion: RecomendacionEntrevistaHumana; comentario?: string },
 ) {
-  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/realizada`, {
+  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/resultado`, {
     resultado: datos.resultado,
     recomendacion: datos.recomendacion,
     comentario: datos.comentario ?? "",
@@ -456,6 +464,29 @@ export function marcarEntrevistaHumanaRealizada(
 
 export function recordatorioEntrevistaHumana(codigo: string) {
   return post<{ enviado: boolean; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana/recordatorio`);
+}
+
+/* Liga pública del entrevistador (sin sesión, un solo submit) */
+
+export interface EntrevistaHumanaPublica {
+  candidato: string;
+  puesto: string;
+  fecha: string | null;
+}
+
+export function fetchEntrevistaHumanaPublica(token: string) {
+  return get<EntrevistaHumanaPublica>(`/entrevista-humana/publica/${token}`);
+}
+
+export function enviarEvaluacionEntrevistaHumana(
+  token: string,
+  datos: { resultado: ResultadoEntrevistaHumana; recomendacion: RecomendacionEntrevistaHumana; comentario?: string },
+) {
+  return post<{ ok: boolean }>(`/entrevista-humana/publica/${token}`, {
+    resultado: datos.resultado,
+    recomendacion: datos.recomendacion,
+    comentario: datos.comentario ?? "",
+  });
 }
 
 /* ============================================================
