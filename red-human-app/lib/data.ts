@@ -162,6 +162,16 @@ export interface Vacante {
   embudo?: { etapas?: Record<string, number>; estados?: Record<string, number> };
   creada?: string;
   actualizada?: string;
+  /* --- Fase B: Cliente/Responsable/Colaboradores/visibilidad --- */
+  cliente?: string | null;
+  responsable?: string | null;
+  colaboradores?: string[];
+  mostrarClienteCandidato?: boolean;
+  /** nombre que ve el candidato — ya resuelto por el backend (Cliente si aplica y está visible,
+   * si no el nombre de la Cuenta). Úsalo en cualquier vista candidato-visible en vez de `empresa`. */
+  nombreEmpresa?: string;
+  /** solo presente en /vacantes/slug/{slug}, /vacantes/publicas y /vacantes/{codigo}/vista-previa */
+  logoUrl?: string;
 }
 
 export const kpis = [

@@ -1,15 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, FlaskConical, Loader2, Trash2 } from "lucide-react";
+import { AlertTriangle, Building2, FlaskConical, Loader2, Plus, Trash2 } from "lucide-react";
 import { Card, Badge, Button } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
 import { Aviso } from "@/components/dashboard/subida";
 import { useEsAdmin } from "@/components/sesion";
 import {
   actualizarConfiguracion,
+  actualizarCliente,
+  crearCliente,
   eliminarCandidatosPrueba,
+  fetchClientes,
   fetchConfiguracion,
+  type Cliente,
   type ConfiguracionSistema,
   type ResumenBorradoPrueba,
 } from "@/lib/api";
@@ -25,6 +29,12 @@ export default function Configuracion() {
   const [borrando, setBorrando] = useState(false);
   const [resumen, setResumen] = useState<ResumenBorradoPrueba | null>(null);
 
+  const [clientes, setClientes] = useState<Cliente[]>([]);
+  const [cargandoClientes, setCargandoClientes] = useState(true);
+  const [nuevoCliente, setNuevoCliente] = useState("");
+  const [creandoCliente, setCreandoCliente] = useState(false);
+  const [errorCliente, setErrorCliente] = useState("");
+
   useEffect(() => {
     if (!esAdmin) {
       setCargando(false);
@@ -34,7 +44,30 @@ export default function Configuracion() {
       setCfg(d);
       setCargando(false);
     });
+    fetchClientes().then((c) => {
+      setClientes(c ?? []);
+      setCargandoClientes(false);
+    });
   }, [esAdmin]);
+
+  async function crearNuevoCliente() {
+    if (!nuevoCliente.trim()) return;
+    setCreandoCliente(true);
+    setErrorCliente("");
+    const r = await crearCliente(nuevoCliente.trim());
+    setCreandoCliente(false);
+    if (!r.ok) {
+      setErrorCliente(r.error);
+      return;
+    }
+    setClientes((prev) => [...prev, r.data].sort((a, b) => a.nombre.localeCompare(b.nombre)));
+    setNuevoCliente("");
+  }
+
+  async function alternarEstadoCliente(c: Cliente) {
+    const r = await actualizarCliente(c.id, { estado: c.estado === "Activo" ? "Inactivo" : "Activo" });
+    if (r.ok) setClientes((prev) => prev.map((x) => (x.id === c.id ? r.data : x)));
+  }
 
   async function alternarModoPrueba() {
     if (!cfg) return;
@@ -123,6 +156,59 @@ export default function Configuracion() {
             </button>
           )}
         </div>
+      </Card>
+
+      <Card className="mt-4 p-5">
+        <div className="flex items-center gap-2">
+          <Building2 className="h-[18px] w-[18px] text-brand" />
+          <h3 className="font-display text-base font-bold">Clientes</h3>
+        </div>
+        <p className="mt-1.5 max-w-md text-[13px] leading-relaxed text-ink-2">
+          Empresas para las que recluta tu Cuenta. Se pueden elegir al crear una vacante; si tu
+          Cuenta no tiene ningún Cliente, ese selector no aparece en el formulario.
+        </p>
+
+        {errorCliente && (
+          <div className="mt-3">
+            <Aviso tono="error">{errorCliente}</Aviso>
+          </div>
+        )}
+
+        <div className="mt-4 flex gap-2">
+          <input
+            value={nuevoCliente}
+            onChange={(e) => setNuevoCliente(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && crearNuevoCliente()}
+            placeholder="Nombre del Cliente"
+            className="h-10 flex-1 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+          />
+          <Button size="sm" onClick={crearNuevoCliente} disabled={creandoCliente || !nuevoCliente.trim()}>
+            <Plus className="h-4 w-4" /> Agregar
+          </Button>
+        </div>
+
+        {cargandoClientes ? (
+          <Loader2 className="mt-4 h-5 w-5 animate-spin text-ink-3" />
+        ) : clientes.length === 0 ? (
+          <p className="mt-4 text-sm text-ink-3">Todavía no hay ningún Cliente.</p>
+        ) : (
+          <ul className="mt-4 flex flex-col divide-y divide-border-faint">
+            {clientes.map((c) => (
+              <li key={c.id} className="flex items-center justify-between gap-3 py-2.5">
+                <span className="text-sm">{c.nombre}</span>
+                <button
+                  onClick={() => alternarEstadoCliente(c)}
+                  className="shrink-0"
+                  aria-label={`Marcar ${c.nombre} como ${c.estado === "Activo" ? "Inactivo" : "Activo"}`}
+                >
+                  <Badge tone={c.estado === "Activo" ? "good" : "neutral"} dot>
+                    {c.estado}
+                  </Badge>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </Card>
 
       <Card className="mt-4 border-bad/25 p-5">

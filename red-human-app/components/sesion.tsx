@@ -74,14 +74,15 @@ export function useNombreRH() {
   return useSesion().usuario?.nombre ?? "";
 }
 
-/** `false` para el rol de solo lectura: la UI esconde los botones que la API rechazaría. */
+/** Administrador y Usuario deciden por igual (ya no hay rol de solo lectura) — se deja el hook
+ * para no tocar los call-sites existentes; el servidor es la fuente real de verdad. */
 export function usePuedeDecidir() {
   return useSesion().usuario?.puedeDecidir ?? false;
 }
 
-/** `true` solo para admin — el servidor es quien realmente lo exige (Depends(usuario_admin)). */
+/** `true` solo para Administrador — el servidor es quien realmente lo exige (Depends(usuario_admin)). */
 export function useEsAdmin() {
-  return useSesion().usuario?.rol === "admin";
+  return useSesion().usuario?.rol === "Administrador";
 }
 
 /** Modo Prueba (Lote 4) — activo, ciertos bloqueos de estado pueden saltarse con

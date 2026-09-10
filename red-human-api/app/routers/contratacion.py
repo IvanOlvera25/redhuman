@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import Candidato, Colaborador, Cuenta, Documento, Expediente, Mensaje, Usuario, registrar
-from ..serial import colaborador_dict, expediente_dict
+from ..serial import colaborador_dict, expediente_dict, nombre_empresa_candidato
 from ..services import archivos as fs
 from ..services import ia
 from ..services.configuracion import puede_forzar_prueba
@@ -481,7 +481,7 @@ def _html_carta_intencion(e: Expediente) -> str:
     correo."""
     c = e.candidato
     nombre = c.nombre if c else "[Nombre del colaborador]"
-    empresa = (c.vacante.empresa if c and c.vacante else "") or "la empresa"
+    empresa = (nombre_empresa_candidato(c.vacante) if c and c.vacante else "") or "la empresa"
     puesto = e.puesto or (c.vacante.titulo if c and c.vacante else "") or "el puesto"
     sueldo = e.sueldo or "por definir"
     tipo_contratacion = e.tipo_contratacion or "por definir"

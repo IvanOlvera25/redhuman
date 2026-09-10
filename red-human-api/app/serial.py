@@ -1,7 +1,7 @@
 """Serializadores → formas exactas que consume el frontend (lib/data.ts / lib/phase2.ts)."""
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from .models import AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Vacante
 from .services.avatar import avatar_activo
@@ -40,13 +40,38 @@ def fecha_corta(dt: Optional[datetime]) -> str:
 # ------------------------------------------------------------
 
 
-def vacante_dict(v: Vacante, n_candidatos: int = 0, n_nuevos: int = 0, embudo: Optional[dict] = None) -> dict:
+def nombre_empresa_candidato(v: Vacante) -> str:
+    """Nombre de empresa que debe ver el candidato (Fase B, punto 10): el Cliente real solo si
+    hay uno asignado y `mostrar_cliente_candidato` está activo; si no, el nombre comercial de la
+    Cuenta — nunca el texto libre `empresa` salvo que la vacante no tenga Cuenta (no debería
+    pasar tras la migración de Fase A, es solo un respaldo defensivo)."""
+    if v.cliente_id and v.mostrar_cliente_candidato and v.cliente:
+        return v.cliente.nombre
+    if v.cuenta:
+        return v.cuenta.nombre_comercial
+    return v.empresa or ""
+
+
+def vacante_dict(
+    v: Vacante,
+    n_candidatos: int = 0,
+    n_nuevos: int = 0,
+    embudo: Optional[dict] = None,
+    colaboradores: Optional[List[str]] = None,
+) -> dict:
     return {
         "id": v.codigo,
         "slug": v.slug or "",
         "titulo": v.titulo,
         "area": v.area,
         "empresa": v.empresa,
+        # --- Fase B: Cliente/Responsable/Colaboradores/visibilidad ---
+        "cliente": v.cliente.nombre if v.cliente else None,
+        "responsable": v.responsable.nombre if v.responsable else None,
+        "colaboradores": colaboradores or [],
+        "mostrarClienteCandidato": v.mostrar_cliente_candidato,
+        # nombre que ve el candidato — RH siempre ve la relación real arriba, sin importar el flag
+        "nombreEmpresa": nombre_empresa_candidato(v),
         "ubicacion": v.ubicacion,
         "modalidad": v.modalidad,
         "sueldo": v.sueldo,
