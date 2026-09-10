@@ -648,7 +648,7 @@ async def _avisar_apto_e_iniciar_agenda(db: Session, c: Candidato) -> dict:
     return envio
 
 
-async def _auto_decision_zero_touch(db: Session, c: Candidato) -> None:
+async def _auto_decision_zero_touch(db: Session, c: Candidato) -> dict:
     """Flujo Zero-Touch: al terminar el prefiltro, clasifica al candidato contra
     UMBRAL_ZERO_TOUCH y le avisa el resultado por WhatsApp sin intervención de RH.
 
@@ -656,6 +656,10 @@ async def _auto_decision_zero_touch(db: Session, c: Candidato) -> None:
     (cumple/no_cumple). RH conserva la capacidad de reabrir el caso desde el panel;
     la bitácora deja constancia de que la acción la tomó el agente ("agente-ia"),
     no una persona de RH, para no falsear la trazabilidad que exige la LFPDPPP.
+
+    Regresa {"respuesta": str, "whatsapp": dict} — el ÚNICO mensaje que debe ver el
+    candidato en el turno de cierre del prefiltro (ver procesar_prefiltro: ya no se
+    manda encima el mensaje genérico de turno.respuesta).
     """
     if c.score < UMBRAL_ZERO_TOUCH:
         c.estado = "no_cumple"
@@ -666,18 +670,20 @@ async def _auto_decision_zero_touch(db: Session, c: Candidato) -> None:
             "por si surge una oportunidad más adelante. ¡Mucho éxito en tu búsqueda! 🙌"
         )
         registrar(db, "agente-ia", accion, "candidato", c.codigo, {"score": c.score, "umbral": UMBRAL_ZERO_TOUCH})
-        if not c.telefono:
-            return
-        try:
-            envio = await enviar_mensaje(c.telefono, texto)
-        except Exception as e:
-            print(f"[zero-touch-whatsapp-error] {c.codigo}: {e}")
-            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+        envio = {"enviado": False, "proveedor": "demo"}
+        if c.telefono:
+            try:
+                envio = await enviar_mensaje(c.telefono, texto)
+            except Exception as e:
+                print(f"[zero-touch-whatsapp-error] {c.codigo}: {e}")
+                envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+        # Se guarda igual sin teléfono (p.ej. pruebas por simulador): así el veredicto real
+        # siempre queda en el historial, aunque no haya salido por WhatsApp.
         db.add(Mensaje(
             candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
             enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
         ))
-        return
+        return {"respuesta": texto, "whatsapp": envio}
 
     c.estado = "cumple"
     # antes la tarjeta solo se movía al agendar la cita, así que un candidato ya clasificado
@@ -688,7 +694,8 @@ async def _auto_decision_zero_touch(db: Session, c: Candidato) -> None:
         db, "agente-ia", "auto_apto_zero_touch", "candidato", c.codigo,
         {"score": c.score, "umbral": UMBRAL_ZERO_TOUCH},
     )
-    await _avisar_apto_e_iniciar_agenda(db, c)
+    envio = await _avisar_apto_e_iniciar_agenda(db, c)
+    return {"respuesta": _texto_apto(c), "whatsapp": envio}
 
 
 def _parsear_fecha_cita(valor: str) -> Optional[datetime]:
@@ -843,23 +850,19 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, 
         nombre_candidato=c.wa_nombre or c.nombre.split(" ")[0],
     )
 
-    envio = {"enviado": False, "proveedor": "demo"}
-    if canal == "whatsapp" and c.telefono:
-        try:
-            envio = await enviar_mensaje(c.telefono, turno.respuesta)
-        except Exception as e:
-            # que WhatsApp falle no debe tumbar el prefiltro: queda registrado y RH lo ve
-            print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
-            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
-    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal,
-                   enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
-
     analisis_actual = dict(c.analisis or {})
     if turno.respuestas_extraidas:
         analisis_actual["respuestas_prefiltro"] = [r.model_dump() for r in turno.respuestas_extraidas]
 
-    clasificacion = None
-    if turno.clasificacion_lista and turno.estado and not c.prefiltro_completo:
+    cierra_prefiltro = turno.clasificacion_lista and turno.estado and not c.prefiltro_completo
+
+    if cierra_prefiltro:
+        # Turno de cierre: turno.respuesta es el mensaje genérico ("gracias, RH revisará") que
+        # la regla (7) del prompt le pide al modelo para no filtrarle el resultado real al
+        # candidato — nunca debe llegar por WhatsApp ni quedar en el historial: no aporta nada
+        # que _auto_decision_zero_touch no vuelva a decir con el veredicto real, y mandar los
+        # dos seguidos (uno genérico, luego el real) confundía al candidato. Se descarta aquí
+        # sin guardarlo.
         c.score = turno.score or 0
         c.evidencia = turno.evidencia or ""
         c.prefiltro_completo = True
@@ -869,13 +872,29 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, 
             {"ia": con_ia, "estado_ia": turno.estado, "score": c.score, "evidencia": c.evidencia},
         )
 
-        # Zero-Touch: clasificación final (cumple/no_cumple) y aviso automático por WhatsApp.
-        await _auto_decision_zero_touch(db, c)
+        # Zero-Touch: clasificación final (cumple/no_cumple) — su mensaje es el único que ve
+        # el candidato en este turno.
+        resultado_cierre = await _auto_decision_zero_touch(db, c)
         clasificacion = {"estado": c.estado, "score": c.score, "evidencia": c.evidencia}
+        respuesta_final = resultado_cierre["respuesta"]
+        envio = resultado_cierre["whatsapp"]
+    else:
+        envio = {"enviado": False, "proveedor": "demo"}
+        if canal == "whatsapp" and c.telefono:
+            try:
+                envio = await enviar_mensaje(c.telefono, turno.respuesta)
+            except Exception as e:
+                # que WhatsApp falle no debe tumbar el prefiltro: queda registrado y RH lo ve
+                print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
+                envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+        db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal,
+                       enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
+        clasificacion = None
+        respuesta_final = turno.respuesta
 
     c.analisis = analisis_actual
     db.commit()
-    return {"respuesta": turno.respuesta, "clasificacion": clasificacion, "ia": con_ia, "whatsapp": envio}
+    return {"respuesta": respuesta_final, "clasificacion": clasificacion, "ia": con_ia, "whatsapp": envio}
 
 
 @router.post("/{codigo}/prefiltro")
