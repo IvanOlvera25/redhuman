@@ -39,7 +39,7 @@ from ..models import (
 from ..serial import archivo_dict, candidato_dict, expediente_dict
 from ..services import archivos as fs
 from ..services import ia
-from ..services.configuracion import modo_prueba_activo
+from ..services.configuracion import modo_prueba_activo, puede_forzar_prueba
 from ..services.correo import enviar_correo
 from ..services.whatsapp import enviar_mensaje, enviar_plantilla
 
@@ -988,6 +988,7 @@ def _abrir_expediente(db: Session, c: Candidato, u: Usuario) -> Expediente:
     exp = Expediente(
         puesto=c.vacante.titulo if c.vacante else "",
         seleccionado_por=u.nombre,
+        token=secrets.token_urlsafe(24),
     )
     # se asigna por la relación (no solo candidato_id=c.id): así c.expediente queda
     # sincronizado en memoria de inmediato — si no, candidato_dict(c) seguía viendo None
@@ -1002,7 +1003,10 @@ def _abrir_expediente(db: Session, c: Candidato, u: Usuario) -> Expediente:
 
 
 @router.patch("/{codigo}/etapa")
-async def mover_etapa(codigo: str, datos: EtapaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+async def mover_etapa(
+    codigo: str, datos: EtapaIn, forzar_prueba: bool = False,
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+):
     """Avance manual explícito del Kanban — cada botón del panel manda su etapa destino exacta
     (ver ETAPAS_CANDIDATO). No reemplaza el flujo dedicado de Entrevista Humana
     (POST /{codigo}/entrevista-humana, que captura entrevistador/fecha/modalidad además de
@@ -1011,22 +1015,27 @@ async def mover_etapa(codigo: str, datos: EtapaIn, db: Session = Depends(get_db)
     "Entrevista IA" desde Prefiltro es la única "fricción manual" a propósito: fuerza la
     clasificación como apto y dispara el mismo mensaje que usa Zero-Touch para invitar al
     candidato a compartir disponibilidad, para RH pueda arrancar el proceso sin esperar a
-    que el agente termine el prefiltro por su cuenta."""
+    que el agente termine el prefiltro por su cuenta.
+
+    `forzar_prueba` (Lote 4): inerte salvo que Modo Prueba esté activo (ver
+    services.configuracion.puede_forzar_prueba) — deja saltar los bloqueos de secuencia de
+    abajo para poder probar el flujo completo rápido, sin esperar a que cada paso previo esté
+    realmente satisfecho."""
     c = _por_codigo(db, codigo)
     if datos.etapa not in ETAPAS_CANDIDATO:
         raise HTTPException(400, f"Etapa inválida. Usa una de: {', '.join(ETAPAS_CANDIDATO)}")
     if datos.etapa == "Entrevista Humana":
         raise HTTPException(409, "Para programar la Entrevista Humana usa POST /candidatos/{codigo}/entrevista-humana.")
     if datos.etapa == "Onboarding":
-        if c.etapa != "Contratación":
+        if c.etapa != "Contratación" and not puede_forzar_prueba(db, forzar_prueba):
             raise HTTPException(409, "Solo se puede enviar a Onboarding desde la etapa de Contratación.")
-    elif c.etapa == "Onboarding":
+    elif c.etapa == "Onboarding" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato ya está en Onboarding; gestiona su expediente desde ese módulo.")
 
     if datos.etapa == "Entrevista IA":
         if c.etapa != "Prefiltro":
             raise HTTPException(409, "Solo se puede forzar Entrevista IA desde la etapa de Prefiltro.")
-        if not c.telefono:
+        if not c.telefono and not puede_forzar_prueba(db, forzar_prueba):
             raise HTTPException(409, "El candidato no tiene WhatsApp registrado; no se puede iniciar el agendamiento.")
         c.estado = "cumple"
         c.prefiltro_completo = True
@@ -1307,13 +1316,15 @@ def _ultima_entrevista_humana(c: Candidato) -> EntrevistaHumana:
 
 
 @router.post("/{codigo}/entrevista-humana/realizada")
-async def marcar_entrevista_humana_realizada(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+async def marcar_entrevista_humana_realizada(
+    codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+):
     """Botón «Marcar entrevista realizada» — ya no le pide el resultado a RH: marca que la
     entrevista ocurrió y le manda al entrevistador la liga pública para que registre su propia
     evaluación (Aprobado/No aprobado, recomendación, comentario). RH conserva la opción de
     capturarlo/corregirlo a mano como respaldo — ver POST .../entrevista-humana/resultado."""
     c = _por_codigo(db, codigo)
-    if c.etapa != "Entrevista Humana":
+    if c.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
     eh = _ultima_entrevista_humana(c)
 
@@ -1352,14 +1363,15 @@ class EntrevistaHumanaResultadoIn(BaseModel):
 
 @router.post("/{codigo}/entrevista-humana/resultado")
 def registrar_resultado_entrevista_humana(
-    codigo: str, datos: EntrevistaHumanaResultadoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+    codigo: str, datos: EntrevistaHumanaResultadoIn, forzar_prueba: bool = False,
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
 ):
     """Respaldo manual de RH junto a la liga del entrevistador (Eje 1 del Lote 3: gana quien
     llegue primero, pero RH siempre puede usar este mismo endpoint después para corregir —
     a diferencia de POST /entrevista-humana/publica/{token}, que si ya está capturada regresa
     409 sin tocar nada)."""
     c = _por_codigo(db, codigo)
-    if c.etapa != "Entrevista Humana":
+    if c.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
     if datos.resultado not in RESULTADOS_ENTREVISTA_HUMANA:
         raise HTTPException(400, f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_ENTREVISTA_HUMANA)}")
@@ -1392,14 +1404,16 @@ def registrar_resultado_entrevista_humana(
 
 
 @router.post("/{codigo}/entrevista-humana/recordatorio")
-async def recordatorio_entrevista_humana(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+async def recordatorio_entrevista_humana(
+    codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+):
     """Botón «Enviar recordatorio» — seguimiento manual junto a «Marcar entrevista realizada»,
     mismo patrón que candidatos._disparar_mensaje_onboarding (enviar_mensaje + Mensaje + bitácora)."""
     c = _por_codigo(db, codigo)
-    if c.etapa != "Entrevista Humana":
+    if c.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
     eh = _ultima_entrevista_humana(c)
-    if eh.realizada:
+    if eh.realizada and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
     if not c.telefono:
         raise HTTPException(409, "El candidato no tiene WhatsApp registrado.")
@@ -1487,16 +1501,20 @@ def guardar_condiciones_contratacion(
 # agente (ia.onboarding_turno, ver procesar_prefiltro) listo para dar seguimiento a lo que
 # el candidato conteste después.
 
-TEXTO_SOLICITUD_DOCUMENTOS = (
-    "¡Felicidades por tu contratación! 🎉 Para avanzar, por favor envíame por aquí foto o PDF de "
-    "tu INE y tu comprobante de domicilio. En cuanto los reciba los reviso y seguimos con el resto "
-    "de tu expediente."
-)
+def _texto_solicitud_documentos(liga: str) -> str:
+    return (
+        "¡Felicidades por tu contratación! 🎉 Para avanzar, sube tu INE y tu comprobante de "
+        f"domicilio (foto o PDF) desde esta liga: {liga}\n\nEn cuanto los reciba los reviso y "
+        "seguimos con el resto de tu expediente."
+    )
 
-TEXTO_RECORDATORIO_DOCUMENTOS = (
-    "Hola de nuevo 👋 Te escribo para dar seguimiento: ¿ya tienes a la mano tu INE y tu comprobante "
-    "de domicilio? Mándamelos por aquí en cuanto puedas para no atrasar tu proceso de ingreso."
-)
+
+def _texto_recordatorio_documentos(liga: str) -> str:
+    return (
+        "Hola de nuevo 👋 Te escribo para dar seguimiento: ¿ya tienes a la mano tu INE y tu "
+        f"comprobante de domicilio? Súbelos desde esta liga en cuanto puedas para no atrasar tu "
+        f"proceso de ingreso: {liga}"
+    )
 
 
 async def _disparar_mensaje_onboarding(db: Session, c: Candidato, texto: str, accion: str, u: Usuario) -> dict:
@@ -1516,15 +1534,29 @@ async def _disparar_mensaje_onboarding(db: Session, c: Candidato, texto: str, ac
     return {"enviado": envio.get("enviado", False), "whatsapp": envio, "candidato": candidato_dict(c, detalle=True)}
 
 
+def _liga_documentos(c: Candidato) -> str:
+    """Liga pública para que el candidato suba sus documentos (Lote 4, ver
+    routers/expediente_publico.py) — genera el token del expediente perezosamente si es uno de
+    los que existían antes de este lote (Expediente.token es nullable, ver models.py)."""
+    if not c.expediente:
+        raise HTTPException(409, "El candidato no tiene expediente de contratación; no se puede generar la liga de documentos.")
+    if not c.expediente.token:
+        c.expediente.token = secrets.token_urlsafe(24)
+    return f"{settings.app_url}/expediente/{c.expediente.token}"
+
+
 @router.post("/{codigo}/solicitar-documentos")
 async def solicitar_documentos(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    """Botón 'Solicitar documentos' — rompe el hielo por WhatsApp al entrar a Onboarding."""
+    """Botón 'Solicitar documentos' — rompe el hielo por WhatsApp al entrar a Onboarding, con
+    la liga pública para que el candidato suba sus documentos él mismo."""
     c = _por_codigo(db, codigo)
-    return await _disparar_mensaje_onboarding(db, c, TEXTO_SOLICITUD_DOCUMENTOS, "documentos_solicitados", u)
+    liga = _liga_documentos(c)
+    return await _disparar_mensaje_onboarding(db, c, _texto_solicitud_documentos(liga), "documentos_solicitados", u)
 
 
 @router.post("/{codigo}/recordatorio-documentos")
 async def recordatorio_documentos(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
     """Botón 'Enviar recordatorio' — seguimiento manual si el candidato no ha respondido."""
     c = _por_codigo(db, codigo)
-    return await _disparar_mensaje_onboarding(db, c, TEXTO_RECORDATORIO_DOCUMENTOS, "recordatorio_documentos_enviado", u)
+    liga = _liga_documentos(c)
+    return await _disparar_mensaje_onboarding(db, c, _texto_recordatorio_documentos(liga), "recordatorio_documentos_enviado", u)

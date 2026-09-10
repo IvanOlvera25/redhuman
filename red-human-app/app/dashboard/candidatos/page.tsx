@@ -69,12 +69,13 @@ import {
   subirCVs,
   subirDocumento,
   urlArchivoCandidato,
+  urlCartaIntencion,
   urlDocumento,
   type CargaCV,
   type MensajePrefiltro,
   type ModalidadEntrevistaHumana,
 } from "@/lib/api";
-import { usePuedeDecidir } from "@/components/sesion";
+import { usePuedeDecidir, useModoPrueba } from "@/components/sesion";
 import { cn } from "@/lib/utils";
 
 const etapas: EtapaCandidato[] = [
@@ -458,6 +459,11 @@ function Pastilla({
 
 type TabCandidato = "resumen" | "evaluaciones" | "documentos" | "whatsapp" | "contratacion";
 
+/** `reintentar` (Lote 4): presente solo en avisos de error de acciones que pueden toparse con
+ * un bloqueo de estado forzable — el botón "Continuar de todos modos" solo se pinta si además
+ * Modo Prueba está activo (ver useModoPrueba). */
+type AvisoEstado = { tono: "ok" | "error" | "warn"; texto: string; reintentar?: () => void } | null;
+
 /* ============================================================
    MODAL CENTRADO: Detalle del Candidato (4 pestañas + Contratación condicional)
    ============================================================ */
@@ -473,6 +479,7 @@ function ModalCandidato({
   onCambio: (c: Candidato) => void;
 }) {
   const puedeDecidir = usePuedeDecidir();
+  const modoPrueba = useModoPrueba();
   const [tab, setTab] = useState<TabCandidato>(() => (c.etapa === "Contratación" ? "contratacion" : "resumen"));
   // Si el candidato ENTRA a Contratación mientras el modal ya está abierto (p.ej. RH lo mueve
   // de etapa sin cerrar la ficha), salta solo a esa pestaña para que no se pierda entre las
@@ -484,15 +491,15 @@ function ModalCandidato({
     }
     etapaAnterior.current = c.etapa;
   }, [c.etapa]);
-  const [aviso, setAviso] = useState<{ tono: "ok" | "error" | "warn"; texto: string } | null>(null);
+  const [aviso, setAviso] = useState<AvisoEstado>(null);
   const [ocupado, setOcupado] = useState("");
   const [comentario, setComentario] = useState("");
   const [modalEntrevista, setModalEntrevista] = useState(false);
 
-  function resolver<T>(r: { ok: true; data: T } | { ok: false; error: string }, exito: string) {
+  function resolver<T>(r: { ok: true; data: T } | { ok: false; error: string }, exito: string, reintentar?: () => void) {
     setOcupado("");
     if (!r.ok) {
-      setAviso({ tono: "error", texto: r.error });
+      setAviso({ tono: "error", texto: r.error, reintentar });
       return null;
     }
     setAviso({ tono: "ok", texto: exito });
@@ -510,12 +517,17 @@ function ModalCandidato({
     }
   }
 
-  /** Botón explícito de avance — PATCH /candidatos/{codigo}/etapa con el destino exacto. */
-  async function enviarAEtapa(etapa: EtapaCandidato) {
+  /** Botón explícito de avance — PATCH /candidatos/{codigo}/etapa con el destino exacto.
+   * `forzarPrueba` (Lote 4): si el primer intento falla y Modo Prueba está activo, el aviso de
+   * error trae un botón "Continuar de todos modos" que reintenta con el flag en true. */
+  async function enviarAEtapa(etapa: EtapaCandidato, forzarPrueba = false) {
     if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
     setOcupado(etapa);
-    const r = await moverEtapaCandidato(c.id, etapa, comentario);
-    const data = resolver(r, `Enviado a ${etapa}.`);
+    const r = await moverEtapaCandidato(c.id, etapa, comentario, forzarPrueba);
+    const data = resolver(
+      r, `Enviado a ${etapa}.`,
+      modoPrueba && !forzarPrueba ? () => enviarAEtapa(etapa, true) : undefined,
+    );
     if (data) {
       setComentario("");
       onCambio(data);
@@ -555,14 +567,19 @@ function ModalCandidato({
 
   /** Botón principal de Onboarding — cierra el ciclo y mueve el registro a Colaboradores.
    * Siempre visible y habilitado mientras esté en Onboarding: si faltan documentos
-   * obligatorios, el backend lo rechaza (409) y el motivo se muestra en {aviso}. */
-  async function darDeAltaComoColaborador() {
+   * obligatorios, el backend lo rechaza (409) y el motivo se muestra en {aviso}. Con Modo
+   * Prueba activo, ese aviso trae un botón "Continuar de todos modos" — salvo que el 409 sea
+   * "ya fue dado de alta", que el backend nunca deja saltar (ver contratacion.alta). */
+  async function darDeAltaComoColaborador(forzarPrueba = false) {
     if (!live || !c.expedienteId) return setAviso({ tono: "warn", texto: "Levanta la API para dar de alta al candidato." });
     setOcupado("alta");
-    const r = await autorizarAlta(c.expedienteId);
+    const r = await autorizarAlta(c.expedienteId, undefined, forzarPrueba);
     if (!r.ok) {
       setOcupado("");
-      return setAviso({ tono: "error", texto: r.error });
+      return setAviso({
+        tono: "error", texto: r.error,
+        reintentar: modoPrueba && !forzarPrueba ? () => darDeAltaComoColaborador(true) : undefined,
+      });
     }
     const actualizado = await fetchCandidato(c.id);
     setOcupado("");
@@ -651,7 +668,16 @@ function ModalCandidato({
 
         {/* Cuerpo Scrolleable */}
         <div className="flex-1 overflow-y-auto p-5 sm:p-6 flex flex-col gap-5">
-          {aviso && <Aviso tono={aviso.tono} onCerrar={() => setAviso(null)}>{aviso.texto}</Aviso>}
+          {aviso && (
+            <Aviso tono={aviso.tono} onCerrar={() => setAviso(null)}>
+              {aviso.texto}
+              {aviso.reintentar && (
+                <Button size="sm" variant="outline" className="mt-2" onClick={aviso.reintentar}>
+                  <FlaskConical className="h-3.5 w-3.5" /> Continuar de todos modos (modo prueba)
+                </Button>
+              )}
+            </Aviso>
+          )}
 
           {c.consentimiento === false && (
             <Card className="border-warn/30 bg-warn-soft/40 p-4">
@@ -794,7 +820,7 @@ function ModalCandidato({
               {c.etapa === "Onboarding" && (
                 <Button
                   className="w-full"
-                  onClick={darDeAltaComoColaborador}
+                  onClick={() => darDeAltaComoColaborador()}
                   disabled={Boolean(ocupado) || c.expedienteEstado === "alta"}
                 >
                   <UserCheck className="h-4 w-4" />
@@ -1100,7 +1126,7 @@ function PestanaDocumentos({
   c: Candidato;
   live: boolean;
   onCambio: (c: Candidato) => void;
-  setAviso: (a: { tono: "ok" | "error" | "warn"; texto: string } | null) => void;
+  setAviso: (a: AvisoEstado) => void;
 }) {
   const puedeDecidir = usePuedeDecidir();
   const [cargandoCV, setCargandoCV] = useState(false);
@@ -1581,18 +1607,22 @@ function PanelEntrevistaHumana({
   live: boolean;
   onCambio: (c: Candidato) => void;
 }) {
+  const modoPrueba = useModoPrueba();
   const eh = c.entrevistaHumana;
   const [modalResultado, setModalResultado] = useState(false);
   const [marcando, setMarcando] = useState(false);
   const [guardando, setGuardando] = useState(false);
-  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState<AvisoEstado>(null);
   const [recordando, setRecordando] = useState(false);
-  const [avisoRecordatorio, setAvisoRecordatorio] = useState<{ tono: "ok" | "error"; texto: string } | null>(null);
+  const [avisoRecordatorio, setAvisoRecordatorio] = useState<AvisoEstado>(null);
 
   /** Ya no pide resultado (Lote 3, Eje 2): solo confirma que la entrevista ocurrió y dispara el
-   * correo con la liga al entrevistador. */
-  async function marcarRealizada() {
+   * correo con la liga al entrevistador. `forzarPrueba` (Lote 4): si Modo Prueba está activo y
+   * el candidato ya no está en la etapa de Entrevista Humana, el aviso de error trae un botón
+   * para reintentar saltando ese bloqueo. */
+  async function marcarRealizada(forzarPrueba = false) {
     if (
+      !forzarPrueba &&
       !window.confirm(
         "¿Confirmas que la entrevista ya se llevó a cabo? Se le mandará al entrevistador una liga por correo para que registre su evaluación.",
       )
@@ -1600,11 +1630,14 @@ function PanelEntrevistaHumana({
       return;
     }
     setMarcando(true);
-    setError("");
-    const r = await marcarEntrevistaHumanaRealizada(c.id);
+    setAviso(null);
+    const r = await marcarEntrevistaHumanaRealizada(c.id, forzarPrueba);
     setMarcando(false);
     if (!r.ok) {
-      setError(r.error);
+      setAviso({
+        tono: "error", texto: r.error,
+        reintentar: modoPrueba && !forzarPrueba ? () => marcarRealizada(true) : undefined,
+      });
       return;
     }
     onCambio(r.data.candidato);
@@ -1612,30 +1645,35 @@ function PanelEntrevistaHumana({
 
   /** Respaldo manual de RH — captura la primera vez o corrige un resultado ya capturado
    * (por RH o por el entrevistador vía su liga). */
-  async function guardarResultado(datos: {
-    resultado: ResultadoEntrevistaHumana;
-    recomendacion: RecomendacionEntrevistaHumana;
-    comentario: string;
-  }) {
+  async function guardarResultado(
+    datos: { resultado: ResultadoEntrevistaHumana; recomendacion: RecomendacionEntrevistaHumana; comentario: string },
+    forzarPrueba = false,
+  ) {
     setGuardando(true);
-    setError("");
-    const r = await registrarResultadoEntrevistaHumana(c.id, datos);
+    setAviso(null);
+    const r = await registrarResultadoEntrevistaHumana(c.id, datos, forzarPrueba);
     setGuardando(false);
     if (!r.ok) {
-      setError(r.error);
+      setAviso({
+        tono: "error", texto: r.error,
+        reintentar: modoPrueba && !forzarPrueba ? () => guardarResultado(datos, true) : undefined,
+      });
       return;
     }
     setModalResultado(false);
     onCambio(r.data);
   }
 
-  async function enviarRecordatorio() {
+  async function enviarRecordatorio(forzarPrueba = false) {
     setRecordando(true);
     setAvisoRecordatorio(null);
-    const r = await recordatorioEntrevistaHumana(c.id);
+    const r = await recordatorioEntrevistaHumana(c.id, forzarPrueba);
     setRecordando(false);
     if (!r.ok) {
-      setAvisoRecordatorio({ tono: "error", texto: r.error });
+      setAvisoRecordatorio({
+        tono: "error", texto: r.error,
+        reintentar: modoPrueba && !forzarPrueba ? () => enviarRecordatorio(true) : undefined,
+      });
       return;
     }
     setAvisoRecordatorio({
@@ -1675,15 +1713,29 @@ function PanelEntrevistaHumana({
       </div>
       {eh.comentario && <p className="mt-2.5 text-[13px] leading-relaxed text-ink-2">{eh.comentario}</p>}
 
-      {error && (
+      {aviso && (
         <div className="mt-3">
-          <Aviso tono="error">{error}</Aviso>
+          <Aviso tono={aviso.tono}>
+            {aviso.texto}
+            {aviso.reintentar && (
+              <Button size="sm" variant="outline" className="mt-2" onClick={aviso.reintentar}>
+                <FlaskConical className="h-3.5 w-3.5" /> Continuar de todos modos (modo prueba)
+              </Button>
+            )}
+          </Aviso>
         </div>
       )}
 
       {avisoRecordatorio && (
         <div className="mt-3">
-          <Aviso tono={avisoRecordatorio.tono}>{avisoRecordatorio.texto}</Aviso>
+          <Aviso tono={avisoRecordatorio.tono}>
+            {avisoRecordatorio.texto}
+            {avisoRecordatorio.reintentar && (
+              <Button size="sm" variant="outline" className="mt-2" onClick={avisoRecordatorio.reintentar}>
+                <FlaskConical className="h-3.5 w-3.5" /> Continuar de todos modos (modo prueba)
+              </Button>
+            )}
+          </Aviso>
         </div>
       )}
 
@@ -1699,10 +1751,10 @@ function PanelEntrevistaHumana({
           <span className="text-xs text-ink-3">Esperando evaluación del entrevistador…</span>
         ) : live ? (
           <>
-            <Button size="sm" variant="secondary" onClick={marcarRealizada} disabled={marcando}>
+            <Button size="sm" variant="secondary" onClick={() => marcarRealizada()} disabled={marcando}>
               <CheckCircle2 className="h-4 w-4" /> {marcando ? "Enviando…" : "Marcar entrevista realizada"}
             </Button>
-            <Button size="sm" variant="outline" onClick={enviarRecordatorio} disabled={recordando}>
+            <Button size="sm" variant="outline" onClick={() => enviarRecordatorio()} disabled={recordando}>
               <RotateCw className="h-4 w-4" /> {recordando ? "Enviando…" : "Enviar recordatorio"}
             </Button>
           </>
@@ -2243,8 +2295,9 @@ function PanelContratacion({
   c: Candidato;
   live: boolean;
   onCambio: (c: Candidato) => void;
-  setAviso: (a: { tono: "ok" | "error" | "warn"; texto: string } | null) => void;
+  setAviso: (a: AvisoEstado) => void;
 }) {
+  const modoPrueba = useModoPrueba();
   const cond = c.expedienteCondiciones;
   const [puesto, setPuesto] = useState(cond?.puesto ?? c.puesto ?? "");
   const [sueldo, setSueldo] = useState(cond?.sueldo ?? "");
@@ -2283,11 +2336,16 @@ function PanelContratacion({
     onCambio(r.data);
   }
 
-  async function enviarOnboarding() {
+  async function enviarOnboarding(forzarPrueba = false) {
     setOcupado("onboarding");
-    const r = await moverEtapaCandidato(c.id, "Onboarding");
+    const r = await moverEtapaCandidato(c.id, "Onboarding", "", forzarPrueba);
     setOcupado("");
-    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    if (!r.ok) {
+      return setAviso({
+        tono: "error", texto: r.error,
+        reintentar: modoPrueba && !forzarPrueba ? () => enviarOnboarding(true) : undefined,
+      });
+    }
     setAviso({ tono: "ok", texto: "Candidato enviado a Onboarding." });
     onCambio(r.data);
   }
@@ -2363,7 +2421,17 @@ function PanelContratacion({
           >
             Cancelar contratación
           </Button>
-          <Button size="sm" onClick={enviarOnboarding} disabled={Boolean(ocupado)}>
+          {c.expedienteId != null && (
+            <a
+              href={urlCartaIntencion(c.expedienteId)}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 rounded-xl border border-border-soft bg-surface px-3 py-1.5 text-xs font-semibold text-ink transition hover:bg-surface-2"
+            >
+              <FileText className="h-3.5 w-3.5" /> Generar carta de intención
+            </a>
+          )}
+          <Button size="sm" onClick={() => enviarOnboarding()} disabled={Boolean(ocupado)}>
             Enviar a Onboarding
           </Button>
         </div>

@@ -16,3 +16,9 @@ def obtener(db: Session) -> ConfiguracionSistema:
 
 def modo_prueba_activo(db: Session) -> bool:
     return obtener(db).modo_prueba
+
+
+def puede_forzar_prueba(db: Session, forzar: bool) -> bool:
+    """`forzar_prueba` (Lote 4) solo tiene efecto si Modo Prueba está activo — en producción
+    real, mandar el flag no hace absolutamente nada."""
+    return bool(forzar) and modo_prueba_activo(db)
