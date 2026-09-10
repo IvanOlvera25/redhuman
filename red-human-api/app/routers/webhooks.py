@@ -155,7 +155,7 @@ def _texto_aviso_privacidad(nombre: str, vacante: Optional[Vacante]) -> str:
     saludo = f"¡Hola{' ' + nombre if nombre else ''}! 👋"
     puesto = f" para *{vacante.titulo}*" if vacante else ""
     return (
-        f"{saludo} Gracias por tu interés{puesto}. Soy el asistente de reclutamiento de Red Human AI.\n\n"
+        f"{saludo} Gracias por tu interés{puesto}. Soy Red Human.\n\n"
         "Antes de comenzar, necesito tu autorización: tus datos personales serán tratados conforme "
         "a nuestro Aviso de Privacidad, exclusivamente para este proceso de selección. "
         "Puedes consultar el aviso completo en redhuman.mx/privacidad.\n\n"

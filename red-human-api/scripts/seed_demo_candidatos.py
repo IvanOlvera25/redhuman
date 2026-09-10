@@ -80,7 +80,7 @@ def _mensajes_prefiltro(db, candidato_id: int, vacante_titulo: str, completo: bo
     no se vea vacía en ninguna etapa, como si de verdad hubiera pasado por el prefiltro."""
     charla = [
         ("assistant", (
-            f"¡Hola! Soy el asistente de Red Human. Vi tu interés en la vacante de {vacante_titulo}. "
+            f"¡Hola! Soy Red Human. Vi tu interés en la vacante de {vacante_titulo}. "
             "Antes de comenzar, necesito tu autorización para tratar tus datos conforme a nuestro "
             "Aviso de Privacidad. ¿Autorizas continuar? (Responde *Sí* o *Acepto*)"
         )),

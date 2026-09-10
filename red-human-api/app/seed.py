@@ -105,7 +105,7 @@ def sembrar(db: Session) -> None:
 
     # conversación de ejemplo del prefiltro (María Fernanda por WhatsApp)
     charla = [
-        ("assistant", "¡Hola! Soy el asistente de Red Human. Vi tu interés en la vacante de Cajero(a) de sucursal en Guadalajara. ¿Te hago unas preguntas rápidas? 😊"),
+        ("assistant", "¡Hola! Soy Red Human. Vi tu interés en la vacante de Cajero(a) de sucursal en Guadalajara. ¿Te hago unas preguntas rápidas? 😊"),
         ("user", "¡Hola! Sí, claro."),
         ("assistant", "¿Cuentas con disponibilidad para turnos rotativos?"),
         ("user", "Sí, no tengo problema con los horarios."),

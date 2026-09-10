@@ -7,7 +7,9 @@ para que la plataforma siga funcionando de punta a punta.
 """
 
 import json
+from datetime import datetime
 from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -539,17 +541,21 @@ def prefiltro_turno(
             f"Criterios de prefiltro:\n{criterios_prefiltro(preguntas)}\n\n"
             "Reglas: (1) una sola pregunta por mensaje, tono cálido y breve — hablas como un reclutador "
             "humano, NO como un cuestionario robótico;" + saludo + " (2) recorre los criterios en orden "
-            "y no repitas los que ya quedaron contestados; (3) si el candidato pregunta sobre sueldo, "
-            "ubicación, beneficios o el puesto, contesta con los datos de la vacante que tienes arriba; "
-            "(4) en `respuestas_extraidas` mantén una lista estructurada y acumulada de los criterios "
-            "evaluados, la pregunta, la respuesta del candidato y si cumple (true/false/null); "
-            "(5) cuando tengas suficiente información marca clasificacion_lista=true con estado, score "
-            "y evidencia OBJETIVA citando lo que dijo la persona; (6) si falla un criterio marcado como "
-            "DESCARTA, el estado es 'no_cumple'; si solo quedan dudas, 'revision'; (7) NUNCA le comuniques "
-            "un rechazo al candidato: si no cumple, agradece y di que RH revisará su caso — la decisión "
-            "final siempre la toma una persona de RH; (8) no pidas datos sensibles (salud, embarazo, "
-            "religión, estado civil, edad); (9) si el candidato dice que ya no le interesa, agradece y "
-            "clasifica como 'no_cumple' con evidencia 'candidato declinó participar'."
+            "y no repitas los que ya quedaron contestados — no es necesario agotarlos todos: en cuanto "
+            "puedas clasificar con confianza, cierra antes (ver regla 5); (3) si el candidato pregunta "
+            "sobre sueldo, ubicación, beneficios o el puesto, contesta con los datos de la vacante que "
+            "tienes arriba; (4) en `respuestas_extraidas` mantén una lista estructurada y acumulada de "
+            "los criterios evaluados, la pregunta, la respuesta del candidato y si cumple (true/false/"
+            "null); (5) cuando tengas suficiente información marca clasificacion_lista=true con estado, "
+            "score y evidencia OBJETIVA citando lo que dijo la persona; (6) si falla un criterio marcado "
+            "como DESCARTA, el estado es 'no_cumple'; si solo quedan dudas, 'revision'; (7) NUNCA le "
+            "comuniques un rechazo al candidato: si no cumple, agradece y di que RH revisará su caso — "
+            "la decisión final siempre la toma una persona de RH; (8) no pidas datos sensibles (salud, "
+            "embarazo, religión, estado civil, edad); (9) si el candidato dice que ya no le interesa, "
+            "agradece y clasifica como 'no_cumple' con evidencia 'candidato declinó participar'; "
+            "(10) en tu PRIMER mensaje de la conversación (revisa el historial: si no hay turnos tuyos "
+            "previos, es el primero), preséntate como «Red Human» — nunca como «asistente virtual» ni "
+            "«asistente de reclutamiento» — y menciona el título de la vacante a la que se postula."
         ),
         input=mensajes,
         text_format=TurnoPrefiltro,
@@ -618,6 +624,11 @@ def agendar_videollamada_mock(
     return {"liga": liga, "fecha_hora": fecha_hora}
 
 
+# Nombres de día en español — evita depender del locale del servidor (strftime %A regresa
+# nombres en inglés salvo que el sistema tenga es_MX instalado, algo que no podemos garantizar).
+_DIAS_SEMANA_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+
+
 def agenda_turno(
     nombre_candidato: str,
     vacante_titulo: str,
@@ -643,9 +654,19 @@ def agenda_turno(
             False,
         )
 
+    # Ancla temporal explícita: sin esto el modelo no tiene forma de saber qué día es "hoy" y
+    # no puede resolver fechas relativas ("mañana", "el próximo lunes", "8am") de forma confiable.
+    ahora = datetime.now(ZoneInfo("America/Mexico_City"))
+    referencia_fecha = (
+        f"Hoy es {_DIAS_SEMANA_ES[ahora.weekday()]} {ahora.isoformat(timespec='minutes')} "
+        "(hora de Ciudad de México, America/Mexico_City). Úsalo como referencia para interpretar "
+        "cualquier fecha/hora relativa que diga el candidato al normalizarla a ISO 8601."
+    )
+
     instrucciones = (
         "Eres el agente de Red Human AI (México). Ya clasificaste a este candidato como apto para "
         f"{vacante_titulo or 'la vacante'}; tu único objetivo ahora es coordinar una videollamada.\n"
+        f"{referencia_fecha}\n"
         f"Te diriges a {nombre_candidato}. Reglas: (1) si todavía no sabes su disponibilidad, "
         "pregúntasela en un mensaje breve y cálido; (2) en cuanto el candidato te dé una fecha/hora "
         "concreta, DEBES invocar la herramienta agendar_videollamada con esa fecha/hora en ISO 8601 "
