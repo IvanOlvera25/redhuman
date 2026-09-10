@@ -37,7 +37,7 @@ from ..models import (
     Vacante,
     registrar,
 )
-from ..serial import archivo_dict, candidato_dict, expediente_dict
+from ..serial import archivo_dict, candidato_dict, expediente_dict, nombre_empresa_candidato
 from ..services import archivos as fs
 from ..services import ia
 from ..services.configuracion import modo_prueba_activo, puede_forzar_prueba
@@ -875,7 +875,7 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, 
         v.requisitos if v else "",
         (v.preguntas_filtro or []) if v else [],
         historial,
-        empresa=v.empresa if v else "",
+        empresa=nombre_empresa_candidato(v) if v else "",
         ubicacion=v.ubicacion if v else "",
         sueldo=v.sueldo if v else "",
         modalidad=v.modalidad if v else "",

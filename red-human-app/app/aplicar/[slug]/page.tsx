@@ -130,7 +130,13 @@ export default function Aplicar() {
     <main className="min-h-svh bg-bg">
       <header className="border-b border-border-soft">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-5 py-4">
-          <Logo />
+          {/* Apariencia mínima del Portal (Fase B, punto 12): logo de la Cuenta si existe */}
+          {vacante?.logoUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={vacante.logoUrl} alt={vacante.nombreEmpresa ?? ""} className="h-8 w-auto object-contain" />
+          ) : (
+            <Logo />
+          )}
           <ThemeToggle />
         </div>
       </header>
@@ -145,7 +151,7 @@ export default function Aplicar() {
             <h1 className="font-display mt-3 text-3xl font-bold tracking-tight sm:text-4xl">{titulo}</h1>
             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-2">
               <span className="flex items-center gap-1.5">
-                <Building2 className="h-4 w-4 text-ink-3" /> {vacante?.empresa ?? "Grupo Carbe"}
+                <Building2 className="h-4 w-4 text-ink-3" /> {vacante?.nombreEmpresa ?? "Red Human"}
               </span>
               <span className="flex items-center gap-1.5">
                 <MapPin className="h-4 w-4 text-ink-3" /> {vacante?.ubicacion ?? "México"}

@@ -123,7 +123,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           <p className="px-3 pb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-ink-3">Colaborador</p>
           <NavList items={navColaborador} onNavigate={onNavigate} />
         </div>
-        {usuario?.rol === "admin" && (
+        {usuario?.rol === "Administrador" && (
           <div>
             <p className="px-3 pb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-ink-3">Administración</p>
             <NavList items={navAdmin} onNavigate={onNavigate} />
@@ -214,11 +214,6 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
 
 
 /* ---------------- Sesión ---------------- */
-const ETIQUETA_ROL: Record<string, string> = {
-  admin: "Administrador",
-  rh: "Recursos Humanos",
-  lectura: "Solo lectura",
-};
 
 function TarjetaUsuario() {
   const { usuario, cargando, salir } = useSesion();
@@ -229,7 +224,7 @@ function TarjetaUsuario() {
       <Avatar name={usuario.nombre} />
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-semibold">{usuario.nombre}</p>
-        <p className="truncate text-xs text-ink-3">{ETIQUETA_ROL[usuario.rol] ?? usuario.rol}</p>
+        <p className="truncate text-xs text-ink-3">{usuario.rol}</p>
       </div>
       <button
         onClick={salir}
@@ -251,7 +246,7 @@ function UsuarioBarra() {
       <Avatar name={usuario.nombre} />
       <div className="leading-tight">
         <p className="text-[13px] font-semibold">{usuario.nombre}</p>
-        <p className="font-mono text-[10px] text-ink-3">{ETIQUETA_ROL[usuario.rol] ?? usuario.rol}</p>
+        <p className="font-mono text-[10px] text-ink-3">{usuario.rol}</p>
       </div>
       <button
         onClick={salir}

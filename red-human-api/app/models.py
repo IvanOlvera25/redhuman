@@ -79,6 +79,19 @@ class Vacante(Base):
     cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
     cliente_id: Mapped[Optional[int]] = mapped_column(ForeignKey("clientes.id"), nullable=True, index=True)
 
+    # --- Fase B: creación de vacante (Responsable/Colaboradores/plantilla/visibilidad del Cliente) ---
+    responsable_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
+    # lista de ids de Usuario — sin tabla puente, mismo patrón que Vacante.plataformas/preguntas_filtro
+    colaboradores_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # solo aplica si cliente_id está definido; default True = comportamiento de hoy (se muestra)
+    mostrar_cliente_candidato: Mapped[bool] = mapped_column(Boolean, default=True)
+    # de qué Plantilla nació esta vacante, si de alguna — solo trazabilidad, no fuerza nada
+    plantilla_id: Mapped[Optional[int]] = mapped_column(ForeignKey("plantillas.id"), nullable=True)
+
+    responsable: Mapped[Optional["Usuario"]] = relationship(foreign_keys=[responsable_id])
+    cliente: Mapped[Optional["Cliente"]] = relationship()
+    cuenta: Mapped[Optional["Cuenta"]] = relationship()
+
     candidatos: Mapped[List["Candidato"]] = relationship(back_populates="vacante")
 
 
@@ -538,6 +551,46 @@ class ClienteContacto(Base):
     telefono: Mapped[str] = mapped_column(String(30), default="")
 
     cliente: Mapped["Cliente"] = relationship(back_populates="contactos")
+
+
+class Plantilla(Base):
+    """Plantilla reutilizable de vacante (Fase B, punto 11) — General de la Cuenta
+    (cliente_id=None) o de un Cliente específico. No hay nivel intermedio."""
+
+    __tablename__ = "plantillas"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
+    cliente_id: Mapped[Optional[int]] = mapped_column(ForeignKey("clientes.id"), nullable=True, index=True)
+    nombre: Mapped[str] = mapped_column(String(150))  # para identificarla en el selector
+    # "eliminar" = desactivar, nunca borrado físico — una Vacante ya creada desde ella conserva
+    # plantilla_id para trazabilidad aunque la plantilla ya no se ofrezca para nuevas vacantes.
+    activa: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # --- contenido reutilizable: mismos campos/tipos que Vacante ---
+    titulo: Mapped[str] = mapped_column(String(200), default="")
+    area: Mapped[str] = mapped_column(String(100), default="")
+    modalidad: Mapped[str] = mapped_column(String(30), default="Presencial")
+    sueldo: Mapped[str] = mapped_column(String(80), default="A convenir")
+    requisitos: Mapped[str] = mapped_column(Text, default="")
+    descripcion: Mapped[str] = mapped_column(Text, default="")
+    resumen: Mapped[str] = mapped_column(Text, default="")
+    perfil_ideal: Mapped[str] = mapped_column(Text, default="")
+    responsabilidades: Mapped[list] = mapped_column(JSON, default=list)
+    requisitos_deseables: Mapped[list] = mapped_column(JSON, default=list)
+    beneficios: Mapped[list] = mapped_column(JSON, default=list)
+    palabras_clave: Mapped[list] = mapped_column(JSON, default=list)
+    seniority: Mapped[str] = mapped_column(String(40), default="")
+    avisos_cumplimiento: Mapped[list] = mapped_column(JSON, default=list)
+    preguntas_filtro: Mapped[list] = mapped_column(JSON, default=list)  # = "evaluaciones" (ver spec Fase B)
+    texto_whatsapp: Mapped[str] = mapped_column(Text, default="")
+    texto_bolsa: Mapped[str] = mapped_column(Text, default="")
+
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+    cuenta: Mapped["Cuenta"] = relationship()
+    cliente: Mapped[Optional["Cliente"]] = relationship()
 
 
 class UsuarioCuenta(Base):

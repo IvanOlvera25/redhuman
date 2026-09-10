@@ -16,8 +16,8 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import PLATAFORMAS, Candidato, Cuenta, Usuario, Vacante, registrar, slugificar
-from ..serial import vacante_dict
+from ..models import PLATAFORMAS, Candidato, Cliente, Cuenta, Plantilla, Usuario, UsuarioCuenta, Vacante, registrar, slugificar
+from ..serial import nombre_empresa_candidato, vacante_dict
 from ..services import ia
 
 router = APIRouter(prefix="/vacantes", tags=["vacantes"])
@@ -69,7 +69,55 @@ def _conteos(db: Session, v: Vacante):
 
 def _salida(db: Session, v: Vacante) -> dict:
     total, nuevos = _conteos(db, v)
-    return vacante_dict(v, total, nuevos, _embudo(db, v.id))
+    colaboradores = []
+    if v.colaboradores_ids:
+        colaboradores = [n for (n,) in db.query(Usuario.nombre).filter(Usuario.id.in_(v.colaboradores_ids)).all()]
+    return vacante_dict(v, total, nuevos, _embudo(db, v.id), colaboradores)
+
+
+def _con_logo(db: Session, salida: dict, v: Vacante) -> dict:
+    """Agrega el logo de la Cuenta al payload candidato-visible (Fase B, punto 12: la vista
+    previa/portal público hereda la apariencia mínima de la Cuenta — logo + nombre comercial;
+    el nombre ya lo resuelve `nombre_empresa_candidato` dentro de `vacante_dict`)."""
+    return {**salida, "logoUrl": v.cuenta.logo if v.cuenta else ""}
+
+
+def _validar_relaciones(
+    db: Session,
+    cuenta: Cuenta,
+    cliente_id: Optional[int],
+    responsable_id: Optional[int],
+    colaboradores_ids: Optional[List[int]],
+    plantilla_id: Optional[int],
+) -> Optional[List[int]]:
+    """Valida que Cliente/Responsable/Colaboradores/Plantilla (cuando vienen) pertenezcan a la
+    Cuenta actual — nunca a otra. Regresa la lista de colaboradores_ids ya filtrada a los que sí
+    pertenecen (los que no, se ignoran en silencio en vez de tronar: un id viejo/de otra Cuenta no
+    debe bloquear guardar el resto del formulario)."""
+    if cliente_id is not None:
+        existe = db.query(Cliente).filter(Cliente.id == cliente_id, Cliente.cuenta_id == cuenta.id).first()
+        if not existe:
+            raise HTTPException(400, "El Cliente indicado no existe en esta Cuenta.")
+    if responsable_id is not None:
+        pertenece = (
+            db.query(UsuarioCuenta)
+            .filter(UsuarioCuenta.usuario_id == responsable_id, UsuarioCuenta.cuenta_id == cuenta.id)
+            .first()
+        )
+        if not pertenece:
+            raise HTTPException(400, "El responsable indicado no tiene acceso a esta Cuenta.")
+    if plantilla_id is not None:
+        existe = db.query(Plantilla).filter(Plantilla.id == plantilla_id, Plantilla.cuenta_id == cuenta.id).first()
+        if not existe:
+            raise HTTPException(400, "La plantilla indicada no existe en esta Cuenta.")
+    if colaboradores_ids is None:
+        return None
+    return [
+        uid
+        for (uid,) in db.query(UsuarioCuenta.usuario_id)
+        .filter(UsuarioCuenta.usuario_id.in_(colaboradores_ids), UsuarioCuenta.cuenta_id == cuenta.id)
+        .all()
+    ]
 
 
 @router.get("")
@@ -163,6 +211,12 @@ class CrearIn(GenerarIn):
     publicar: bool = False
     plataformas: List[str] = []
     generar_si_falta: bool = True  # si no llega contenido, lo genera antes de guardar
+    # --- Fase B: creación de vacante (punto 8) ---
+    cliente_id: Optional[int] = None
+    responsable_id: Optional[int] = None  # si no viene, default a quien crea la vacante
+    colaboradores_ids: List[int] = []
+    mostrar_cliente_candidato: bool = True
+    plantilla_id: Optional[int] = None  # solo trazabilidad de qué plantilla se usó, si alguna
 
 
 @router.post("", status_code=201)
@@ -175,6 +229,10 @@ def crear(
     if not datos.titulo.strip():
         raise HTTPException(400, "El título del puesto es obligatorio.")
 
+    colaboradores_validos = _validar_relaciones(
+        db, cuenta, datos.cliente_id, datos.responsable_id, datos.colaboradores_ids, datos.plantilla_id
+    )
+
     plataformas = [p for p in datos.plataformas if p in PLATAFORMAS]
     if datos.publicar and not plataformas:
         plataformas = ["WhatsApp", "Portal"]
@@ -182,6 +240,11 @@ def crear(
     v = Vacante(
         codigo="TMP",
         cuenta_id=cuenta.id,
+        cliente_id=datos.cliente_id,
+        responsable_id=datos.responsable_id or u.id,
+        colaboradores_ids=colaboradores_validos or [],
+        mostrar_cliente_candidato=datos.mostrar_cliente_candidato,
+        plantilla_id=datos.plantilla_id,
         titulo=datos.titulo.strip(),
         area=datos.area,
         empresa=datos.empresa,
@@ -208,7 +271,12 @@ def crear(
 
     con_ia = None
     if datos.generar_si_falta and not datos.publicaciones and not datos.descripcion:
-        generado, con_ia = _generar(GenerarIn(**datos.model_dump(include=set(GenerarIn.model_fields))))
+        entrada_generador = GenerarIn(**datos.model_dump(include=set(GenerarIn.model_fields)))
+        # el candidato debe ver el mismo nombre que resolverá vacante_dict/nombre_empresa_candidato
+        # (Cliente si aplica y está visible, si no el nombre de la Cuenta) — no el texto libre que
+        # se haya tecleado en el campo `empresa` del formulario.
+        entrada_generador.empresa = nombre_empresa_candidato(v)
+        generado, con_ia = _generar(entrada_generador)
         _aplicar_generado(v, generado)
 
     db.add(v)
@@ -231,7 +299,7 @@ def por_slug(slug: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Vacante no encontrada")
     if v.estado != "Publicada":
         raise HTTPException(410, "Esta vacante ya no está recibiendo postulaciones.")
-    return _salida(db, v)
+    return _con_logo(db, _salida(db, v), v)
 
 
 @router.get("/publicas")
@@ -242,7 +310,7 @@ def listar_publicas(db: Session = Depends(get_db)):
     como un código de vacante.
     """
     q = db.query(Vacante).filter(Vacante.estado == "Publicada").order_by(Vacante.id.desc())
-    return [_salida(db, v) for v in q.all()]
+    return [_con_logo(db, _salida(db, v), v) for v in q.all()]
 
 
 @router.get("/{codigo}")
@@ -250,6 +318,18 @@ def detalle(
     codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
 ):
     return _salida(db, _por_codigo(db, codigo, cuenta.id))
+
+
+@router.get("/{codigo}/vista-previa")
+def vista_previa(
+    codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    """Cómo verá el candidato esta vacante — funciona aunque siga en Borrador (usa `codigo`, no
+    `slug`: una vacante sin publicar no tiene slug público), para que "Vista previa" nunca sea
+    obligatoria para publicar (punto 12). Mismo payload que `/vacantes/slug/{slug}`, para que la
+    vista previa sea fiel a lo que el candidato verá de verdad."""
+    v = _por_codigo(db, codigo, cuenta.id)
+    return _con_logo(db, _salida(db, v), v)
 
 
 class ActualizarIn(BaseModel):
@@ -272,6 +352,11 @@ class ActualizarIn(BaseModel):
     preguntas_filtro: Optional[List[dict]] = None
     publicaciones: Optional[Dict[str, dict]] = None
     estado: Optional[str] = None
+    # --- Fase B: Cliente/Responsable/Colaboradores/visibilidad (punto 8/10) ---
+    cliente_id: Optional[int] = None
+    responsable_id: Optional[int] = None
+    colaboradores_ids: Optional[List[int]] = None
+    mostrar_cliente_candidato: Optional[bool] = None
 
 
 @router.patch("/{codigo}")
@@ -281,7 +366,12 @@ def actualizar(
 ):
     """Edición manual de RH sobre lo que generó la IA (el agente propone, RH dispone)."""
     v = _por_codigo(db, codigo, cuenta.id)
+    colaboradores_validos = _validar_relaciones(
+        db, cuenta, datos.cliente_id, datos.responsable_id, datos.colaboradores_ids, None
+    )
     cambios = datos.model_dump(exclude_none=True, exclude={"autor"})
+    if colaboradores_validos is not None:
+        cambios["colaboradores_ids"] = colaboradores_validos
     if datos.estado is not None and datos.estado not in ESTADOS:
         raise HTTPException(400, f"Estado inválido. Usa uno de: {', '.join(ESTADOS)}")
 
@@ -309,7 +399,7 @@ def regenerar(
     """Vuelve a generar todo el contenido de una vacante existente con los datos ya capturados."""
     v = _por_codigo(db, codigo, cuenta.id)
     generado, con_ia = ia.generar_vacante(
-        v.titulo, v.area, v.ubicacion, v.sueldo, v.requisitos, v.empresa, v.modalidad, datos.notas
+        v.titulo, v.area, v.ubicacion, v.sueldo, v.requisitos, nombre_empresa_candidato(v), v.modalidad, datos.notas
     )
     _aplicar_generado(v, generado)
     registrar(db, u.nombre, "vacante_regenerada", "vacante", v.codigo, {"ia": con_ia, "notas": datos.notas})

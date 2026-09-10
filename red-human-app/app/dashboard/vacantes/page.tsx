@@ -16,6 +16,10 @@ import {
   ExternalLink,
   Ban,
   RotateCcw,
+  Sparkles,
+  FileEdit,
+  Eye,
+  Building2,
 } from "lucide-react";
 import { Button, Card, Badge, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
@@ -23,14 +27,23 @@ import { Aviso, BotonCopiar } from "@/components/dashboard/subida";
 import { vacantes as vacantesDemo, type Vacante } from "@/lib/data";
 import {
   crearVacante,
+  actualizarVacante,
   fetchVacantes,
+  fetchVistaPreviaVacante,
   publicarVacante,
   cerrarVacante,
   regenerarVacante,
   generarVacanteIA,
+  fetchClientes,
+  fetchEntrevistadores,
+  fetchPlantillas,
+  crearPlantilla,
+  eliminarPlantilla,
   type BloquePlataforma,
   type CriterioFiltro,
   type VacanteGenerada,
+  type Cliente,
+  type Plantilla,
 } from "@/lib/api";
 import { usePuedeDecidir } from "@/components/sesion";
 import { cn } from "@/lib/utils";
@@ -57,6 +70,8 @@ export default function Vacantes() {
   const [filtro, setFiltro] = useState<(typeof filtros)[number]>("Todas");
   const [open, setOpen] = useState(false);
   const [sel, setSel] = useState<Vacante | null>(null);
+  const [verPrevia, setVerPrevia] = useState<string | null>(null);
+  const [gestionPlantillas, setGestionPlantillas] = useState(false);
   const [datos, setDatos] = useState<Vacante[]>(vacantesDemo);
   const [live, setLive] = useState(false);
   const [cambiandoEstatus, setCambiandoEstatus] = useState("");
@@ -97,6 +112,11 @@ export default function Vacantes() {
           <Badge tone="good" dot>
             API en vivo
           </Badge>
+        )}
+        {puedeDecidir && (
+          <Button size="sm" variant="outline" onClick={() => setGestionPlantillas(true)}>
+            <Sparkles className="h-4 w-4" /> Plantillas
+          </Button>
         )}
         {puedeDecidir && (
           <Button size="sm" onClick={() => setOpen(true)}>
@@ -236,7 +256,19 @@ export default function Vacantes() {
         />
       )}
 
-      {sel && <DetalleVacante v={sel} live={live} onClose={() => setSel(null)} onCambio={recargar} />}
+      {sel && (
+        <DetalleVacante
+          v={sel}
+          live={live}
+          onClose={() => setSel(null)}
+          onCambio={recargar}
+          onVerPrevia={() => setVerPrevia(sel.id)}
+        />
+      )}
+
+      {verPrevia && <VistaPreviaVacante codigo={verPrevia} onClose={() => setVerPrevia(null)} />}
+
+      {gestionPlantillas && <GestionPlantillas onClose={() => setGestionPlantillas(false)} />}
     </div>
   );
 }
@@ -245,6 +277,37 @@ export default function Vacantes() {
    Modal: crear vacante con IA
    ============================================================ */
 function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado: (codigo: string) => void }) {
+  const [paso, setPaso] = useState<"elegir" | "plantilla" | "formulario">("elegir");
+  const [clientes, setClientes] = useState<Cliente[]>([]);
+  const [usuarios, setUsuarios] = useState<{ id: number; nombre: string }[]>([]);
+  const [plantillas, setPlantillas] = useState<Plantilla[]>([]);
+  const [clienteParaPlantilla, setClienteParaPlantilla] = useState<number | "">("");
+  const [plantillaBase, setPlantillaBase] = useState<Plantilla | null>(null);
+
+  useEffect(() => {
+    fetchClientes("Activo").then((c) => setClientes(c ?? []));
+    fetchEntrevistadores().then((u) => setUsuarios(u ?? []));
+  }, []);
+
+  useEffect(() => {
+    if (paso !== "plantilla") return;
+    fetchPlantillas(clienteParaPlantilla || undefined).then((p) => setPlantillas(p ?? []));
+  }, [paso, clienteParaPlantilla]);
+
+  function elegirPlantilla(p: Plantilla) {
+    setPlantillaBase(p);
+    setF((prev) => ({
+      ...prev,
+      titulo: p.titulo || prev.titulo,
+      area: p.area || prev.area,
+      sueldo: p.sueldo || prev.sueldo,
+      modalidad: p.modalidad || prev.modalidad,
+      requisitos: p.requisitos || prev.requisitos,
+    }));
+    if (p.clienteId) setClienteId(p.clienteId);
+    setPaso("formulario");
+  }
+
   const [f, setF] = useState({
     titulo: "",
     area: "",
@@ -256,6 +319,11 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
     notas: "",
   });
   const set = (k: keyof typeof f) => (v: string) => setF((prev) => ({ ...prev, [k]: v }));
+
+  const [clienteId, setClienteId] = useState<number | "">("");
+  const [responsableId, setResponsableId] = useState<number | "">("");
+  const [colaboradoresIds, setColaboradoresIds] = useState<number[]>([]);
+  const [mostrarCliente, setMostrarCliente] = useState(true);
 
   const [gen, setGen] = useState<VacanteGenerada | null>(null);
   const [generando, setGenerando] = useState(false);
@@ -282,30 +350,56 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
   async function guardar(publicar: boolean) {
     setGuardando(true);
     setError("");
-    const r = await crearVacante({
-      ...f,
-      descripcion: gen?.descripcion ?? "",
-      resumen: gen?.resumen ?? "",
-      perfil_ideal: gen?.perfil_ideal ?? "",
-      responsabilidades: gen?.responsabilidades ?? [],
-      requisitos_deseables: gen?.requisitos_deseables ?? [],
-      beneficios: gen?.beneficios ?? [],
-      palabras_clave: gen?.palabras_clave ?? [],
-      seniority: gen?.seniority ?? "",
-      avisos_cumplimiento: gen?.avisos_cumplimiento ?? [],
-      texto_whatsapp: gen?.texto_whatsapp ?? "",
-      preguntas_filtro: gen?.preguntas_filtro ?? [],
-      publicaciones: gen
-        ? {
+    // El contenido viene de lo que la IA generó en esta sesión si se corrió; si no, de la
+    // plantilla elegida (si hubo); si tampoco, se manda vacío y generar_si_falta deja que la
+    // API lo genere sola al guardar.
+    const contenido = gen
+      ? {
+          descripcion: gen.descripcion,
+          resumen: gen.resumen,
+          perfil_ideal: gen.perfil_ideal,
+          responsabilidades: gen.responsabilidades,
+          requisitos_deseables: gen.requisitos_deseables,
+          beneficios: gen.beneficios,
+          palabras_clave: gen.palabras_clave,
+          seniority: gen.seniority,
+          avisos_cumplimiento: gen.avisos_cumplimiento,
+          texto_whatsapp: gen.texto_whatsapp,
+          preguntas_filtro: gen.preguntas_filtro,
+          publicaciones: {
             whatsapp: { titulo: f.titulo, copy: gen.texto_whatsapp, page: gen.texto_whatsapp, etiquetas: [] },
             occ: gen.occ,
             linkedin: gen.linkedin,
             portal: gen.portal,
+          },
+        }
+      : plantillaBase
+        ? {
+            descripcion: plantillaBase.descripcion,
+            resumen: plantillaBase.resumen,
+            perfil_ideal: plantillaBase.perfilIdeal,
+            responsabilidades: plantillaBase.responsabilidades,
+            requisitos_deseables: plantillaBase.requisitosDeseables,
+            beneficios: plantillaBase.beneficios,
+            palabras_clave: plantillaBase.palabrasClave,
+            seniority: plantillaBase.seniority,
+            avisos_cumplimiento: plantillaBase.avisosCumplimiento,
+            texto_whatsapp: plantillaBase.textoWhatsapp,
+            preguntas_filtro: plantillaBase.preguntasFiltro,
           }
-        : undefined,
+        : {};
+
+    const r = await crearVacante({
+      ...f,
+      ...contenido,
       publicar,
       plataformas: publicar ? destinos : [],
-      generar_si_falta: !gen, // si RH guarda sin generar, la API genera el contenido
+      generar_si_falta: !gen && !plantillaBase, // sin IA ni plantilla, la API genera el contenido
+      cliente_id: clienteId || null,
+      responsable_id: responsableId || null,
+      colaboradores_ids: colaboradoresIds,
+      mostrar_cliente_candidato: mostrarCliente,
+      plantilla_id: plantillaBase?.id ?? null,
     });
     setGuardando(false);
     if (!r.ok) {
@@ -315,9 +409,105 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
     onGuardado(r.data.id);
   }
 
+  if (paso === "elegir") {
+    return (
+      <Panel titulo="Nueva vacante" eyebrow="Distribuidor de vacantes" onClose={onClose} ancho="max-w-2xl">
+        <div className="flex flex-col gap-4 p-6">
+          <p className="text-sm text-ink-2">¿Cómo quieres empezar? Ninguna opción es obligatoria.</p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <button
+              onClick={() => {
+                setPlantillaBase(null);
+                setPaso("formulario");
+              }}
+              className="group flex flex-col items-start gap-3 rounded-2xl border border-border-soft bg-surface p-5 text-left transition hover:border-brand"
+            >
+              <span className="grid h-11 w-11 place-items-center rounded-xl bg-brand-soft text-brand">
+                <FileEdit className="h-5 w-5" />
+              </span>
+              <div>
+                <p className="font-display text-base font-bold">Crear desde cero</p>
+                <p className="mt-1 text-sm text-ink-3">Empieza con un formulario en blanco.</p>
+              </div>
+            </button>
+            <button
+              onClick={() => setPaso("plantilla")}
+              className="group flex flex-col items-start gap-3 rounded-2xl border border-border-soft bg-surface p-5 text-left transition hover:border-brand"
+            >
+              <span className="grid h-11 w-11 place-items-center rounded-xl bg-human-soft text-human">
+                <Sparkles className="h-5 w-5" />
+              </span>
+              <div>
+                <p className="font-display text-base font-bold">Usar plantilla</p>
+                <p className="mt-1 text-sm text-ink-3">Precarga puesto, descripción, requisitos y preguntas.</p>
+              </div>
+            </button>
+          </div>
+        </div>
+      </Panel>
+    );
+  }
+
+  if (paso === "plantilla") {
+    return (
+      <Panel titulo="Usar plantilla" eyebrow="Nueva vacante" onClose={onClose} ancho="max-w-2xl">
+        <div className="flex flex-col gap-4 p-6">
+          <button onClick={() => setPaso("elegir")} className="self-start text-xs font-medium text-ink-3 hover:text-brand">
+            ← Volver
+          </button>
+          {clientes.length > 0 && (
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Cliente (opcional)</span>
+              <select
+                value={clienteParaPlantilla}
+                onChange={(e) => setClienteParaPlantilla(e.target.value ? Number(e.target.value) : "")}
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+              >
+                <option value="">Sin Cliente (solo plantillas generales)</option>
+                {clientes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.nombre}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {plantillas.length === 0 ? (
+            <Aviso tono="info">
+              No hay plantillas {clienteParaPlantilla ? "para este Cliente ni generales" : "generales"} todavía.
+              Cierra esta ventana y crea la vacante desde cero.
+            </Aviso>
+          ) : (
+            <div className="flex flex-col gap-2.5">
+              {plantillas.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => elegirPlantilla(p)}
+                  className="flex items-center justify-between gap-3 rounded-xl border border-border-soft bg-surface p-4 text-left transition hover:border-brand"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold">{p.nombre}</p>
+                    <p className="truncate text-xs text-ink-3">{p.titulo || "Sin título precargado"}</p>
+                  </div>
+                  {p.clienteNombre ? <Badge tone="brand">{p.clienteNombre}</Badge> : <Badge tone="neutral">General</Badge>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </Panel>
+    );
+  }
+
   return (
     <Panel titulo="Nueva vacante" eyebrow="Distribuidor de vacantes" onClose={onClose} ancho="max-w-3xl">
       <div className="flex flex-col gap-5 p-6">
+        {plantillaBase && (
+          <Aviso tono="ok">
+            Formulario precargado desde la plantilla «{plantillaBase.nombre}». Puedes editar cualquier campo.
+          </Aviso>
+        )}
+
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Título del puesto" value={f.titulo} onChange={set("titulo")} placeholder="Ej. Repartidor en motocicleta" full />
           <Field label="Área" value={f.area} onChange={set("area")} placeholder="Ej. Logística" />
@@ -331,6 +521,76 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
             opciones={["Presencial", "Híbrido", "Remoto"]}
           />
         </div>
+
+        {/* Cuenta (automática) / Cliente / Responsable / Colaboradores — Fase B, punto 8 */}
+        <div className="grid gap-4 border-t border-border-faint pt-5 sm:grid-cols-2">
+          {clientes.length > 0 && (
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Cliente (opcional)</span>
+              <select
+                value={clienteId}
+                onChange={(e) => setClienteId(e.target.value ? Number(e.target.value) : "")}
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+              >
+                <option value="">Sin Cliente — la Cuenta recluta directo</option>
+                {clientes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.nombre}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-ink-2">Responsable (opcional)</span>
+            <select
+              value={responsableId}
+              onChange={(e) => setResponsableId(e.target.value ? Number(e.target.value) : "")}
+              className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+            >
+              <option value="">Quien crea la vacante</option>
+              {usuarios.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.nombre}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        {usuarios.length > 0 && (
+          <div>
+            <Eyebrow>Colaboradores (opcional)</Eyebrow>
+            <div className="mt-2.5 flex flex-wrap gap-2">
+              {usuarios.map((u) => {
+                const activo = colaboradoresIds.includes(u.id);
+                return (
+                  <button
+                    key={u.id}
+                    onClick={() =>
+                      setColaboradoresIds((ids) => (activo ? ids.filter((x) => x !== u.id) : [...ids, u.id]))
+                    }
+                    className={cn(
+                      "rounded-full border px-3 py-1.5 text-[13px] font-medium transition",
+                      activo ? "border-brand bg-brand-soft text-brand" : "border-border-soft text-ink-2 hover:border-brand/40",
+                    )}
+                  >
+                    {u.nombre}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {clienteId !== "" && (
+          <ToggleSiNo
+            label="Mostrar cliente al candidato"
+            ayuda="Si está en 'No', el candidato ve el nombre de tu Cuenta en vez del Cliente — internamente el equipo siempre ve la relación real."
+            valor={mostrarCliente}
+            onChange={setMostrarCliente}
+          />
+        )}
 
         <Area
           label="Requisitos indispensables"
@@ -412,6 +672,138 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
         </div>
       </div>
     </Panel>
+  );
+}
+
+/* ============================================================
+   Gestión de Plantillas (Fase B, punto 11)
+   ============================================================ */
+function GestionPlantillas({ onClose }: { onClose: () => void }) {
+  const [clientes, setClientes] = useState<Cliente[]>([]);
+  const [plantillas, setPlantillas] = useState<Plantilla[]>([]);
+  const [cargando, setCargando] = useState(true);
+  const [crear, setCrear] = useState(false);
+
+  const recargar = useCallback(async () => {
+    const p = await fetchPlantillas();
+    setPlantillas(p ?? []);
+  }, []);
+
+  useEffect(() => {
+    fetchClientes("Activo").then((c) => setClientes(c ?? []));
+    recargar().then(() => setCargando(false));
+  }, [recargar]);
+
+  async function desactivar(id: number) {
+    await eliminarPlantilla(id);
+    recargar();
+  }
+
+  return (
+    <Panel titulo="Plantillas de vacante" eyebrow="General de la Cuenta o de un Cliente" onClose={onClose} ancho="max-w-2xl">
+      <div className="flex flex-col gap-4 p-6">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm text-ink-2">
+            Precargan puesto, descripción, requisitos y preguntas al crear una vacante.
+          </p>
+          <Button size="sm" variant="outline" onClick={() => setCrear((v) => !v)}>
+            <Plus className="h-4 w-4" /> {crear ? "Cancelar" : "Nueva"}
+          </Button>
+        </div>
+
+        {crear && (
+          <FormularioPlantilla
+            clientes={clientes}
+            onCreada={() => {
+              setCrear(false);
+              recargar();
+            }}
+          />
+        )}
+
+        {cargando ? (
+          <p className="text-sm text-ink-3">Cargando…</p>
+        ) : plantillas.length === 0 ? (
+          <Aviso tono="info">
+            Todavía no hay ninguna plantilla. Créala aquí, o desde el detalle de una vacante con
+            «Guardar este contenido como plantilla reutilizable».
+          </Aviso>
+        ) : (
+          <ul className="flex flex-col divide-y divide-border-faint">
+            {plantillas.map((p) => (
+              <li key={p.id} className="flex items-center justify-between gap-3 py-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold">{p.nombre}</p>
+                  <p className="truncate text-xs text-ink-3">{p.titulo || "Sin título precargado"}</p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  {p.clienteNombre ? <Badge tone="brand">{p.clienteNombre}</Badge> : <Badge tone="neutral">General</Badge>}
+                  <button onClick={() => desactivar(p.id)} className="text-xs font-medium text-bad hover:underline">
+                    Desactivar
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function FormularioPlantilla({ clientes, onCreada }: { clientes: Cliente[]; onCreada: () => void }) {
+  const [nombre, setNombre] = useState("");
+  const [clienteId, setClienteId] = useState<number | "">("");
+  const [titulo, setTitulo] = useState("");
+  const [requisitos, setRequisitos] = useState("");
+  const [descripcion, setDescripcion] = useState("");
+  const [guardando, setGuardando] = useState(false);
+  const [error, setError] = useState("");
+
+  async function crear() {
+    if (!nombre.trim()) {
+      setError("El nombre de la plantilla es obligatorio.");
+      return;
+    }
+    setGuardando(true);
+    setError("");
+    const r = await crearPlantilla({ nombre: nombre.trim(), cliente_id: clienteId || null, titulo, requisitos, descripcion });
+    setGuardando(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
+    onCreada();
+  }
+
+  return (
+    <Card className="flex flex-col gap-3 p-4">
+      <Field label="Nombre de la plantilla" value={nombre} onChange={setNombre} placeholder="Ej. Vendedor de piso estándar" full />
+      {clientes.length > 0 && (
+        <label className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium text-ink-2">Alcance</span>
+          <select
+            value={clienteId}
+            onChange={(e) => setClienteId(e.target.value ? Number(e.target.value) : "")}
+            className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+          >
+            <option value="">General de la Cuenta</option>
+            {clientes.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.nombre}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      <Field label="Título del puesto" value={titulo} onChange={setTitulo} placeholder="Ej. Vendedor de piso" />
+      <Area label="Requisitos" value={requisitos} onChange={setRequisitos} rows={2} />
+      <Area label="Descripción" value={descripcion} onChange={setDescripcion} rows={3} />
+      {error && <Aviso tono="error">{error}</Aviso>}
+      <Button size="sm" onClick={crear} disabled={guardando}>
+        {guardando ? "Guardando…" : "Crear plantilla"}
+      </Button>
+    </Card>
   );
 }
 
@@ -605,6 +997,118 @@ function Criterios({ criterios }: { criterios: CriterioFiltro[] }) {
 }
 
 /* ============================================================
+   Cliente / Responsable / Colaboradores — únicos campos editables del detalle (Fase B)
+   ============================================================ */
+function RelacionesVacante({ v, onCambio }: { v: Vacante; onCambio: () => void }) {
+  const puedeDecidir = usePuedeDecidir();
+  const [clientes, setClientes] = useState<Cliente[]>([]);
+  const [usuarios, setUsuarios] = useState<{ id: number; nombre: string }[]>([]);
+  const [guardando, setGuardando] = useState(false);
+
+  useEffect(() => {
+    fetchClientes("Activo").then((c) => setClientes(c ?? []));
+    fetchEntrevistadores().then((u) => setUsuarios(u ?? []));
+  }, []);
+
+  async function guardar(cambios: Record<string, unknown>) {
+    setGuardando(true);
+    await actualizarVacante(v.id, cambios);
+    setGuardando(false);
+    onCambio();
+  }
+
+  if (!puedeDecidir) {
+    return (
+      <Card className="p-4 text-sm text-ink-2">
+        <p>Cliente: {v.cliente ?? "— la Cuenta recluta directo —"}</p>
+        <p className="mt-1">Responsable: {v.responsable ?? "—"}</p>
+        {(v.colaboradores?.length ?? 0) > 0 && <p className="mt-1">Colaboradores: {v.colaboradores!.join(", ")}</p>}
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="flex flex-col gap-4 p-4">
+      <Eyebrow>Cliente y responsables</Eyebrow>
+      <div className="grid gap-4 sm:grid-cols-2">
+        {clientes.length > 0 && (
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-ink-2">Cliente</span>
+            <select
+              value={v.cliente ? clientes.find((c) => c.nombre === v.cliente)?.id ?? "" : ""}
+              onChange={(e) => guardar({ cliente_id: e.target.value ? Number(e.target.value) : null })}
+              disabled={guardando}
+              className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+            >
+              <option value="">Sin Cliente — la Cuenta recluta directo</option>
+              {clientes.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.nombre}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium text-ink-2">Responsable</span>
+          <select
+            value={usuarios.find((u) => u.nombre === v.responsable)?.id ?? ""}
+            onChange={(e) => guardar({ responsable_id: e.target.value ? Number(e.target.value) : null })}
+            disabled={guardando}
+            className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+          >
+            <option value="">Sin asignar</option>
+            {usuarios.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.nombre}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {usuarios.length > 0 && (
+        <div>
+          <span className="text-sm font-medium text-ink-2">Colaboradores</span>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {usuarios.map((u) => {
+              const activo = (v.colaboradores ?? []).includes(u.nombre);
+              return (
+                <button
+                  key={u.id}
+                  disabled={guardando}
+                  onClick={() => {
+                    const nombresActuales = v.colaboradores ?? [];
+                    const idsActuales = usuarios.filter((x) => nombresActuales.includes(x.nombre)).map((x) => x.id);
+                    const nuevos = activo ? idsActuales.filter((x) => x !== u.id) : [...idsActuales, u.id];
+                    guardar({ colaboradores_ids: nuevos });
+                  }}
+                  className={cn(
+                    "rounded-full border px-3 py-1.5 text-[13px] font-medium transition disabled:opacity-50",
+                    activo ? "border-brand bg-brand-soft text-brand" : "border-border-soft text-ink-2 hover:border-brand/40",
+                  )}
+                >
+                  {u.nombre}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {v.cliente && (
+        <ToggleSiNo
+          label="Mostrar cliente al candidato"
+          ayuda="Si está en 'No', el candidato ve el nombre de tu Cuenta en vez del Cliente."
+          valor={v.mostrarClienteCandidato ?? true}
+          onChange={(valor) => guardar({ mostrar_cliente_candidato: valor })}
+        />
+      )}
+    </Card>
+  );
+}
+
+/* ============================================================
    Drawer: detalle de una vacante ya guardada
    ============================================================ */
 function DetalleVacante({
@@ -612,11 +1116,13 @@ function DetalleVacante({
   live,
   onClose,
   onCambio,
+  onVerPrevia,
 }: {
   v: Vacante;
   live: boolean;
   onClose: () => void;
   onCambio: (codigo?: string) => void;
+  onVerPrevia: () => void;
 }) {
   const [ocupado, setOcupado] = useState("");
   const [aviso, setAviso] = useState<{ tono: "ok" | "error"; texto: string } | null>(null);
@@ -666,6 +1172,46 @@ function DetalleVacante({
     if (r.ok) onCambio(v.id);
   }
 
+  const [mostrarGuardarPlantilla, setMostrarGuardarPlantilla] = useState(false);
+  const [nombrePlantilla, setNombrePlantilla] = useState("");
+  const [guardandoPlantilla, setGuardandoPlantilla] = useState(false);
+
+  /** Guarda el contenido ya generado de esta vacante como una Plantilla general (Fase B, punto
+   * 11) — la forma más natural de armar una plantilla rica sin capturar todo a mano. Se puede
+   * mover a un Cliente específico después desde la gestión de Plantillas. */
+  async function guardarComoPlantilla() {
+    if (!nombrePlantilla.trim()) return;
+    setGuardandoPlantilla(true);
+    const r = await crearPlantilla({
+      nombre: nombrePlantilla.trim(),
+      titulo: v.titulo,
+      area: v.area,
+      modalidad: v.modalidad,
+      sueldo: v.sueldo,
+      requisitos: v.requisitos ?? "",
+      descripcion: v.descripcion ?? "",
+      resumen: v.resumen ?? "",
+      perfil_ideal: v.perfilIdeal ?? "",
+      responsabilidades: v.responsabilidades ?? [],
+      requisitos_deseables: v.requisitosDeseables ?? [],
+      beneficios: v.beneficios ?? [],
+      palabras_clave: v.palabrasClave ?? [],
+      seniority: v.seniority ?? "",
+      avisos_cumplimiento: v.avisosCumplimiento ?? [],
+      preguntas_filtro: (v.criterios ?? []) as CriterioFiltro[],
+      texto_whatsapp: v.textoWhatsapp ?? "",
+      texto_bolsa: v.textoBolsa ?? "",
+    });
+    setGuardandoPlantilla(false);
+    if (!r.ok) {
+      setAviso({ tono: "error", texto: r.error });
+      return;
+    }
+    setAviso({ tono: "ok", texto: `Plantilla "${r.data.nombre}" creada — ya se puede sugerir en nuevas vacantes.` });
+    setMostrarGuardarPlantilla(false);
+    setNombrePlantilla("");
+  }
+
   const embudo = v.embudo?.etapas ?? {};
 
   return (
@@ -709,6 +1255,17 @@ function DetalleVacante({
           </div>
         )}
 
+        {live && (
+          <button
+            onClick={onVerPrevia}
+            className="flex items-center justify-center gap-2 rounded-xl border border-border-soft px-4 py-2.5 text-sm font-semibold text-ink-2 transition hover:border-brand/40 hover:text-brand"
+          >
+            <Eye className="h-4 w-4" /> Vista previa — cómo la ve el candidato
+          </button>
+        )}
+
+        {live && <RelacionesVacante v={v} onCambio={() => onCambio(v.id)} />}
+
         {aviso && <Aviso tono={aviso.tono} onCerrar={() => setAviso(null)}>{aviso.texto}</Aviso>}
 
         {(v.avisosCumplimiento?.length ?? 0) > 0 && (
@@ -736,6 +1293,34 @@ function DetalleVacante({
         )}
 
         {(v.criterios?.length ?? 0) > 0 && <Criterios criterios={v.criterios as CriterioFiltro[]} />}
+
+        {live && puedeDecidir && tieneContenido && (
+          <div className="rounded-xl border border-border-soft p-4">
+            {mostrarGuardarPlantilla ? (
+              <div className="flex gap-2">
+                <input
+                  value={nombrePlantilla}
+                  onChange={(e) => setNombrePlantilla(e.target.value)}
+                  placeholder="Nombre de la plantilla"
+                  className="h-10 flex-1 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+                />
+                <Button size="sm" onClick={guardarComoPlantilla} disabled={guardandoPlantilla || !nombrePlantilla.trim()}>
+                  {guardandoPlantilla ? "Guardando…" : "Guardar"}
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setMostrarGuardarPlantilla(false)}>
+                  Cancelar
+                </Button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setMostrarGuardarPlantilla(true)}
+                className="text-sm font-medium text-brand hover:underline"
+              >
+                Guardar este contenido como plantilla reutilizable
+              </button>
+            )}
+          </div>
+        )}
 
         {live && puedeDecidir && (
           <div className="flex flex-col gap-3 border-t border-border-faint pt-5">
@@ -853,6 +1438,60 @@ function Panel({
   );
 }
 
+/** Vista previa (Fase B, punto 12) — mismo layout conceptual que /aplicar/[slug]: título,
+ * nombre de empresa ya resuelto por el backend (Cliente o Cuenta, según el flag), ubicación,
+ * sueldo/modalidad, resumen/descripción/responsabilidades/beneficios. Logo de la Cuenta si
+ * existe. Funciona con la vacante en Borrador — nunca es obligatoria para publicar. */
+function VistaPreviaVacante({ codigo, onClose }: { codigo: string; onClose: () => void }) {
+  const [v, setV] = useState<Vacante | null>(null);
+  const [cargando, setCargando] = useState(true);
+
+  useEffect(() => {
+    fetchVistaPreviaVacante(codigo).then((data) => {
+      setV(data);
+      setCargando(false);
+    });
+  }, [codigo]);
+
+  return (
+    <Panel titulo="Vista previa" eyebrow="Cómo la ve el candidato" onClose={onClose} ancho="max-w-2xl">
+      <div className="flex flex-col gap-5 p-6">
+        {cargando && <p className="text-sm text-ink-3">Cargando…</p>}
+        {!cargando && !v && <Aviso tono="error">No se pudo cargar la vista previa.</Aviso>}
+        {v && (
+          <Card className="p-6">
+            {v.logoUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={v.logoUrl} alt={v.nombreEmpresa ?? ""} className="h-10 w-auto object-contain" />
+            ) : (
+              <span className="font-display text-lg font-bold text-brand">Red Human AI</span>
+            )}
+            <h2 className="font-display mt-4 text-2xl font-bold">{v.titulo}</h2>
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-ink-2">
+              <span className="flex items-center gap-1.5">
+                <Building2 className="h-4 w-4 text-ink-3" /> {v.nombreEmpresa ?? v.empresa}
+              </span>
+              <span className="flex items-center gap-1.5">
+                <MapPin className="h-4 w-4 text-ink-3" /> {v.ubicacion}
+              </span>
+              <span>{v.modalidad}</span>
+              <span className="font-mono text-brand">{v.sueldo}</span>
+            </div>
+            {v.resumen && <p className="mt-4 text-[15px] font-medium leading-relaxed">{v.resumen}</p>}
+            {v.descripcion && (
+              <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-ink-2">{v.descripcion}</p>
+            )}
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <ListaCorta titulo="Responsabilidades" items={v.responsabilidades ?? []} />
+              <ListaCorta titulo="Ofrecemos" items={v.beneficios ?? []} />
+            </div>
+          </Card>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 function ListaCorta({ titulo, items }: { titulo: string; items: string[] }) {
   if (!items?.length) return null;
   return (
@@ -922,6 +1561,42 @@ function Selector({
         ))}
       </select>
     </label>
+  );
+}
+
+function ToggleSiNo({
+  label,
+  ayuda,
+  valor,
+  onChange,
+}: {
+  label: string;
+  ayuda?: string;
+  valor: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div>
+      <span className="text-sm font-medium text-ink-2">{label}</span>
+      <div className="mt-1.5 flex gap-2">
+        {[
+          { texto: "Sí", val: true },
+          { texto: "No", val: false },
+        ].map((o) => (
+          <button
+            key={o.texto}
+            onClick={() => onChange(o.val)}
+            className={cn(
+              "rounded-full border px-4 py-1.5 text-[13px] font-medium transition",
+              valor === o.val ? "border-brand bg-brand-soft text-brand" : "border-border-soft text-ink-2 hover:border-brand/40",
+            )}
+          >
+            {o.texto}
+          </button>
+        ))}
+      </div>
+      {ayuda && <p className="mt-1.5 text-xs leading-relaxed text-ink-3">{ayuda}</p>}
+    </div>
   );
 }
 

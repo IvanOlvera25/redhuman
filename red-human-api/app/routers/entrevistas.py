@@ -17,7 +17,7 @@ from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import Candidato, Cuenta, Entrevista, Mensaje, Usuario, Vacante, registrar
-from ..serial import entrevista_dict
+from ..serial import entrevista_dict, nombre_empresa_candidato
 from ..services import ia
 from ..services.avatar import avatar_activo, crear_sesion_avatar
 from ..services.configuracion import modo_prueba_activo
@@ -193,7 +193,7 @@ def publica(token: str, db: Session = Depends(get_db)):
     return {
         "candidato": c.nombre if c else "",
         "puesto": c.vacante.titulo if c and c.vacante else "",
-        "empresa": c.vacante.empresa if c and c.vacante else "Red Human",
+        "empresa": nombre_empresa_candidato(c.vacante) if c and c.vacante else "Red Human",
         "tipo": e.tipo,
         "estado": e.estado,
         "consentimiento": e.consentimiento,

@@ -316,7 +316,7 @@ function VacanteCard({ v }: { v: Vacante }) {
 
       <div className="flex flex-wrap items-center gap-1.5">
         <Badge tone="neutral">
-          <Building2 className="h-3 w-3" /> {v.empresa}
+          <Building2 className="h-3 w-3" /> {v.nombreEmpresa ?? v.empresa}
         </Badge>
         <Badge tone="neutral">
           <MapPin className="h-3 w-3" /> {v.ubicacion || "México"}

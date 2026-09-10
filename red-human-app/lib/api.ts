@@ -89,6 +89,10 @@ function subir<T>(ruta: string, form: FormData) {
   return enviar<T>(ruta, { method: "POST", body: form });
 }
 
+function eliminar<T>(ruta: string) {
+  return enviar<T>(ruta, { method: "DELETE" });
+}
+
 export function urlArchivo(ruta: string) {
   return `${API}${ruta}`;
 }
@@ -97,7 +101,7 @@ export function urlArchivo(ruta: string) {
    Autenticación
    ============================================================ */
 
-export type RolUsuario = "admin" | "rh" | "lectura";
+export type RolUsuario = "Administrador" | "Usuario";
 
 export interface UsuarioRH {
   id: number;
@@ -267,6 +271,12 @@ export function crearVacante(
     publicar?: boolean;
     plataformas?: string[];
     generar_si_falta?: boolean;
+    /* --- Fase B: creación de vacante --- */
+    cliente_id?: number | null;
+    responsable_id?: number | null;
+    colaboradores_ids?: number[];
+    mostrar_cliente_candidato?: boolean;
+    plantilla_id?: number | null;
   },
 ) {
   return post<Vacante>("/vacantes", datos);
@@ -274,6 +284,11 @@ export function crearVacante(
 
 export function actualizarVacante(codigo: string, cambios: Record<string, unknown>) {
   return patch<Vacante>(`/vacantes/${codigo}`, cambios);
+}
+
+/** Cómo verá el candidato esta vacante — funciona aunque siga en Borrador. */
+export function fetchVistaPreviaVacante(codigo: string) {
+  return get<Vacante>(`/vacantes/${codigo}/vista-previa`);
 }
 
 export function regenerarVacante(codigo: string, notas = "") {
@@ -301,6 +316,105 @@ export interface PublicacionLista {
 
 export function fetchPublicacion(codigo: string, plataforma: string) {
   return get<PublicacionLista>(`/vacantes/${codigo}/publicacion/${plataforma}`);
+}
+
+/* ============================================================
+   Fase B · Clientes (empresas para las que recluta una Cuenta)
+   ============================================================ */
+
+export interface Cliente {
+  id: number;
+  nombre: string;
+  estado: "Activo" | "Inactivo";
+  creado: string;
+}
+
+export function fetchClientes(estado?: string) {
+  return get<Cliente[]>(`/clientes${estado ? `?estado=${estado}` : ""}`);
+}
+
+export function crearCliente(nombre: string) {
+  return post<Cliente>("/clientes", { nombre });
+}
+
+export function actualizarCliente(id: number, cambios: { nombre?: string; estado?: string }) {
+  return patch<Cliente>(`/clientes/${id}`, cambios);
+}
+
+/* ============================================================
+   Fase B · Plantillas de vacante
+   ============================================================ */
+
+export interface Plantilla {
+  id: number;
+  nombre: string;
+  clienteId: number | null;
+  clienteNombre: string | null;
+  activa: boolean;
+  titulo: string;
+  area: string;
+  modalidad: string;
+  sueldo: string;
+  requisitos: string;
+  descripcion: string;
+  resumen: string;
+  perfilIdeal: string;
+  responsabilidades: string[];
+  requisitosDeseables: string[];
+  beneficios: string[];
+  palabrasClave: string[];
+  seniority: string;
+  avisosCumplimiento: string[];
+  preguntasFiltro: CriterioFiltro[];
+  textoWhatsapp: string;
+  textoBolsa: string;
+  creadoPor: string;
+  creada: string;
+}
+
+export interface DatosPlantilla {
+  nombre: string;
+  cliente_id?: number | null;
+  titulo?: string;
+  area?: string;
+  modalidad?: string;
+  sueldo?: string;
+  requisitos?: string;
+  descripcion?: string;
+  resumen?: string;
+  perfil_ideal?: string;
+  responsabilidades?: string[];
+  requisitos_deseables?: string[];
+  beneficios?: string[];
+  palabras_clave?: string[];
+  seniority?: string;
+  avisos_cumplimiento?: string[];
+  preguntas_filtro?: CriterioFiltro[];
+  texto_whatsapp?: string;
+  texto_bolsa?: string;
+}
+
+/** Sin `clienteId`: todas las plantillas activas de la Cuenta. Con `clienteId`: las de ese
+ * Cliente primero, luego las generales — el orden de sugerencia para "crear vacante". */
+export function fetchPlantillas(clienteId?: number) {
+  return get<Plantilla[]>(`/plantillas${clienteId ? `?cliente_id=${clienteId}` : ""}`);
+}
+
+export function fetchPlantilla(id: number) {
+  return get<Plantilla>(`/plantillas/${id}`);
+}
+
+export function crearPlantilla(datos: DatosPlantilla) {
+  return post<Plantilla>("/plantillas", datos);
+}
+
+export function actualizarPlantilla(id: number, cambios: Partial<DatosPlantilla> & { activa?: boolean }) {
+  return patch<Plantilla>(`/plantillas/${id}`, cambios);
+}
+
+/** No borra — desactiva (deja de sugerirse, pero las vacantes ya creadas desde ella conservan la referencia). */
+export function eliminarPlantilla(id: number) {
+  return eliminar<{ ok: boolean }>(`/plantillas/${id}`);
 }
 
 /* ============================================================

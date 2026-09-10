@@ -4,8 +4,9 @@
 Especificación completa en Otros_cambios_2.docx (29 puntos), dividida en 6 fases por 
 dependencia real (cada fase depende de que la anterior esté terminada, salvo E que es 
 transversal):
-- Fase A: Modelo de Cuenta, Cliente, Usuarios y permisos — EN CURSO (investigación)
-- Fase B: Vacantes (creación, herencia automática de Cuenta/Cliente, plantillas, vista previa) — PENDIENTE, depende de A
+- Fase A: Modelo de Cuenta, Cliente, Usuarios y permisos — CÓDIGO LISTO, sin commit/deploy;
+  falta correr `migrar_cuentas.py` en producción (ver detalle abajo)
+- Fase B: Vacantes (creación, herencia automática de Cuenta/Cliente, plantillas, vista previa) — CÓDIGO LISTO, sin commit/deploy; depende de que Fase A ya esté desplegada y migrada
 - Fase C: Vistas de Vacantes/Candidatos (tarjetas/lista, filtros, conteos reales por etapa, navegación desde contadores, lógica de "Apto") — PENDIENTE, depende de A y B
 - Fase D: Notificaciones configurables por evento/destinatario/canal — PENDIENTE, depende de A, B y de la infraestructura de WhatsApp/correo ya existente
 - Fase E: Reglas de simplificación (ocultar selectores cuando no aplican, herencia automática, no repetir capturas) — transversal, se verifica en cada fase, no es un entregable aparte
@@ -265,10 +266,10 @@ producción (o revisar la lista impresa en un `--forzar` no confirmado) antes de
 migración real, para ver el resultado con sus datos reales** — lo que se verificó aquí
 prueba que la lógica de agrupación funciona, no sustituye ver la lista real.
 
-### Siguiente paso
-1. El usuario revisa el diff completo (`git diff` — 14 archivos de `routers/` +
-   `models.py` + `deps.py` + `seed.py`, y el archivo nuevo `scripts/migrar_cuentas.py`,
-   este último ya con el fix de normalización de nombres) — nada está comiteado todavía.
+### Fase A — pendiente de deploy
+1. El usuario revisa el diff completo de Fase A (`git diff` — 14 archivos de `routers/` +
+   `models.py` + `deps.py` + `seed.py`, y el archivo nuevo `scripts/migrar_cuentas.py`, ya
+   con el fix de normalización de nombres) — nada está comiteado todavía.
 2. Antes de confirmar la migración real: correr `migrar_cuentas.py` SIN `--forzar` contra
    una copia de la base de producción (o directamente, cancelando en el prompt de
    confirmación) para revisar la lista real de Clientes que se crearían — especialmente
@@ -277,6 +278,83 @@ prueba que la lógica de agrupación funciona, no sustituye ver la lista real.
    confirmación explícita, como siempre). **Orden obligatorio**: el script debe correr
    inmediatamente después del deploy — hasta que corra, `usuario_cuentas` está vacía y
    `cuenta_actual` le da 403 a todo el mundo.
-4. Fase A queda funcionalmente completa (modelo + auth + los 14 archivos de endpoints).
-   Sigue Fase B: Vacantes con creación, herencia automática de Cuenta/Cliente, plantillas,
-   vista previa — depende de A, ya lista.
+
+### Fase B — implementada completa (código real, todavía sin commit/deploy) — 2026-09-10
+
+Investigación previa (3 agentes en paralelo, backend + 2 de frontend) confirmó: puntos 8,
+10, 11 y 12 eran 100% nuevos (nada que reutilizar salvo `Cuenta.logo`/`nombre_comercial`,
+que Fase A dejó listos pero sin usar en ningún lado); punto 9 (herencia automática) ya
+funcionaba en su mayor parte gracias a Fase A — solo faltaba resolver el nombre de empresa
+candidato-visible en 4 puntos (ver detalle en el plan, `nombre_empresa_candidato`).
+
+Decisiones de negocio confirmadas por el usuario (no volver a preguntar):
+- CRUD de Cliente (listar/crear/editar, sin contactos) sí entra en Fase B.
+- Cuando `mostrar_cliente_candidato=False` o no hay Cliente: el candidato ve el nombre
+  comercial de la Cuenta (`Cuenta.nombre_comercial`), nunca un texto genérico.
+- "Evaluaciones" en una Plantilla = solo `preguntas_filtro` (el guion de Entrevista IA
+  sigue generándose con IA, no viene de la plantilla).
+- Apariencia del Portal (vista previa) = mínimo viable: `Cuenta.logo` +
+  `Cuenta.nombre_comercial` en vez del logo fijo de Red Human. Sin sistema de colores nuevo.
+
+**Backend implementado:**
+- `models.py`: `Vacante` gana `responsable_id`, `colaboradores_ids` (lista de ids, sin
+  tabla puente), `mostrar_cliente_candidato`, `plantilla_id`, y relationships
+  `responsable`/`cliente`/`cuenta`. Tabla nueva `Plantilla` (General de la Cuenta o de un
+  Cliente específico, nunca ambos — mismos campos reutilizables que Vacante).
+- `serial.py`: nueva función `nombre_empresa_candidato(v)` — Cliente si aplica y está
+  visible, si no el nombre de la Cuenta. Aplicada en `vacante_dict`, en los call-sites de
+  generación de copy IA (`routers/vacantes.py::crear/regenerar`, vía
+  `routers/candidatos.py::prefiltro_turno`), en la carta de intención
+  (`routers/contratacion.py`) y en `GET /entrevistas/publica/{token}`.
+- `routers/vacantes.py`: `CrearIn`/`ActualizarIn` ganan los 5 campos de Fase B con
+  validación cruzada de Cuenta (`_validar_relaciones`); nuevo endpoint
+  `GET /vacantes/{codigo}/vista-previa` (funciona con la vacante en Borrador — nunca
+  obligatoria para publicar); `por_slug`/`listar_publicas` agregan `nombreEmpresa`/`logoUrl`.
+- Dos routers nuevos: `routers/clientes.py` (CRUD simple) y `routers/plantillas.py`
+  (`GET /plantillas?cliente_id=` regresa las del Cliente primero, luego generales — el
+  orden de sugerencia exacto del punto 11; `DELETE` no borra, desactiva).
+- Registrados en `main.py`.
+
+**Frontend implementado** (`red-human-app`):
+- Fix del bug de roles viejos (`admin`/`rh`/`lectura` → `Administrador`/`Usuario`) en
+  `lib/api.ts`, `components/sesion.tsx`, `components/dashboard/shell.tsx` — encontrado
+  durante la investigación, corregido como parte de este mismo trabajo por ser mecánico.
+- `app/dashboard/vacantes/page.tsx` (el cambio grande): `CrearVacante` gana el paso
+  "Crear desde cero | Usar plantilla", selectores de Cliente/Responsable/Colaboradores
+  (Cliente oculto por completo si la Cuenta no tiene ninguno), toggle "Mostrar cliente al
+  candidato"; nuevo botón "Vista previa" en `DetalleVacante` (Panel nuevo
+  `VistaPreviaVacante`); nueva tarjeta editable `RelacionesVacante` en el detalle; botón
+  "Guardar este contenido como plantilla reutilizable" en el detalle; panel de gestión
+  `GestionPlantillas` (listar/crear/desactivar) accesible desde un botón "Plantillas" en
+  el header.
+- `app/dashboard/configuracion/page.tsx`: tarjeta nueva de gestión de Clientes
+  (listar/crear/activar-desactivar), junto a Modo Prueba.
+- `app/aplicar/[slug]/page.tsx` y `app/portal/page.tsx`: usan `nombreEmpresa`/`logoUrl` ya
+  resueltos por el backend en vez del `empresa` crudo (quitado el fallback fijo
+  `"Grupo Carbe"` del primero).
+
+**Verificación realizada** (todo contra copias descartables, nunca la base real):
+- Backend: esquema nuevo aplica limpio (incluida la tabla `plantillas` y las 4 columnas
+  nuevas de `Vacante`); suite de `TestClient` cubriendo Clientes (CRUD + duplicado
+  case-insensitive), Plantillas (CRUD + orden de sugerencia por Cliente + desactivar),
+  Vacantes (crear con Cliente/Responsable/Colaboradores/plantilla, `mostrar_cliente`
+  en ambos sentidos, vista previa en Borrador, publicar, `/publicas` y `/slug/{slug}` con
+  los campos nuevos) — todo en verde; regresión de los 17 endpoints de Fase A: sin
+  cambios.
+- Frontend: `tsc --noEmit` limpio, `next build` compila y pasa lint/type-check sin
+  errores. Prueba con servidores reales (backend `uvicorn` + frontend `next dev`, ambos
+  contra una copia de la base ya migrada): login real funciona, `/vacantes/publicas` y
+  `/vacantes/slug/{slug}` regresan `nombreEmpresa`/`logoUrl` correctos a través del
+  servidor real (no solo TestClient), todas las páginas tocadas responden 200 (o 307 a
+  login cuando no hay sesión, correcto). Servidores y base de prueba ya detenidos/borrados.
+
+### Siguiente paso
+1. El usuario revisa el diff completo de Fase B (7 archivos de backend incluidos 2 nuevos
+   `routers/clientes.py` y `routers/plantillas.py`; 9 archivos de frontend) — nada
+   comiteado todavía.
+2. Deploy en el orden correcto: Fase A completa (commit → deploy → `migrar_cuentas.py`)
+   primero, Fase B después (no necesita su propio script de migración de datos — todas
+   sus columnas/tabla son nuevas sin backfill).
+3. Sigue Fase C: Vistas de Vacantes/Candidatos (tarjetas/lista, filtros, conteos reales
+   por etapa, navegación desde contadores, lógica de "Apto") — depende de A y B, ambas ya
+   listas en código.
