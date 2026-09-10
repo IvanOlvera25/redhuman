@@ -10,29 +10,45 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from ..deps import cuenta_actual, usuario_actual
 from ..database import get_db
-from ..deps import usuario_actual
-from ..models import ETAPAS_CANDIDATO, Candidato, Entrevista, Expediente, Vacante
+from ..models import ETAPAS_CANDIDATO, Candidato, Cuenta, Entrevista, Expediente, Vacante
 
 router = APIRouter(prefix="/metricas", tags=["metricas"], dependencies=[Depends(usuario_actual)])
 
 
-def _candidatos(db: Session):
+def _candidatos(db: Session, cuenta_id: int):
     """Base de todo conteo de Candidato en este módulo — nunca cuenta postulaciones de Modo Prueba."""
-    return db.query(Candidato).filter(Candidato.es_prueba.is_(False))
+    return db.query(Candidato).filter(Candidato.es_prueba.is_(False), Candidato.cuenta_id == cuenta_id)
 
 
 @router.get("/pipeline")
-def pipeline(db: Session = Depends(get_db)):
+def pipeline(db: Session = Depends(get_db), cuenta: Cuenta = Depends(cuenta_actual)):
     """Embudo de punta a punta: captación → prefiltro → entrevista → expediente → alta."""
-    total_candidatos = _candidatos(db).count()
-    por_etapa = dict(_candidatos(db).with_entities(Candidato.etapa, func.count(Candidato.id)).group_by(Candidato.etapa).all())
-    por_estado = dict(_candidatos(db).with_entities(Candidato.estado, func.count(Candidato.id)).group_by(Candidato.estado).all())
-    por_fuente = dict(_candidatos(db).with_entities(Candidato.fuente, func.count(Candidato.id)).group_by(Candidato.fuente).all())
+    total_candidatos = _candidatos(db, cuenta.id).count()
+    por_etapa = dict(
+        _candidatos(db, cuenta.id).with_entities(Candidato.etapa, func.count(Candidato.id)).group_by(Candidato.etapa).all()
+    )
+    por_estado = dict(
+        _candidatos(db, cuenta.id).with_entities(Candidato.estado, func.count(Candidato.id)).group_by(Candidato.estado).all()
+    )
+    por_fuente = dict(
+        _candidatos(db, cuenta.id).with_entities(Candidato.fuente, func.count(Candidato.id)).group_by(Candidato.fuente).all()
+    )
 
-    prefiltrados = _candidatos(db).filter(Candidato.prefiltro_completo.is_(True)).count()
-    entrevistas_evaluadas = db.query(Entrevista).filter(Entrevista.estado == "evaluada").count()
-    expedientes = db.query(Expediente).all()
+    prefiltrados = _candidatos(db, cuenta.id).filter(Candidato.prefiltro_completo.is_(True)).count()
+    entrevistas_evaluadas = (
+        db.query(Entrevista)
+        .join(Candidato, Entrevista.candidato_id == Candidato.id)
+        .filter(Entrevista.estado == "evaluada", Candidato.cuenta_id == cuenta.id)
+        .count()
+    )
+    expedientes = (
+        db.query(Expediente)
+        .join(Candidato, Expediente.candidato_id == Candidato.id)
+        .filter(Candidato.cuenta_id == cuenta.id)
+        .all()
+    )
     altas = [e for e in expedientes if e.estado == "alta"]
 
     embudo = [
@@ -49,17 +65,17 @@ def pipeline(db: Session = Depends(get_db)):
     hace_7d = datetime.now(timezone.utc) - timedelta(days=7)
     return {
         "vacantes": {
-            "total": db.query(Vacante).count(),
-            "publicadas": db.query(Vacante).filter(Vacante.estado == "Publicada").count(),
-            "borradores": db.query(Vacante).filter(Vacante.estado == "Borrador").count(),
+            "total": db.query(Vacante).filter(Vacante.cuenta_id == cuenta.id).count(),
+            "publicadas": db.query(Vacante).filter(Vacante.estado == "Publicada", Vacante.cuenta_id == cuenta.id).count(),
+            "borradores": db.query(Vacante).filter(Vacante.estado == "Borrador", Vacante.cuenta_id == cuenta.id).count(),
         },
         "candidatos": {
             "total": total_candidatos,
-            "nuevos_7d": _candidatos(db).filter(Candidato.creado_en >= hace_7d).count(),
+            "nuevos_7d": _candidatos(db, cuenta.id).filter(Candidato.creado_en >= hace_7d).count(),
             "por_etapa": {e: por_etapa.get(e, 0) for e in ETAPAS_CANDIDATO},
             "por_estado": por_estado,
             "por_fuente": por_fuente,
-            "sin_consentimiento": _candidatos(db).filter(Candidato.consentimiento.is_(False)).count(),
+            "sin_consentimiento": _candidatos(db, cuenta.id).filter(Candidato.consentimiento.is_(False)).count(),
         },
         "contratacion": {
             "expedientes": len(expedientes),
@@ -71,14 +87,14 @@ def pipeline(db: Session = Depends(get_db)):
         },
         "embudo": embudo,
         # cuellos de botella accionables para RH, con la liga al módulo que los resuelve
-        "acciones": _acciones(db, expedientes),
+        "acciones": _acciones(db, expedientes, cuenta.id),
     }
 
 
-def _acciones(db: Session, expedientes) -> list:
+def _acciones(db: Session, expedientes, cuenta_id: int) -> list:
     salida = []
 
-    por_decidir = _candidatos(db).filter(
+    por_decidir = _candidatos(db, cuenta_id).filter(
         Candidato.prefiltro_completo.is_(True), Candidato.etapa == "Prefiltro", Candidato.estado != "no_cumple"
     ).count()
     if por_decidir:
@@ -90,7 +106,7 @@ def _acciones(db: Session, expedientes) -> list:
             "ruta": "/dashboard/candidatos",
         })
 
-    sin_consentimiento = _candidatos(db).filter(
+    sin_consentimiento = _candidatos(db, cuenta_id).filter(
         Candidato.consentimiento.is_(False), Candidato.etapa != "Prefiltro"
     ).count()
     if sin_consentimiento:

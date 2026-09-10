@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..deps import usuario_actual, usuario_decisor
-from ..models import PLATAFORMAS, Candidato, Usuario, Vacante, registrar, slugificar
+from ..deps import cuenta_actual, usuario_actual, usuario_decisor
+from ..models import PLATAFORMAS, Candidato, Cuenta, Usuario, Vacante, registrar, slugificar
 from ..serial import vacante_dict
 from ..services import ia
 
@@ -25,8 +25,8 @@ router = APIRouter(prefix="/vacantes", tags=["vacantes"])
 ESTADOS = ["Borrador", "En revisión", "Publicada", "Cerrada"]
 
 
-def _por_codigo(db: Session, codigo: str) -> Vacante:
-    v = db.query(Vacante).filter(Vacante.codigo == codigo).first()
+def _por_codigo(db: Session, codigo: str, cuenta_id: int) -> Vacante:
+    v = db.query(Vacante).filter(Vacante.codigo == codigo, Vacante.cuenta_id == cuenta_id).first()
     if not v:
         raise HTTPException(404, "Vacante no encontrada")
     return v
@@ -73,8 +73,13 @@ def _salida(db: Session, v: Vacante) -> dict:
 
 
 @router.get("")
-def listar(estado: Optional[str] = None, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    q = db.query(Vacante).order_by(Vacante.id.desc())
+def listar(
+    estado: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(usuario_actual),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    q = db.query(Vacante).filter(Vacante.cuenta_id == cuenta.id).order_by(Vacante.id.desc())
     if estado:
         q = q.filter(Vacante.estado == estado)
     return [_salida(db, v) for v in q.all()]
@@ -161,7 +166,12 @@ class CrearIn(GenerarIn):
 
 
 @router.post("", status_code=201)
-def crear(datos: CrearIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def crear(
+    datos: CrearIn,
+    db: Session = Depends(get_db),
+    u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     if not datos.titulo.strip():
         raise HTTPException(400, "El título del puesto es obligatorio.")
 
@@ -171,6 +181,7 @@ def crear(datos: CrearIn, db: Session = Depends(get_db), u: Usuario = Depends(us
 
     v = Vacante(
         codigo="TMP",
+        cuenta_id=cuenta.id,
         titulo=datos.titulo.strip(),
         area=datos.area,
         empresa=datos.empresa,
@@ -235,8 +246,10 @@ def listar_publicas(db: Session = Depends(get_db)):
 
 
 @router.get("/{codigo}")
-def detalle(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    return _salida(db, _por_codigo(db, codigo))
+def detalle(
+    codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    return _salida(db, _por_codigo(db, codigo, cuenta.id))
 
 
 class ActualizarIn(BaseModel):
@@ -262,9 +275,12 @@ class ActualizarIn(BaseModel):
 
 
 @router.patch("/{codigo}")
-def actualizar(codigo: str, datos: ActualizarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def actualizar(
+    codigo: str, datos: ActualizarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     """Edición manual de RH sobre lo que generó la IA (el agente propone, RH dispone)."""
-    v = _por_codigo(db, codigo)
+    v = _por_codigo(db, codigo, cuenta.id)
     cambios = datos.model_dump(exclude_none=True, exclude={"autor"})
     if datos.estado is not None and datos.estado not in ESTADOS:
         raise HTTPException(400, f"Estado inválido. Usa uno de: {', '.join(ESTADOS)}")
@@ -286,9 +302,12 @@ class RegenerarIn(BaseModel):
 
 
 @router.post("/{codigo}/regenerar")
-def regenerar(codigo: str, datos: RegenerarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def regenerar(
+    codigo: str, datos: RegenerarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     """Vuelve a generar todo el contenido de una vacante existente con los datos ya capturados."""
-    v = _por_codigo(db, codigo)
+    v = _por_codigo(db, codigo, cuenta.id)
     generado, con_ia = ia.generar_vacante(
         v.titulo, v.area, v.ubicacion, v.sueldo, v.requisitos, v.empresa, v.modalidad, datos.notas
     )
@@ -308,8 +327,11 @@ class PublicarIn(BaseModel):
 
 
 @router.post("/{codigo}/publicar")
-def publicar(codigo: str, datos: PublicarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    v = _por_codigo(db, codigo)
+def publicar(
+    codigo: str, datos: PublicarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    v = _por_codigo(db, codigo, cuenta.id)
     plataformas = [p for p in datos.plataformas if p in PLATAFORMAS]
     if not plataformas:
         raise HTTPException(400, f"Elige al menos una plataforma válida: {', '.join(PLATAFORMAS)}")
@@ -326,8 +348,11 @@ def publicar(codigo: str, datos: PublicarIn, db: Session = Depends(get_db), u: U
 
 
 @router.post("/{codigo}/cerrar")
-def cerrar(codigo: str, datos: PublicarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    v = _por_codigo(db, codigo)
+def cerrar(
+    codigo: str, datos: PublicarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    v = _por_codigo(db, codigo, cuenta.id)
     v.estado = "Cerrada"
     v.plataformas = []
     registrar(db, u.nombre, "vacante_cerrada", "vacante", v.codigo, {})
@@ -336,9 +361,12 @@ def cerrar(codigo: str, datos: PublicarIn, db: Session = Depends(get_db), u: Usu
 
 
 @router.get("/{codigo}/publicacion/{plataforma}")
-def publicacion(codigo: str, plataforma: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
+def publicacion(
+    codigo: str, plataforma: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     """Texto listo para copiar y pegar en la plataforma indicada, con la liga de postulación."""
-    v = _por_codigo(db, codigo)
+    v = _por_codigo(db, codigo, cuenta.id)
     clave = plataforma.lower()
     bloque = (v.publicaciones or {}).get(clave)
     if not bloque:

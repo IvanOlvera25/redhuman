@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..deps import usuario_actual, usuario_decisor
-from ..models import Candidato, Entrevista, Mensaje, Usuario, Vacante, registrar
+from ..deps import cuenta_actual, usuario_actual, usuario_decisor
+from ..models import Candidato, Cuenta, Entrevista, Mensaje, Usuario, Vacante, registrar
 from ..serial import entrevista_dict
 from ..services import ia
 from ..services.avatar import avatar_activo, crear_sesion_avatar
@@ -42,14 +42,25 @@ def _por_codigo(db: Session, codigo: str) -> Entrevista:
 
 
 @router.get("")
-def listar(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    return [entrevista_dict(e) for e in db.query(Entrevista).order_by(Entrevista.id.desc()).all()]
+def listar(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    q = (
+        db.query(Entrevista)
+        .join(Candidato, Entrevista.candidato_id == Candidato.id)
+        .filter(Candidato.cuenta_id == cuenta.id)
+        .order_by(Entrevista.id.desc())
+    )
+    return [entrevista_dict(e) for e in q.all()]
 
 
 @router.get("/metricas")
-def metricas(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
+def metricas(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
     """Métricas del motor de entrevistas para el dashboard."""
-    todas = db.query(Entrevista).all()
+    todas = (
+        db.query(Entrevista)
+        .join(Candidato, Entrevista.candidato_id == Candidato.id)
+        .filter(Candidato.cuenta_id == cuenta.id)
+        .all()
+    )
     evaluadas = [e for e in todas if e.estado == "evaluada" and e.evaluacion]
     matches = [e.evaluacion.get("match_perfil", 0) for e in evaluadas]
     recomendaciones = {"avanzar": 0, "revision": 0, "no_avanzar": 0}
@@ -79,8 +90,11 @@ class AgendarIn(BaseModel):
 
 
 @router.post("", status_code=201)
-async def agendar(datos: AgendarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    c = db.query(Candidato).filter(Candidato.codigo == datos.candidato).first()
+async def agendar(
+    datos: AgendarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    c = db.query(Candidato).filter(Candidato.codigo == datos.candidato, Candidato.cuenta_id == cuenta.id).first()
     if not c:
         raise HTTPException(404, "Candidato no encontrado")
 
@@ -120,7 +134,10 @@ class InmediataIn(BaseModel):
 
 
 @router.post("/inmediata", status_code=201)
-async def inmediata(datos: InmediataIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+async def inmediata(
+    datos: InmediataIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     """Crea (o reutiliza) al prospecto y genera su liga de entrevista en un paso."""
     if not datos.nombre.strip():
         raise HTTPException(400, "El nombre del prospecto es obligatorio.")
@@ -130,14 +147,23 @@ async def inmediata(datos: InmediataIn, db: Session = Depends(get_db), u: Usuari
     c = None
     if not prueba:
         if datos.telefono:
-            c = db.query(Candidato).filter(Candidato.telefono == datos.telefono, Candidato.es_prueba.is_(False)).first()
+            c = db.query(Candidato).filter(
+                Candidato.telefono == datos.telefono, Candidato.es_prueba.is_(False), Candidato.cuenta_id == cuenta.id
+            ).first()
         if not c and datos.correo:
-            c = db.query(Candidato).filter(Candidato.correo == datos.correo, Candidato.es_prueba.is_(False)).first()
+            c = db.query(Candidato).filter(
+                Candidato.correo == datos.correo, Candidato.es_prueba.is_(False), Candidato.cuenta_id == cuenta.id
+            ).first()
 
     if not c:
-        vac = db.query(Vacante).filter(Vacante.codigo == datos.vacante).first() if datos.vacante else None
+        vac = (
+            db.query(Vacante).filter(Vacante.codigo == datos.vacante, Vacante.cuenta_id == cuenta.id).first()
+            if datos.vacante
+            else None
+        )
         c = Candidato(
             codigo="TMP",
+            cuenta_id=cuenta.id,
             nombre=datos.nombre.strip(),
             telefono=datos.telefono,
             correo=datos.correo,
@@ -152,7 +178,7 @@ async def inmediata(datos: InmediataIn, db: Session = Depends(get_db), u: Usuari
         registrar(db, "sistema", "candidato_ingresado", "candidato", c.codigo, {"fuente": "RH", "via": "entrevista_inmediata"})
         db.commit()
 
-    return await agendar(AgendarIn(candidato=c.codigo, avisar_whatsapp=datos.avisar_whatsapp), db, u)
+    return await agendar(AgendarIn(candidato=c.codigo, avisar_whatsapp=datos.avisar_whatsapp), db, u, cuenta)
 
 
 # ------------------------------------------------------------

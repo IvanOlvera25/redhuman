@@ -14,8 +14,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..deps import usuario_actual, usuario_decisor
-from ..models import Colaborador, Documento, Expediente, Mensaje, Usuario, registrar
+from ..deps import cuenta_actual, usuario_actual, usuario_decisor
+from ..models import Candidato, Colaborador, Cuenta, Documento, Expediente, Mensaje, Usuario, registrar
 from ..serial import colaborador_dict, expediente_dict
 from ..services import archivos as fs
 from ..services import ia
@@ -27,8 +27,15 @@ router = APIRouter(prefix="/contratacion", tags=["contratacion"])
 ESTADOS_DOC = ("recibido", "rechazado", "revision", "pendiente")
 
 
-def _expediente(db: Session, exp_id: int) -> Expediente:
-    e = db.get(Expediente, exp_id)
+def _expediente(db: Session, exp_id: int, cuenta_id: int) -> Expediente:
+    """El Expediente no tiene columna cuenta_id propia — se resuelve por join contra el
+    Candidato dueño, igual que el resto de las entidades que cuelgan de él."""
+    e = (
+        db.query(Expediente)
+        .join(Candidato, Expediente.candidato_id == Candidato.id)
+        .filter(Expediente.id == exp_id, Candidato.cuenta_id == cuenta_id)
+        .first()
+    )
     if not e:
         raise HTTPException(404, "Expediente no encontrado")
     return e
@@ -48,17 +55,32 @@ def _sincronizar_estado(e: Expediente) -> None:
 
 
 @router.get("/expedientes")
-def listar(estado: Optional[str] = None, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    q = db.query(Expediente).order_by(Expediente.id)
+def listar(
+    estado: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(usuario_actual),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    q = (
+        db.query(Expediente)
+        .join(Candidato, Expediente.candidato_id == Candidato.id)
+        .filter(Candidato.cuenta_id == cuenta.id)
+        .order_by(Expediente.id)
+    )
     if estado:
         q = q.filter(Expediente.estado == estado)
     return [expediente_dict(e) for e in q.all()]
 
 
 @router.get("/metricas")
-def metricas(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
+def metricas(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
     """Resumen del módulo 2 para el tablero — cierra el ciclo con el módulo 1."""
-    todos = db.query(Expediente).all()
+    todos = (
+        db.query(Expediente)
+        .join(Candidato, Expediente.candidato_id == Candidato.id)
+        .filter(Candidato.cuenta_id == cuenta.id)
+        .all()
+    )
     docs_pendientes = sum(len(e.pendientes) for e in todos)
     por_revisar = sum(len(e.por_revisar) for e in todos)
     completos = [e for e in todos if e.progreso == 100]
@@ -79,8 +101,10 @@ def metricas(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)
 
 
 @router.get("/expedientes/{exp_id}")
-def detalle(exp_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    return expediente_dict(_expediente(db, exp_id))
+def detalle(
+    exp_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    return expediente_dict(_expediente(db, exp_id, cuenta.id))
 
 
 # ------------------------------------------------------------
@@ -100,11 +124,12 @@ class PreparacionIn(BaseModel):
 
 @router.patch("/expedientes/{exp_id}/preparacion")
 def actualizar_preparacion(
-    exp_id: int, datos: PreparacionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+    exp_id: int, datos: PreparacionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Bloque 4 de Onboarding — checklist de preparación de ingreso, independiente del
     expediente documental (bloque 3)."""
-    e = _expediente(db, exp_id)
+    e = _expediente(db, exp_id, cuenta.id)
     if e.estado == "alta":
         raise HTTPException(409, "El expediente ya fue dado de alta; no admite cambios.")
 
@@ -198,14 +223,18 @@ async def subir_documento(
     archivo: UploadFile = File(...),
     db: Session = Depends(get_db),
     u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    e = _expediente(db, exp_id)
+    e = _expediente(db, exp_id, cuenta.id)
     return await subir_documento_interno(db, e, tipo, archivo, subido_por=u.nombre)
 
 
 @router.get("/expedientes/{exp_id}/documentos/{tipo}/archivo")
-def descargar_documento(exp_id: int, tipo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    e = _expediente(db, exp_id)
+def descargar_documento(
+    exp_id: int, tipo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    e = _expediente(db, exp_id, cuenta.id)
     doc = _documento(e, tipo)
     if not fs.existe(doc.archivo):
         raise HTTPException(404, "Todavía no se ha subido este documento.")
@@ -221,9 +250,12 @@ class EstadoDocIn(BaseModel):
 
 
 @router.post("/expedientes/{exp_id}/documentos/estado")
-def marcar_documento(exp_id: int, datos: EstadoDocIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def marcar_documento(
+    exp_id: int, datos: EstadoDocIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     """Revisión humana manual de un documento (el agente propone, RH dispone)."""
-    e = _expediente(db, exp_id)
+    e = _expediente(db, exp_id, cuenta.id)
     doc = _documento(e, datos.tipo)
     if datos.estado not in ESTADOS_DOC:
         raise HTTPException(400, f"Estado inválido. Usa uno de: {', '.join(ESTADOS_DOC)}")
@@ -256,9 +288,12 @@ class AgregarDocIn(BaseModel):
 
 
 @router.post("/expedientes/{exp_id}/documentos/agregar", status_code=201)
-def agregar_documento(exp_id: int, datos: AgregarDocIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def agregar_documento(
+    exp_id: int, datos: AgregarDocIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     """Suma un documento al checklist (título profesional, licencia, carta de no antecedentes…)."""
-    e = _expediente(db, exp_id)
+    e = _expediente(db, exp_id, cuenta.id)
     tipo = datos.tipo.strip()
     if not tipo:
         raise HTTPException(400, "Indica el nombre del documento.")
@@ -274,8 +309,11 @@ def agregar_documento(exp_id: int, datos: AgregarDocIn, db: Session = Depends(ge
 
 
 @router.delete("/expedientes/{exp_id}/documentos/{tipo}")
-def quitar_documento(exp_id: int, tipo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    e = _expediente(db, exp_id)
+def quitar_documento(
+    exp_id: int, tipo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    e = _expediente(db, exp_id, cuenta.id)
     doc = _documento(e, tipo)
     if doc.estado == "recibido":
         raise HTTPException(409, "No se puede quitar un documento ya recibido; márcalo como no obligatorio.")
@@ -292,8 +330,10 @@ def quitar_documento(exp_id: int, tipo: str, db: Session = Depends(get_db), u: U
 
 
 @router.post("/expedientes/{exp_id}/recordatorio")
-async def recordatorio(exp_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_decisor)):
-    e = _expediente(db, exp_id)
+async def recordatorio(
+    exp_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    e = _expediente(db, exp_id, cuenta.id)
     pendientes = e.pendientes
     if not pendientes:
         return {"enviado": False, "detalle": "Sin documentos pendientes 🎉", "expediente": expediente_dict(e)}
@@ -332,6 +372,8 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
     cv = next((a for a in reversed(c.archivos) if a.tipo == "cv"), None)
     col = Colaborador(
         codigo="TMP",
+        cuenta_id=c.cuenta_id,
+        cliente_id=c.vacante.cliente_id if c.vacante else None,
         nombre=c.nombre,
         correo=c.correo,
         telefono=c.telefono,
@@ -366,11 +408,12 @@ class AltaIn(BaseModel):
 async def alta(
     exp_id: int, datos: AltaIn, forzar_prueba: bool = False,
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """`forzar_prueba` (Lote 4) deja saltar los bloqueos de completitud de abajo, pero NUNCA el
     de "ya fue dado de alta" — _crear_colaborador() no es idempotente, forzar ese en particular
     crearía un Colaborador duplicado, así que se queda tan duro como el gate de consentimiento."""
-    e = _expediente(db, exp_id)
+    e = _expediente(db, exp_id, cuenta.id)
     if e.estado == "alta":
         raise HTTPException(409, f"El expediente ya fue dado de alta por {e.alta_autorizada_por}.")
     if e.progreso < 100 and not puede_forzar_prueba(db, forzar_prueba):
@@ -498,7 +541,9 @@ def _html_carta_intencion(e: Expediente) -> str:
 
 
 @router.get("/expedientes/{exp_id}/carta-intencion")
-def carta_intencion(exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def carta_intencion(
+    exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
     """Genera la carta de intención en PDF a partir de las condiciones ya capturadas en el
     expediente. GET (no POST) a propósito: mismo patrón que urlArchivoCandidato/urlDocumento —
     un <a href> autenticado por cookie de sesión, sin manejo de blobs en el frontend.
@@ -515,7 +560,7 @@ def carta_intencion(exp_id: int, db: Session = Depends(get_db), u: Usuario = Dep
             "La generación de PDF no está disponible en este servidor: faltan librerías del "
             f"sistema que requiere WeasyPrint (Pango/Cairo/GDK-PixBuf). Detalle: {ex}",
         )
-    e = _expediente(db, exp_id)
+    e = _expediente(db, exp_id, cuenta.id)
     html = _html_carta_intencion(e)
     pdf = weasyprint.HTML(string=html).write_pdf()
     registrar(
@@ -536,10 +581,13 @@ class CancelarIn(BaseModel):
 
 
 @router.post("/expedientes/{exp_id}/cancelar")
-def cancelar(exp_id: int, datos: CancelarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def cancelar(
+    exp_id: int, datos: CancelarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     """Botón «Cancelar contratación» — cierra un expediente que no llegó a alta y regresa al
     candidato a Entrevista Humana (la etapa manual inmediata anterior a Contratación)."""
-    e = _expediente(db, exp_id)
+    e = _expediente(db, exp_id, cuenta.id)
     if not datos.motivo.strip():
         raise HTTPException(400, "La cancelación requiere un motivo.")
     if e.estado == "alta":

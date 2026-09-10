@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..deps import usuario_actual
-from ..models import Bitacora, Candidato, Mensaje, Usuario, Vacante, registrar
+from ..deps import cuenta_actual, usuario_actual
+from ..models import Bitacora, Candidato, Cuenta, Mensaje, Usuario, Vacante, registrar
 from ..services.configuracion import modo_prueba_activo
 from ..services.whatsapp import enviar_mensaje, enviar_lista_interactiva, parsear_webhook
 
@@ -48,7 +48,7 @@ def _normalizar_telefono(wa_id: str) -> str:
     return digitos[-10:] if len(digitos) > 10 else digitos
 
 
-def _detectar_vacante(texto: str, db: Session, id_seleccionado: Optional[str] = None) -> Optional[Vacante]:
+def _detectar_vacante(texto: str, db: Session, cuenta_id: int, id_seleccionado: Optional[str] = None) -> Optional[Vacante]:
     """Busca la vacante por ID interactivo, código VAC-XXXX, número de lista, título o slug."""
     candidatos_cod = [s for s in [id_seleccionado, texto] if s]
 
@@ -56,18 +56,24 @@ def _detectar_vacante(texto: str, db: Session, id_seleccionado: Optional[str] = 
     for s in candidatos_cod:
         s_clean = s.strip()
         # Coincidencia directa por código
-        v = db.query(Vacante).filter(func.lower(Vacante.codigo) == s_clean.lower()).first()
+        v = db.query(Vacante).filter(func.lower(Vacante.codigo) == s_clean.lower(), Vacante.cuenta_id == cuenta_id).first()
         if v:
             return v
         # Regex VAC-####
         m = _RE_VAC.search(s_clean)
         if m:
             cod = f"VAC-{m.group(1)}"
-            v = db.query(Vacante).filter(func.lower(Vacante.codigo) == cod.lower()).first()
+            v = db.query(Vacante).filter(func.lower(Vacante.codigo) == cod.lower(), Vacante.cuenta_id == cuenta_id).first()
             if v:
                 return v
 
-    vacantes_activas = db.query(Vacante).filter(Vacante.estado == "Publicada").order_by(Vacante.id.desc()).limit(10).all()
+    vacantes_activas = (
+        db.query(Vacante)
+        .filter(Vacante.estado == "Publicada", Vacante.cuenta_id == cuenta_id)
+        .order_by(Vacante.id.desc())
+        .limit(10)
+        .all()
+    )
 
     # 2. Búsqueda por número si el usuario respondió "1", "2", etc.
     t_clean = (texto or "").strip()
@@ -92,7 +98,7 @@ def _detectar_vacante(texto: str, db: Session, id_seleccionado: Optional[str] = 
 
 
 def _buscar_o_crear_candidato(
-    db: Session, wa_id: str, nombre: str, vacante: Optional[Vacante], prueba: bool = False
+    db: Session, wa_id: str, nombre: str, vacante: Optional[Vacante], cuenta_id: int, prueba: bool = False
 ) -> Candidato:
     """Dedup por wa_id (exacto) o por teléfono normalizado; crea si no existe.
 
@@ -104,12 +110,22 @@ def _buscar_o_crear_candidato(
     """
     # 1. Buscar por wa_id (el más confiable). order_by id desc: con Modo Prueba puede haber
     # más de un candidato con el mismo wa_id — nos quedamos con el más reciente.
-    existente = db.query(Candidato).filter(Candidato.wa_id == wa_id).order_by(Candidato.id.desc()).first()
+    existente = (
+        db.query(Candidato)
+        .filter(Candidato.wa_id == wa_id, Candidato.cuenta_id == cuenta_id)
+        .order_by(Candidato.id.desc())
+        .first()
+    )
 
     # 2. Buscar por teléfono normalizado
     tel = _normalizar_telefono(wa_id)
     if not existente and tel:
-        existente = db.query(Candidato).filter(Candidato.telefono == tel).order_by(Candidato.id.desc()).first()
+        existente = (
+            db.query(Candidato)
+            .filter(Candidato.telefono == tel, Candidato.cuenta_id == cuenta_id)
+            .order_by(Candidato.id.desc())
+            .first()
+        )
 
     if existente:
         ultima_actividad = existente.mensajes[-1].creado_en if existente.mensajes else existente.creado_en
@@ -132,6 +148,7 @@ def _buscar_o_crear_candidato(
     # 3. Crear candidato nuevo
     c = Candidato(
         codigo="TMP",
+        cuenta_id=cuenta_id,
         nombre=nombre or "Candidato WhatsApp",
         telefono=tel,
         fuente="WhatsApp",
@@ -148,6 +165,21 @@ def _buscar_o_crear_candidato(
         {"fuente": "WhatsApp", "wa_id": wa_id, "es_prueba": prueba},
     )
     return c
+
+
+def _cuenta_unica(db: Session) -> Cuenta:
+    """El webhook de WhatsApp no tiene sesión ni Cuenta que resolver: hoy solo existe un WABA
+    para toda la plataforma, así que el candidato entrante se asigna a la única Cuenta activa.
+    TEMPORAL — cuando exista ruteo de WhatsApp por Cuenta (Fase D), esto debe resolverse por el
+    número que recibió el mensaje, no adivinando una sola Cuenta."""
+    cuentas = db.query(Cuenta).filter(Cuenta.estado == "Activa").order_by(Cuenta.id).all()
+    if len(cuentas) != 1:
+        raise HTTPException(
+            500,
+            f"No se pudo resolver la Cuenta del mensaje entrante: hay {len(cuentas)} Cuenta(s) activa(s) "
+            "y el webhook de WhatsApp todavía no sabe rutear por número (pendiente de Fase D).",
+        )
+    return cuentas[0]
 
 
 def _texto_aviso_privacidad(nombre: str, vacante: Optional[Vacante]) -> str:
@@ -213,9 +245,11 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
 
     print(f"[agente] Procesando mensaje de {nombre_wa} ({telefono}): '{texto}' (id_sel='{id_seleccionado}')")
 
+    cuenta = _cuenta_unica(db)
+
     # ── 1. Buscar o crear candidato (todavía sin vacante: hace falta saber su estado
     # actual antes de decidir si corresponde detectar/reasignar vacante) ──────────
-    c = _buscar_o_crear_candidato(db, telefono, nombre_wa, None, prueba=modo_prueba_activo(db))
+    c = _buscar_o_crear_candidato(db, telefono, nombre_wa, None, cuenta.id, prueba=modo_prueba_activo(db))
     print(f"[agente] Candidato asociado: {c.codigo} ({c.nombre}), consentimiento={c.consentimiento}, vacante_id={c.vacante_id}")
 
     # ── 2. Detectar vacante SOLO si el candidato sigue en proceso de selección
@@ -226,7 +260,7 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
     # número de un dígito se interpretaba como "selección #N de la lista", pisando
     # silenciosamente c.vacante_id con una vacante ajena a su postulación.
     en_seleccion_vacante = not c.vacante_id or not c.consentimiento
-    vacante_detectada = _detectar_vacante(texto, db, id_seleccionado) if en_seleccion_vacante else None
+    vacante_detectada = _detectar_vacante(texto, db, cuenta.id, id_seleccionado) if en_seleccion_vacante else None
     if vacante_detectada:
         print(f"[agente] Vacante detectada: {vacante_detectada.codigo} - {vacante_detectada.titulo}")
 
@@ -273,7 +307,13 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
     # ── 3. Si aún no hay vacante asignada → enviar menú de vacantes activas ──
     if not c.vacante_id:
         print(f"[agente] Candidato {c.codigo} no tiene vacante asignada. Buscando vacantes publicadas...")
-        vacantes = db.query(Vacante).filter(Vacante.estado == "Publicada").order_by(Vacante.id.desc()).limit(10).all()
+        vacantes = (
+            db.query(Vacante)
+            .filter(Vacante.estado == "Publicada", Vacante.cuenta_id == cuenta.id)
+            .order_by(Vacante.id.desc())
+            .limit(10)
+            .all()
+        )
         if vacantes:
             print(f"[agente] Enviando lista interactiva con {len(vacantes)} vacantes a {telefono}")
             res_envio = await enviar_lista_interactiva(
@@ -343,9 +383,18 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
 # ============================================================
 
 @router.get("/bitacora")
-def bitacora(limite: int = 50, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    """Últimos eventos de auditoría con su cadena de hashes."""
-    filas = db.query(Bitacora).order_by(Bitacora.id.desc()).limit(limite).all()
+def bitacora(
+    limite: int = 50, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Últimos eventos de auditoría con su cadena de hashes, de la Cuenta actual."""
+    filas = (
+        db.query(Bitacora)
+        .filter(Bitacora.cuenta_id == cuenta.id)
+        .order_by(Bitacora.id.desc())
+        .limit(limite)
+        .all()
+    )
     return [
         {
             "id": b.id,

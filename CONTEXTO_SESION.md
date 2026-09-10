@@ -131,9 +131,119 @@ Los 3 valores distintos de `Vacante.empresa` en los datos actuales ("Grupo Carbe
 Cuenta default durante la migración — no entran sin Cliente. Son datos de seed/demo, es el
 momento correcto para establecer el patrón real de Cuenta→Cliente desde el inicio.
 
+### Fix de seguridad aplicado — 2026-09-10 (commit `74d71ce`, ya en producción)
+`POST /auth/usuarios` (routers/auth.py) había perdido la dependencia de admin y el
+registro en bitácora (comentario "MODIFICADO AQUI" en el código, hallado durante la
+investigación de Fase A). Se restauró `Depends(usuario_admin)` y
+`registrar(db, admin.nombre, "usuario_creado", ...)`. Confirmado y comiteado por el
+usuario fuera de esta sesión.
+
+### Diseño de Fase A aprobado e implementado — 2026-09-10
+
+Plan completo guardado por el harness en `C:\Users\chris\.claude\plans\indexed-baking-yeti.md`.
+Decisiones de negocio confirmadas (no repetir):
+- "Distribuidora Norte" y "Retail Bajío" (valores de `Vacante.empresa`) se migran como
+  Clientes reales dentro de la Cuenta default "Grupo Carbe". Las filas con
+  `empresa == "Grupo Carbe"` se quedan con `cliente_id = NULL` (la Cuenta recluta para sí
+  misma, no es su propio Cliente).
+- El rol de solo-lectura desaparece: `ROLES = ("Administrador", "Usuario")`, ambos
+  pueden decidir (`puede_decidir()` ahora siempre `True`). Migración de datos:
+  `admin → "Administrador"`; `rh`/`lectura → "Usuario"`.
+
+**Implementado (working tree, SIN commit — pendiente de que el usuario lo revise):**
+
+1. `models.py` — 4 tablas nuevas (`Cuenta`, `Cliente`, `ClienteContacto`,
+   `UsuarioCuenta`, vía `Base.metadata.create_all()`), `Usuario` gana `ve_equipo` y
+   `reporta_a_id` + relationship `cuentas`, `ROLES` colapsa a 2 valores,
+   `cuenta_id`/`cliente_id` (nullable) agregados a `Vacante`, `Candidato` (solo
+   `cuenta_id`), `Empleado`, `Colaborador`, `Requisicion`; `Bitacora` gana `cuenta_id`
+   (confirmado fuera del payload que se hashea en `registrar()`, no rompe la cadena).
+   Limpieza de los 3 strings de rol viejos en `deps.py`, `routers/auth.py`,
+   `routers/candidatos.py:1211` (se quitó el filtro por rol en la lista de
+   entrevistadores — ya no hace falta, ambos perfiles pueden entrevistar) y `seed.py`.
+2. `deps.py` — nueva dependencia `cuenta_actual` (cabecera `X-Cuenta-Id` cuando el
+   usuario tiene más de una Cuenta; se resuelve sola si solo tiene una).
+3. `scripts/migrar_cuentas.py` (nuevo, **NO ejecutado en producción** — lo corre el
+   usuario). Verificado por mí en una copia descartable de `redhuman.db` (no la real):
+   crea la Cuenta y los 2 Clientes correctos, deja `cliente_id = NULL` en las vacantes de
+   "Grupo Carbe", migra roles, es idempotente (segunda corrida no hace nada), 0 filas con
+   `cuenta_id` NULL al terminar.
+4. Endpoints de ejemplo reescritos con el patrón (`cuenta_actual` + filtro/estampado):
+   `GET /candidatos`, `GET /vacantes`, `POST /vacantes`. Probados con `TestClient` contra
+   la misma copia descartable ya migrada — mismos conteos que antes (11 candidatos, 6
+   vacantes) para un usuario de una sola Cuenta, sin mandar ninguna cabecera nueva.
+5. Sin cambios de frontend.
+
+⚠️ **Orden de despliegue obligatorio**: hasta que `scripts/migrar_cuentas.py` corra en
+producción, la tabla `usuario_cuentas` está vacía → `cuenta_actual` respondería 403 a
+todos. No desplegar los endpoints de ejemplo del punto 4 antes de correr el script.
+
+### Filtrado por Cuenta extendido a TODO el sistema — 2026-09-10
+
+Con el patrón de los 3 endpoints de ejemplo ya aprobado, se aplicó a los ~85-90 endpoints
+restantes que dependen de sesión, en los 14 archivos de `routers/`. **Todos los archivos
+de routers quedaron migrados a filtrado por Cuenta**: auth.py, candidatos.py,
+capacitacion.py, colaboradores.py, configuracion.py, contratacion.py, empleados.py,
+entrevista_humana.py*, entrevistas.py, expediente_publico.py*, metricas.py,
+requisiciones.py, vacantes.py, webhooks.py.
+(*entrevista_humana.py y expediente_publico.py son 100% públicos por token — no
+necesitaban tocarse, se confirmó explícitamente que ninguno de sus endpoints depende de
+sesión.)
+
+**Sigue sin commit ni deploy — todo en el working tree, pendiente de revisión.**
+
+**Patrón aplicado**: helpers compartidos de lookup por código (`_por_codigo`, `_vacante`,
+`_expediente`, `_duplicado`, etc.) ahora exigen `cuenta_id` y filtran por él — cualquier
+endpoint que dependa de un helper queda protegido automáticamente. Donde el modelo no
+tiene columna `cuenta_id` propia (`Expediente`, `Entrevista`), se resuelve con `JOIN`
+contra `Candidato`. Verificado con un script que recorre cada handler con sesión en los 12
+archivos y confirma que todos traen `cuenta_actual` en la firma — cero huecos (2 falsos
+positivos esperados y confirmados manualmente: `POST /vacantes/generar` no toca la base,
+`GET /auth/yo` no consulta nada por Cuenta).
+
+**3 decisiones/ajustes que surgieron durante la implementación (todas ya resueltas con el
+usuario, documentadas aquí para no repetir la pregunta):**
+1. `Curso` (capacitación) no tenía `cuenta_id` en el diseño original de Fase A porque no
+   cuelga de ningún Candidato/Vacante — se agregó la columna a `models.py` y se actualizó
+   `migrar_cuentas.py` para estamparla. `AsignacionCurso` se resuelve transitivamente vía
+   `Curso.cuenta_id`; además `POST /capacitacion/{codigo}/asignar` ahora valida que el
+   Colaborador a asignar sea de la misma Cuenta que el Curso.
+2. `POST /auth/usuarios` ahora también crea la fila `usuario_cuentas` del usuario nuevo
+   con la Cuenta del admin que lo creó — si no, el usuario nuevo se quedaba sin ninguna
+   Cuenta asignada y `cuenta_actual` le daría 403 en su primer login. Verificado con
+   TestClient: el usuario nuevo queda vinculado correctamente.
+3. El webhook público de WhatsApp (`_buscar_o_crear_candidato` en webhooks.py) no tiene
+   sesión ni forma de resolver una Cuenta (un solo WABA para toda la plataforma hoy) — se
+   agregó `_cuenta_unica(db)`, que toma la única Cuenta activa (y lanza 500 explícito si
+   hay 0 o más de 1, en vez de adivinar). **Pendiente real de Fase D**: ruteo de WhatsApp
+   por número/Cuenta cuando haya más de una Cuenta con WhatsApp activo.
+
+**Nota aparte, NO resuelta, fuera de alcance de esta tarea**: `seed.py::sembrar_admin`
+crea el primer administrador en una instalación *nueva* (sin datos) antes de que exista
+cualquier Cuenta — en una instalación realmente nueva (no el caso de este proyecto, que ya
+tiene datos y corre `migrar_cuentas.py`) ese admin quedaría sin Cuenta asignada. Anotado
+para cuando se toque el flujo de instalación desde cero.
+
+**Verificación end-to-end realizada** (todo contra una copia descartable de
+`redhuman.db`, nunca la real):
+- Esquema: `Base.metadata.create_all()` + `migraciones.py::sincronizar()` agregan las
+  tablas/columnas nuevas sin errores (incluye la columna nueva de `Curso`).
+- `migrar_cuentas.py` corrido dos veces: primera vez migra todo correctamente (2 Clientes,
+  0 filas con `cuenta_id` NULL en las 7 tablas tocadas, 3 usuarios reales migrados de rol
+  y asignados a la Cuenta); segunda vez es no-op (idempotente).
+- 17 endpoints GET probados con `TestClient` (uno por archivo de router, más los 3 de
+  ejemplo previos) — los 17 responden 200 con los mismos conteos que antes de migrar.
+- 2 endpoints de escritura probados: `POST /vacantes` estampa `cuenta_id`; `POST
+  /auth/usuarios` crea el usuario Y su fila en `usuario_cuentas`.
+
 ### Siguiente paso
-Diseño del modelo de datos (tablas `cuentas`, `clientes`, `usuario_cuentas`, columnas
-`cuenta_id`/`cliente_id` en los modelos del punto 1) propuesto — pendiente de aprobación
-explícita del usuario antes de escribir cualquier código. Ver el diseño completo en el
-historial de esta conversación (no repetido aquí para no duplicar); una vez aprobado,
-volcar el diseño final a esta sección antes de empezar a implementar.
+1. El usuario revisa el diff completo (`git diff` — 14 archivos de `routers/` +
+   `models.py` + `deps.py` + `seed.py`, y el archivo nuevo `scripts/migrar_cuentas.py`)
+   — nada está comiteado todavía.
+2. Si aprueba: commit → deploy → correr `migrar_cuentas.py` en producción (con
+   confirmación explícita, como siempre). **Orden obligatorio**: el script debe correr
+   inmediatamente después del deploy — hasta que corra, `usuario_cuentas` está vacía y
+   `cuenta_actual` le da 403 a todo el mundo.
+3. Fase A queda funcionalmente completa (modelo + auth + los 14 archivos de endpoints).
+   Sigue Fase B: Vacantes con creación, herencia automática de Cuenta/Cliente, plantillas,
+   vista previa — depende de A, ya lista.

@@ -21,12 +21,13 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..deps import usuario_actual, usuario_admin, usuario_decisor
+from ..deps import cuenta_actual, usuario_actual, usuario_admin, usuario_decisor
 from ..models import (
     DOCUMENTOS_BASE,
     ETAPAS_CANDIDATO,
     Archivo,
     Candidato,
+    Cuenta,
     Documento,
     Entrevista,
     EntrevistaHumana,
@@ -52,17 +53,17 @@ PLANTILLA_INICIO_ENTREVISTA = "inicio_entrevista_rh"
 TIPOS_ARCHIVO = ["cv", "carta", "certificado", "identificacion", "otro"]
 
 
-def _por_codigo(db: Session, codigo: str) -> Candidato:
-    c = db.query(Candidato).filter(Candidato.codigo == codigo).first()
+def _por_codigo(db: Session, codigo: str, cuenta_id: int) -> Candidato:
+    c = db.query(Candidato).filter(Candidato.codigo == codigo, Candidato.cuenta_id == cuenta_id).first()
     if not c:
         raise HTTPException(404, "Candidato no encontrado")
     return c
 
 
-def _vacante(db: Session, codigo: Optional[str]) -> Optional[Vacante]:
+def _vacante(db: Session, codigo: Optional[str], cuenta_id: int) -> Optional[Vacante]:
     if not codigo:
         return None
-    v = db.query(Vacante).filter(Vacante.codigo == codigo).first()
+    v = db.query(Vacante).filter(Vacante.codigo == codigo, Vacante.cuenta_id == cuenta_id).first()
     if not v:
         raise HTTPException(404, f"Vacante '{codigo}' no encontrada")
     return v
@@ -84,10 +85,11 @@ def _distinto(a: str, b: str) -> bool:
     return bool(ta and tb and not (ta & tb))
 
 
-def _duplicado(db: Session, telefono: str, correo: str, excluir: Optional[int] = None) -> Optional[Candidato]:
-    """Nunca empareja contra un candidato de Modo Prueba (`es_prueba=True`): una postulación de
-    prueba con este mismo teléfono/correo no debe bloquear ni mezclarse con una real."""
-    q = db.query(Candidato).filter(Candidato.es_prueba.is_(False))
+def _duplicado(db: Session, telefono: str, correo: str, cuenta_id: int, excluir: Optional[int] = None) -> Optional[Candidato]:
+    """Nunca empareja contra un candidato de Modo Prueba (`es_prueba=True`); tampoco cruza
+    Cuentas — dos empresas reclutadoras distintas en la plataforma no deben verse como
+    'el mismo candidato duplicado' entre sí."""
+    q = db.query(Candidato).filter(Candidato.es_prueba.is_(False), Candidato.cuenta_id == cuenta_id)
     if excluir:
         q = q.filter(Candidato.id != excluir)
     if telefono:
@@ -106,13 +108,14 @@ def listar(
     estado: Optional[str] = None,
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     # A diferencia de /metricas y los conteos por vacante, este listado (el Kanban de RH) SÍ
     # incluye a los candidatos de Modo Prueba (es_prueba=True) — el frontend los distingue con
     # un badge "Prueba" para que un admin pueda seguir su propio flujo de pruebas visualmente.
-    q = db.query(Candidato).order_by(Candidato.id.desc())
+    q = db.query(Candidato).filter(Candidato.cuenta_id == cuenta.id).order_by(Candidato.id.desc())
     if vacante:
-        v = _vacante(db, vacante)
+        v = _vacante(db, vacante, cuenta.id)
         q = q.filter(Candidato.vacante_id == v.id)
     if etapa:
         q = q.filter(Candidato.etapa == etapa)
@@ -122,11 +125,13 @@ def listar(
 
 
 @router.post("/prueba/eliminar")
-def eliminar_candidatos_prueba(db: Session = Depends(get_db), u: Usuario = Depends(usuario_admin)):
+def eliminar_candidatos_prueba(
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_admin), cuenta: Cuenta = Depends(cuenta_actual)
+):
     """Botón «Eliminar postulaciones de prueba» (solo admin) — borra TODOS los candidatos
-    con `es_prueba=True` y lo que cuelga de ellos. Mismo patrón de cascada que
-    scripts/borrar_demo_candidatos.py (que borra por prefijo de código en vez de por flag)."""
-    candidatos = db.query(Candidato).filter(Candidato.es_prueba.is_(True)).all()
+    con `es_prueba=True` de la Cuenta activa y lo que cuelga de ellos. Mismo patrón de cascada
+    que scripts/borrar_demo_candidatos.py (que borra por prefijo de código en vez de por flag)."""
+    candidatos = db.query(Candidato).filter(Candidato.es_prueba.is_(True), Candidato.cuenta_id == cuenta.id).all()
     if not candidatos:
         return {"candidatos": 0, "mensajes": 0, "entrevistas": 0, "expedientes": 0, "documentos": 0}
 
@@ -155,8 +160,8 @@ def eliminar_candidatos_prueba(db: Session = Depends(get_db), u: Usuario = Depen
 
 
 @router.get("/{codigo}")
-def detalle(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    return candidato_dict(_por_codigo(db, codigo), detalle=True)
+def detalle(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    return candidato_dict(_por_codigo(db, codigo, cuenta.id), detalle=True)
 
 
 # ------------------------------------------------------------
@@ -176,22 +181,28 @@ class IngresarIn(BaseModel):
 
 
 @router.post("", status_code=201)
-def ingresar(datos: IngresarIn, db: Session = Depends(get_db), _: Usuario = Depends(usuario_decisor)):
+def ingresar(
+    datos: IngresarIn,
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     if not datos.nombre.strip():
         raise HTTPException(400, "El nombre del candidato es obligatorio.")
-    vac = _vacante(db, datos.vacante)
+    vac = _vacante(db, datos.vacante, cuenta.id)
     telefono = _telefono(datos.telefono)
     prueba = modo_prueba_activo(db)
 
     # dedup básico por teléfono o correo (módulo 3.6) — con Modo Prueba activo se salta siempre:
     # cada alta es una postulación nueva e independiente marcada es_prueba=True.
     if not prueba:
-        existente = _duplicado(db, telefono, datos.correo)
+        existente = _duplicado(db, telefono, datos.correo, cuenta.id)
         if existente:
             return {"duplicado": True, **candidato_dict(existente)}
 
     c = Candidato(
         codigo="TMP",
+        cuenta_id=cuenta.id,
         nombre=datos.nombre.strip(),
         correo=datos.correo.strip(),
         telefono=telefono,
@@ -257,6 +268,7 @@ async def _procesar_cv(
     vac: Optional[Vacante],
     fuente: str,
     subido_por: str,
+    cuenta_id: int,
     candidato: Optional[Candidato] = None,
 ) -> dict:
     """Valida el archivo, lo guarda, lo extrae con IA y crea o actualiza al prospecto."""
@@ -274,7 +286,7 @@ async def _procesar_cv(
     prueba = modo_prueba_activo(db)
     if c is None and not prueba:
         telefono = _telefono(datos.telefono)
-        c = _duplicado(db, telefono, datos.correo or "")
+        c = _duplicado(db, telefono, datos.correo or "", cuenta_id)
         duplicado = c is not None
     if duplicado and c is not None and datos.nombre and _distinto(datos.nombre, c.nombre):
         # mismo teléfono/correo pero otro nombre: puede ser un contacto compartido o un dato mal capturado
@@ -285,6 +297,7 @@ async def _procesar_cv(
     if c is None:
         c = Candidato(
             codigo="TMP",
+            cuenta_id=cuenta_id,
             nombre=datos.nombre or archivo.nombre.rsplit(".", 1)[0],
             fuente=fuente,
             vacante_id=vac.id if vac else None,
@@ -353,18 +366,19 @@ async def subir_cv(
     fuente: str = Form(default="RH"),
     db: Session = Depends(get_db),
     u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Carga masiva de CVs: valida, extrae con IA y califica contra la vacante."""
     if not archivos:
         raise HTTPException(400, "No se recibió ningún archivo.")
     if len(archivos) > 20:
         raise HTTPException(400, "Máximo 20 CVs por carga.")
-    vac = _vacante(db, vacante)
+    vac = _vacante(db, vacante, cuenta.id)
 
     resultados = []
     for subida in archivos:
         try:
-            resultados.append(await _procesar_cv(db, subida, vac, fuente, u.nombre))
+            resultados.append(await _procesar_cv(db, subida, vac, fuente, u.nombre, cuenta.id))
             db.commit()
         except HTTPException as e:
             db.rollback()
@@ -436,7 +450,7 @@ async def postular(
 
     c = None
     if not prueba:
-        c = _duplicado(db, tel, correo)
+        c = _duplicado(db, tel, correo, vac.cuenta_id)
         if c and c.etapa != "Prefiltro":
             # Ya avanzó del prefiltro (en esta vacante o en otra): no lo mezclamos con una
             # postulación nueva — antes esto pisaba silenciosamente su vacante_id.
@@ -451,7 +465,7 @@ async def postular(
     nuevo = c is None
     if c is None:
         c = Candidato(
-            codigo="TMP", nombre=nombre.strip(), telefono=tel, correo=correo.strip(),
+            codigo="TMP", cuenta_id=vac.cuenta_id, nombre=nombre.strip(), telefono=tel, correo=correo.strip(),
             fuente="Formulario", es_prueba=prueba,
         )
         db.add(c)
@@ -480,7 +494,7 @@ async def postular(
     resultado_cv = {"ok": False, "avisos": []}
     if cv and cv.filename:
         try:
-            resultado_cv = await _procesar_cv(db, cv, vac, "Formulario", c.codigo, candidato=c)
+            resultado_cv = await _procesar_cv(db, cv, vac, "Formulario", c.codigo, vac.cuenta_id, candidato=c)
         except Exception as e:
             print(f"[postular-cv-error] Error procesando CV: {e}")
             resultado_cv = {"ok": False, "avisos": [f"No se pudo extraer el CV: {e}"]}
@@ -515,14 +529,15 @@ async def subir_archivo(
     tipo: str = Form(default="cv"),
     db: Session = Depends(get_db),
     u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Adjunta un archivo a un prospecto existente. Si es CV, vuelve a extraer y recalificar."""
-    c = _por_codigo(db, codigo)
+    c = _por_codigo(db, codigo, cuenta.id)
     if tipo not in TIPOS_ARCHIVO:
         raise HTTPException(400, f"Tipo inválido. Usa uno de: {', '.join(TIPOS_ARCHIVO)}")
 
     if tipo == "cv":
-        resultado = await _procesar_cv(db, archivo, c.vacante, c.fuente, u.nombre, candidato=c)
+        resultado = await _procesar_cv(db, archivo, c.vacante, c.fuente, u.nombre, cuenta.id, candidato=c)
         db.commit()
         return resultado
 
@@ -546,8 +561,14 @@ async def subir_archivo(
 
 
 @router.get("/{codigo}/archivos/{archivo_id}")
-def descargar_archivo(codigo: str, archivo_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    c = _por_codigo(db, codigo)
+def descargar_archivo(
+    codigo: str,
+    archivo_id: int,
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(usuario_actual),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    c = _por_codigo(db, codigo, cuenta.id)
     a = next((x for x in c.archivos if x.id == archivo_id), None)
     if not a:
         raise HTTPException(404, "Archivo no encontrado")
@@ -567,10 +588,16 @@ class AsignarIn(BaseModel):
 
 
 @router.post("/{codigo}/asignar")
-def asignar(codigo: str, datos: AsignarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def asignar(
+    codigo: str,
+    datos: AsignarIn,
+    db: Session = Depends(get_db),
+    u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     """Mueve al prospecto a otra vacante y, si tiene CV, recalcula el match."""
-    c = _por_codigo(db, codigo)
-    vac = _vacante(db, datos.vacante)
+    c = _por_codigo(db, codigo, cuenta.id)
+    vac = _vacante(db, datos.vacante, cuenta.id)
     anterior = c.vacante.codigo if c.vacante else None
     c.vacante_id = vac.id
 
@@ -588,11 +615,13 @@ def asignar(codigo: str, datos: AsignarIn, db: Session = Depends(get_db), u: Usu
 
 
 @router.post("/{codigo}/liberar-telefono")
-def liberar_telefono(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def liberar_telefono(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
     """SOLO PRUEBAS: limpia teléfono y wa_id del candidato para poder reutilizar el mismo número
     de WhatsApp en pruebas repetidas sin que `_buscar_o_crear_candidato` (webhooks.py) lo asocie
     a este registro. No borra el candidato ni sus mensajes/CV/expediente."""
-    c = _por_codigo(db, codigo)
+    c = _por_codigo(db, codigo, cuenta.id)
     anterior = {"telefono": c.telefono, "wa_id": c.wa_id}
     c.telefono = ""
     c.wa_id = ""
@@ -607,8 +636,10 @@ def liberar_telefono(codigo: str, db: Session = Depends(get_db), u: Usuario = De
 
 
 @router.get("/{codigo}/mensajes")
-def mensajes(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    c = _por_codigo(db, codigo)
+def mensajes(
+    codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    c = _por_codigo(db, codigo, cuenta.id)
     return [
         {"rol": m.rol, "texto": m.texto, "canal": m.canal, "enviado": m.enviado, "ts": m.creado_en.isoformat()}
         for m in c.mensajes
@@ -901,8 +932,14 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, 
 
 
 @router.post("/{codigo}/prefiltro")
-async def prefiltro(codigo: str, datos: MensajeIn, db: Session = Depends(get_db), _: Usuario = Depends(usuario_decisor)):
-    c = _por_codigo(db, codigo)
+async def prefiltro(
+    codigo: str,
+    datos: MensajeIn,
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    c = _por_codigo(db, codigo, cuenta.id)
     if not datos.texto.strip():
         raise HTTPException(400, "El mensaje va vacío.")
     return await procesar_prefiltro(db, c, datos.texto, datos.canal)
@@ -920,9 +957,15 @@ class ConsentimientoIn(BaseModel):
 
 
 @router.post("/{codigo}/consentimiento")
-def consentimiento(codigo: str, datos: ConsentimientoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+def consentimiento(
+    codigo: str,
+    datos: ConsentimientoIn,
+    db: Session = Depends(get_db),
+    u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
     """Deja constancia del consentimiento en la bitácora hash-encadenada."""
-    c = _por_codigo(db, codigo)
+    c = _por_codigo(db, codigo, cuenta.id)
     if not datos.acepta:
         c.consentimiento = False
         c.consentimiento_fecha = None
@@ -955,8 +998,14 @@ class DecisionIn(BaseModel):
 
 
 @router.post("/{codigo}/decision")
-def decision(codigo: str, datos: DecisionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
-    c = _por_codigo(db, codigo)
+def decision(
+    codigo: str,
+    datos: DecisionIn,
+    db: Session = Depends(get_db),
+    u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    c = _por_codigo(db, codigo, cuenta.id)
     if datos.accion != "descartar":
         raise HTTPException(400, "Acción inválida. Para mover de etapa usa PATCH /candidatos/{codigo}/etapa.")
     if c.expediente:
@@ -1006,6 +1055,7 @@ def _abrir_expediente(db: Session, c: Candidato, u: Usuario) -> Expediente:
 async def mover_etapa(
     codigo: str, datos: EtapaIn, forzar_prueba: bool = False,
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Avance manual explícito del Kanban — cada botón del panel manda su etapa destino exacta
     (ver ETAPAS_CANDIDATO). No reemplaza el flujo dedicado de Entrevista Humana
@@ -1021,7 +1071,7 @@ async def mover_etapa(
     services.configuracion.puede_forzar_prueba) — deja saltar los bloqueos de secuencia de
     abajo para poder probar el flujo completo rápido, sin esperar a que cada paso previo esté
     realmente satisfecho."""
-    c = _por_codigo(db, codigo)
+    c = _por_codigo(db, codigo, cuenta.id)
     if datos.etapa not in ETAPAS_CANDIDATO:
         raise HTTPException(400, f"Etapa inválida. Usa una de: {', '.join(ETAPAS_CANDIDATO)}")
     if datos.etapa == "Entrevista Humana":
@@ -1186,14 +1236,15 @@ class EntrevistaHumanaIn(BaseModel):
 
 @router.post("/{codigo}/entrevista-humana", status_code=201)
 async def programar_entrevista_humana(
-    codigo: str, datos: EntrevistaHumanaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+    codigo: str, datos: EntrevistaHumanaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón «Programar entrevista» del modal — agenda una ronda NUEVA (ver EntrevistaHumana:
     cada llamada crea su propia fila, nunca sobreescribe una anterior — así "Agendar otra
     Entrevista Humana" no borra el resultado de la ronda previa), mueve la tarjeta a Entrevista
     Humana y avisa al candidato por WhatsApp y por correo (Resend); también avisa por correo a
     quien entrevista (interno o externo)."""
-    c = _por_codigo(db, codigo)
+    c = _por_codigo(db, codigo, cuenta.id)
 
     if datos.tipo_entrevistador not in TIPOS_ENTREVISTADOR:
         raise HTTPException(400, f"Tipo de entrevistador inválido. Usa uno de: {', '.join(TIPOS_ENTREVISTADOR)}")
@@ -1205,11 +1256,7 @@ async def programar_entrevista_humana(
             raise HTTPException(400, "Selecciona quién entrevista.")
         entrevistador_usuario = (
             db.query(Usuario)
-            .filter(
-                Usuario.id == datos.entrevistador_usuario_id,
-                Usuario.activo.is_(True),
-                Usuario.rol.in_(("admin", "rh")),
-            )
+            .filter(Usuario.id == datos.entrevistador_usuario_id, Usuario.activo.is_(True))
             .first()
         )
         if not entrevistador_usuario:
@@ -1317,13 +1364,14 @@ def _ultima_entrevista_humana(c: Candidato) -> EntrevistaHumana:
 
 @router.post("/{codigo}/entrevista-humana/realizada")
 async def marcar_entrevista_humana_realizada(
-    codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+    codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón «Marcar entrevista realizada» — ya no le pide el resultado a RH: marca que la
     entrevista ocurrió y le manda al entrevistador la liga pública para que registre su propia
     evaluación (Aprobado/No aprobado, recomendación, comentario). RH conserva la opción de
     capturarlo/corregirlo a mano como respaldo — ver POST .../entrevista-humana/resultado."""
-    c = _por_codigo(db, codigo)
+    c = _por_codigo(db, codigo, cuenta.id)
     if c.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
     eh = _ultima_entrevista_humana(c)
@@ -1365,12 +1413,13 @@ class EntrevistaHumanaResultadoIn(BaseModel):
 def registrar_resultado_entrevista_humana(
     codigo: str, datos: EntrevistaHumanaResultadoIn, forzar_prueba: bool = False,
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Respaldo manual de RH junto a la liga del entrevistador (Eje 1 del Lote 3: gana quien
     llegue primero, pero RH siempre puede usar este mismo endpoint después para corregir —
     a diferencia de POST /entrevista-humana/publica/{token}, que si ya está capturada regresa
     409 sin tocar nada)."""
-    c = _por_codigo(db, codigo)
+    c = _por_codigo(db, codigo, cuenta.id)
     if c.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
     if datos.resultado not in RESULTADOS_ENTREVISTA_HUMANA:
@@ -1405,11 +1454,12 @@ def registrar_resultado_entrevista_humana(
 
 @router.post("/{codigo}/entrevista-humana/recordatorio")
 async def recordatorio_entrevista_humana(
-    codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+    codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón «Enviar recordatorio» — seguimiento manual junto a «Marcar entrevista realizada»,
     mismo patrón que candidatos._disparar_mensaje_onboarding (enviar_mensaje + Mensaje + bitácora)."""
-    c = _por_codigo(db, codigo)
+    c = _por_codigo(db, codigo, cuenta.id)
     if c.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
     eh = _ultima_entrevista_humana(c)
@@ -1443,8 +1493,10 @@ async def recordatorio_entrevista_humana(
 
 
 @router.get("/{codigo}/expediente")
-def expediente(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)):
-    c = _por_codigo(db, codigo)
+def expediente(
+    codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    c = _por_codigo(db, codigo, cuenta.id)
     if not c.expediente:
         raise HTTPException(404, "El candidato aún no tiene expediente de contratación.")
     return expediente_dict(c.expediente)
@@ -1461,12 +1513,13 @@ class CondicionesContratacionIn(BaseModel):
 
 @router.patch("/{codigo}/condiciones-contratacion")
 def guardar_condiciones_contratacion(
-    codigo: str, datos: CondicionesContratacionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)
+    codigo: str, datos: CondicionesContratacionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Formulario de la etapa Contratación (puesto precargado pero editable, sueldo, tipo de
     contratación, fecha de ingreso, ubicación y jefe directo). Requiere que el expediente ya
     exista — se abre solo al entrar a Contratación, ver mover_etapa/_abrir_expediente."""
-    c = _por_codigo(db, codigo)
+    c = _por_codigo(db, codigo, cuenta.id)
     if not c.expediente:
         raise HTTPException(404, "El candidato todavía no tiene expediente de contratación.")
 
@@ -1546,17 +1599,21 @@ def _liga_documentos(c: Candidato) -> str:
 
 
 @router.post("/{codigo}/solicitar-documentos")
-async def solicitar_documentos(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+async def solicitar_documentos(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
     """Botón 'Solicitar documentos' — rompe el hielo por WhatsApp al entrar a Onboarding, con
     la liga pública para que el candidato suba sus documentos él mismo."""
-    c = _por_codigo(db, codigo)
+    c = _por_codigo(db, codigo, cuenta.id)
     liga = _liga_documentos(c)
     return await _disparar_mensaje_onboarding(db, c, _texto_solicitud_documentos(liga), "documentos_solicitados", u)
 
 
 @router.post("/{codigo}/recordatorio-documentos")
-async def recordatorio_documentos(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor)):
+async def recordatorio_documentos(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
     """Botón 'Enviar recordatorio' — seguimiento manual si el candidato no ha respondido."""
-    c = _por_codigo(db, codigo)
+    c = _por_codigo(db, codigo, cuenta.id)
     liga = _liga_documentos(c)
     return await _disparar_mensaje_onboarding(db, c, _texto_recordatorio_documentos(liga), "recordatorio_documentos_enviado", u)
