@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus,
   MapPin,
@@ -20,11 +20,19 @@ import {
   FileEdit,
   Eye,
   Building2,
+  LayoutGrid,
+  List,
+  Search,
+  Filter,
+  ChevronDown,
+  ChevronRight,
+  MoreHorizontal,
 } from "lucide-react";
 import { Button, Card, Badge, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
 import { Aviso, BotonCopiar } from "@/components/dashboard/subida";
 import { vacantes as vacantesDemo, type Vacante } from "@/lib/data";
+import { useRouter } from "next/navigation";
 import {
   crearVacante,
   actualizarVacante,
@@ -67,6 +75,7 @@ const PLATAFORMAS = [
 
 export default function Vacantes() {
   const puedeDecidir = usePuedeDecidir();
+  const router = useRouter();
   const [filtro, setFiltro] = useState<(typeof filtros)[number]>("Todas");
   const [open, setOpen] = useState(false);
   const [sel, setSel] = useState<Vacante | null>(null);
@@ -75,6 +84,19 @@ export default function Vacantes() {
   const [datos, setDatos] = useState<Vacante[]>(vacantesDemo);
   const [live, setLive] = useState(false);
   const [cambiandoEstatus, setCambiandoEstatus] = useState("");
+  // --- Fase C: vista, buscador y filtros avanzados ---
+  const [vista, setVista] = useState<"tarjetas" | "lista">("tarjetas");
+  const [buscador, setBuscador] = useState("");
+  const [filtrosAbiertos, setFiltrosAbiertos] = useState(false);
+  const [fCliente, setFCliente] = useState<number | "">("" );
+  const [fResponsable, setFResponsable] = useState<number | "">("" );
+  const [fArea, setFArea] = useState("");
+  const [fUbicacion, setFUbicacion] = useState("");
+  const [clientes, setClientes] = useState<import("@/lib/api").Cliente[]>([]);
+  const [usuarios, setUsuarios] = useState<{ id: number; nombre: string }[]>([]);
+  // Menú de acciones flotante por tarjeta/fila
+  const [menuAbierto, setMenuAbierto] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const recargar = useCallback(
     async (seleccionar?: string) => {
@@ -90,7 +112,22 @@ export default function Vacantes() {
 
   useEffect(() => {
     recargar();
+    // Fase C: restaurar vista preferida desde localStorage
+    const guardada = localStorage.getItem("rh-vacantes-vista");
+    if (guardada === "lista" || guardada === "tarjetas") setVista(guardada);
+    // Cargar listas para los selectores de filtros avanzados
+    fetchClientes("Activo").then((c) => setClientes(c ?? []));
+    fetchEntrevistadores().then((u) => setUsuarios(u ?? []));
   }, [recargar]);
+
+  // Cerrar menú flotante al hacer click fuera
+  useEffect(() => {
+    function clickFuera(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuAbierto(null);
+    }
+    document.addEventListener("mousedown", clickFuera);
+    return () => document.removeEventListener("mousedown", clickFuera);
+  }, []);
 
   /** Switch de estatus: Publicada -> Cerrada le quita la vacante del portal público al instante; Cerrada -> Publicada la reabre. */
   async function alternarEstatus(v: Vacante) {
@@ -103,7 +140,59 @@ export default function Vacantes() {
     if (r.ok) recargar(sel?.id === v.id ? v.id : undefined);
   }
 
-  const lista = filtro === "Todas" ? datos : datos.filter((v) => v.estado === filtro);
+  function cambiarVista(v: "tarjetas" | "lista") {
+    setVista(v);
+    localStorage.setItem("rh-vacantes-vista", v);
+  }
+
+  /** Navega a Candidatos filtrando por vacante + etapa (Punto 17). */
+  function navegarAEtapa(vacanteId: string, etapa: string) {
+    const params = new URLSearchParams({ vacante: vacanteId, etapa });
+    router.push(`/dashboard/candidatos?${params.toString()}`);
+  }
+
+  function limpiarFiltros() {
+    setFCliente("");
+    setFResponsable("");
+    setFArea("");
+    setFUbicacion("");
+    setBuscador("");
+  }
+
+  const filtrosActivosCount = [fCliente, fResponsable, fArea, fUbicacion].filter(Boolean).length;
+
+  // Formatear fecha corta
+  function fechaCorta(iso: string | null | undefined): string | null {
+    if (!iso) return null;
+    try {
+      return new Date(iso).toLocaleDateString("es-MX", { day: "numeric", month: "short" });
+    } catch {
+      return null;
+    }
+  }
+
+  // Filtrado combinado (estatus + buscador + filtros avanzados — todos client-side)
+  const lista = useMemo(() => {
+    let r = filtro === "Todas" ? datos : datos.filter((v) => v.estado === filtro);
+    if (buscador.trim())
+      r = r.filter((v) => v.titulo.toLowerCase().includes(buscador.toLowerCase().trim()));
+    if (fArea.trim()) r = r.filter((v) => v.area?.toLowerCase().includes(fArea.toLowerCase().trim()));
+    if (fUbicacion.trim()) r = r.filter((v) => v.ubicacion?.toLowerCase().includes(fUbicacion.toLowerCase().trim()));
+    if (fCliente) r = r.filter((v) => {
+      // cliente es un string de nombre — buscamos las vacantes que tengan algún candidato del cliente seleccionado
+      // como no tenemos cliente_id en el frontend, filtramos por nombre de cliente
+      const nombreCliente = clientes.find((c) => c.id === fCliente)?.nombre;
+      return nombreCliente ? v.cliente === nombreCliente : true;
+    });
+    if (fResponsable) r = r.filter((v) => {
+      const nombreResp = usuarios.find((u) => u.id === fResponsable)?.nombre;
+      return nombreResp ? v.responsable === nombreResp : true;
+    });
+    return r;
+  }, [datos, filtro, buscador, fArea, fUbicacion, fCliente, fResponsable, clientes, usuarios]);
+
+  // Columna Cliente: solo si alguna vacante del listado actual tiene cliente != null
+  const mostrarCliente = useMemo(() => lista.some((v) => v.cliente), [lista]);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
@@ -113,6 +202,31 @@ export default function Vacantes() {
             API en vivo
           </Badge>
         )}
+        {/* Fase C: selector de vista */}
+        <div className="flex items-center gap-1 rounded-lg border border-border-soft bg-surface-2 p-1">
+          <button
+            id="vacantes-vista-tarjetas"
+            onClick={() => cambiarVista("tarjetas")}
+            className={cn(
+              "grid place-items-center rounded-md p-1.5 transition",
+              vista === "tarjetas" ? "bg-surface text-ink shadow-sm" : "text-ink-3 hover:text-ink",
+            )}
+            title="Vista tarjetas"
+          >
+            <LayoutGrid className="h-4 w-4" />
+          </button>
+          <button
+            id="vacantes-vista-lista"
+            onClick={() => cambiarVista("lista")}
+            className={cn(
+              "grid place-items-center rounded-md p-1.5 transition",
+              vista === "lista" ? "bg-surface text-ink shadow-sm" : "text-ink-3 hover:text-ink",
+            )}
+            title="Vista lista"
+          >
+            <List className="h-4 w-4" />
+          </button>
+        </div>
         {puedeDecidir && (
           <Button size="sm" variant="outline" onClick={() => setGestionPlantillas(true)}>
             <Sparkles className="h-4 w-4" /> Plantillas
@@ -125,7 +239,7 @@ export default function Vacantes() {
         )}
       </PageHeader>
 
-      {/* Filtros */}
+      {/* Filtros rápidos de estatus + buscador + botón Filtros */}
       <div className="mt-6 flex flex-wrap items-center gap-2">
         {filtros.map((f) => (
           <button
@@ -146,105 +260,323 @@ export default function Vacantes() {
             )}
           </button>
         ))}
-      </div>
-
-      {/* Grid */}
-      <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {lista.map((v) => (
-          <Card key={v.id} hover className="flex cursor-pointer flex-col p-5" onClick={() => setSel(v)}>
-            <div className="flex items-start justify-between">
-              <span className="grid h-11 w-11 place-items-center rounded-xl bg-brand-soft text-brand">
-                <Briefcase className="h-5 w-5" />
-              </span>
-              <Badge tone={estadoTone[v.estado]} dot>
-                {v.estado}
-              </Badge>
-            </div>
-
-            <h3 className="font-display mt-4 text-lg font-bold leading-snug">{v.titulo}</h3>
-            <p className="mt-1 text-sm text-ink-3">
-              {v.area} · {v.empresa}
-            </p>
-
-            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-sm text-ink-2">
-              <span className="flex items-center gap-1.5">
-                <MapPin className="h-4 w-4 text-ink-3" /> {v.ubicacion}
-              </span>
-              <span className="font-mono text-brand">{v.sueldo}</span>
-            </div>
-
-            {v.plataformas.length > 0 && (
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {v.plataformas.map((p) => (
-                  <span key={p} className="rounded-md bg-surface-2 px-2 py-0.5 font-mono text-[10px] text-ink-3">
-                    {p}
-                  </span>
-                ))}
-              </div>
-            )}
-
-            {(v.avisosCumplimiento?.length ?? 0) > 0 && (
-              <p className="mt-3 flex items-center gap-1.5 text-[11px] text-warn">
-                <ShieldAlert className="h-3.5 w-3.5" />
-                {v.avisosCumplimiento!.length} aviso(s) de cumplimiento por confirmar
-              </p>
-            )}
-
-            <div className="mt-auto flex items-center justify-between border-t border-border-faint pt-4">
-              <div className="flex items-center gap-2 text-sm">
-                <Users className="h-4 w-4 text-ink-3" />
-                <span className="font-semibold tabular">{v.candidatos}</span>
-                <span className="text-ink-3">candidatos</span>
-              </div>
-              {v.nuevos > 0 && (
-                <span className="rounded-full bg-human-soft px-2 py-0.5 text-[11px] font-semibold text-human">
-                  {v.nuevos} nuevos
-                </span>
-              )}
-            </div>
-
-            {/* Acción rápida de estatus: no abre el detalle, cambia el switch Publicada <-> Cerrada al instante */}
-            {puedeDecidir && (v.estado === "Publicada" || v.estado === "Cerrada") && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  alternarEstatus(v);
-                }}
-                disabled={cambiandoEstatus === v.id}
-                className={cn(
-                  "mt-3 flex items-center justify-center gap-1.5 rounded-xl border py-2 text-xs font-semibold transition disabled:opacity-50",
-                  v.estado === "Publicada"
-                    ? "border-border-soft text-ink-2 hover:border-bad/40 hover:bg-bad-soft hover:text-bad"
-                    : "border-border-soft text-ink-2 hover:border-good/40 hover:bg-good-soft hover:text-good",
-                )}
-              >
-                {v.estado === "Publicada" ? (
-                  <>
-                    <Ban className="h-3.5 w-3.5" /> {cambiandoEstatus === v.id ? "Cerrando…" : "Cerrar vacante"}
-                  </>
-                ) : (
-                  <>
-                    <RotateCcw className="h-3.5 w-3.5" /> {cambiandoEstatus === v.id ? "Reabriendo…" : "Reabrir vacante"}
-                  </>
-                )}
-              </button>
-            )}
-          </Card>
-        ))}
-
-        {/* Add card */}
+        {/* Buscador */}
+        <div className="relative ml-auto flex items-center">
+          <Search className="absolute left-3 h-4 w-4 text-ink-3" />
+          <input
+            id="vacantes-buscador"
+            type="text"
+            placeholder="Buscar por título…"
+            value={buscador}
+            onChange={(e) => setBuscador(e.target.value)}
+            className="h-9 rounded-full border border-border-soft bg-surface pl-9 pr-3 text-sm text-ink placeholder:text-ink-3 focus:border-brand focus:outline-none"
+          />
+          {buscador && (
+            <button onClick={() => setBuscador("")} className="absolute right-3 text-ink-3 hover:text-ink">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+        {/* Botón Filtros avanzados */}
         <button
-          onClick={() => setOpen(true)}
-          className="group grid min-h-[220px] place-items-center rounded-2xl border border-dashed border-border-soft text-ink-3 transition hover:border-brand hover:text-brand"
+          id="vacantes-btn-filtros"
+          onClick={() => setFiltrosAbiertos((prev) => !prev)}
+          className={cn(
+            "flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition",
+            filtrosAbiertos || filtrosActivosCount > 0
+              ? "border-brand bg-brand-soft text-brand"
+              : "border-border-soft text-ink-2 hover:border-brand/40 hover:text-ink",
+          )}
         >
-          <span className="flex flex-col items-center gap-2">
-            <span className="grid h-12 w-12 place-items-center rounded-2xl bg-surface-2 transition group-hover:bg-brand-soft">
-              <Plus className="h-6 w-6" />
-            </span>
-            <span className="text-sm font-medium">Crear vacante</span>
-          </span>
+          <Filter className="h-3.5 w-3.5" />
+          Filtros{filtrosActivosCount > 0 ? ` · ${filtrosActivosCount}` : ""}
+          <ChevronDown className={cn("h-3.5 w-3.5 transition", filtrosAbiertos && "rotate-180")} />
         </button>
+        {(filtrosActivosCount > 0 || buscador) && (
+          <button
+            onClick={limpiarFiltros}
+            className="text-xs text-ink-3 underline hover:text-ink"
+          >
+            Limpiar
+          </button>
+        )}
       </div>
+
+      {/* Panel de filtros avanzados */}
+      {filtrosAbiertos && (
+        <div className="mt-3 flex flex-wrap items-end gap-3 rounded-xl border border-border-soft bg-surface-2 p-4">
+          {clientes.length > 0 && (
+            <label className="flex flex-col gap-1.5 text-xs text-ink-2">
+              Cliente
+              <select
+                value={fCliente}
+                onChange={(e) => setFCliente(e.target.value ? Number(e.target.value) : "")}
+                className="rounded-lg border border-border-soft bg-surface px-3 py-2 text-sm text-ink focus:border-brand focus:outline-none"
+              >
+                <option value="">Todos</option>
+                {clientes.map((c) => (
+                  <option key={c.id} value={c.id}>{c.nombre}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          {usuarios.length > 0 && (
+            <label className="flex flex-col gap-1.5 text-xs text-ink-2">
+              Responsable
+              <select
+                value={fResponsable}
+                onChange={(e) => setFResponsable(e.target.value ? Number(e.target.value) : "")}
+                className="rounded-lg border border-border-soft bg-surface px-3 py-2 text-sm text-ink focus:border-brand focus:outline-none"
+              >
+                <option value="">Todos</option>
+                {usuarios.map((u) => (
+                  <option key={u.id} value={u.id}>{u.nombre}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label className="flex flex-col gap-1.5 text-xs text-ink-2">
+            Área
+            <input
+              type="text"
+              value={fArea}
+              onChange={(e) => setFArea(e.target.value)}
+              placeholder="Ej: Operaciones"
+              className="rounded-lg border border-border-soft bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-3 focus:border-brand focus:outline-none"
+            />
+          </label>
+          <label className="flex flex-col gap-1.5 text-xs text-ink-2">
+            Ubicación
+            <input
+              type="text"
+              value={fUbicacion}
+              onChange={(e) => setFUbicacion(e.target.value)}
+              placeholder="Ej: Guadalajara"
+              className="rounded-lg border border-border-soft bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-3 focus:border-brand focus:outline-none"
+            />
+          </label>
+          <button
+            onClick={limpiarFiltros}
+            className="rounded-lg border border-border-soft px-3 py-2 text-sm text-ink-2 hover:border-bad/40 hover:bg-bad-soft hover:text-bad"
+          >
+            Limpiar filtros
+          </button>
+        </div>
+      )}
+
+      {/* Vista Tarjetas */}
+      {vista === "tarjetas" && (
+        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {lista.map((v) => (
+            <Card key={v.id} hover className="flex cursor-pointer flex-col p-5" onClick={() => setSel(v)}>
+              <div className="flex items-start justify-between">
+                <span className="grid h-11 w-11 place-items-center rounded-xl bg-brand-soft text-brand">
+                  <Briefcase className="h-5 w-5" />
+                </span>
+                <div className="flex items-center gap-2">
+                  <Badge tone={estadoTone[v.estado]} dot>{v.estado}</Badge>
+                  {/* Menú de acciones (Fase C: mover de botón principal a ⋯) */}
+                  {puedeDecidir && (v.estado === "Publicada" || v.estado === "Cerrada") && (
+                    <div className="relative" ref={menuAbierto === v.id ? menuRef : undefined}>
+                      <button
+                        id={`vacante-menu-${v.id}`}
+                        onClick={(e) => { e.stopPropagation(); setMenuAbierto(menuAbierto === v.id ? null : v.id); }}
+                        className="grid place-items-center rounded-lg p-1.5 text-ink-3 transition hover:bg-surface-2 hover:text-ink"
+                      >
+                        <MoreHorizontal className="h-4 w-4" />
+                      </button>
+                      {menuAbierto === v.id && (
+                        <div className="absolute right-0 top-full z-20 mt-1 min-w-[160px] rounded-xl border border-border-soft bg-surface p-1 shadow-lg">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setMenuAbierto(null); alternarEstatus(v); }}
+                            disabled={cambiandoEstatus === v.id}
+                            className={cn(
+                              "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium transition hover:bg-surface-2 disabled:opacity-50",
+                              v.estado === "Publicada" ? "text-bad" : "text-good",
+                            )}
+                          >
+                            {v.estado === "Publicada" ? <Ban className="h-3.5 w-3.5" /> : <RotateCcw className="h-3.5 w-3.5" />}
+                            {cambiandoEstatus === v.id ? "…" : v.estado === "Publicada" ? "Cerrar vacante" : "Reabrir vacante"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <h3 className="font-display mt-4 text-lg font-bold leading-snug">{v.titulo}</h3>
+              <p className="mt-1 text-sm text-ink-3">
+                {v.area} · {v.cliente ?? v.empresa}
+              </p>
+
+              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-sm text-ink-2">
+                <span className="flex items-center gap-1.5">
+                  <MapPin className="h-4 w-4 text-ink-3" /> {v.ubicacion}
+                </span>
+                <span className="font-mono text-brand">{v.sueldo}</span>
+              </div>
+
+              {v.plataformas.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {v.plataformas.map((p) => (
+                    <span key={p} className="rounded-md bg-surface-2 px-2 py-0.5 font-mono text-[10px] text-ink-3">{p}</span>
+                  ))}
+                </div>
+              )}
+
+              {(v.avisosCumplimiento?.length ?? 0) > 0 && (
+                <p className="mt-3 flex items-center gap-1.5 text-[11px] text-warn">
+                  <ShieldAlert className="h-3.5 w-3.5" />
+                  {v.avisosCumplimiento!.length} aviso(s) de cumplimiento por confirmar
+                </p>
+              )}
+
+              {/* Fase C: mini-embudo clicable (Punto 16 + 17) */}
+              {v.embudo?.etapas && Object.keys(v.embudo.etapas).length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1">
+                  {Object.entries(v.embudo.etapas)
+                    .filter(([, n]) => n > 0)
+                    .map(([etapa, n]) => (
+                      <button
+                        key={etapa}
+                        id={`vacante-embudo-${v.id}-${etapa.replace(/\s/g, "-")}`}
+                        onClick={(e) => { e.stopPropagation(); navegarAEtapa(v.id, etapa); }}
+                        className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-ink-3 transition hover:bg-brand-soft hover:text-brand"
+                      >
+                        <span className="h-1.5 w-1.5 rounded-full bg-brand" />
+                        {etapa} <span className="font-semibold tabular">{n}</span>
+                      </button>
+                    ))}
+                </div>
+              )}
+
+              {/* Fase C: pie con candidatos + fechas */}
+              <div className="mt-auto flex items-end justify-between border-t border-border-faint pt-4">
+                <div className="flex items-center gap-2 text-sm">
+                  <Users className="h-4 w-4 text-ink-3" />
+                  <span className="font-semibold tabular">{v.candidatos}</span>
+                  <span className="text-ink-3">candidatos</span>
+                  {v.nuevos > 0 && (
+                    <span className="rounded-full bg-human-soft px-2 py-0.5 text-[11px] font-semibold text-human">
+                      {v.nuevos} nuevos
+                    </span>
+                  )}
+                </div>
+                <div className="text-right text-[11px] text-ink-3">
+                  {fechaCorta(v.creada) && <span>Creada {fechaCorta(v.creada)}</span>}
+                  {fechaCorta(v.publicadaEn) && (
+                    <><br /><span className="text-good">Publicada {fechaCorta(v.publicadaEn)}</span></>
+                  )}
+                </div>
+              </div>
+            </Card>
+          ))}
+
+          {/* Add card */}
+          <button
+            onClick={() => setOpen(true)}
+            className="group grid min-h-[220px] place-items-center rounded-2xl border border-dashed border-border-soft text-ink-3 transition hover:border-brand hover:text-brand"
+          >
+            <span className="flex flex-col items-center gap-2">
+              <span className="grid h-12 w-12 place-items-center rounded-2xl bg-surface-2 transition group-hover:bg-brand-soft">
+                <Plus className="h-6 w-6" />
+              </span>
+              <span className="text-sm font-medium">Crear vacante</span>
+            </span>
+          </button>
+        </div>
+      )}
+
+      {/* Fase C: Vista Lista */}
+      {vista === "lista" && (
+        <div className="mt-5 overflow-x-auto rounded-xl border border-border-soft">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border-soft bg-surface-2 text-xs font-semibold uppercase tracking-wide text-ink-3">
+                <th className="px-4 py-3 text-left">Vacante</th>
+                {mostrarCliente && <th className="px-4 py-3 text-left">Cliente</th>}
+                <th className="px-4 py-3 text-left">Área</th>
+                <th className="px-4 py-3 text-left">Estatus</th>
+                <th className="px-4 py-3 text-left">Candidatos / Etapas</th>
+                <th className="px-4 py-3 text-left">Responsable</th>
+                <th className="px-4 py-3 text-left">Ubicación</th>
+                <th className="px-4 py-3 text-left">Creada</th>
+                {puedeDecidir && <th className="px-4 py-3" />}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border-faint">
+              {lista.map((v) => (
+                <tr
+                  key={v.id}
+                  onClick={() => setSel(v)}
+                  className="cursor-pointer transition hover:bg-brand-soft/30"
+                >
+                  <td className="px-4 py-3">
+                    <p className="font-semibold text-ink">{v.titulo}</p>
+                    <p className="font-mono text-[11px] text-ink-3">{v.id}</p>
+                  </td>
+                  {mostrarCliente && <td className="px-4 py-3 text-ink-2">{v.cliente ?? "—"}</td>}
+                  <td className="px-4 py-3 text-ink-2">{v.area || "—"}</td>
+                  <td className="px-4 py-3">
+                    <Badge tone={estadoTone[v.estado]} dot>{v.estado}</Badge>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-1 text-ink-2">
+                      <Users className="h-3.5 w-3.5 text-ink-3" />
+                      <span className="font-semibold">{v.candidatos}</span>
+                    </div>
+                    {v.embudo?.etapas && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {Object.entries(v.embudo.etapas)
+                          .filter(([, n]) => n > 0)
+                          .map(([etapa, n]) => (
+                            <button
+                              key={etapa}
+                              onClick={(e) => { e.stopPropagation(); navegarAEtapa(v.id, etapa); }}
+                              className="rounded-md bg-brand-soft px-1.5 py-0.5 text-[10px] font-medium text-brand hover:bg-brand hover:text-white"
+                            >
+                              {etapa} {n}
+                            </button>
+                          ))}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-ink-2">{v.responsable ?? "—"}</td>
+                  <td className="px-4 py-3 text-ink-2">{v.ubicacion || "—"}</td>
+                  <td className="px-4 py-3 text-[12px] text-ink-3">
+                    {fechaCorta(v.creada) ?? "—"}
+                    {fechaCorta(v.publicadaEn) && (
+                      <div className="text-good">{fechaCorta(v.publicadaEn)}</div>
+                    )}
+                  </td>
+                  {puedeDecidir && (
+                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      {(v.estado === "Publicada" || v.estado === "Cerrada") && (
+                        <button
+                          onClick={() => alternarEstatus(v)}
+                          disabled={cambiandoEstatus === v.id}
+                          className={cn(
+                            "rounded-lg border px-3 py-1.5 text-xs font-medium transition disabled:opacity-50",
+                            v.estado === "Publicada"
+                              ? "border-bad/30 text-bad hover:bg-bad-soft"
+                              : "border-good/30 text-good hover:bg-good-soft",
+                          )}
+                        >
+                          {cambiandoEstatus === v.id ? "…" : v.estado === "Publicada" ? "Cerrar" : "Reabrir"}
+                        </button>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {lista.length === 0 && (
+            <div className="py-12 text-center text-sm text-ink-3">Sin vacantes con estos filtros.</div>
+          )}
+        </div>
+      )}
 
       {open && (
         <CrearVacante

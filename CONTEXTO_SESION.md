@@ -7,7 +7,7 @@ transversal):
 - Fase A: Modelo de Cuenta, Cliente, Usuarios y permisos — CÓDIGO LISTO, sin commit/deploy;
   falta correr `migrar_cuentas.py` en producción (ver detalle abajo)
 - Fase B: Vacantes (creación, herencia automática de Cuenta/Cliente, plantillas, vista previa) — CÓDIGO LISTO, sin commit/deploy; depende de que Fase A ya esté desplegada y migrada
-- Fase C: Vistas de Vacantes/Candidatos (tarjetas/lista, filtros, conteos reales por etapa, navegación desde contadores, lógica de "Apto") — PENDIENTE, depende de A y B
+- Fase C: Vistas de Vacantes/Candidatos (tarjetas/lista, filtros, conteos reales por etapa, navegación desde contadores, lógica de "Apto") — CÓDIGO LISTO, sin commit/deploy; incluye script de backfill `backfill_resultado_apto.py`
 - Fase D: Notificaciones configurables por evento/destinatario/canal — PENDIENTE, depende de A, B y de la infraestructura de WhatsApp/correo ya existente
 - Fase E: Reglas de simplificación (ocultar selectores cuando no aplican, herencia automática, no repetir capturas) — transversal, se verifica en cada fase, no es un entregable aparte
 - Fase F: Agente global "Pregunta a Red Human" (consulta/analiza/encuentra/ejecuta sobre 
@@ -348,13 +348,37 @@ Decisiones de negocio confirmadas por el usuario (no volver a preguntar):
   servidor real (no solo TestClient), todas las páginas tocadas responden 200 (o 307 a
   login cuando no hay sesión, correcto). Servidores y base de prueba ya detenidos/borrados.
 
+### Diseño e Implementación de Fase C completados — 2026-09-10 (CÓDIGO LISTO, sin commit/deploy)
+
+**Alcance ejecutado**:
+1. Vistas duales (Tarjetas / Lista) con persistencia en `localStorage` tanto para Vacantes como para Candidatos.
+2. Filtros avanzados en backend y frontend (Cliente, Responsable, Área, Ubicación, Fuente, Consentimiento, Apto, Duplicados).
+3. Navegación directa y resaltado de columnas en el Pipeline de Candidatos (Opción A aprobada) desde contadores del mini-embudo de Vacantes y parámetros de URL (`?vacante=...&etapa=...`).
+4. Lógica de "Apto" persistida (`Candidato.resultado_apto`) con la regla "el más reciente gana" (Contratación/Onboarding=True, Entrevista Humana, Entrevista IA, Prefiltro).
+5. Registro de `Candidato.ultima_actividad_en` y ordenamiento por actividad reciente.
+6. Detección visual y filtro de posibles candidatos duplicados (mismo teléfono normalizado a 10 dígitos o correo).
+7. Script standalone de backfill de datos `scripts/backfill_resultado_apto.py` (dry-run primero, confirmación explícita).
+
+**Backend implementado** (`red-human-api`):
+- `models.py`: 3 columnas nuevas en `Candidato` (`ultima_actividad_en`, `resultado_apto`) y `Vacante` (`publicada_en`).
+- `serial.py`: serialización de los 4 campos nuevos (`publicadaEn` en vacante_dict; `ultimaActividadEn`, `resultadoApto`, `clienteVacante` en candidato_dict).
+- `routers/vacantes.py`: filtros de listado (`busqueda`, `cliente_id`, `responsable_id`, `area`, `ubicacion`) y registro de `publicada_en` al publicar.
+- `routers/candidatos.py`: filtros adicionales (`fuente`, `cliente_id`, `responsable_id`, `consentimiento`, `apto`, `duplicados`), helpers `_actualizar_ultima_actividad` y `_recalcular_resultado_apto` aplicados en todos los endpoints de transición.
+- `routers/entrevista_humana.py`: invocación de actualización de actividad y recálculo de `resultado_apto` al recibir resultado de evaluación pública externa.
+- `scripts/backfill_resultado_apto.py`: script de migración para poblar `resultado_apto` y `ultima_actividad_en` en candidatos históricos y `publicada_en` en vacantes publicadas existentes.
+
+**Frontend implementado** (`red-human-app`):
+- `lib/data.ts`: tipos actualizados con `publicadaEn`, `ultimaActividadEn`, `resultadoApto`, `clienteVacante`.
+- `lib/api.ts`: parámetros de filtro tipados en `fetchVacantes()` y `fetchCandidatos()`.
+- `app/dashboard/vacantes/page.tsx`: vista Lista de vacantes (tabla completa), mini-embudo clicable con navegación a Candidatos por etapa, fechas de creación/publicación, filtros avanzados.
+- `app/dashboard/candidatos/page.tsx`: vista Lista de candidatos (tabla completa con score, fuente, cliente, apto), pipeline con badge Apto y detección de duplicados, soporte de query params (`?vacante=...&etapa=...`), auto-scroll y enfoque visual de columna etapa, panel de filtros avanzados y ordenamiento dinámico.
+
+**Verificación realizada**:
+- Backend: `py_compile` en todos los archivos modificados y scripts sin errores.
+- Frontend: `next build` (con `tsc --noEmit` y linting) completado con exit code 0; 19 rutas generadas limpiamente.
+
 ### Siguiente paso
-1. El usuario revisa el diff completo de Fase B (7 archivos de backend incluidos 2 nuevos
-   `routers/clientes.py` y `routers/plantillas.py`; 9 archivos de frontend) — nada
-   comiteado todavía.
-2. Deploy en el orden correcto: Fase A completa (commit → deploy → `migrar_cuentas.py`)
-   primero, Fase B después (no necesita su propio script de migración de datos — todas
-   sus columnas/tabla son nuevas sin backfill).
-3. Sigue Fase C: Vistas de Vacantes/Candidatos (tarjetas/lista, filtros, conteos reales
-   por etapa, navegación desde contadores, lógica de "Apto") — depende de A y B, ambas ya
-   listas en código.
+1. El usuario revisa los cambios de la Fase C.
+2. Deploy y corrida de `scripts/backfill_resultado_apto.py` cuando se apruebe.
+3. Sigue Fase D: Notificaciones configurables por evento/destinatario/canal.
+

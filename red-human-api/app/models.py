@@ -67,6 +67,9 @@ class Vacante(Base):
 
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
     actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+    # Fase C: fecha de primera publicación — se estampa automáticamente en publicar(), nunca captura manual.
+    # NULL para vacantes que aún no se han publicado o que existían antes del deploy de Fase C.
+    publicada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Origen: si esta vacante nació de una requisición autorizada (módulo 4). Puede ser null
     # para vacantes creadas directamente por RH sin pasar por el flujo de requisición.
@@ -142,6 +145,14 @@ class Candidato(Base):
     wa_nombre: Mapped[str] = mapped_column(String(200), default="")  # nombre del perfil de WhatsApp
     wa_id: Mapped[str] = mapped_column(String(30), default="", index=True)  # ID de WhatsApp (tel tal como lo envía Meta)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    # Fase C: última actividad relevante (cambio de etapa, evaluación, entrevista, mensaje, documento,
+    # nota, contratación, onboarding). Se actualiza en los endpoints correspondientes; NULL para
+    # candidatos sin actividad registrada desde el deploy de Fase C (backfill via script).
+    ultima_actividad_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Fase C: resultado vigente más reciente de todas las evaluaciones (Prefiltro IA, Entrevista IA,
+    # Entrevista Humana). True=Apto, False=No apto, None=sin evaluación todavía. El filtro "Aptos" usa
+    # este campo en vez de `estado` para respetar la regla "el más reciente gana".
+    resultado_apto: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     # Modo Prueba (solo admin, ver ConfiguracionSistema): nunca aparece en listados/reportes de RH.
     es_prueba: Mapped[bool] = mapped_column(Boolean, default=False)
     # Cuenta (Fase A multi-cuenta) — directo, no vía join a Vacante: vacante_id es nullable y no

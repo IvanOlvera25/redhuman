@@ -70,8 +70,14 @@ def enviar_resultado(token: str, datos: ResultadoEntrevistaHumanaPublicaIn, db: 
     eh.recomendacion = datos.recomendacion
     eh.comentario = comentario
     eh.resultado_capturado_por = "entrevistador"
+    # Fase C: actualizar resultado_apto y ultima_actividad_en del candidato.
+    # Se importa aquí (no en el módulo) para evitar import circular entre routers.
+    from .candidatos import _recalcular_resultado_apto, _actualizar_ultima_actividad
+    c = eh.candidato
+    _actualizar_ultima_actividad(c)
+    _recalcular_resultado_apto(c)
     registrar(
-        db, "entrevistador-externo", "entrevista_humana_evaluada_por_liga", "candidato", eh.candidato.codigo,
+        db, "entrevistador-externo", "entrevista_humana_evaluada_por_liga", "candidato", c.codigo,
         {"resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario},
     )
     db.commit()

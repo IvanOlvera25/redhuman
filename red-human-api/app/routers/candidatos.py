@@ -101,11 +101,69 @@ def _duplicado(db: Session, telefono: str, correo: str, cuenta_id: int, excluir:
     return None
 
 
+# ============================================================
+# Fase C — Helpers de actividad y resultado "Apto"
+# ============================================================
+
+
+def _actualizar_ultima_actividad(c: Candidato) -> None:
+    """Registra que hubo actividad relevante en este candidato ahora mismo.
+    Debe llamarse justo antes de db.commit() en cualquier endpoint que modifique
+    el estado del candidato (etapa, evaluación, documento, mensaje, consentimiento)."""
+    from ..models import ahora as _ahora
+    c.ultima_actividad_en = _ahora()
+
+
+def _recalcular_resultado_apto(c: Candidato) -> None:
+    """Actualiza Candidato.resultado_apto aplicando la regla 'el más reciente gana':
+
+    1. Contratación / Onboarding → True siempre (llegaron al final del pipeline).
+    2. Descartado (decision() -> estado='no_cumple' sin evaluaciones posteriores) → False.
+    3. EntrevistaHumana más reciente con resultado → aprobado=True | no_aprobado=False.
+    4. Entrevista IA más reciente evaluada → avanzar=True | no_avanzar=False.
+    5. Prefiltro (c.estado) → cumple=True | no_cumple=False | otro=None.
+
+    Se llama tras cualquier cambio que pueda alterar el resultado vigente.
+    """
+    # Regla 1: etapas finales del pipeline — llegaron al final del proceso, siempre Aptos.
+    if c.etapa in ("Contratación", "Onboarding"):
+        c.resultado_apto = True
+        return
+
+    # Regla 3: Entrevista Humana más reciente con resultado registrado
+    for eh in reversed(c.entrevistas_humanas):
+        if eh.resultado:
+            c.resultado_apto = (eh.resultado == "aprobado")
+            return
+
+    # Regla 4: Entrevista IA más reciente evaluada
+    for e in reversed(c.entrevistas):
+        rec = (e.evaluacion or {}).get("recomendacion", "")
+        if rec:
+            c.resultado_apto = (rec == "avanzar")
+            return
+
+    # Regla 5: Prefiltro del agente (fallback)
+    if c.estado == "cumple":
+        c.resultado_apto = True
+    elif c.estado == "no_cumple":
+        c.resultado_apto = False
+    else:
+        c.resultado_apto = None
+
+
 @router.get("")
 def listar(
     vacante: Optional[str] = None,
     etapa: Optional[str] = None,
     estado: Optional[str] = None,
+    # --- Fase C: filtros adicionales ---
+    fuente: Optional[str] = None,
+    cliente_id: Optional[int] = None,
+    responsable_id: Optional[int] = None,
+    consentimiento: Optional[bool] = None,
+    apto: Optional[bool] = None,           # True → resultado_apto == True; False → == False
+    duplicados: Optional[bool] = None,     # True → candidatos con tel/correo repetido en la Cuenta
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
     cuenta: Cuenta = Depends(cuenta_actual),
@@ -121,6 +179,34 @@ def listar(
         q = q.filter(Candidato.etapa == etapa)
     if estado:
         q = q.filter(Candidato.estado == estado)
+    if fuente:
+        q = q.filter(Candidato.fuente == fuente)
+    if consentimiento is not None:
+        q = q.filter(Candidato.consentimiento.is_(consentimiento))
+    if apto is not None:
+        q = q.filter(Candidato.resultado_apto.is_(apto))
+    if cliente_id is not None:
+        q = q.join(Vacante, Candidato.vacante_id == Vacante.id).filter(Vacante.cliente_id == cliente_id)
+    if responsable_id is not None:
+        q = q.join(Vacante, Candidato.vacante_id == Vacante.id, isouter=True).filter(Vacante.responsable_id == responsable_id)
+    if duplicados:
+        # Candidatos cuyo teléfono normalizado o correo en minúsculas aparece más de una vez
+        # en la misma Cuenta — misma lógica que _duplicado(), pero para MOSTRAR, no para bloquear.
+        from sqlalchemy import select
+        tel_dup = (
+            select(Candidato.telefono)
+            .where(Candidato.cuenta_id == cuenta.id, Candidato.telefono != "", Candidato.es_prueba.is_(False))
+            .group_by(Candidato.telefono)
+            .having(func.count(Candidato.id) > 1)
+        ).scalar_subquery()
+        correo_dup = (
+            select(func.lower(Candidato.correo))
+            .where(Candidato.cuenta_id == cuenta.id, Candidato.correo != "", Candidato.es_prueba.is_(False))
+            .group_by(func.lower(Candidato.correo))
+            .having(func.count(Candidato.id) > 1)
+        ).scalar_subquery()
+        from sqlalchemy import or_
+        q = q.filter(or_(Candidato.telefono.in_(tel_dup), func.lower(Candidato.correo).in_(correo_dup)))
     return [candidato_dict(c) for c in q.all()]
 
 
@@ -556,6 +642,7 @@ async def subir_archivo(
     c.archivos.append(reg)
     db.flush()
     registrar(db, u.nombre, "archivo_adjuntado", "candidato", c.codigo, {"tipo": tipo, "archivo": validado.nombre})
+    _actualizar_ultima_actividad(c)
     db.commit()
     return {"ok": True, "archivo": archivo_dict(reg), "candidato": candidato_dict(c, detalle=True)}
 
@@ -609,6 +696,7 @@ def asignar(
             datos_cv, con_ia = ia.extraer_cv(b64, cv.ruta.rsplit(".", 1)[-1], vac.titulo, vac.requisitos)
             _aplicar_cv(db, c, datos_cv, vac, con_ia)
 
+    _recalcular_resultado_apto(c)  # la nueva vacante puede cambiar el contexto de evaluación
     registrar(db, u.nombre, "candidato_reasignado", "candidato", c.codigo, {"de": anterior, "a": vac.codigo})
     db.commit()
     return candidato_dict(c, detalle=True)
@@ -927,6 +1015,11 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, 
         respuesta_final = turno.respuesta
 
     c.analisis = analisis_actual
+    # Fase C: cada turno del prefiltro (mensaje recibido) es actividad; si hubo clasificaci\u00f3n
+    # (ci\u00f3n del agente), recalcular resultado_apto para reflejar cumple/no_cumple reci\u00e9n asignados.
+    _actualizar_ultima_actividad(c)
+    if cierra_prefiltro:
+        _recalcular_resultado_apto(c)
     db.commit()
     return {"respuesta": respuesta_final, "clasificacion": clasificacion, "ia": con_ia, "whatsapp": envio}
 
@@ -975,6 +1068,7 @@ def consentimiento(
 
     c.consentimiento = True
     c.consentimiento_fecha = datetime.now(timezone.utc)
+    _actualizar_ultima_actividad(c)
     registrar(
         db, u.nombre, "consentimiento_otorgado", "candidato", c.codigo,
         {"medio": datos.medio, "evidencia": datos.evidencia[:500], "correo_rh": u.correo},
@@ -1017,6 +1111,8 @@ def decision(
     recomendacion_ia = {"estado": c.estado, "score": c.score}
     c.etapa = "Prefiltro"
     c.estado = "no_cumple"
+    _actualizar_ultima_actividad(c)
+    _recalcular_resultado_apto(c)
     registrar(
         db, u.nombre, "decision_descartar", "candidato", c.codigo,
         {"recomendacion_ia": recomendacion_ia, "comentario": datos.comentario, "correo_rh": u.correo},
@@ -1106,6 +1202,8 @@ async def mover_etapa(
 
     anterior = c.etapa
     c.etapa = datos.etapa
+    _actualizar_ultima_actividad(c)
+    _recalcular_resultado_apto(c)
     registrar(
         db, u.nombre, "etapa_movida", "candidato", c.codigo,
         {"de": anterior, "a": datos.etapa, "comentario": datos.comentario, "correo_rh": u.correo},
@@ -1347,7 +1445,7 @@ async def programar_entrevista_humana(
             "correo_entrevistador": correo_entrevistador_resultado,
         },
     )
-
+    _actualizar_ultima_actividad(c)
     db.commit()
     return candidato_dict(c, detalle=True)
 
@@ -1441,6 +1539,8 @@ def registrar_resultado_entrevista_humana(
     eh.recomendacion = datos.recomendacion
     eh.comentario = comentario
     eh.resultado_capturado_por = "rh"
+    _actualizar_ultima_actividad(c)
+    _recalcular_resultado_apto(c)
     registrar(
         db, u.nombre, "entrevista_humana_resultado_capturado_rh", "candidato", c.codigo,
         {
