@@ -217,6 +217,8 @@ function CandidatosContenido() {
   const [fFuente, setFFuente] = useState<string>("");
   const [fConsentimiento, setFConsentimiento] = useState<"todos" | "con" | "sin">("todos");
   const [fApto, setFApto] = useState<"todos" | "apto" | "no_apto" | "sin_evaluar">("todos");
+  const [fScoreMin, setFScoreMin] = useState<number | "">("");
+  const [fScoreMax, setFScoreMax] = useState<number | "">("");
   const [fDuplicados, setFDuplicados] = useState(false);
   const [orden, setOrden] = useState<"actividad" | "fecha" | "score" | "nombre">("actividad");
 
@@ -335,6 +337,8 @@ function CandidatosContenido() {
       if (fApto === "apto" && c.resultadoApto !== true) return false;
       if (fApto === "no_apto" && c.resultadoApto !== false) return false;
       if (fApto === "sin_evaluar" && c.resultadoApto != null) return false;
+      if (fScoreMin !== "" && (c.score ?? 0) < Number(fScoreMin)) return false;
+      if (fScoreMax !== "" && (c.score ?? 0) > Number(fScoreMax)) return false;
       if (fDuplicados && !duplicadosSet.has(c.id)) return false;
       return true;
     });
@@ -370,6 +374,8 @@ function CandidatosContenido() {
     fFuente,
     fConsentimiento,
     fApto,
+    fScoreMin,
+    fScoreMax,
     fDuplicados,
     orden,
     vacantes,
@@ -384,6 +390,7 @@ function CandidatosContenido() {
     (fFuente ? 1 : 0) +
     (fConsentimiento !== "todos" ? 1 : 0) +
     (fApto !== "todos" ? 1 : 0) +
+    (fScoreMin !== "" || fScoreMax !== "" ? 1 : 0) +
     (fDuplicados ? 1 : 0);
 
   const limpiarTodosLosFiltros = () => {
@@ -395,6 +402,8 @@ function CandidatosContenido() {
     setFFuente("");
     setFConsentimiento("todos");
     setFApto("todos");
+    setFScoreMin("");
+    setFScoreMax("");
     setFDuplicados(false);
     setColumnaResaltada(null);
   };
@@ -551,7 +560,7 @@ function CandidatosContenido() {
 
       {/* Panel desplegable de Filtros Avanzados (Fase C) */}
       {filtrosAvanzados && (
-        <Card className="mt-3 grid gap-3 border-border-soft bg-surface/90 p-4 sm:grid-cols-2 lg:grid-cols-5">
+        <Card className="mt-3 grid gap-3 border-border-soft bg-surface/90 p-4 sm:grid-cols-2 lg:grid-cols-6">
           {/* Cliente */}
           {clientes.length > 0 && (
             <div>
@@ -630,28 +639,74 @@ function CandidatosContenido() {
             </select>
           </div>
 
-          {/* Consentimiento y Duplicados */}
-          <div className="flex flex-col justify-end gap-2">
-            <div className="flex items-center gap-2">
+          {/* Score CV (Rango) */}
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-ink-3">
+              Score CV (%)
+            </label>
+            <div className="flex items-center gap-1.5">
               <input
-                type="checkbox"
-                id="f-duplicados"
-                checked={fDuplicados}
-                onChange={(e) => setFDuplicados(e.target.checked)}
-                className="h-4 w-4 rounded border-border-soft text-brand focus:ring-brand"
+                type="number"
+                min="0"
+                max="100"
+                placeholder="Mín"
+                value={fScoreMin}
+                onChange={(e) => setFScoreMin(e.target.value === "" ? "" : Math.max(0, Math.min(100, Number(e.target.value))))}
+                className="w-full rounded-lg border border-border-soft bg-surface p-2 text-xs outline-none focus:border-brand"
               />
-              <label htmlFor="f-duplicados" className="cursor-pointer text-xs font-medium text-ink-2">
-                Solo duplicados ({duplicadosSet.size})
-              </label>
+              <span className="text-xs text-ink-3">-</span>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                placeholder="Máx"
+                value={fScoreMax}
+                onChange={(e) => setFScoreMax(e.target.value === "" ? "" : Math.max(0, Math.min(100, Number(e.target.value))))}
+                className="w-full rounded-lg border border-border-soft bg-surface p-2 text-xs outline-none focus:border-brand"
+              />
             </div>
-            {totalFiltrosAvanzadosActivos > 0 && (
-              <button
-                onClick={limpiarTodosLosFiltros}
-                className="text-left text-xs font-semibold text-brand hover:underline"
-              >
-                Limpiar filtros
-              </button>
-            )}
+          </div>
+
+          {/* Consentimiento */}
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-ink-3">
+              Consentimiento
+            </label>
+            <select
+              value={fConsentimiento}
+              onChange={(e) => setFConsentimiento(e.target.value as typeof fConsentimiento)}
+              className="w-full rounded-lg border border-border-soft bg-surface p-2 text-xs outline-none focus:border-brand"
+            >
+              <option value="todos">Todos</option>
+              <option value="con">Con consentimiento</option>
+              <option value="sin">Sin consentimiento</option>
+            </select>
+          </div>
+
+          {/* Duplicados */}
+          <div className="flex flex-col justify-end gap-2 sm:col-span-2 lg:col-span-6">
+            <div className="flex flex-wrap items-center justify-between border-t border-border-faint pt-2">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="f-duplicados"
+                  checked={fDuplicados}
+                  onChange={(e) => setFDuplicados(e.target.checked)}
+                  className="h-4 w-4 rounded border-border-soft text-brand focus:ring-brand"
+                />
+                <label htmlFor="f-duplicados" className="cursor-pointer text-xs font-medium text-ink-2">
+                  Solo duplicados ({duplicadosSet.size})
+                </label>
+              </div>
+              {totalFiltrosAvanzadosActivos > 0 && (
+                <button
+                  onClick={limpiarTodosLosFiltros}
+                  className="text-xs font-semibold text-brand hover:underline"
+                >
+                  Limpiar todos los filtros
+                </button>
+              )}
+            </div>
           </div>
         </Card>
       )}
