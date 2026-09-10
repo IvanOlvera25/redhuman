@@ -472,6 +472,8 @@ export function fetchCandidatos(filtros?: {
   consentimiento?: boolean;
   apto?: boolean;
   duplicados?: boolean;
+  score_min?: number;
+  score_max?: number;
 }) {
   const q = new URLSearchParams(
     Object.entries(filtros ?? {})

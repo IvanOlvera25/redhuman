@@ -164,6 +164,8 @@ def listar(
     consentimiento: Optional[bool] = None,
     apto: Optional[bool] = None,           # True → resultado_apto == True; False → == False
     duplicados: Optional[bool] = None,     # True → candidatos con tel/correo repetido en la Cuenta
+    score_min: Optional[int] = None,       # Score CV mínimo (0-100)
+    score_max: Optional[int] = None,       # Score CV máximo (0-100)
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
     cuenta: Cuenta = Depends(cuenta_actual),
@@ -185,6 +187,10 @@ def listar(
         q = q.filter(Candidato.consentimiento.is_(consentimiento))
     if apto is not None:
         q = q.filter(Candidato.resultado_apto.is_(apto))
+    if score_min is not None:
+        q = q.filter(Candidato.score >= score_min)
+    if score_max is not None:
+        q = q.filter(Candidato.score <= score_max)
     if cliente_id is not None:
         q = q.join(Vacante, Candidato.vacante_id == Vacante.id).filter(Vacante.cliente_id == cliente_id)
     if responsable_id is not None:

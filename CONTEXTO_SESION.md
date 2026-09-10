@@ -352,7 +352,7 @@ Decisiones de negocio confirmadas por el usuario (no volver a preguntar):
 
 **Alcance ejecutado**:
 1. Vistas duales (Tarjetas / Lista) con persistencia en `localStorage` tanto para Vacantes como para Candidatos.
-2. Filtros avanzados en backend y frontend (Cliente, Responsable, Área, Ubicación, Fuente, Consentimiento, Apto, Duplicados).
+2. Filtros avanzados en backend y frontend (Cliente, Responsable, Área, Ubicación, Fuente, Score CV mín/máx, Resultado Apto, Consentimiento, Duplicados).
 3. Navegación directa y resaltado de columnas en el Pipeline de Candidatos (Opción A aprobada) desde contadores del mini-embudo de Vacantes y parámetros de URL (`?vacante=...&etapa=...`).
 4. Lógica de "Apto" persistida (`Candidato.resultado_apto`) con la regla "el más reciente gana" (Contratación/Onboarding=True, Entrevista Humana, Entrevista IA, Prefiltro).
 5. Registro de `Candidato.ultima_actividad_en` y ordenamiento por actividad reciente.
