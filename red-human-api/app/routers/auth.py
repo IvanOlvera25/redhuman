@@ -134,9 +134,8 @@ class CrearUsuarioIn(BaseModel):
    puesto: str = ""
    rol: str = "rh"
    password: str
-# ----------------- MODIFICADO AQUI (Se quitó la dependencia de admin) -----------------
 @router.post("/usuarios", status_code=201)
-def crear(datos: CrearUsuarioIn, db: Session = Depends(get_db)):
+def crear(datos: CrearUsuarioIn, db: Session = Depends(get_db), admin: Usuario = Depends(usuario_admin)):
    correo = str(datos.correo).strip().lower()
    if not CORREO_RE.match(correo):
        raise HTTPException(400, "El correo no tiene un formato válido.")
@@ -157,8 +156,7 @@ def crear(datos: CrearUsuarioIn, db: Session = Depends(get_db)):
    )
    db.add(u)
    db.flush()
-   # ----------------- MODIFICADO AQUI (Se comentó el registro en bitácora) -----------------
-   # registrar(db, admin.nombre, "usuario_creado", "usuario", correo, {"rol": u.rol})
+   registrar(db, admin.nombre, "usuario_creado", "usuario", correo, {"rol": u.rol})
    db.commit()
    return usuario_dict(u)
 
