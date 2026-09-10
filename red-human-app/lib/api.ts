@@ -233,8 +233,19 @@ export interface DatosVacante {
   notas?: string;
 }
 
-export function fetchVacantes() {
-  return get<Vacante[]>("/vacantes");
+export function fetchVacantes(filtros?: {
+  estado?: string;
+  // --- Fase C: filtros adicionales ---
+  busqueda?: string;
+  cliente_id?: number;
+  responsable_id?: number;
+  area?: string;
+  ubicacion?: string;
+}) {
+  const q = new URLSearchParams(
+    Object.entries(filtros ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== "") as [string, string][],
+  ).toString();
+  return get<Vacante[]>(`/vacantes${q ? `?${q}` : ""}`);
 }
 
 /** Bolsa de trabajo pública (/portal): solo vacantes en estado "Publicada", sin sesión. */
@@ -450,9 +461,22 @@ export interface CargaCV {
   resultados: ResultadoCV[];
 }
 
-export function fetchCandidatos(filtros?: { vacante?: string; etapa?: string; estado?: string }) {
+export function fetchCandidatos(filtros?: {
+  vacante?: string;
+  etapa?: string;
+  estado?: string;
+  // --- Fase C: filtros adicionales ---
+  fuente?: string;
+  cliente_id?: number;
+  responsable_id?: number;
+  consentimiento?: boolean;
+  apto?: boolean;
+  duplicados?: boolean;
+}) {
   const q = new URLSearchParams(
-    Object.entries(filtros ?? {}).filter(([, v]) => Boolean(v)) as [string, string][],
+    Object.entries(filtros ?? {})
+      .filter(([, v]) => v !== undefined && v !== null && v !== "")
+      .map(([k, v]) => [k, String(v)]),
   ).toString();
   return get<Candidato[]>(`/candidatos${q ? `?${q}` : ""}`);
 }

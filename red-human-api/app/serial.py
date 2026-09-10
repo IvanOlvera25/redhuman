@@ -101,6 +101,8 @@ def vacante_dict(
         # embudo de esta vacante (conecta con el pipeline de candidatos)
         "embudo": embudo or {},
         "creada": iso(v.creada_en),
+        # Fase C: fecha de primera publicación (ISO string, null si nunca se publicó)
+        "publicadaEn": iso(v.publicada_en),
         "actualizada": iso(v.actualizada_en),
     }
 
@@ -191,6 +193,16 @@ def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
         "entrevistaRecomendacion": (ultima.evaluacion or {}).get("recomendacion") if ultima else None,
         "archivos": len(c.archivos),
         "mensajes": len(c.mensajes),
+        # --- Fase C: actividad, resultado vigente y cliente de la vacante ---
+        # ultima_actividad_en: None para candidatos previos al deploy de Fase C hasta que se ejecute
+        # el script backfill_resultado_apto.py (o hasta su próximo evento de actividad).
+        "ultimaActividadEn": iso(c.ultima_actividad_en),
+        # resultado_apto: True=Apto, False=No apto, None=sin evaluación. La regla "el más reciente gana"
+        # se aplica en _recalcular_resultado_apto() dentro de routers/candidatos.py.
+        "resultadoApto": c.resultado_apto,
+        # clienteVacante: nombre del Cliente de la vacante del candidato, si aplica — permite mostrar
+        # la columna Cliente en la vista lista de candidatos sin JOIN extra desde el frontend.
+        "clienteVacante": c.vacante.cliente.nombre if c.vacante and c.vacante.cliente else None,
     }
     if not detalle:
         return base

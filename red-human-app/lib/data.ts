@@ -87,6 +87,16 @@ export interface Candidato {
   entrevistaRecomendacion?: string | null;
   archivos?: number;
   mensajes?: number;
+  /* --- Fase C: actividad, resultado vigente y cliente de la vacante --- */
+  /** Fecha ISO de última actividad (cambio de etapa, evaluación, mensaje, etc.). Null si no hay
+   * actividad registrada desde el deploy de Fase C (usar aplicado como fallback). */
+  ultimaActividadEn?: string | null;
+  /** True=Apto, False=No apto, null=sin evaluación todavía.
+   * La regla "el más reciente gana" se aplica en el backend (_recalcular_resultado_apto). */
+  resultadoApto?: boolean | null;
+  /** Nombre del Cliente de la vacante del candidato, si aplica. Null si no tiene vacante o
+   * la vacante no tiene Cliente. Permite la columna "Cliente" en la vista lista sin JOIN extra. */
+  clienteVacante?: string | null;
   /* solo en el detalle (GET /candidatos/{codigo}) */
   cvDatos?: Record<string, unknown>;
   analisis?: {
@@ -161,6 +171,9 @@ export interface Vacante {
   }[];
   embudo?: { etapas?: Record<string, number>; estados?: Record<string, number> };
   creada?: string;
+  /** Fecha ISO de primera publicación. Null si la vacante nunca se ha publicado o existia
+   * antes del deploy de Fase C y aún no ha pasado por publicar(). */
+  publicadaEn?: string | null;
   actualizada?: string;
   /* --- Fase B: Cliente/Responsable/Colaboradores/visibilidad --- */
   cliente?: string | null;

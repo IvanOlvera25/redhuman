@@ -123,6 +123,12 @@ def _validar_relaciones(
 @router.get("")
 def listar(
     estado: Optional[str] = None,
+    # --- Fase C: filtros adicionales ---
+    busqueda: Optional[str] = None,          # LIKE sobre titulo (case-insensitive)
+    cliente_id: Optional[int] = None,
+    responsable_id: Optional[int] = None,
+    area: Optional[str] = None,              # LIKE sobre area
+    ubicacion: Optional[str] = None,         # LIKE sobre ubicacion
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
     cuenta: Cuenta = Depends(cuenta_actual),
@@ -130,6 +136,16 @@ def listar(
     q = db.query(Vacante).filter(Vacante.cuenta_id == cuenta.id).order_by(Vacante.id.desc())
     if estado:
         q = q.filter(Vacante.estado == estado)
+    if busqueda:
+        q = q.filter(Vacante.titulo.ilike(f"%{busqueda.strip()}%"))
+    if cliente_id is not None:
+        q = q.filter(Vacante.cliente_id == cliente_id)
+    if responsable_id is not None:
+        q = q.filter(Vacante.responsable_id == responsable_id)
+    if area:
+        q = q.filter(Vacante.area.ilike(f"%{area.strip()}%"))
+    if ubicacion:
+        q = q.filter(Vacante.ubicacion.ilike(f"%{ubicacion.strip()}%"))
     return [_salida(db, v) for v in q.all()]
 
 
@@ -283,6 +299,9 @@ def crear(
     db.flush()
     v.codigo = f"VAC-{1036 + v.id}"
     v.slug = _slug_unico(db, v.titulo, v.id)
+    # Fase C: estampar fecha de publicación si la vacante se publica directamente al crear.
+    if datos.publicar and v.publicada_en is None:
+        v.publicada_en = v.creada_en  # misma marca de tiempo que la creación
     registrar(
         db, u.nombre, "vacante_creada", "vacante", v.codigo,
         {"titulo": v.titulo, "estado": v.estado, "ia": con_ia, "plataformas": v.plataformas},
@@ -432,6 +451,10 @@ def publicar(
     v.plataformas = sorted(set((v.plataformas or []) + plataformas), key=PLATAFORMAS.index)
     if not v.slug:
         v.slug = _slug_unico(db, v.titulo, v.id)
+    # Fase C: estampar fecha de primera publicación (solo la primera vez; no sobreescribir en
+    # reaperturas — la fecha que importa es cuándo salió por primera vez al público).
+    if v.publicada_en is None:
+        v.publicada_en = datetime.now(timezone.utc)
     registrar(db, u.nombre, "vacante_publicada", "vacante", v.codigo, {"plataformas": v.plataformas})
     db.commit()
     return _salida(db, v)

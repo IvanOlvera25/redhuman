@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   X,
   MapPin,
@@ -30,6 +31,13 @@ import {
   CalendarClock,
   FlaskConical,
   User,
+  LayoutGrid,
+  List,
+  ChevronDown,
+  Building2,
+  Clock,
+  ArrowUpDown,
+  Copy,
 } from "lucide-react";
 import { Card, Badge, Button, Avatar, Eyebrow, Progress } from "@/components/ui";
 import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
@@ -51,6 +59,7 @@ import {
   enviarPrefiltro,
   fetchCandidato,
   fetchCandidatos,
+  fetchClientes,
   fetchEntrevistadores,
   fetchExpediente,
   fetchMensajes,
@@ -72,6 +81,7 @@ import {
   urlCartaIntencion,
   urlDocumento,
   type CargaCV,
+  type Cliente,
   type MensajePrefiltro,
   type ModalidadEntrevistaHumana,
 } from "@/lib/api";
@@ -151,6 +161,18 @@ function normalizarTexto(s: string): string {
   return s.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
 }
 
+/** Formatea una fecha ISO a formato corto legible (ej. "10 sep, 14:30") */
+function fechaCorta(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return d.toLocaleDateString("es-MX", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return null;
+  }
+}
+
 /** "Todos" excluye a los descartados a propósito: son un archivo aparte, no la vista por defecto. */
 function coincideEstado(c: Candidato, filtro: FiltroEstado): boolean {
   const yaContratado = ETAPAS_YA_CONTRATADO.includes(c.etapa);
@@ -169,16 +191,61 @@ function coincideEstado(c: Candidato, filtro: FiltroEstado): boolean {
   }
 }
 
-export default function Candidatos() {
+function CandidatosContenido() {
   const puedeDecidir = usePuedeDecidir();
+  const searchParams = useSearchParams();
+
   const [sel, setSel] = useState<Candidato | null>(null);
   const [datos, setDatos] = useState<Candidato[]>(candidatosDemo);
   const [vacantes, setVacantes] = useState<Vacante[]>([]);
+  const [clientes, setClientes] = useState<Cliente[]>([]);
+  const [usuarios, setUsuarios] = useState<{ id: number; nombre: string }[]>([]);
+
+  // Filtros principales
   const [filtroVacante, setFiltroVacante] = useState<string>("");
   const [filtroEstado, setFiltroEstado] = useState<FiltroEstado>("todos");
   const [busqueda, setBusqueda] = useState("");
   const [live, setLive] = useState(false);
   const [carga, setCarga] = useState(false);
+
+  // Fase C: Vistas, URL params y filtros avanzados
+  const [vista, setVista] = useState<"pipeline" | "lista">("pipeline");
+  const [columnaResaltada, setColumnaResaltada] = useState<string | null>(null);
+  const [filtrosAvanzados, setFiltrosAvanzados] = useState(false);
+  const [fCliente, setFCliente] = useState<number | "">("");
+  const [fResponsable, setFResponsable] = useState<number | "">("");
+  const [fFuente, setFFuente] = useState<string>("");
+  const [fConsentimiento, setFConsentimiento] = useState<"todos" | "con" | "sin">("todos");
+  const [fApto, setFApto] = useState<"todos" | "apto" | "no_apto" | "sin_evaluar">("todos");
+  const [fDuplicados, setFDuplicados] = useState(false);
+  const [orden, setOrden] = useState<"actividad" | "fecha" | "score" | "nombre">("actividad");
+
+  // Inicialización desde URL params y localStorage
+  useEffect(() => {
+    const vParam = searchParams.get("vacante");
+    if (vParam) setFiltroVacante(vParam);
+
+    const eParam = searchParams.get("etapa");
+    if (eParam && etapas.includes(eParam as EtapaCandidato)) {
+      setColumnaResaltada(eParam);
+      setTimeout(() => {
+        const el = document.getElementById(`columna-etapa-${eParam.replace(/\s/g, "-")}`);
+        if (el) el.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+      }, 200);
+    }
+
+    const guardada = localStorage.getItem("rh-candidatos-vista");
+    if (guardada === "pipeline" || guardada === "lista") {
+      setVista(guardada);
+    }
+  }, [searchParams]);
+
+  const cambiarVista = (nueva: "pipeline" | "lista") => {
+    setVista(nueva);
+    try {
+      localStorage.setItem("rh-candidatos-vista", nueva);
+    } catch {}
+  };
 
   const recargar = useCallback(async (abrirCodigo?: string) => {
     const c = await fetchCandidatos(filtroVacante ? { vacante: filtroVacante } : undefined);
@@ -198,6 +265,8 @@ export default function Candidatos() {
   useEffect(() => {
     recargar();
     fetchVacantes().then((v) => v && setVacantes(v));
+    fetchClientes("Activo").then((cl) => setClientes(cl ?? []));
+    fetchEntrevistadores().then((u) => setUsuarios(u ?? []));
   }, [recargar]);
 
   async function abrir(c: Candidato) {
@@ -207,14 +276,128 @@ export default function Candidatos() {
     if (detalle) setSel(detalle);
   }
 
+  // Detección de duplicados en el conjunto cargado (por teléfono normalizado a 10 dígitos o correo)
+  const duplicadosSet = useMemo(() => {
+    const telMap = new Map<string, number>();
+    const emailMap = new Map<string, number>();
+
+    for (const c of datos) {
+      const t = c.telefono ? c.telefono.replace(/\D/g, "").slice(-10) : "";
+      if (t.length >= 7) telMap.set(t, (telMap.get(t) ?? 0) + 1);
+      const m = c.correo ? c.correo.trim().toLowerCase() : "";
+      if (m) emailMap.set(m, (emailMap.get(m) ?? 0) + 1);
+    }
+
+    const dups = new Set<string>();
+    for (const c of datos) {
+      const t = c.telefono ? c.telefono.replace(/\D/g, "").slice(-10) : "";
+      const m = c.correo ? c.correo.trim().toLowerCase() : "";
+      if ((t.length >= 7 && (telMap.get(t) ?? 0) > 1) || (m && (emailMap.get(m) ?? 0) > 1)) {
+        dups.add(c.id);
+      }
+    }
+    return dups;
+  }, [datos]);
+
   const sinConsentimiento = datos.filter((c) => c.consentimiento === false).length;
-  const datosFiltrados = datos.filter(
-    (c) =>
-      (!filtroVacante || c.vacanteId === filtroVacante) &&
-      coincideEstado(c, filtroEstado) &&
-      (!busqueda.trim() || normalizarTexto(c.nombre).includes(normalizarTexto(busqueda))),
-  );
+
+  // Filtrado y ordenamiento compuesto
+  const datosFiltrados = useMemo(() => {
+    let res = datos.filter((c) => {
+      if (filtroVacante && c.vacanteId !== filtroVacante) return false;
+      if (!coincideEstado(c, filtroEstado)) return false;
+      if (
+        busqueda.trim() &&
+        !normalizarTexto(c.nombre).includes(normalizarTexto(busqueda)) &&
+        !normalizarTexto(c.id).includes(normalizarTexto(busqueda))
+      ) {
+        return false;
+      }
+      if (fCliente !== "") {
+        const v = vacantes.find((vac) => vac.id === c.vacanteId);
+        const cliObj = clientes.find((cl) => cl.id === fCliente);
+        const cliNombre = cliObj?.nombre;
+        if (cliNombre && c.clienteVacante !== cliNombre && v?.cliente !== cliNombre) {
+          return false;
+        }
+      }
+      if (fResponsable !== "") {
+        const v = vacantes.find((vac) => vac.id === c.vacanteId);
+        const uObj = usuarios.find((u) => u.id === fResponsable);
+        const uNombre = uObj?.nombre;
+        if (uNombre && v?.responsable !== uNombre) {
+          return false;
+        }
+      }
+      if (fFuente && c.fuente !== fFuente) return false;
+      if (fConsentimiento === "con" && c.consentimiento !== true) return false;
+      if (fConsentimiento === "sin" && c.consentimiento !== false) return false;
+      if (fApto === "apto" && c.resultadoApto !== true) return false;
+      if (fApto === "no_apto" && c.resultadoApto !== false) return false;
+      if (fApto === "sin_evaluar" && c.resultadoApto != null) return false;
+      if (fDuplicados && !duplicadosSet.has(c.id)) return false;
+      return true;
+    });
+
+    res = [...res].sort((a, b) => {
+      if (orden === "actividad") {
+        const ta = a.ultimaActividadEn ? new Date(a.ultimaActividadEn).getTime() : a.aplicado ? new Date(a.aplicado).getTime() : 0;
+        const tb = b.ultimaActividadEn ? new Date(b.ultimaActividadEn).getTime() : b.aplicado ? new Date(b.aplicado).getTime() : 0;
+        return tb - ta;
+      }
+      if (orden === "fecha") {
+        const ta = a.aplicado ? new Date(a.aplicado).getTime() : 0;
+        const tb = b.aplicado ? new Date(b.aplicado).getTime() : 0;
+        return tb - ta;
+      }
+      if (orden === "score") {
+        return (b.score ?? 0) - (a.score ?? 0);
+      }
+      if (orden === "nombre") {
+        return a.nombre.localeCompare(b.nombre);
+      }
+      return 0;
+    });
+
+    return res;
+  }, [
+    datos,
+    filtroVacante,
+    filtroEstado,
+    busqueda,
+    fCliente,
+    fResponsable,
+    fFuente,
+    fConsentimiento,
+    fApto,
+    fDuplicados,
+    orden,
+    vacantes,
+    clientes,
+    duplicadosSet,
+  ]);
+
   const vacanteSeleccionada = vacantes.find((v) => v.id === filtroVacante);
+  const totalFiltrosAvanzadosActivos =
+    (fCliente !== "" ? 1 : 0) +
+    (fResponsable !== "" ? 1 : 0) +
+    (fFuente ? 1 : 0) +
+    (fConsentimiento !== "todos" ? 1 : 0) +
+    (fApto !== "todos" ? 1 : 0) +
+    (fDuplicados ? 1 : 0);
+
+  const limpiarTodosLosFiltros = () => {
+    setFiltroVacante("");
+    setFiltroEstado("todos");
+    setBusqueda("");
+    setFCliente("");
+    setFResponsable("");
+    setFFuente("");
+    setFConsentimiento("todos");
+    setFApto("todos");
+    setFDuplicados(false);
+    setColumnaResaltada(null);
+  };
 
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6 sm:py-8">
@@ -234,76 +417,259 @@ export default function Candidatos() {
         )}
       </PageHeader>
 
-      {/* Filtro por vacante */}
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <div className="relative">
-          <Filter className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
-          <select
-            id="filtro-vacante"
-            value={filtroVacante}
-            onChange={(e) => setFiltroVacante(e.target.value)}
-            className="h-11 min-w-[260px] appearance-none rounded-xl border border-border-soft bg-surface pl-9 pr-8 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
-          >
-            <option value="">Todas las vacantes</option>
-            {vacantes.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.titulo}{v.ubicacion ? ` · ${v.ubicacion}` : ""}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* Búsqueda por nombre — se combina con el filtro de vacante, no lo reemplaza */}
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
-          <input
-            type="text"
-            value={busqueda}
-            onChange={(e) => setBusqueda(e.target.value)}
-            placeholder="Buscar por nombre…"
-            className="h-11 min-w-[220px] rounded-xl border border-border-soft bg-surface pl-9 pr-8 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
-          />
-          {busqueda && (
+      {/* Barra principal de control: selector de vista, vacante, búsqueda, estado y filtros */}
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Toggle de vista (Pipeline vs Lista) */}
+          <div className="flex items-center rounded-xl border border-border-soft bg-surface p-1 shadow-sm">
             <button
-              onClick={() => setBusqueda("")}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-ink-3 hover:text-ink"
-              aria-label="Limpiar búsqueda"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          )}
-        </div>
-
-        {/* Barra de filtro por estado */}
-        <div className="flex flex-wrap items-center gap-1 rounded-xl border border-border-soft bg-surface-2/60 p-1">
-          {FILTROS_ESTADO.map((f) => (
-            <button
-              key={f.key}
-              onClick={() => setFiltroEstado(f.key)}
+              id="candidatos-vista-pipeline"
+              onClick={() => cambiarVista("pipeline")}
               className={cn(
-                "rounded-lg px-3 py-1.5 text-xs font-semibold transition",
-                filtroEstado === f.key
-                  ? "bg-surface text-brand shadow-sm"
-                  : "text-ink-3 hover:bg-surface/60 hover:text-ink",
+                "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition",
+                vista === "pipeline"
+                  ? "bg-brand text-white shadow-sm"
+                  : "text-ink-3 hover:bg-surface-2 hover:text-ink",
               )}
+              title="Vista de Pipeline (Kanban)"
             >
-              {f.label}
+              <LayoutGrid className="h-3.5 w-3.5" /> Pipeline
             </button>
-          ))}
+            <button
+              id="candidatos-vista-lista"
+              onClick={() => cambiarVista("lista")}
+              className={cn(
+                "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition",
+                vista === "lista"
+                  ? "bg-brand text-white shadow-sm"
+                  : "text-ink-3 hover:bg-surface-2 hover:text-ink",
+              )}
+              title="Vista en Lista detallada"
+            >
+              <List className="h-3.5 w-3.5" /> Lista
+            </button>
+          </div>
+
+          {/* Filtro por vacante */}
+          <div className="relative">
+            <Filter className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
+            <select
+              id="filtro-vacante"
+              value={filtroVacante}
+              onChange={(e) => setFiltroVacante(e.target.value)}
+              className="h-10 min-w-[240px] appearance-none rounded-xl border border-border-soft bg-surface pl-9 pr-8 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+            >
+              <option value="">Todas las vacantes</option>
+              {vacantes.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.titulo}{v.cliente ? ` · ${v.cliente}` : ""}{v.ubicacion ? ` (${v.ubicacion})` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Búsqueda por nombre o código */}
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
+            <input
+              type="text"
+              value={busqueda}
+              onChange={(e) => setBusqueda(e.target.value)}
+              placeholder="Buscar por nombre o código…"
+              className="h-10 min-w-[220px] rounded-xl border border-border-soft bg-surface pl-9 pr-8 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+            />
+            {busqueda && (
+              <button
+                onClick={() => setBusqueda("")}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-ink-3 hover:text-ink"
+                aria-label="Limpiar búsqueda"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+
+          {/* Barra de filtro por estado */}
+          <div className="flex flex-wrap items-center gap-1 rounded-xl border border-border-soft bg-surface-2/60 p-1">
+            {FILTROS_ESTADO.map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setFiltroEstado(f.key)}
+                className={cn(
+                  "rounded-lg px-2.5 py-1 text-xs font-semibold transition",
+                  filtroEstado === f.key
+                    ? "bg-surface text-brand shadow-sm"
+                    : "text-ink-3 hover:bg-surface/60 hover:text-ink",
+                )}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Botón desplegable de filtros avanzados */}
+          <button
+            onClick={() => setFiltrosAvanzados((prev) => !prev)}
+            className={cn(
+              "flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold transition",
+              filtrosAvanzados || totalFiltrosAvanzadosActivos > 0
+                ? "border-brand bg-brand-soft text-brand"
+                : "border-border-soft bg-surface text-ink-2 hover:border-brand/40",
+            )}
+          >
+            <Filter className="h-3.5 w-3.5" />
+            Filtros
+            {totalFiltrosAvanzadosActivos > 0 && (
+              <span className="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-brand px-1 text-[10px] text-white">
+                {totalFiltrosAvanzadosActivos}
+              </span>
+            )}
+            <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", filtrosAvanzados && "rotate-180")} />
+          </button>
         </div>
 
-        <Badge tone="brand" dot>
-          {datosFiltrados.length} candidato{datosFiltrados.length !== 1 ? "s" : ""}
-        </Badge>
-        {filtroVacante && vacanteSeleccionada && (
-          <button
-            onClick={() => setFiltroVacante("")}
-            className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-ink-3 transition hover:bg-surface-2 hover:text-ink"
-          >
-            <X className="h-3 w-3" /> Limpiar filtro
-          </button>
-        )}
+        {/* Contador y Orden */}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5 text-xs text-ink-3">
+            <ArrowUpDown className="h-3.5 w-3.5" />
+            <select
+              value={orden}
+              onChange={(e) => setOrden(e.target.value as typeof orden)}
+              className="rounded-lg border border-border-soft bg-surface px-2 py-1 text-xs font-medium text-ink outline-none focus:border-brand"
+            >
+              <option value="actividad">Última actividad</option>
+              <option value="fecha">Fecha aplicación</option>
+              <option value="score">Mayor Score CV</option>
+              <option value="nombre">Nombre (A-Z)</option>
+            </select>
+          </div>
+          <Badge tone="brand" dot>
+            {datosFiltrados.length} candidato{datosFiltrados.length !== 1 ? "s" : ""}
+          </Badge>
+        </div>
       </div>
+
+      {/* Panel desplegable de Filtros Avanzados (Fase C) */}
+      {filtrosAvanzados && (
+        <Card className="mt-3 grid gap-3 border-border-soft bg-surface/90 p-4 sm:grid-cols-2 lg:grid-cols-5">
+          {/* Cliente */}
+          {clientes.length > 0 && (
+            <div>
+              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-ink-3">
+                Cliente
+              </label>
+              <select
+                value={fCliente}
+                onChange={(e) => setFCliente(e.target.value === "" ? "" : Number(e.target.value))}
+                className="w-full rounded-lg border border-border-soft bg-surface p-2 text-xs outline-none focus:border-brand"
+              >
+                <option value="">Todos los clientes</option>
+                {clientes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.nombre}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Responsable */}
+          {usuarios.length > 0 && (
+            <div>
+              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-ink-3">
+                Responsable
+              </label>
+              <select
+                value={fResponsable}
+                onChange={(e) => setFResponsable(e.target.value === "" ? "" : Number(e.target.value))}
+                className="w-full rounded-lg border border-border-soft bg-surface p-2 text-xs outline-none focus:border-brand"
+              >
+                <option value="">Todos los responsables</option>
+                {usuarios.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.nombre}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Fuente */}
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-ink-3">
+              Fuente
+            </label>
+            <select
+              value={fFuente}
+              onChange={(e) => setFFuente(e.target.value)}
+              className="w-full rounded-lg border border-border-soft bg-surface p-2 text-xs outline-none focus:border-brand"
+            >
+              <option value="">Todas las fuentes</option>
+              <option value="WhatsApp">WhatsApp</option>
+              <option value="OCC">OCC</option>
+              <option value="LinkedIn">LinkedIn</option>
+              <option value="Portal">Portal</option>
+              <option value="Carga CV">Carga CV</option>
+            </select>
+          </div>
+
+          {/* Apto (Punto 21) */}
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-ink-3">
+              Resultado Apto
+            </label>
+            <select
+              value={fApto}
+              onChange={(e) => setFApto(e.target.value as typeof fApto)}
+              className="w-full rounded-lg border border-border-soft bg-surface p-2 text-xs outline-none focus:border-brand"
+            >
+              <option value="todos">Todos los resultados</option>
+              <option value="apto">Apto (Sí)</option>
+              <option value="no_apto">No apto (No)</option>
+              <option value="sin_evaluar">Sin evaluar</option>
+            </select>
+          </div>
+
+          {/* Consentimiento y Duplicados */}
+          <div className="flex flex-col justify-end gap-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="f-duplicados"
+                checked={fDuplicados}
+                onChange={(e) => setFDuplicados(e.target.checked)}
+                className="h-4 w-4 rounded border-border-soft text-brand focus:ring-brand"
+              />
+              <label htmlFor="f-duplicados" className="cursor-pointer text-xs font-medium text-ink-2">
+                Solo duplicados ({duplicadosSet.size})
+              </label>
+            </div>
+            {totalFiltrosAvanzadosActivos > 0 && (
+              <button
+                onClick={limpiarTodosLosFiltros}
+                className="text-left text-xs font-semibold text-brand hover:underline"
+              >
+                Limpiar filtros
+              </button>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {/* Avisos */}
+      {columnaResaltada && (
+        <div className="mt-3 flex items-center justify-between rounded-xl border border-brand/40 bg-brand-soft/40 px-4 py-2 text-xs text-brand">
+          <span>
+            Mostrando etapa enfocada: <strong>{columnaResaltada}</strong>
+          </span>
+          <button
+            onClick={() => setColumnaResaltada(null)}
+            className="flex items-center gap-1 font-semibold hover:underline"
+          >
+            <X className="h-3.5 w-3.5" /> Quitar enfoque
+          </button>
+        </div>
+      )}
 
       {live && sinConsentimiento > 0 && (
         <div className="mt-4">
@@ -314,100 +680,276 @@ export default function Candidatos() {
         </div>
       )}
 
-      {/* Kanban */}
-      <div className="mt-6 grid gap-4 overflow-x-auto sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-        {etapas.map((etapa) => {
-          const cols = datosFiltrados.filter((c) => c.etapa === etapa);
-          return (
-            <div key={etapa} className="flex flex-col rounded-2xl border border-border-soft bg-surface-2/40 p-3">
-              <div className="mb-3 flex items-center justify-between px-1">
-                <div className="flex items-center gap-2">
-                  <span className="h-2.5 w-2.5 rounded-full" style={{ background: etapaColor[etapa] }} />
-                  <span className="text-sm font-semibold">{etapa}</span>
-                </div>
-                <span className="rounded-full bg-surface px-2 py-0.5 font-mono text-[11px] text-ink-3">
-                  {cols.length}
-                </span>
-              </div>
+      {/* VISTA 1: PIPELINE (Kanban) */}
+      {vista === "pipeline" && (
+        <div className="mt-6 grid gap-4 overflow-x-auto sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+          {etapas.map((etapa) => {
+            const cols = datosFiltrados.filter((c) => c.etapa === etapa);
+            const esResaltada = columnaResaltada === etapa;
 
-              <div className="flex flex-col gap-2.5">
-                {cols.map((c) => (
-                  <button
-                    key={c.id}
-                    onClick={() => abrir(c)}
-                    className="card-hover group rounded-xl border border-border-soft bg-surface p-3.5 text-left transition-all hover:border-brand/40 hover:shadow-md"
+            return (
+              <div
+                key={etapa}
+                id={`columna-etapa-${etapa.replace(/\s/g, "-")}`}
+                className={cn(
+                  "flex flex-col rounded-2xl border p-3 transition-all duration-300",
+                  esResaltada
+                    ? "border-brand bg-brand/5 ring-2 ring-brand/30 shadow-md"
+                    : "border-border-soft bg-surface-2/40",
+                )}
+              >
+                <div className="mb-3 flex items-center justify-between px-1">
+                  <div className="flex items-center gap-2">
+                    <span className="h-2.5 w-2.5 rounded-full" style={{ background: etapaColor[etapa] }} />
+                    <span className={cn("text-sm font-semibold", esResaltada && "text-brand")}>{etapa}</span>
+                  </div>
+                  <span
+                    className={cn(
+                      "rounded-full px-2 py-0.5 font-mono text-[11px]",
+                      esResaltada ? "bg-brand text-white font-bold" : "bg-surface text-ink-3",
+                    )}
                   >
-                    <div className="flex items-center gap-3">
-                      <div className="relative">
-                        <ScoreRing score={c.score} />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <p className="truncate text-sm font-semibold group-hover:text-brand">{c.nombre}</p>
-                          {c.esPrueba && (
-                            <span className="shrink-0 rounded bg-brand-soft px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide text-brand">
-                              Prueba
-                            </span>
+                    {cols.length}
+                  </span>
+                </div>
+
+                <div className="flex flex-col gap-2.5">
+                  {cols.map((c) => {
+                    const esDup = duplicadosSet.has(c.id);
+                    return (
+                      <button
+                        key={c.id}
+                        onClick={() => abrir(c)}
+                        className="card-hover group rounded-xl border border-border-soft bg-surface p-3.5 text-left transition-all hover:border-brand/40 hover:shadow-md"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="relative">
+                            <ScoreRing score={c.score} />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <p className="truncate text-sm font-semibold group-hover:text-brand">{c.nombre}</p>
+                              {c.esPrueba && (
+                                <span className="shrink-0 rounded bg-brand-soft px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide text-brand">
+                                  Prueba
+                                </span>
+                              )}
+                              {esDup && (
+                                <span
+                                  title="Posible candidato duplicado (coincide teléfono o correo)"
+                                  className="shrink-0 rounded bg-warn-soft px-1.5 py-0.5 font-mono text-[9px] font-bold text-warn"
+                                >
+                                  Duplicado
+                                </span>
+                              )}
+                            </div>
+                            <p className="truncate text-xs text-ink-3">
+                              {c.puesto || "Sin vacante"}
+                              {c.clienteVacante ? ` · ${c.clienteVacante}` : ""}
+                            </p>
+                            <div className="mt-1 flex items-center gap-1.5">
+                              <span className="rounded bg-brand/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand">
+                                Score CV: {c.score}%
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Estado y Apto (Fase C) */}
+                        <div className="mt-3 flex items-center justify-between">
+                          <div className="flex items-center gap-1.5">
+                            <EstadoBadge estado={c.estado} />
+                            {c.resultadoApto === true && (
+                              <span className="rounded-md bg-good-soft px-1.5 py-0.5 text-[10px] font-bold text-good">
+                                Apto
+                              </span>
+                            )}
+                            {c.resultadoApto === false && (
+                              <span className="rounded-md bg-bad-soft px-1.5 py-0.5 text-[10px] font-bold text-bad">
+                                No apto
+                              </span>
+                            )}
+                          </div>
+                          <span className="flex items-center gap-1 font-mono text-[10px] text-ink-3">
+                            {c.fuente === "WhatsApp" ? (
+                              <span className="inline-flex items-center gap-1 font-semibold text-good">
+                                <MessageCircle className="h-3 w-3" /> WhatsApp
+                              </span>
+                            ) : (
+                              c.fuente
+                            )}
+                          </span>
+                        </div>
+
+                        {/* Señales */}
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          {(c.archivos ?? 0) > 0 && (
+                            <Pastilla icon={FileText} tono="neutral">
+                              {c.archivos} CV/doc
+                            </Pastilla>
+                          )}
+                          {(c.mensajes ?? 0) > 0 && (
+                            <Pastilla icon={MessageCircle} tono="good">
+                              {c.mensajes} msgs
+                            </Pastilla>
+                          )}
+                          {c.entrevistaEstado === "evaluada" && (
+                            <Pastilla icon={Video}>match {c.entrevistaMatch ?? "—"}</Pastilla>
+                          )}
+                          {c.expedienteId != null && (
+                            <Pastilla icon={UserCheck} tono="good">
+                              expediente {c.expedienteProgreso ?? 0}%
+                            </Pastilla>
+                          )}
+                          {c.consentimiento === false && (
+                            <Pastilla icon={AlertTriangle} tono="warn">
+                              sin consentimiento
+                            </Pastilla>
                           )}
                         </div>
-                        <p className="truncate text-xs text-ink-3">{c.puesto || "Sin vacante asignada"}</p>
-                        <div className="mt-1 flex items-center gap-1.5">
-                          <span className="rounded bg-brand/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand">
-                            Score CV: {c.score}%
-                          </span>
+
+                        {/* Fecha última actividad / aplicación */}
+                        {(c.ultimaActividadEn || c.aplicado) && (
+                          <div className="mt-2.5 flex items-center gap-1 border-t border-border-faint pt-2 text-[10px] text-ink-3">
+                            <Clock className="h-3 w-3" />
+                            <span>
+                              {c.ultimaActividadEn
+                                ? `Actividad ${fechaCorta(c.ultimaActividadEn)}`
+                                : `Aplicó ${fechaCorta(c.aplicado)}`}
+                            </span>
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {cols.length === 0 && (
+                    <div className="rounded-xl border border-dashed border-border-soft py-8 text-center text-xs text-ink-3">
+                      Sin candidatos
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* VISTA 2: LISTA (Fase C) */}
+      {vista === "lista" && (
+        <div className="mt-6 overflow-x-auto rounded-xl border border-border-soft bg-surface">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border-soft bg-surface-2 text-xs font-semibold uppercase tracking-wide text-ink-3">
+                <th className="px-4 py-3 text-left">Candidato</th>
+                <th className="px-4 py-3 text-left">Vacante</th>
+                <th className="px-4 py-3 text-left">Cliente</th>
+                <th className="px-4 py-3 text-left">Etapa</th>
+                <th className="px-4 py-3 text-left">Resultado Apto</th>
+                <th className="px-4 py-3 text-left">Score CV</th>
+                <th className="px-4 py-3 text-left">Fuente</th>
+                <th className="px-4 py-3 text-left">Última Actividad</th>
+                <th className="px-4 py-3 text-right">Acción</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border-faint">
+              {datosFiltrados.map((c) => {
+                const esDup = duplicadosSet.has(c.id);
+                return (
+                  <tr
+                    key={c.id}
+                    onClick={() => abrir(c)}
+                    className="cursor-pointer transition hover:bg-brand-soft/30"
+                  >
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2.5">
+                        <Avatar name={c.nombre} tone={c.tono} />
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <p className="font-semibold text-ink">{c.nombre}</p>
+                            {c.esPrueba && (
+                              <span className="rounded bg-brand-soft px-1 text-[9px] font-bold text-brand">
+                                Prueba
+                              </span>
+                            )}
+                            {esDup && (
+                              <span
+                                title="Posible candidato duplicado"
+                                className="rounded bg-warn-soft px-1 text-[9px] font-bold text-warn"
+                              >
+                                Duplicado
+                              </span>
+                            )}
+                          </div>
+                          <p className="font-mono text-[11px] text-ink-3">{c.id}</p>
                         </div>
                       </div>
-                    </div>
-                    <div className="mt-3 flex items-center justify-between">
-                      <EstadoBadge estado={c.estado} />
-                      <span className="flex items-center gap-1 font-mono text-[10px] text-ink-3">
-                        {c.fuente === "WhatsApp" ? (
-                          <span className="inline-flex items-center gap-1 text-good font-semibold">
-                            <MessageCircle className="h-3 w-3" /> WhatsApp
-                          </span>
-                        ) : (
-                          c.fuente
-                        )}
+                    </td>
+                    <td className="px-4 py-3 text-ink-2">
+                      <p className="font-medium text-ink">{c.puesto || "—"}</p>
+                      <p className="font-mono text-[11px] text-ink-3">{c.vacanteId}</p>
+                    </td>
+                    <td className="px-4 py-3 text-ink-2">
+                      {c.clienteVacante || "—"}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
+                        style={{
+                          background: `${etapaColor[c.etapa]}18`,
+                          color: etapaColor[c.etapa],
+                        }}
+                      >
+                        <span className="h-1.5 w-1.5 rounded-full" style={{ background: etapaColor[c.etapa] }} />
+                        {c.etapa}
                       </span>
-                    </div>
-                    {/* señales */}
-                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      {(c.archivos ?? 0) > 0 && (
-                        <Pastilla icon={FileText} tono="neutral">
-                          {c.archivos} CV/doc
-                        </Pastilla>
+                    </td>
+                    <td className="px-4 py-3">
+                      {c.resultadoApto === true && (
+                        <Badge tone="good" dot>
+                          Apto
+                        </Badge>
                       )}
-                      {(c.mensajes ?? 0) > 0 && (
-                        <Pastilla icon={MessageCircle} tono="good">
-                          {c.mensajes} msgs
-                        </Pastilla>
+                      {c.resultadoApto === false && (
+                        <Badge tone="bad" dot>
+                          No apto
+                        </Badge>
                       )}
-                      {c.entrevistaEstado === "evaluada" && (
-                        <Pastilla icon={Video}>match {c.entrevistaMatch ?? "—"}</Pastilla>
+                      {c.resultadoApto == null && (
+                        <span className="text-xs text-ink-3">Sin evaluar</span>
                       )}
-                      {c.expedienteId != null && (
-                        <Pastilla icon={UserCheck} tono="good">
-                          expediente {c.expedienteProgreso ?? 0}%
-                        </Pastilla>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="font-mono text-xs font-semibold text-ink">
+                        {c.score != null ? `${c.score}%` : "—"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-ink-2">
+                      {c.fuente === "WhatsApp" ? (
+                        <span className="inline-flex items-center gap-1 font-semibold text-good">
+                          <MessageCircle className="h-3.5 w-3.5" /> WhatsApp
+                        </span>
+                      ) : (
+                        c.fuente || "—"
                       )}
-                      {c.consentimiento === false && (
-                        <Pastilla icon={AlertTriangle} tono="warn">
-                          sin consentimiento
-                        </Pastilla>
-                      )}
-                    </div>
-                  </button>
-                ))}
-                {cols.length === 0 && (
-                  <div className="rounded-xl border border-dashed border-border-soft py-8 text-center text-xs text-ink-3">
-                    Sin candidatos
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-ink-3">
+                      {c.ultimaActividadEn ? fechaCorta(c.ultimaActividadEn) : c.aplicado ? fechaCorta(c.aplicado) : "—"}
+                    </td>
+                    <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                      <Button size="sm" variant="secondary" onClick={() => abrir(c)}>
+                        Ver detalle
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {datosFiltrados.length === 0 && (
+            <div className="py-12 text-center text-sm text-ink-3">Sin candidatos con estos filtros.</div>
+          )}
+        </div>
+      )}
 
       {carga && (
         <CargarCVs
@@ -432,6 +974,14 @@ export default function Candidatos() {
         />
       )}
     </div>
+  );
+}
+
+export default function Candidatos() {
+  return (
+    <Suspense fallback={<div className="p-8 text-center text-sm text-ink-3">Cargando candidatos…</div>}>
+      <CandidatosContenido />
+    </Suspense>
   );
 }
 
