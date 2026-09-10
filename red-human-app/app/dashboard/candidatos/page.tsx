@@ -29,7 +29,7 @@ import {
   Phone,
   CalendarClock,
   FlaskConical,
-  ChevronDown,
+  User,
 } from "lucide-react";
 import { Card, Badge, Button, Avatar, Eyebrow, Progress } from "@/components/ui";
 import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
@@ -119,6 +119,30 @@ const ETAPAS_YA_CONTRATADO: EtapaCandidato[] = ["Contratación", "Onboarding"];
 
 const TIPOS_CONTRATACION = ["Tiempo indeterminado", "Tiempo determinado", "Por obra o proyecto", "Honorarios"];
 const MODALIDADES_ENTREVISTA_HUMANA: ModalidadEntrevistaHumana[] = ["Presencial", "Videollamada", "Llamada"];
+
+/** Usado tanto por PanelEntrevistaHumana (agenda/resultado) como por PestanaEvaluaciones
+ * (vista de solo lectura del mismo resultado) — una sola fuente para el label. */
+const RECOMENDACION_LABEL: Record<RecomendacionEntrevistaHumana, string> = {
+  avanzar: "Avanzar",
+  no_avanzar: "No avanzar",
+  segunda_entrevista: "Segunda entrevista",
+};
+
+/** Clases completas y estáticas por tono de pestaña — Tailwind necesita ver el nombre de la
+ * clase literal en el código para generarla; un template literal tipo `text-${tone}` no
+ * funciona (ver toneMap en components/ui.tsx, mismo patrón). */
+const TAB_TONE_ACTIVA: Record<string, string> = {
+  brand: "bg-bg text-brand border-brand shadow-sm",
+  human: "bg-bg text-human border-human shadow-sm",
+  good: "bg-bg text-good border-good shadow-sm",
+  warn: "bg-bg text-warn border-warn shadow-sm",
+};
+const TAB_TONE_BADGE: Record<string, string> = {
+  brand: "bg-brand/15 text-brand",
+  human: "bg-human/15 text-human",
+  good: "bg-good/15 text-good",
+  warn: "bg-warn/15 text-warn",
+};
 
 /** Quita acentos y pasa a minúsculas para que "jose" encuentre "José" en la búsqueda por nombre. */
 function normalizarTexto(s: string): string {
@@ -431,8 +455,10 @@ function Pastilla({
   );
 }
 
+type TabCandidato = "resumen" | "evaluaciones" | "documentos" | "whatsapp" | "contratacion";
+
 /* ============================================================
-   MODAL CENTRADO: Detalle del Candidato (2 Pestañas)
+   MODAL CENTRADO: Detalle del Candidato (4 pestañas + Contratación condicional)
    ============================================================ */
 function ModalCandidato({
   c,
@@ -446,12 +472,21 @@ function ModalCandidato({
   onCambio: (c: Candidato) => void;
 }) {
   const puedeDecidir = usePuedeDecidir();
-  const [tab, setTab] = useState<"perfil_cv" | "whatsapp">("perfil_cv");
+  const [tab, setTab] = useState<TabCandidato>(() => (c.etapa === "Contratación" ? "contratacion" : "resumen"));
+  // Si el candidato ENTRA a Contratación mientras el modal ya está abierto (p.ej. RH lo mueve
+  // de etapa sin cerrar la ficha), salta solo a esa pestaña para que no se pierda entre las
+  // demás — sin esto, seguiría en "resumen" hasta que el usuario la buscara a mano.
+  const etapaAnterior = useRef(c.etapa);
+  useEffect(() => {
+    if (c.etapa === "Contratación" && etapaAnterior.current !== "Contratación") {
+      setTab("contratacion");
+    }
+    etapaAnterior.current = c.etapa;
+  }, [c.etapa]);
   const [aviso, setAviso] = useState<{ tono: "ok" | "error" | "warn"; texto: string } | null>(null);
   const [ocupado, setOcupado] = useState("");
   const [comentario, setComentario] = useState("");
   const [modalEntrevista, setModalEntrevista] = useState(false);
-  const [verEvaluacionIA, setVerEvaluacionIA] = useState(false);
 
   function resolver<T>(r: { ok: true; data: T } | { ok: false; error: string }, exito: string) {
     setOcupado("");
@@ -579,39 +614,37 @@ function ModalCandidato({
           </div>
         </div>
 
-        {/* Barra de Pestañas Principales (2 Pestañas) */}
+        {/* Barra de Pestañas Principales (4 base + Contratación condicional) */}
         <div className="border-b border-border-soft bg-surface-2/70 px-6 pt-3">
           <div className="flex gap-2">
-            <button
-              onClick={() => setTab("perfil_cv")}
-              className={cn(
-                "flex items-center gap-2 rounded-t-xl px-4 py-2.5 text-sm font-semibold transition border-b-2",
-                tab === "perfil_cv"
-                  ? "bg-bg text-brand border-brand shadow-sm"
-                  : "border-transparent text-ink-3 hover:text-ink hover:bg-surface/50",
-              )}
-            >
-              <FileText className="h-4 w-4" />
-              Perfil y CV
-            </button>
-
-            <button
-              onClick={() => setTab("whatsapp")}
-              className={cn(
-                "flex items-center gap-2 rounded-t-xl px-4 py-2.5 text-sm font-semibold transition border-b-2",
-                tab === "whatsapp"
-                  ? "bg-bg text-good border-good shadow-sm"
-                  : "border-transparent text-ink-3 hover:text-ink hover:bg-surface/50",
-              )}
-            >
-              <MessageCircle className="h-4 w-4" />
-              Chat de WhatsApp
-              {Boolean(c.mensajes) && (
-                <span className="rounded-full bg-good/15 px-2 py-0.2 font-mono text-[11px] text-good font-bold">
-                  {c.mensajes}
-                </span>
-              )}
-            </button>
+            {(
+              [
+                { id: "resumen", label: "Resumen", icon: User, tone: "brand" },
+                { id: "evaluaciones", label: "Evaluaciones", icon: Sparkles, tone: "human" },
+                { id: "documentos", label: "CV y documentos", icon: FileText, tone: "brand" },
+                { id: "whatsapp", label: "WhatsApp", icon: MessageCircle, tone: "good", badge: c.mensajes },
+                ...(c.etapa === "Contratación"
+                  ? [{ id: "contratacion", label: "Contratación", icon: Briefcase, tone: "warn" }]
+                  : []),
+              ] as { id: TabCandidato; label: string; icon: typeof User; tone: string; badge?: number }[]
+            ).map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                className={cn(
+                  "flex items-center gap-2 rounded-t-xl px-4 py-2.5 text-sm font-semibold transition border-b-2",
+                  tab === t.id ? TAB_TONE_ACTIVA[t.tone] : "border-transparent text-ink-3 hover:text-ink hover:bg-surface/50",
+                )}
+              >
+                <t.icon className="h-4 w-4" />
+                {t.label}
+                {Boolean(t.badge) && (
+                  <span className={cn("rounded-full px-2 py-0.2 font-mono text-[11px] font-bold", TAB_TONE_BADGE[t.tone])}>
+                    {t.badge}
+                  </span>
+                )}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -639,10 +672,14 @@ function ModalCandidato({
           )}
 
           {c.etapa === "Entrevista Humana" && <PanelEntrevistaHumana c={c} live={live} onCambio={onCambio} />}
-          {c.etapa === "Contratación" && <PanelContratacion c={c} live={live} onCambio={onCambio} setAviso={setAviso} />}
 
-          {tab === "perfil_cv" && <PestanaPerfilYCV c={c} live={live} onCambio={onCambio} setAviso={setAviso} />}
+          {tab === "resumen" && <PestanaResumen c={c} />}
+          {tab === "evaluaciones" && <PestanaEvaluaciones c={c} />}
+          {tab === "documentos" && <PestanaDocumentos c={c} live={live} onCambio={onCambio} setAviso={setAviso} />}
           {tab === "whatsapp" && <PestanaWhatsApp c={c} live={live} onCambio={onCambio} />}
+          {tab === "contratacion" && c.etapa === "Contratación" && (
+            <PanelContratacion c={c} live={live} onCambio={onCambio} setAviso={setAviso} />
+          )}
         </div>
 
         {/* SOLO PRUEBAS: independiente de la etapa — no es parte del flujo normal del candidato. */}
@@ -695,37 +732,6 @@ function ModalCandidato({
                 placeholder="Nota de decisión para auditoría (opcional)…"
                 className="h-10 w-full rounded-xl border border-border-soft bg-bg px-3.5 text-xs sm:text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
               />
-
-              {/* Entrevista IA y Evaluación: resumen en línea de la evaluación del avatar, si ya
-                  existe. En cuanto se evalúa, Zero-Touch mueve al candidato a Evaluación en la
-                  misma transacción — sin esta segunda etapa el desplegable casi nunca alcanza a
-                  mostrarse. */}
-              {(c.etapa === "Entrevista IA" || c.etapa === "Evaluación") &&
-                (c.entrevistaMatch != null || c.entrevistaRecomendacion) && (
-                <div>
-                  <button
-                    onClick={() => setVerEvaluacionIA((x) => !x)}
-                    className="flex items-center gap-1 text-xs font-semibold text-brand hover:underline"
-                  >
-                    <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", verEvaluacionIA && "rotate-180")} />
-                    {verEvaluacionIA ? "Ocultar evaluación" : "Ver evaluación"}
-                  </button>
-                  {verEvaluacionIA && (
-                    <div className="mt-2 rounded-xl border border-border-soft bg-bg p-3 text-xs text-ink-2">
-                      {c.entrevistaMatch != null && (
-                        <p>
-                          Match de la entrevista: <b className="text-ink">{c.entrevistaMatch}%</b>
-                        </p>
-                      )}
-                      {c.entrevistaRecomendacion && (
-                        <p>
-                          Recomendación de la IA: <b className="text-ink">{c.entrevistaRecomendacion}</b>
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
 
               <div className="flex flex-wrap items-center gap-2">
                 {c.expedienteId == null && (
@@ -819,52 +825,14 @@ function ModalCandidato({
 }
 
 /* ============================================================
-   PESTAÑA 1: Perfil y CV (Score de Afinidad + Análisis de CV)
+   PESTAÑA 1: Resumen (contacto + vistazo rápido del CV)
    ============================================================ */
-function PestanaPerfilYCV({
-  c,
-  live,
-  onCambio,
-  setAviso,
-}: {
-  c: Candidato;
-  live: boolean;
-  onCambio: (c: Candidato) => void;
-  setAviso: (a: { tono: "ok" | "error" | "warn"; texto: string } | null) => void;
-}) {
-  const puedeDecidir = usePuedeDecidir();
-  const [cargandoCV, setCargandoCV] = useState(false);
-
+function PestanaResumen({ c }: { c: Candidato }) {
   const cv = (c.cvDatos || {}) as Record<string, unknown>;
   const anios = cv.anios_experiencia as number | undefined;
   const resumen = (cv.experiencia_resumen as string) || c.experiencia;
   const puestoActual = (cv.puesto_actual as string) || "";
   const ultimoEmpleo = (cv.ultimo_empleo as string) || "";
-  const habilidades = (cv.habilidades as string[]) || [];
-  const estudios = (cv.estudios as string[]) || [];
-  const idiomas = (cv.idiomas as string[]) || [];
-  const a = c.analisis ?? {};
-  const alertas = (cv.alertas as string[]) || (a.alertas || []);
-  const faltantes = (cv.datos_faltantes as string[]) || (a.datos_faltantes || []);
-  const listaArchivos = c.listaArchivos ?? [];
-  const ultimaEntrevista = c.entrevistas?.[c.entrevistas.length - 1];
-  const evalAvatar = ultimaEntrevista?.evaluacion as
-    | { resumen?: string; fortalezas?: string[]; riesgos?: string[] }
-    | null
-    | undefined;
-
-  async function subirCV(archivos: File[]) {
-    setCargandoCV(true);
-    setAviso(null);
-    const r = await subirArchivoCandidato(c.id, archivos[0], "cv");
-    setCargandoCV(false);
-    if (!r.ok) {
-      setAviso({ tono: "error", texto: r.error });
-      return;
-    }
-    setAviso({ tono: "ok", texto: "CV procesado exitosamente: datos y score de afinidad actualizados." });
-    if (r.data.candidato) onCambio(r.data.candidato);
-  }
 
   return (
     <div className="flex flex-col gap-5">
@@ -877,6 +845,52 @@ function PestanaPerfilYCV({
         {c.fuente === "WhatsApp" && <Info icon={MessageCircle} v="Canal: WhatsApp" />}
       </div>
 
+      {/* Análisis y Extracción del Currículum */}
+      <div>
+        <Eyebrow>Análisis y Extracción del Currículum</Eyebrow>
+        <Card className="mt-2 p-5">
+          <p className="text-sm leading-relaxed text-ink-2">{resumen || "Sin resumen de experiencia disponible."}</p>
+
+          <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+            {anios != null && (
+              <div className="rounded-xl bg-surface-2 p-3">
+                <span className="block font-mono text-[10px] text-ink-3">Experiencia total</span>
+                <span className="text-sm font-bold text-ink">{anios} años</span>
+              </div>
+            )}
+            {puestoActual && (
+              <div className="rounded-xl bg-surface-2 p-3">
+                <span className="block font-mono text-[10px] text-ink-3">Puesto más reciente</span>
+                <span className="truncate text-sm font-bold text-ink">{puestoActual}</span>
+              </div>
+            )}
+            {ultimoEmpleo && (
+              <div className="rounded-xl bg-surface-2 p-3 col-span-2 sm:col-span-1">
+                <span className="block font-mono text-[10px] text-ink-3">Última empresa / periodo</span>
+                <span className="truncate text-sm font-bold text-ink">{ultimoEmpleo}</span>
+              </div>
+            )}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   PESTAÑA 2: Evaluaciones (Luna, avatar, requisitos/brechas, prefiltro, entrevista humana)
+   ============================================================ */
+function PestanaEvaluaciones({ c }: { c: Candidato }) {
+  const a = c.analisis ?? {};
+  const ultimaEntrevista = c.entrevistas?.[c.entrevistas.length - 1];
+  const evalAvatar = ultimaEntrevista?.evaluacion as
+    | { resumen?: string; fortalezas?: string[]; riesgos?: string[] }
+    | null
+    | undefined;
+  const eh = c.entrevistaHumana;
+
+  return (
+    <div className="flex flex-col gap-5">
       {/* Tarjeta de Score de Afinidad */}
       <Card className="border-brand/30 bg-brand-soft/20 p-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -927,6 +941,27 @@ function PestanaPerfilYCV({
               </ul>
             </div>
           )}
+        </Card>
+      )}
+
+      {/* Match y recomendación de la entrevista con avatar — antes vivía colapsable dentro del
+          footer de decisión; ya con pestaña propia se muestra siempre visible aquí. */}
+      {(c.etapa === "Entrevista IA" || c.etapa === "Evaluación") &&
+        (c.entrevistaMatch != null || c.entrevistaRecomendacion) && (
+        <Card className="p-4">
+          <Eyebrow>Evaluación de la entrevista</Eyebrow>
+          <div className="mt-2 space-y-1 text-xs text-ink-2">
+            {c.entrevistaMatch != null && (
+              <p>
+                Match de la entrevista: <b className="text-ink">{c.entrevistaMatch}%</b>
+              </p>
+            )}
+            {c.entrevistaRecomendacion && (
+              <p>
+                Recomendación de la IA: <b className="text-ink">{c.entrevistaRecomendacion}</b>
+              </p>
+            )}
+          </div>
         </Card>
       )}
 
@@ -1007,35 +1042,66 @@ function PestanaPerfilYCV({
         </div>
       )}
 
-      {/* Análisis y Extracción del Currículum */}
-      <div>
-        <Eyebrow>Análisis y Extracción del Currículum</Eyebrow>
-        <Card className="mt-2 p-5">
-          <p className="text-sm leading-relaxed text-ink-2">{resumen || "Sin resumen de experiencia disponible."}</p>
-
-          <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-            {anios != null && (
-              <div className="rounded-xl bg-surface-2 p-3">
-                <span className="block font-mono text-[10px] text-ink-3">Experiencia total</span>
-                <span className="text-sm font-bold text-ink">{anios} años</span>
-              </div>
-            )}
-            {puestoActual && (
-              <div className="rounded-xl bg-surface-2 p-3">
-                <span className="block font-mono text-[10px] text-ink-3">Puesto más reciente</span>
-                <span className="truncate text-sm font-bold text-ink">{puestoActual}</span>
-              </div>
-            )}
-            {ultimoEmpleo && (
-              <div className="rounded-xl bg-surface-2 p-3 col-span-2 sm:col-span-1">
-                <span className="block font-mono text-[10px] text-ink-3">Última empresa / periodo</span>
-                <span className="truncate text-sm font-bold text-ink">{ultimoEmpleo}</span>
-              </div>
-            )}
+      {/* Resultado de Entrevista Humana — solo lectura; agendar/reprogramar/marcar realizada y
+          el recordatorio siguen viviendo exclusivamente en PanelEntrevistaHumana (acción
+          activa, no se duplica aquí). Esto es únicamente el veredicto ya cerrado. */}
+      {eh?.realizada && (
+        <Card className="border-[color:var(--brand-2)]/30 bg-surface-2/40 p-4">
+          <Eyebrow>Resultado de Entrevista Humana</Eyebrow>
+          <div className="mt-2.5 flex flex-wrap items-center gap-2">
+            <Badge tone={eh.resultado === "aprobado" ? "good" : "bad"} dot>
+              {eh.resultado === "aprobado" ? "Aprobado" : "No aprobado"}
+            </Badge>
+            {eh.recomendacion && <Badge tone="brand">{RECOMENDACION_LABEL[eh.recomendacion]}</Badge>}
           </div>
+          {eh.comentario && <p className="mt-2.5 text-[13px] leading-relaxed text-ink-2">{eh.comentario}</p>}
         </Card>
-      </div>
+      )}
+    </div>
+  );
+}
 
+/* ============================================================
+   PESTAÑA 3: CV y documentos (habilidades, estudios/idiomas, alertas, archivos)
+   ============================================================ */
+function PestanaDocumentos({
+  c,
+  live,
+  onCambio,
+  setAviso,
+}: {
+  c: Candidato;
+  live: boolean;
+  onCambio: (c: Candidato) => void;
+  setAviso: (a: { tono: "ok" | "error" | "warn"; texto: string } | null) => void;
+}) {
+  const puedeDecidir = usePuedeDecidir();
+  const [cargandoCV, setCargandoCV] = useState(false);
+
+  const cv = (c.cvDatos || {}) as Record<string, unknown>;
+  const habilidades = (cv.habilidades as string[]) || [];
+  const estudios = (cv.estudios as string[]) || [];
+  const idiomas = (cv.idiomas as string[]) || [];
+  const a = c.analisis ?? {};
+  const alertas = (cv.alertas as string[]) || (a.alertas || []);
+  const faltantes = (cv.datos_faltantes as string[]) || (a.datos_faltantes || []);
+  const listaArchivos = c.listaArchivos ?? [];
+
+  async function subirCV(archivos: File[]) {
+    setCargandoCV(true);
+    setAviso(null);
+    const r = await subirArchivoCandidato(c.id, archivos[0], "cv");
+    setCargandoCV(false);
+    if (!r.ok) {
+      setAviso({ tono: "error", texto: r.error });
+      return;
+    }
+    setAviso({ tono: "ok", texto: "CV procesado exitosamente: datos y score de afinidad actualizados." });
+    if (r.data.candidato) onCambio(r.data.candidato);
+  }
+
+  return (
+    <div className="flex flex-col gap-5">
       {/* Habilidades detectadas */}
       {habilidades.length > 0 && (
         <div>
@@ -1540,12 +1606,6 @@ function PanelEntrevistaHumana({
           : "";
 
   const IconoModalidad = eh.modalidad === "Presencial" ? MapPin : eh.modalidad === "Llamada" ? Phone : Video;
-
-  const RECOMENDACION_LABEL: Record<RecomendacionEntrevistaHumana, string> = {
-    avanzar: "Avanzar",
-    no_avanzar: "No avanzar",
-    segunda_entrevista: "Segunda entrevista",
-  };
 
   return (
     <Card className="border-[color:var(--brand-2)]/30 bg-surface-2/40 p-4">
