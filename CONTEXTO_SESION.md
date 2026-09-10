@@ -236,14 +236,47 @@ para cuando se toque el flujo de instalación desde cero.
 - 2 endpoints de escritura probados: `POST /vacantes` estampa `cuenta_id`; `POST
   /auth/usuarios` crea el usuario Y su fila en `usuario_cuentas`.
 
+### Bug encontrado y corregido en migrar_cuentas.py — 2026-09-10 (antes de correr en producción)
+
+El usuario, revisando el diff, detectó que la lista de Clientes a crear traía "GROWTIA" y
+"Growtia" como 2 entradas separadas. Confirmado: `_nombres_cliente()` agrupaba los valores
+de `empresa` en un `set()` de Python después de solo `.strip()` — sin normalizar
+mayúsculas ni espacios internos, así que cualquier variante de capitalización/espaciado del
+mismo nombre real habría creado un Cliente duplicado.
+
+**Fix aplicado**: nueva función `_normalizar()` (colapsa espacios + `casefold()`) usada
+para agrupar — `_agrupar_empresas()` regresa `{clave_normalizada: Counter(variantes)}` y
+`_nombres_cliente()` elige como nombre visible la variante más frecuente en los datos
+reales (empate → alfabética, determinista). El resumen que imprime el script antes de
+pedir confirmación ahora muestra qué variantes se agruparon bajo cada Cliente, p.ej.
+`GROWTIA  (agrupa: "GROWTIA"×1, "Growtia"×1, "growtia"×1)`. `_cliente_id()` (la función que
+asigna `cliente_id` a cada Vacante/Colaborador) también normaliza antes de buscar, así que
+las 3 variantes de un mismo nombre real quedan apuntando al mismo Cliente.
+
+**Verificado con datos sintéticos** (NO se tiene acceso a la base de datos real de
+producción desde este entorno — la única `redhuman.db` local disponible aquí es la de
+seed/demo, sin "GROWTIA"): se insertaron 3 vacantes de prueba con "GROWTIA"/"Growtia"/
+"growtia  " (espacio extra) en una copia descartable, se corrió el script completo, y se
+confirmó: 1 solo Cliente creado (no 3), las 3 vacantes de prueba quedaron con el mismo
+`cliente_id`. Copia de prueba borrada al terminar.
+
+⚠️ **El usuario todavía debe correr el script corregido contra una copia real de
+producción (o revisar la lista impresa en un `--forzar` no confirmado) antes de la
+migración real, para ver el resultado con sus datos reales** — lo que se verificó aquí
+prueba que la lógica de agrupación funciona, no sustituye ver la lista real.
+
 ### Siguiente paso
 1. El usuario revisa el diff completo (`git diff` — 14 archivos de `routers/` +
-   `models.py` + `deps.py` + `seed.py`, y el archivo nuevo `scripts/migrar_cuentas.py`)
-   — nada está comiteado todavía.
-2. Si aprueba: commit → deploy → correr `migrar_cuentas.py` en producción (con
+   `models.py` + `deps.py` + `seed.py`, y el archivo nuevo `scripts/migrar_cuentas.py`,
+   este último ya con el fix de normalización de nombres) — nada está comiteado todavía.
+2. Antes de confirmar la migración real: correr `migrar_cuentas.py` SIN `--forzar` contra
+   una copia de la base de producción (o directamente, cancelando en el prompt de
+   confirmación) para revisar la lista real de Clientes que se crearían — especialmente
+   verificar si hay más agrupaciones por mayúsculas/espacios aparte de GROWTIA.
+3. Si aprueba: commit → deploy → correr `migrar_cuentas.py` en producción (con
    confirmación explícita, como siempre). **Orden obligatorio**: el script debe correr
    inmediatamente después del deploy — hasta que corra, `usuario_cuentas` está vacía y
    `cuenta_actual` le da 403 a todo el mundo.
-3. Fase A queda funcionalmente completa (modelo + auth + los 14 archivos de endpoints).
+4. Fase A queda funcionalmente completa (modelo + auth + los 14 archivos de endpoints).
    Sigue Fase B: Vacantes con creación, herencia automática de Cuenta/Cliente, plantillas,
    vista previa — depende de A, ya lista.

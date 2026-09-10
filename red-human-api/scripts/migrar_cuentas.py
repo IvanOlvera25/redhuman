@@ -2,10 +2,12 @@
 multi-cuenta).
 
 Crea una Cuenta default ("Grupo Carbe") y, dentro de ella, un Cliente por cada valor de
-`Vacante.empresa`/`Colaborador.empresa` distinto de "" y del nombre de la Cuenta (con los
-datos actuales: "Distribuidora Norte" y "Retail Bajío"). Las filas cuyo `empresa ==
-"Grupo Carbe"` se quedan con `cliente_id = NULL` — la Cuenta recluta para sí misma, no es
-su propio Cliente (decisión confirmada 2026-09-10, ver CONTEXTO_SESION.md).
+`Vacante.empresa`/`Colaborador.empresa` distinto de "" y del nombre de la Cuenta. El
+agrupamiento es por nombre NORMALIZADO (mayúsculas/minúsculas y espacios extra no cuentan
+— "GROWTIA" y "Growtia" producen un solo Cliente, no dos; el nombre visible es la variante
+de capitalización más frecuente en los datos reales). Las filas cuyo `empresa` normalizado
+coincide con el de la Cuenta se quedan con `cliente_id = NULL` — la Cuenta recluta para sí
+misma, no es su propio Cliente (decisión confirmada 2026-09-10, ver CONTEXTO_SESION.md).
 
 Asigna `cuenta_id`/`cliente_id` a todas las filas existentes de Vacante, Candidato,
 Empleado, Colaborador, Requisicion y Bitacora (Empleado y Requisicion no tienen ningún
@@ -20,7 +22,9 @@ Uso (desde red-human-api/):
     .venv/Scripts/python.exe scripts/migrar_cuentas.py --forzar  # sin preguntar
 """
 
+import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # para poder importar `app.*`
@@ -44,17 +48,39 @@ NOMBRE_CUENTA_DEFAULT = "Grupo Carbe"
 ROLES_VIEJOS_A_NUEVOS = {"admin": "Administrador", "rh": "Usuario", "lectura": "Usuario"}
 
 
-def _nombres_cliente(db) -> list[str]:
-    """Valores de `empresa` (Vacante + Colaborador) distintos de "" y del nombre de la
-    Cuenta default — cada uno se vuelve un Cliente real."""
-    valores = set()
-    for (empresa,) in db.query(Vacante.empresa).distinct():
-        valores.add((empresa or "").strip())
-    for (empresa,) in db.query(Colaborador.empresa).distinct():
-        valores.add((empresa or "").strip())
-    valores.discard("")
-    valores.discard(NOMBRE_CUENTA_DEFAULT)
-    return sorted(valores)
+def _normalizar(s: str) -> str:
+    """Clave de agrupación: colapsa espacios repetidos y quita mayúsculas/minúsculas, para que
+    'GROWTIA' y 'Growtia' (o 'Growtia  ' con espacio de más) agrupen como el mismo Cliente."""
+    return re.sub(r"\s+", " ", (s or "").strip()).casefold()
+
+
+def _agrupar_empresas(db) -> dict[str, Counter]:
+    """Todas las variantes de `empresa` (Vacante + Colaborador) agrupadas por nombre
+    normalizado — regresa {clave_normalizada: Counter({variante_tal_cual: veces_que_aparece})},
+    sin "" ni el nombre de la Cuenta default."""
+    grupos: dict[str, Counter] = {}
+    for modelo in (Vacante, Colaborador):
+        for (empresa,) in db.query(modelo.empresa).all():
+            variante = re.sub(r"\s+", " ", (empresa or "").strip())
+            if not variante:
+                continue
+            grupos.setdefault(_normalizar(variante), Counter())[variante] += 1
+    grupos.pop(_normalizar(NOMBRE_CUENTA_DEFAULT), None)
+    return grupos
+
+
+def _nombres_cliente(db) -> dict[str, str]:
+    """{clave_normalizada: nombre_canónico} — un Cliente por clave. El nombre canónico es la
+    variante de mayúsculas/minúsculas más frecuente en los datos reales; en caso de empate, la
+    primera en orden alfabético, para que el resultado sea determinista si se corre dos veces
+    sobre los mismos datos (aunque el script ya es idempotente por otra vía, ver `migrar()`)."""
+    grupos = _agrupar_empresas(db)
+    canonicos = {}
+    for clave, variantes in grupos.items():
+        maximo = max(variantes.values())
+        empatados = sorted(v for v, n in variantes.items() if n == maximo)
+        canonicos[clave] = empatados[0]
+    return canonicos
 
 
 def migrar(db, forzar: bool) -> int:
@@ -62,7 +88,8 @@ def migrar(db, forzar: bool) -> int:
         print("Ya existe al menos una Cuenta — este script ya se corrió. No se hace nada.")
         return 0
 
-    nombres_clientes = _nombres_cliente(db)
+    grupos_empresa = _agrupar_empresas(db)
+    nombres_clientes = _nombres_cliente(db)  # {clave: nombre_canonico}
 
     n_vacantes = db.query(Vacante).count()
     n_candidatos = db.query(Candidato).count()
@@ -76,8 +103,13 @@ def migrar(db, forzar: bool) -> int:
     print(f'Se va a crear la Cuenta default: "{NOMBRE_CUENTA_DEFAULT}"')
     if nombres_clientes:
         print(f"Se van a crear {len(nombres_clientes)} Cliente(s) dentro de esa Cuenta:")
-        for n in nombres_clientes:
-            print(f"  - {n}")
+        for clave, nombre in sorted(nombres_clientes.items(), key=lambda x: x[1]):
+            variantes = grupos_empresa[clave]
+            if len(variantes) > 1:
+                detalle = ", ".join(f'"{v}"×{n}' for v, n in sorted(variantes.items()))
+                print(f"  - {nombre}  (agrupa: {detalle})")
+            else:
+                print(f"  - {nombre}")
     else:
         print("No hay valores de empresa distintos a migrar como Cliente.")
 
@@ -106,15 +138,15 @@ def migrar(db, forzar: bool) -> int:
     db.add(cuenta)
     db.flush()
 
-    clientes_por_nombre: dict[str, int] = {}
-    for nombre in nombres_clientes:
+    clientes_por_clave: dict[str, int] = {}
+    for clave, nombre in nombres_clientes.items():
         cliente = Cliente(cuenta_id=cuenta.id, nombre=nombre, estado="Activo")
         db.add(cliente)
         db.flush()
-        clientes_por_nombre[nombre] = cliente.id
+        clientes_por_clave[clave] = cliente.id
 
     def _cliente_id(empresa: str):
-        return clientes_por_nombre.get((empresa or "").strip())  # None si "" o == Cuenta
+        return clientes_por_clave.get(_normalizar(empresa))  # None si "" o == Cuenta
 
     for v in db.query(Vacante).all():
         v.cuenta_id = cuenta.id
