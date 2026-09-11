@@ -27,11 +27,39 @@ def usuario_dict(u: Usuario) -> dict:
        # Punto 27: lista de Cuentas activas del usuario para el selector multi-cuenta del
        # frontend. Cuando solo hay una, el selector no aparece (regla de negocio Fase A).
        "cuentas": [
-           {"id": uc.cuenta.id, "nombreComercial": uc.cuenta.nombre_comercial}
+           {"id": uc.cuenta.id, "nombre": uc.cuenta.nombre_visible, "nombreComercial": uc.cuenta.nombre_comercial}
            for uc in u.cuentas
            if uc.cuenta.estado == "Activa"
        ],
    }
+
+
+def crear_usuario_basico(db: Session, correo: str, nombre: str, puesto: str, rol: str, password: str) -> Usuario:
+   """Alta de un Usuario con las validaciones de siempre (correo, rol, unicidad, fortaleza) y
+   `debe_cambiar_pass=True` (la contraseña la eligió el admin, no la persona). NO lo vincula a
+   ninguna Cuenta ni hace commit: el llamador decide (POST /auth/usuarios → cuenta actual;
+   POST /cuentas/{id}/usuarios → esa cuenta). Punto 9."""
+   correo = str(correo).strip().lower()
+   if not CORREO_RE.match(correo):
+       raise HTTPException(400, "El correo no tiene un formato válido.")
+   if rol not in ROLES:
+       raise HTTPException(400, f"Rol inválido. Usa uno de: {', '.join(ROLES)}")
+   if db.query(Usuario).filter(Usuario.correo == correo).first():
+       raise HTTPException(409, "Ya existe un usuario con ese correo.")
+   motivo = auth.validar_fortaleza(password)
+   if motivo:
+       raise HTTPException(400, motivo)
+   u = Usuario(
+       correo=correo,
+       nombre=nombre.strip(),
+       puesto=(puesto or "").strip(),
+       rol=rol,
+       hash_pass=auth.hashear(password),
+       debe_cambiar_pass=True,
+   )
+   db.add(u)
+   db.flush()
+   return u
 
 def _poner_cookie(resp: Response, token: str) -> None:
    # `secure` solo en producción: en dev el front corre en http://localhost
@@ -155,26 +183,8 @@ def crear(
    datos: CrearUsuarioIn, db: Session = Depends(get_db), admin: Usuario = Depends(usuario_admin),
    cuenta: Cuenta = Depends(cuenta_actual),
 ):
-   correo = str(datos.correo).strip().lower()
-   if not CORREO_RE.match(correo):
-       raise HTTPException(400, "El correo no tiene un formato válido.")
-   if datos.rol not in ROLES:
-       raise HTTPException(400, f"Rol inválido. Usa uno de: {', '.join(ROLES)}")
-   if db.query(Usuario).filter(Usuario.correo == correo).first():
-       raise HTTPException(409, "Ya existe un usuario con ese correo.")
-   motivo = auth.validar_fortaleza(datos.password)
-   if motivo:
-       raise HTTPException(400, motivo)
-   u = Usuario(
-       correo=correo,
-       nombre=datos.nombre.strip(),
-       puesto=datos.puesto.strip(),
-       rol=datos.rol,
-       hash_pass=auth.hashear(datos.password),
-       debe_cambiar_pass=True,  # la contraseña la eligió el admin, no la persona
-   )
-   db.add(u)
-   db.flush()
+   u = crear_usuario_basico(db, datos.correo, datos.nombre, datos.puesto, datos.rol, datos.password)
+   correo = u.correo
    # el usuario nuevo queda con acceso a la Cuenta desde la que lo creó el admin — sin esto,
    # cuenta_actual le daría 403 en su primer login por no tener ninguna Cuenta asignada.
    db.add(UsuarioCuenta(usuario_id=u.id, cuenta_id=cuenta.id))

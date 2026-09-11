@@ -1,16 +1,19 @@
 """Fase D — configuración de notificaciones por evento/destinatario/canal (puntos 22-26).
 
-Solo admin: son reglas de la Cuenta completa, no de un candidato en particular. El envío en sí
-vive en `services/notificaciones.py::disparar()`, llamado desde cada endpoint donde ocurre el
-evento — este router únicamente lee/edita la configuración y expone el historial de envíos.
+Editar es solo admin (son reglas de la Cuenta completa, no de un candidato); LEER las reglas lo
+puede hacer cualquier usuario de la Cuenta — Punto 12: la línea "Notificar: … · Editar" de cada
+acción se precarga con la configuración predeterminada. El envío en sí vive en
+`services/notificaciones.py::disparar()`, llamado desde cada endpoint donde ocurre el evento.
 """
+
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..deps import cuenta_actual, usuario_admin
+from ..deps import cuenta_actual, usuario_actual, usuario_admin
 from ..models import Cuenta, EVENTOS_NOTIFICACION, NotificacionEnviada, ReglaNotificacion, Usuario, registrar
 from ..serial import iso
 
@@ -46,7 +49,8 @@ def _reglas_cuenta(db: Session, cuenta_id: int) -> list:
 
 
 @router.get("/reglas")
-def listar_reglas(db: Session = Depends(get_db), _: Usuario = Depends(usuario_admin), cuenta: Cuenta = Depends(cuenta_actual)):
+def listar_reglas(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Configuración predeterminada de la Cuenta — lectura para cualquier usuario (Punto 12)."""
     return [_regla_dict(r) for r in _reglas_cuenta(db, cuenta.id)]
 
 
@@ -86,6 +90,38 @@ def actualizar_regla(
     )
     db.commit()
     return _regla_dict(r)
+
+
+class ReglaConEventoIn(ReglaNotificacionIn):
+    evento: str
+
+
+@router.put("/reglas")
+def guardar_reglas(
+    reglas: List[ReglaConEventoIn], db: Session = Depends(get_db), u: Usuario = Depends(usuario_admin),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Botón «Guardar configuración de notificaciones» (Punto 12): recibe la matriz completa y
+    la aplica en una sola transacción; solo se registran en bitácora los eventos que cambiaron."""
+    desconocidos = [r.evento for r in reglas if r.evento not in EVENTOS_NOTIFICACION]
+    if desconocidos:
+        raise HTTPException(400, f"Eventos desconocidos: {', '.join(desconocidos)}")
+    actuales = {r.evento: r for r in _reglas_cuenta(db, cuenta.id)}
+    cambiados = []
+    for entrada in reglas:
+        r = actuales[entrada.evento]
+        nuevos = entrada.model_dump(exclude={"evento"})
+        if any(getattr(r, k) != v for k, v in nuevos.items()):
+            for k, v in nuevos.items():
+                setattr(r, k, v)
+            cambiados.append(entrada.evento)
+    if cambiados:
+        registrar(
+            db, u.nombre, "reglas_notificacion_guardadas", "cuenta", str(cuenta.id),
+            {"eventos": cambiados, "correo_rh": u.correo},
+        )
+        db.commit()
+    return [_regla_dict(r) for r in _reglas_cuenta(db, cuenta.id)]
 
 
 @router.get("/historial")

@@ -34,7 +34,7 @@ from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual
 from ..models import Bitacora, Candidato, Cuenta, Postulacion, Usuario, Vacante, registrar
-from ..services.configuracion import modo_prueba_activo
+from ..services.configuracion import modo_prueba_activo, ventana_modo_prueba_min
 from ..services.whatsapp import enviar_mensaje, enviar_lista_interactiva, parsear_webhook
 from .candidatos import (
     _crear_candidato,
@@ -45,10 +45,11 @@ from .candidatos import (
     procesar_prefiltro,
 )
 
-# Modo Prueba: una conversación con actividad más vieja que esta ventana ya no se
+# Modo Prueba: una conversación con actividad más vieja que la ventana configurada
+# (ConfiguracionSistema.modo_prueba_ventana_min, Punto 13; 60 min por defecto) ya no se
 # reutiliza — se cierra la postulación y se trata como una nueva e independiente
 # (ver _resolver_postulacion). Con Modo Prueba apagado no aplica.
-VENTANA_MODO_PRUEBA = timedelta(minutes=60)
+VENTANA_MODO_PRUEBA_DEFAULT = timedelta(minutes=60)
 
 router = APIRouter(tags=["webhooks"])
 
@@ -190,13 +191,14 @@ def _buscar_o_crear_candidato(db: Session, wa_id: str, nombre: str, cuenta_id: i
     return c
 
 
-def _conversacion_fria(c: Candidato) -> bool:
+def _conversacion_fria(db: Session, c: Candidato) -> bool:
     ultima = c.mensajes[-1].creado_en if c.mensajes else c.creado_en
     # SQLite descarta el offset de un DateTime(timezone=True) y regresa un datetime naive con
     # los mismos números de reloj UTC — hay que reponerle el tzinfo antes de restar.
     if ultima.tzinfo is None:
         ultima = ultima.replace(tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) - ultima >= VENTANA_MODO_PRUEBA
+    ventana = timedelta(minutes=ventana_modo_prueba_min(db)) or VENTANA_MODO_PRUEBA_DEFAULT
+    return datetime.now(timezone.utc) - ultima >= ventana
 
 
 async def _resolver_postulacion(
@@ -211,7 +213,7 @@ async def _resolver_postulacion(
 
     # Modo Prueba: la conversación en curso ya está fría → se cierra y se empieza de cero,
     # sin tocar teléfono ni wa_id de la persona.
-    if prueba and conv and _conversacion_fria(c):
+    if prueba and conv and _conversacion_fria(db, c):
         conv.cerrar("prueba_expirada")
         registrar(db, "sistema", "postulacion_prueba_expirada", "postulacion", conv.codigo, {"candidato": c.codigo})
         conv = None

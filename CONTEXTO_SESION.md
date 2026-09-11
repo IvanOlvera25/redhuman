@@ -60,12 +60,11 @@ transversal):
    hiciste y cuál es el siguiente paso.
 
 ## Lo último que se hizo
-Fase 2 (Candidato persona / Postulación proceso) auditada, reescrita, verificada (56
-comprobaciones) y CERRADA el 2026-09-11 — ver la sección "Fase 2 — CERRADA" al final del
-archivo, con la lista completa de decisiones (A/B/C), la garantía de despliegue y el orden
-de despliegue. Código listo en el working tree, pendiente de revisión del diff por el usuario
-antes de commit/deploy. Antes de esto: Fase D, Puntos 2/27/28, Fase F y 6 correcciones de UI
-(ver secciones abajo).
+5 pantallas administrativas de Configuración (Puntos 9-13: Cuentas, Clientes y contactos,
+Plantillas, Notificaciones por acción, Modo Prueba) completadas el 2026-09-11 — ver la sección
+"5 pantallas administrativas" al final del archivo (decisiones, esquema, verificación, siguiente
+paso). Código listo en el working tree, SIN commit/deploy, pendiente de revisión del usuario.
+Antes de esto: Fase 2 (Candidato/Postulación) comiteada y desplegada (`24acfd7`).
 
 ## Lo que sigue
 
@@ -840,7 +839,7 @@ exactamente como se implementó, cero cambios derivados de esta conversación.
 
 
 
-## Fase 2 — Candidato (persona) / Postulación (proceso) — CERRADA 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+## Fase 2 — Candidato (persona) / Postulación (proceso) — CERRADA 2026-09-11 (comiteada `24acfd7` y desplegada)
 
 ### Qué pasó
 Un agente anterior (Gemini 3.7 Flash) dejó la Fase 2 a medias y con 7 errores que rompían en
@@ -940,3 +939,97 @@ supuesto: uvicorn con lifespan (el default; `--lifespan off` no se usa en este p
 Nada pendiente de negocio para Fase 2. Deuda conocida fuera de alcance: CVs adjuntos por
 WhatsApp (ya documentada arriba) y ruteo de WhatsApp por Cuenta (`_cuenta_unica` sigue
 exigiendo exactamente 1 Cuenta activa).
+
+
+## 5 pantallas administrativas de Configuración (Puntos 9-13) — completadas 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+
+Investigación previa contra el código real (2 agentes de exploración: backend y frontend) con
+inventario "existe vs falta" por punto; plan completo aprobado en plan mode antes de escribir
+código. Fase 2 ya estaba comiteada y desplegada (`24acfd7`) al empezar.
+
+**Decisiones de negocio confirmadas por el usuario (no volver a preguntar):**
+1. Cuentas: un Administrador solo ve/administra las Cuentas a las que está vinculado
+   (`usuario_cuentas`); al crear una queda vinculado automáticamente. NUNCA super-admin global.
+2. "Nombre de la cuenta" = columna nueva `Cuenta.nombre` (identificador interno, listados y
+   selector); `nombre_comercial` = lo que ven candidatos/portal; `razon_social` opcional.
+3. Plantillas: UN solo formulario compartido para "Nueva vacante" y "Nueva plantilla"
+   (`components/dashboard/vacantes/formulario-contenido.tsx`), todo editable + "Generar con IA".
+4. Modo Prueba: la ventana de nueva sesión (antes constante 60 min) es configurable
+   (`ConfiguracionSistema.modo_prueba_ventana_min`, 5–1440).
+
+**Decisiones de implementación del agente (aceptadas con el plan):**
+- Cliente gana `razon_social`/`nombre_comercial`; el candidato ve `nombre_comercial or nombre`
+  (`Cliente.nombre_visible`, usado por `serial.nombre_empresa_candidato`). Contacto gana `apellidos`.
+- "+ Agregar usuario" en la ficha de cuenta: si el correo ya existe se VINCULA (sin tocar rol ni
+  contraseña); si no, se crea (helper `auth.crear_usuario_basico`, `debe_cambiar_pass=True`) con
+  contraseña temporal que se muestra una sola vez. No se puede desvincular uno mismo ni al último
+  administrador activo de la cuenta.
+- La ficha de una cuenta distinta a la actual muestra sus Clientes en solo lectura con "Cambiar a
+  esta cuenta" para administrarlos; "Usuarios y permisos" (cuenta actual) se conserva.
+- Plantilla: "Eliminar" sigue siendo desactivar (vacantes creadas desde ella conservan
+  `plantilla_id`); "Guardar como plantilla" ahora lo copia el servidor
+  (`POST /plantillas/desde-vacante/{codigo}`, con alcance General/Cliente) usando la lista única
+  `models.CAMPOS_PLANTILLA` (18 campos, también para `POST /plantillas/{id}/duplicar`). "Usar
+  plantilla" precarga TODOS los campos (antes solo 5). La gestión de plantillas se quitó de
+  Vacantes (botón "Plantillas", `GestionPlantillas`, `FormularioPlantilla`).
+- Notificaciones: `disparar(..., override=)` sustituye la regla SOLO en esa llamada; `NotificarIn`
+  viaja como `notificar` en 10 endpoints manuales (programar/modificar/cancelar/realizada/
+  recordatorio/resultado de entrevista humana, solicitar/recordatorio de documentos, alta y
+  recordatorio de contratación). Bitácora guarda `notificar_override`. `GET /notificaciones/reglas`
+  pasó a `usuario_actual` (lectura para precargar la línea); `PUT /notificaciones/reglas` en bloque
+  para el botón "Guardar configuración de notificaciones" (la grilla ya no guarda por checkbox).
+  Los automáticos (`candidato_apto`, no-show, liga externa del entrevistador) siguen 100% con la
+  regla — verificado en prueba.
+- Modo Prueba: el borrado también limpia `NotificacionEnviada` de las personas de prueba; un
+  `Colaborador` dado de alta desde una prueba NO se borra (se reporta como "conservados"). El
+  botón "Reiniciar prueba" solo se muestra con Modo Prueba activo o sobre postulación de prueba
+  (el backend ya lo exigía con 409).
+- Selector de Cuenta: `<PorCuenta>` (layout) remonta todo el dashboard con `key={cuentaActualId}`
+  (así `/dashboard` también se recarga y la conversación en memoria del agente se limpia);
+  `modoPrueba` se relee al cambiar de cuenta; el selector muestra `nombre || nombreComercial`.
+
+**Bug heredado de Fase 2 encontrado y corregido:** `contratacion.recordatorio` seguía pasando
+`e.candidato` (persona) a `disparar`, que desde Fase 2 espera una Postulación (`c.vacante` ya no
+existe en la persona) — tronaba con AttributeError. Ahora usa `e.postulacion`.
+
+**Esquema (aditivo, `sincronizar()` lo aplica al arrancar; SIN script de datos):**
+`cuentas.nombre`, `clientes.razon_social`, `clientes.nombre_comercial`, `cliente_contactos.apellidos`,
+`plantillas.ubicacion`, `plantillas.actualizada_en`, `configuracion_sistema.modo_prueba_ventana_min`.
+Verificado contra una copia de `redhuman.db`: agrega exactamente esas 7 columnas.
+
+**Archivos:** backend `models.py`, `serial.py` (+`clienteId` en `vacante_dict`), `routers/cuentas.py`
+(reescrito), `routers/auth.py`, `routers/clientes.py` (reescrito), `routers/plantillas.py`,
+`routers/notificaciones.py`, `services/notificaciones.py`, `routers/candidatos.py`,
+`routers/contratacion.py`, `routers/configuracion.py` (reescrito), `services/configuracion.py`,
+`routers/webhooks.py`; nuevo `scripts/verificar_config_admin.py`. Frontend `lib/api.ts`,
+`lib/data.ts`, `components/sesion.tsx`, `components/dashboard/shell.tsx`, `app/dashboard/layout.tsx`,
+nuevos `components/dashboard/{campos,linea-notificar,confirmacion-accion,por-cuenta}.tsx` y
+`components/dashboard/vacantes/formulario-contenido.tsx`; `app/dashboard/configuracion/page.tsx`
+(reescrito), `app/dashboard/vacantes/page.tsx`, `app/dashboard/candidatos/page.tsx`,
+`app/dashboard/onboarding/page.tsx`. `CLAUDE.md` con las reglas nuevas.
+
+**Verificación realizada:**
+- Backend: `pyflakes` limpio; `scripts/verificar_config_admin.py` — 52 comprobaciones en verde
+  (`TestClient`, modo demo, base desechable): Cuentas (crear→vinculación, aislamiento 404, agregar
+  nuevo/vincular existente, guards de desvinculación), Clientes+contactos (CRUD, validaciones,
+  aislamiento por cuenta), Plantillas (desde-vacante copia 18 campos, duplicar, ubicación,
+  actualizada, eliminar, vacante con contenido manual sin IA), Notificaciones (lectura no-admin,
+  PUT en bloque, override enciende/apaga sin tocar la regla, automático sin override, alta y
+  recordatorio de contratación), Modo Prueba (ventana respetada por el webhook, borrado limpia
+  notificaciones y no toca reales). Regresión `verificar_fase2.py`: 56/56 sin cambios.
+- Frontend: `tsc --noEmit` y `next build` limpios (19 rutas). Smoke con servidores reales
+  (`uvicorn` + `next start` contra base nueva): login real; `/cuentas`, `/cuentas/actual`,
+  `/clientes`, `/plantillas`, `/notificaciones/reglas`, `/configuracion` → 200; crear cliente y
+  segunda cuenta; aislamiento por `X-Cuenta-Id`; las 5 páginas tocadas → 200 con sesión / 307 sin
+  ella; endpoint con body `notificar` aceptado a través del servidor real. **Limitación honesta**
+  (igual que en fases anteriores): sin navegador real, no se probó clic-a-clic (modales, línea
+  "Notificar", toggle de Cuenta). Servidores y base de prueba detenidos/borrados.
+
+### Siguiente paso
+1. El usuario revisa el diff (`git status`: ver lista de archivos arriba) y, si puede, prueba en
+   navegador: crear una segunda Cuenta y cambiar con el selector; ficha de cliente con contactos;
+   Configuración → Plantillas → Nueva plantilla; línea "Notificar · Editar" al programar una
+   entrevista; ventana de Modo Prueba.
+2. Commit y deploy cuando se apruebe. No hay script de datos que correr: las columnas nuevas las
+   agrega `sincronizar()` al arrancar. Pendiente conocido sin cambio: `sembrar_reglas_notificacion.py`
+   de Fase D (verificar si ya corrió en producción).

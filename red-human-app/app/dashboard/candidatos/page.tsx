@@ -71,6 +71,7 @@ import {
   fetchVacantes,
   guardarCondicionesContratacion,
   reiniciarPostulacionPrueba,
+  type NotificarAccion,
   marcarEntrevistaHumanaRealizada,
   modificarEntrevistaHumana,
   moverEtapaCandidato,
@@ -94,6 +95,8 @@ import {
 } from "@/lib/api";
 import { usePuedeDecidir, useModoPrueba } from "@/components/sesion";
 import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveedor";
+import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
+import { LineaNotificar, useNotificarAccion } from "@/components/dashboard/linea-notificar";
 import { cn } from "@/lib/utils";
 
 const etapas: EtapaCandidato[] = [
@@ -1135,6 +1138,15 @@ type AvisoEstado = { tono: "ok" | "error" | "warn"; texto: string; reintentar?: 
 /* ============================================================
    MODAL CENTRADO: Detalle del Candidato (4 pestañas + Contratación condicional)
    ============================================================ */
+/** Texto del aviso tras una acción que notifica: qué salió y por qué canal, o que la regla
+ * no tenía nada activo (Punto 12). */
+function resumenEnvio(r: { ok: boolean; data?: { resultados?: { enviado: boolean }[] } }, base: string): string {
+  const resultados = r.ok ? r.data?.resultados ?? [] : [];
+  const enviados = resultados.filter((x) => x.enviado).length;
+  if (resultados.length === 0) return `${base} No había ningún destinatario activo — revisa la línea «Notificar» o Configuración → Notificaciones.`;
+  return enviados === 0 ? `${base} Ningún envío se completó (revisa los datos de contacto).` : `${base} ${enviados} envío(s) realizados.`;
+}
+
 function ModalCandidato({
   c,
   live,
@@ -1215,20 +1227,25 @@ function ModalCandidato({
     if (data) onCambio(data);
   }
 
+  // Punto 12: cada acción que notifica pasa por una confirmación ligera con la línea
+  // "Notificar: … · Editar"; el ajuste viaja como `notificar` solo para esa acción.
+  const [confirmacion, setConfirmacion] = useState<null | "solicitar" | "recordatorio" | "alta">(null);
+  const notificarAltaRef = useRef<NotificarAccion | undefined>(undefined);
+
   /** Onboarding · Zero-Touch fase 2 — RH detona, la IA da seguimiento por WhatsApp. */
-  async function solicitarDocumentos() {
+  async function solicitarDocumentos(notificar?: NotificarAccion) {
     if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para enviar mensajes por WhatsApp." });
     setOcupado("solicitar-documentos");
-    const r = await solicitarDocumentosCandidato(c.id);
-    const data = resolver(r, "Solicitud de documentos enviada por WhatsApp.");
+    const r = await solicitarDocumentosCandidato(c.id, notificar);
+    const data = resolver(r, resumenEnvio(r, "Solicitud de documentos enviada."));
     if (data) onCambio(data.candidato);
   }
 
-  async function enviarRecordatorioDocumentos() {
+  async function enviarRecordatorioDocumentos(notificar?: NotificarAccion) {
     if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para enviar mensajes por WhatsApp." });
     setOcupado("recordatorio-documentos");
-    const r = await recordatorioDocumentosCandidato(c.id);
-    const data = resolver(r, "Recordatorio enviado por WhatsApp.");
+    const r = await recordatorioDocumentosCandidato(c.id, notificar);
+    const data = resolver(r, resumenEnvio(r, "Recordatorio enviado."));
     if (data) onCambio(data.candidato);
   }
 
@@ -1237,10 +1254,11 @@ function ModalCandidato({
    * obligatorios, el backend lo rechaza (409) y el motivo se muestra en {aviso}. Con Modo
    * Prueba activo, ese aviso trae un botón "Continuar de todos modos" — salvo que el 409 sea
    * "ya fue dado de alta", que el backend nunca deja saltar (ver contratacion.alta). */
-  async function darDeAltaComoColaborador(forzarPrueba = false) {
+  async function darDeAltaComoColaborador(forzarPrueba = false, notificar?: NotificarAccion) {
     if (!live || !c.expedienteId) return setAviso({ tono: "warn", texto: "Levanta la API para dar de alta al candidato." });
+    if (notificar) notificarAltaRef.current = notificar;
     setOcupado("alta");
-    const r = await autorizarAlta(c.expedienteId, undefined, forzarPrueba);
+    const r = await autorizarAlta(c.expedienteId, undefined, forzarPrueba, notificarAltaRef.current);
     if (!r.ok) {
       setOcupado("");
       return setAviso({
@@ -1405,8 +1423,9 @@ function ModalCandidato({
           )}
         </div>
 
-        {/* MODO PRUEBA (Punto 8): independiente de la etapa — reinicia la postulación sin borrar teléfono */}
-        {puedeDecidir && (
+        {/* MODO PRUEBA (Punto 8): independiente de la etapa — reinicia la postulación sin borrar teléfono.
+            Solo visible con Modo Prueba activo o sobre una postulación de prueba (el backend lo exige). */}
+        {puedeDecidir && (modoPrueba || c.esPrueba) && (
           <div className="border-t border-border-soft bg-surface px-6 py-2">
             <div className="flex justify-end">
               <Button
@@ -1493,10 +1512,10 @@ function ModalCandidato({
                 {/* Onboarding · Zero-Touch fase 2: RH detona por WhatsApp, la IA da seguimiento */}
                 {c.etapa === "Onboarding" && (
                   <>
-                    <Button variant="outline" size="sm" onClick={solicitarDocumentos} disabled={Boolean(ocupado)}>
+                    <Button variant="outline" size="sm" onClick={() => setConfirmacion("solicitar")} disabled={Boolean(ocupado)}>
                       <Send className="h-4 w-4" /> Solicitar documentos
                     </Button>
-                    <Button variant="outline" size="sm" onClick={enviarRecordatorioDocumentos} disabled={Boolean(ocupado)}>
+                    <Button variant="outline" size="sm" onClick={() => setConfirmacion("recordatorio")} disabled={Boolean(ocupado)}>
                       <RotateCw className="h-4 w-4" /> Enviar recordatorio
                     </Button>
                   </>
@@ -1516,7 +1535,7 @@ function ModalCandidato({
               {c.etapa === "Onboarding" && (
                 <Button
                   className="w-full"
-                  onClick={() => darDeAltaComoColaborador()}
+                  onClick={() => setConfirmacion("alta")}
                   disabled={Boolean(ocupado) || c.expedienteEstado === "alta"}
                 >
                   <UserCheck className="h-4 w-4" />
@@ -1532,6 +1551,51 @@ function ModalCandidato({
         )}
       </div>
 
+      {confirmacion === "solicitar" && (
+          <ConfirmacionAccion
+            titulo="Solicitar documentos"
+            texto={`Se le pedirá a ${c.nombre.split(" ")[0]} que suba sus documentos con la liga pública del expediente.`}
+            evento="solicitud_documentos"
+            hayEntrevistador={false}
+            hayCliente={Boolean(c.clienteVacante)}
+            etiquetaConfirmar="Enviar"
+            onCancelar={() => setConfirmacion(null)}
+            onConfirmar={async (n) => {
+              setConfirmacion(null);
+              await solicitarDocumentos(n);
+            }}
+          />
+        )}
+        {confirmacion === "recordatorio" && (
+          <ConfirmacionAccion
+            titulo="Enviar recordatorio de documentos"
+            texto="Recordatorio de los documentos que siguen pendientes en el expediente."
+            evento="recordatorio_documentos"
+            hayEntrevistador={false}
+            hayCliente={Boolean(c.clienteVacante)}
+            etiquetaConfirmar="Enviar"
+            onCancelar={() => setConfirmacion(null)}
+            onConfirmar={async (n) => {
+              setConfirmacion(null);
+              await enviarRecordatorioDocumentos(n);
+            }}
+          />
+        )}
+        {confirmacion === "alta" && (
+          <ConfirmacionAccion
+            titulo="Dar de alta como colaborador"
+            texto="RH autoriza el alta: el registro se mueve a Colaboradores y la postulación queda cerrada como contratada."
+            evento="contratacion"
+            hayEntrevistador={false}
+            hayCliente={Boolean(c.clienteVacante)}
+            etiquetaConfirmar="Dar de alta"
+            onCancelar={() => setConfirmacion(null)}
+            onConfirmar={async (n) => {
+              setConfirmacion(null);
+              await darDeAltaComoColaborador(false, n);
+            }}
+          />
+        )}
       {modalEntrevista && (
         <ModalProgramarEntrevista
           c={c}
@@ -2543,14 +2607,17 @@ function PanelEntrevistaHumana({
   const [recordando, setRecordando] = useState(false);
   const [avisoRecordatorio, setAvisoRecordatorio] = useState<AvisoEstado>(null);
   const [cancelando, setCancelando] = useState(false);
+  // Punto 12: confirmación ligera con la línea "Notificar: … · Editar" antes de cada acción.
+  const [confirmacion, setConfirmacion] = useState<null | "realizada" | "recordatorio" | "cancelar">(null);
+  const ultimoNotificar = useRef<NotificarAccion | undefined>(undefined);
+  const hayCliente = Boolean(c.clienteVacante);
 
   /** Botón «Cancelar» (Fase D) — no mueve la tarjeta de etapa: RH agenda otra ronda o mueve la
    * etapa a mano según corresponda. */
-  async function cancelar() {
-    if (!window.confirm("¿Cancelar esta entrevista? No se mueve la etapa del candidato.")) return;
+  async function cancelar(notificar?: NotificarAccion) {
     setCancelando(true);
     setAviso(null);
-    const r = await cancelarEntrevistaHumana(c.id);
+    const r = await cancelarEntrevistaHumana(c.id, notificar);
     setCancelando(false);
     if (!r.ok) {
       setAviso({ tono: "error", texto: r.error });
@@ -2563,18 +2630,11 @@ function PanelEntrevistaHumana({
    * correo con la liga al entrevistador. `forzarPrueba` (Lote 4): si Modo Prueba está activo y
    * el candidato ya no está en la etapa de Entrevista Humana, el aviso de error trae un botón
    * para reintentar saltando ese bloqueo. */
-  async function marcarRealizada(forzarPrueba = false) {
-    if (
-      !forzarPrueba &&
-      !window.confirm(
-        "¿Confirmas que la entrevista ya se llevó a cabo? Se le mandará al entrevistador una liga por correo para que registre su evaluación.",
-      )
-    ) {
-      return;
-    }
+  async function marcarRealizada(forzarPrueba = false, notificar?: NotificarAccion) {
+    if (notificar) ultimoNotificar.current = notificar;
     setMarcando(true);
     setAviso(null);
-    const r = await marcarEntrevistaHumanaRealizada(c.id, forzarPrueba);
+    const r = await marcarEntrevistaHumanaRealizada(c.id, forzarPrueba, ultimoNotificar.current);
     setMarcando(false);
     if (!r.ok) {
       setAviso({
@@ -2589,7 +2649,7 @@ function PanelEntrevistaHumana({
   /** Respaldo manual de RH — captura la primera vez o corrige un resultado ya capturado
    * (por RH o por el entrevistador vía su liga). */
   async function guardarResultado(
-    datos: { resultado: ResultadoEntrevistaHumana; recomendacion: RecomendacionEntrevistaHumana; comentario: string },
+    datos: { resultado: ResultadoEntrevistaHumana; recomendacion: RecomendacionEntrevistaHumana; comentario: string; notificar?: NotificarAccion },
     forzarPrueba = false,
   ) {
     setGuardando(true);
@@ -2607,10 +2667,11 @@ function PanelEntrevistaHumana({
     onCambio(r.data);
   }
 
-  async function enviarRecordatorio(forzarPrueba = false) {
+  async function enviarRecordatorio(forzarPrueba = false, notificar?: NotificarAccion) {
+    if (notificar) ultimoNotificar.current = notificar;
     setRecordando(true);
     setAvisoRecordatorio(null);
-    const r = await recordatorioEntrevistaHumana(c.id, forzarPrueba);
+    const r = await recordatorioEntrevistaHumana(c.id, forzarPrueba, ultimoNotificar.current);
     setRecordando(false);
     if (!r.ok) {
       setAvisoRecordatorio({
@@ -2624,7 +2685,7 @@ function PanelEntrevistaHumana({
       tono: algunoEnviado ? "ok" : "warn",
       texto: algunoEnviado
         ? "Recordatorio enviado."
-        : "No se envió nada — revisa Configuración → Notificaciones para este evento.",
+        : "No se envió nada — revisa la línea «Notificar» o Configuración → Notificaciones para este evento.",
     });
     onCambio(r.data.candidato);
   }
@@ -2699,16 +2760,16 @@ function PanelEntrevistaHumana({
           <span className="text-xs text-ink-3">Esperando evaluación del entrevistador…</span>
         ) : live ? (
           <>
-            <Button size="sm" variant="secondary" onClick={() => marcarRealizada()} disabled={marcando}>
+            <Button size="sm" variant="secondary" onClick={() => setConfirmacion("realizada")} disabled={marcando}>
               <CheckCircle2 className="h-4 w-4" /> {marcando ? "Enviando…" : "Marcar entrevista realizada"}
             </Button>
-            <Button size="sm" variant="outline" onClick={() => enviarRecordatorio()} disabled={recordando}>
+            <Button size="sm" variant="outline" onClick={() => setConfirmacion("recordatorio")} disabled={recordando}>
               <RotateCw className="h-4 w-4" /> {recordando ? "Enviando…" : "Enviar recordatorio"}
             </Button>
             <Button size="sm" variant="outline" onClick={() => setModalModificar(true)}>
               <Pencil className="h-4 w-4" /> Modificar
             </Button>
-            <Button size="sm" variant="outline" className="text-bad" onClick={cancelar} disabled={cancelando}>
+            <Button size="sm" variant="outline" className="text-bad" onClick={() => setConfirmacion("cancelar")} disabled={cancelando}>
               <XCircle className="h-4 w-4" /> {cancelando ? "Cancelando…" : "Cancelar"}
             </Button>
           </>
@@ -2734,8 +2795,51 @@ function PanelEntrevistaHumana({
         </div>
       )}
 
+      {confirmacion === "realizada" && (
+        <ConfirmacionAccion
+          titulo="¿La entrevista ya se llevó a cabo?"
+          texto="Se le mandará al entrevistador la liga para registrar su evaluación."
+          evento="entrevista_humana_terminada"
+          hayCliente={hayCliente}
+          etiquetaConfirmar="Sí, se realizó"
+          onCancelar={() => setConfirmacion(null)}
+          onConfirmar={async (n) => {
+            setConfirmacion(null);
+            await marcarRealizada(false, n);
+          }}
+        />
+      )}
+      {confirmacion === "recordatorio" && (
+        <ConfirmacionAccion
+          titulo="Enviar recordatorio de la entrevista"
+          evento="recordatorio_entrevista"
+          hayCliente={hayCliente}
+          etiquetaConfirmar="Enviar"
+          onCancelar={() => setConfirmacion(null)}
+          onConfirmar={async (n) => {
+            setConfirmacion(null);
+            await enviarRecordatorio(false, n);
+          }}
+        />
+      )}
+      {confirmacion === "cancelar" && (
+        <ConfirmacionAccion
+          titulo="¿Cancelar esta entrevista?"
+          texto="No se mueve la etapa del candidato; después puedes agendar otra ronda."
+          evento="entrevista_cancelada"
+          hayCliente={hayCliente}
+          etiquetaConfirmar="Cancelar entrevista"
+          tono="bad"
+          onCancelar={() => setConfirmacion(null)}
+          onConfirmar={async (n) => {
+            setConfirmacion(null);
+            await cancelar(n);
+          }}
+        />
+      )}
       {modalResultado && (
         <ModalCerrarEntrevistaHumana
+          hayCliente={hayCliente}
           inicial={
             eh.resultado
               ? { resultado: eh.resultado, recomendacion: eh.recomendacion, comentario: eh.comentario }
@@ -2767,10 +2871,12 @@ function PanelEntrevistaHumana({
    ============================================================ */
 function ModalCerrarEntrevistaHumana({
   inicial,
+  hayCliente = false,
   onCancelar,
   onConfirmar,
   cargando,
 }: {
+  hayCliente?: boolean;
   /** Presente cuando ya había un resultado capturado — el modal pasa a modo "corregir" y
    * precarga los valores actuales. */
   inicial?: {
@@ -2783,9 +2889,11 @@ function ModalCerrarEntrevistaHumana({
     resultado: ResultadoEntrevistaHumana;
     recomendacion: RecomendacionEntrevistaHumana;
     comentario: string;
+    notificar?: NotificarAccion;
   }) => void;
   cargando?: boolean;
 }) {
+  const notificar = useNotificarAccion("recomendacion_final");
   const [resultado, setResultado] = useState<ResultadoEntrevistaHumana | "">(inicial?.resultado ?? "");
   const [recomendacion, setRecomendacion] = useState<RecomendacionEntrevistaHumana | "">(inicial?.recomendacion ?? "");
   const [comentario, setComentario] = useState(inicial?.comentario ?? "");
@@ -2862,6 +2970,8 @@ function ModalCerrarEntrevistaHumana({
           </label>
         </div>
 
+        <LineaNotificar className="mt-4" value={notificar.value} onChange={notificar.setValue} hayCliente={hayCliente} />
+
         <div className="mt-5 flex gap-3">
           <Button variant="outline" className="flex-1" onClick={onCancelar} disabled={cargando}>
             Cancelar
@@ -2873,6 +2983,7 @@ function ModalCerrarEntrevistaHumana({
                 resultado: resultado as ResultadoEntrevistaHumana,
                 recomendacion: recomendacion as RecomendacionEntrevistaHumana,
                 comentario,
+                notificar: notificar.value,
               })
             }
             disabled={cargando || !listo}
@@ -2897,6 +3008,7 @@ function ModalProgramarEntrevista({
   onClose: () => void;
   onListo: (c: Candidato) => void;
 }) {
+  const notificar = useNotificarAccion("entrevista_agendada");
   const [entrevistadores, setEntrevistadores] = useState<{ id: number; nombre: string }[]>([]);
   const [tipoEntrevistador, setTipoEntrevistador] = useState<TipoEntrevistador>("interno");
   const [entrevistadorUsuarioId, setEntrevistadorUsuarioId] = useState<number | null>(null);
@@ -2958,6 +3070,7 @@ function ModalProgramarEntrevista({
       ubicacion,
       telefonoContacto,
       comentario,
+      notificar: notificar.value,
     });
     setEnviando(false);
     if (!r.ok) {
@@ -3136,6 +3249,8 @@ function ModalProgramarEntrevista({
           </div>
         )}
 
+        <LineaNotificar className="mt-4" value={notificar.value} onChange={notificar.setValue} hayCliente={Boolean(c.clienteVacante)} />
+
         <div className="mt-5 flex gap-3">
           <Button variant="outline" className="flex-1" onClick={onClose} disabled={enviando}>
             Cancelar
@@ -3173,6 +3288,7 @@ function ModalModificarEntrevista({
   const [comentario, setComentario] = useState(eh.comentario || "");
   const [error, setError] = useState("");
   const [enviando, setEnviando] = useState(false);
+  const notificar = useNotificarAccion("entrevista_modificada");
 
   async function guardar() {
     if (!fecha || !hora) {
@@ -3189,7 +3305,7 @@ function ModalModificarEntrevista({
     }
     setEnviando(true);
     setError("");
-    const r = await modificarEntrevistaHumana(c.id, { fecha, hora, modalidad, liga, ubicacion, telefonoContacto, comentario });
+    const r = await modificarEntrevistaHumana(c.id, { fecha, hora, modalidad, liga, ubicacion, telefonoContacto, comentario, notificar: notificar.value });
     setEnviando(false);
     if (!r.ok) {
       setError(r.error);
@@ -3203,7 +3319,7 @@ function ModalModificarEntrevista({
       <Card className="w-full max-w-md p-5">
         <h3 className="font-display text-lg font-bold">Modificar entrevista</h3>
         <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-          Con {c.nombre.split(" ")[0]}. Se avisará según lo configurado en Notificaciones.
+          Con {c.nombre.split(" ")[0]}. Abajo puedes ajustar a quién se avisa solo por esta vez.
         </p>
 
         <div className="mt-4 flex flex-col gap-3">
@@ -3293,6 +3409,8 @@ function ModalModificarEntrevista({
             <Aviso tono="error">{error}</Aviso>
           </div>
         )}
+
+        <LineaNotificar className="mt-4" value={notificar.value} onChange={notificar.setValue} hayCliente={Boolean(c.clienteVacante)} />
 
         <div className="mt-5 flex gap-3">
           <Button variant="outline" className="flex-1" onClick={onClose} disabled={enviando}>

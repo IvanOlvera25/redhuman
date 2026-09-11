@@ -17,7 +17,7 @@ import unicodedata
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
@@ -37,6 +37,7 @@ from ..models import (
     EntrevistaHumana,
     Expediente,
     Mensaje,
+    NotificacionEnviada,
     Postulacion,
     Usuario,
     Vacante,
@@ -47,7 +48,7 @@ from ..services import archivos as fs
 from ..services import ia
 from ..services import notificaciones
 from ..services.configuracion import modo_prueba_activo, puede_forzar_prueba
-from ..services.notificaciones import RE_CORREO, TZ_MEXICO
+from ..services.notificaciones import RE_CORREO, TZ_MEXICO, NotificarIn, override_de
 from ..services.whatsapp import enviar_mensaje, enviar_plantilla
 
 router = APIRouter(prefix="/candidatos", tags=["candidatos"])
@@ -383,7 +384,7 @@ def eliminar_candidatos_prueba(
     scripts/borrar_demo_candidatos.py (que borra por prefijo de código en vez de por flag)."""
     candidatos = db.query(Candidato).filter(Candidato.es_prueba.is_(True), Candidato.cuenta_id == cuenta.id).all()
     if not candidatos:
-        return {"candidatos": 0, "postulaciones": 0, "mensajes": 0, "entrevistas": 0, "expedientes": 0, "documentos": 0}
+        return {"candidatos": 0, "postulaciones": 0, "mensajes": 0, "entrevistas": 0, "expedientes": 0, "documentos": 0, "notificaciones": 0, "colaboradoresConservados": 0}
 
     ids = [c.id for c in candidatos]
     # Expedientes uno por uno (no bulk delete) para que la cascada del ORM se lleve también
@@ -397,6 +398,12 @@ def eliminar_candidatos_prueba(
     n_msj = db.query(Mensaje).filter(Mensaje.candidato_id.in_(ids)).delete(synchronize_session=False)
     n_ent = db.query(Entrevista).filter(Entrevista.candidato_id.in_(ids)).delete(synchronize_session=False)
     db.query(EntrevistaHumana).filter(EntrevistaHumana.candidato_id.in_(ids)).delete(synchronize_session=False)
+    # Punto 13: el historial de envíos de esas personas también es de prueba (antes quedaba huérfano).
+    n_notif = db.query(NotificacionEnviada).filter(NotificacionEnviada.candidato_id.in_(ids)).delete(synchronize_session=False)
+    # Un Colaborador dado de alta desde una prueba NO se borra en cascada (es un registro de
+    # nómina/plantilla): se reporta para que RH decida a mano desde Colaboradores.
+    from ..models import Colaborador
+    n_col = db.query(Colaborador).filter(Colaborador.candidato_origen_id.in_(ids)).count()
     for c in candidatos:
         c.postulacion_conversacion_id = None
     db.flush()
@@ -415,6 +422,7 @@ def eliminar_candidatos_prueba(
     return {
         "candidatos": len(candidatos), "postulaciones": n_post, "mensajes": n_msj,
         "entrevistas": n_ent, "expedientes": len(expedientes), "documentos": n_doc,
+        "notificaciones": n_notif, "colaboradoresConservados": n_col,
     }
 
 
@@ -1395,6 +1403,7 @@ class EntrevistaHumanaIn(BaseModel):
     ubicacion: str = ""  # obligatoria si modalidad == Presencial
     telefono_contacto: str = ""  # opcional si modalidad == Llamada (si falta, se usa c.telefono)
     comentario: str = ""
+    notificar: Optional[NotificarIn] = None  # Punto 12: ajuste solo para esta acción
 
 
 @router.post("/{codigo}/entrevista-humana", status_code=201)
@@ -1470,7 +1479,8 @@ async def programar_entrevista_humana(
     p.entrevistas_humanas.append(eh)
     db.flush()
 
-    resultados = await notificaciones.disparar(db, "entrevista_agendada", p, u.nombre, eh=eh)
+    override = override_de(datos.notificar)
+    resultados = await notificaciones.disparar(db, "entrevista_agendada", p, u.nombre, eh=eh, override=override)
 
     registrar(
         db, u.nombre, "entrevista_humana_programada", "postulacion", p.codigo,
@@ -1478,7 +1488,7 @@ async def programar_entrevista_humana(
             "candidato": p.candidato.codigo, "de": anterior, "entrevistador": eh.entrevistador,
             "tipo_entrevistador": datos.tipo_entrevistador,
             "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
-            "notificaciones": resultados,
+            "notificaciones": resultados, "notificar_override": override,
         },
     )
     _actualizar_ultima_actividad(p)
@@ -1504,6 +1514,7 @@ class EntrevistaHumanaModificarIn(BaseModel):
     ubicacion: str = ""  # obligatoria si modalidad == Presencial
     telefono_contacto: str = ""  # opcional si modalidad == Llamada
     comentario: str = ""
+    notificar: Optional[NotificarIn] = None
 
 
 @router.patch("/{codigo}/entrevista-humana")
@@ -1541,10 +1552,11 @@ async def modificar_entrevista_humana(
     eh.telefono_contacto = datos.telefono_contacto.strip() if datos.modalidad == "Llamada" else ""
     eh.comentario = datos.comentario.strip()
 
-    resultados = await notificaciones.disparar(db, "entrevista_modificada", p, u.nombre, eh=eh)
+    override = override_de(datos.notificar)
+    resultados = await notificaciones.disparar(db, "entrevista_modificada", p, u.nombre, eh=eh, override=override)
     registrar(
         db, u.nombre, "entrevista_humana_modificada", "postulacion", p.codigo,
-        {"fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo, "notificaciones": resultados},
+        {"fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo, "notificaciones": resultados, "notificar_override": override},
     )
     _actualizar_ultima_actividad(p)
     db.commit()
@@ -1553,7 +1565,8 @@ async def modificar_entrevista_humana(
 
 @router.post("/{codigo}/entrevista-humana/cancelar")
 async def cancelar_entrevista_humana(
-    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    codigo: str, notificar: Optional[NotificarIn] = Body(default=None, embed=True),
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón «Cancelar» — dispara el evento "entrevista_cancelada" (Fase D). No mueve la etapa
@@ -1566,10 +1579,11 @@ async def cancelar_entrevista_humana(
         raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
     eh.cancelada = True
 
-    resultados = await notificaciones.disparar(db, "entrevista_cancelada", p, u.nombre, eh=eh)
+    override = override_de(notificar)
+    resultados = await notificaciones.disparar(db, "entrevista_cancelada", p, u.nombre, eh=eh, override=override)
     registrar(
         db, u.nombre, "entrevista_humana_cancelada", "postulacion", p.codigo,
-        {"correo_rh": u.correo, "notificaciones": resultados},
+        {"correo_rh": u.correo, "notificaciones": resultados, "notificar_override": override},
     )
     _actualizar_ultima_actividad(p)
     db.commit()
@@ -1578,7 +1592,8 @@ async def cancelar_entrevista_humana(
 
 @router.post("/{codigo}/entrevista-humana/realizada")
 async def marcar_entrevista_humana_realizada(
-    codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    codigo: str, forzar_prueba: bool = False, notificar: Optional[NotificarIn] = Body(default=None, embed=True),
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón «Marcar entrevista realizada» — marca que la entrevista ocurrió y dispara el evento
@@ -1591,11 +1606,12 @@ async def marcar_entrevista_humana_realizada(
     eh = _ultima_entrevista_humana(p)
 
     eh.realizada = True
-    resultados = await notificaciones.disparar(db, "entrevista_humana_terminada", p, u.nombre, eh=eh)
+    override = override_de(notificar)
+    resultados = await notificaciones.disparar(db, "entrevista_humana_terminada", p, u.nombre, eh=eh, override=override)
 
     registrar(
         db, u.nombre, "entrevista_humana_marcada_realizada", "postulacion", p.codigo,
-        {"notificaciones": resultados, "correo_rh": u.correo},
+        {"notificaciones": resultados, "correo_rh": u.correo, "notificar_override": override},
     )
     db.commit()
     return {"resultados": resultados, "candidato": postulacion_dict(p, detalle=True)}
@@ -1605,6 +1621,7 @@ class EntrevistaHumanaResultadoIn(BaseModel):
     resultado: str  # aprobado | no_aprobado
     recomendacion: str  # avanzar | no_avanzar | segunda_entrevista
     comentario: str = ""
+    notificar: Optional[NotificarIn] = None  # aplica a "recomendacion_final"; "candidato_apto" (automático) usa la regla
 
 
 @router.post("/{codigo}/entrevista-humana/resultado")
@@ -1640,12 +1657,14 @@ async def registrar_resultado_entrevista_humana(
     eh.resultado_capturado_por = "rh"
     _actualizar_ultima_actividad(p)
     await _recalcular_resultado_apto_y_notificar(db, p, u.nombre)
-    resultados = await notificaciones.disparar(db, "recomendacion_final", p, u.nombre, eh=eh)
+    override = override_de(datos.notificar)
+    resultados = await notificaciones.disparar(db, "recomendacion_final", p, u.nombre, eh=eh, override=override)
     registrar(
         db, u.nombre, "entrevista_humana_resultado_capturado_rh", "postulacion", p.codigo,
         {
             "resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario,
             "corrigio_captura_previa": ya_capturada, "correo_rh": u.correo, "notificaciones": resultados,
+            "notificar_override": override,
         },
     )
     db.commit()
@@ -1654,7 +1673,8 @@ async def registrar_resultado_entrevista_humana(
 
 @router.post("/{codigo}/entrevista-humana/recordatorio")
 async def recordatorio_entrevista_humana(
-    codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    codigo: str, forzar_prueba: bool = False, notificar: Optional[NotificarIn] = Body(default=None, embed=True),
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón «Enviar recordatorio» — dispara el evento "recordatorio_entrevista" (Fase D): la
@@ -1666,10 +1686,11 @@ async def recordatorio_entrevista_humana(
     if eh.realizada and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
 
-    resultados = await notificaciones.disparar(db, "recordatorio_entrevista", p, u.nombre, eh=eh)
+    override = override_de(notificar)
+    resultados = await notificaciones.disparar(db, "recordatorio_entrevista", p, u.nombre, eh=eh, override=override)
     registrar(
         db, u.nombre, "recordatorio_entrevista_humana_enviado", "postulacion", p.codigo,
-        {"notificaciones": resultados, "correo_rh": u.correo},
+        {"notificaciones": resultados, "correo_rh": u.correo, "notificar_override": override},
     )
     db.commit()
     return {"resultados": resultados, "candidato": postulacion_dict(p, detalle=True)}
@@ -1743,11 +1764,14 @@ def guardar_condiciones_contratacion(
 # (ia.onboarding_turno, ver procesar_prefiltro) listo para dar seguimiento a lo que el
 # candidato conteste después.
 
-async def _disparar_mensaje_onboarding(db: Session, p: Postulacion, evento: str, accion: str, liga: str, u: Usuario) -> dict:
+async def _disparar_mensaje_onboarding(
+    db: Session, p: Postulacion, evento: str, accion: str, liga: str, u: Usuario, notificar: Optional[NotificarIn] = None
+) -> dict:
     if p.etapa != "Onboarding":
         raise HTTPException(409, "Esta acción es solo para postulaciones en la etapa de Onboarding.")
-    resultados = await notificaciones.disparar(db, evento, p, u.nombre, liga=liga)
-    registrar(db, u.nombre, accion, "postulacion", p.codigo, {"notificaciones": resultados, "correo_rh": u.correo})
+    override = override_de(notificar)
+    resultados = await notificaciones.disparar(db, evento, p, u.nombre, liga=liga, override=override)
+    registrar(db, u.nombre, accion, "postulacion", p.codigo, {"notificaciones": resultados, "correo_rh": u.correo, "notificar_override": override})
     _actualizar_ultima_actividad(p)
     db.commit()
     return {"resultados": resultados, "candidato": postulacion_dict(p, detalle=True)}
@@ -1765,20 +1789,22 @@ def _liga_documentos(p: Postulacion) -> str:
 
 @router.post("/{codigo}/solicitar-documentos")
 async def solicitar_documentos(
-    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+    codigo: str, notificar: Optional[NotificarIn] = Body(default=None, embed=True),
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón 'Solicitar documentos' — rompe el hielo por WhatsApp al entrar a Onboarding, con
     la liga pública para que el candidato suba sus documentos él mismo."""
     p = _por_codigo(db, codigo, cuenta.id)
     liga = _liga_documentos(p)
-    return await _disparar_mensaje_onboarding(db, p, "solicitud_documentos", "documentos_solicitados", liga, u)
+    return await _disparar_mensaje_onboarding(db, p, "solicitud_documentos", "documentos_solicitados", liga, u, notificar)
 
 
 @router.post("/{codigo}/recordatorio-documentos")
 async def recordatorio_documentos(
-    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+    codigo: str, notificar: Optional[NotificarIn] = Body(default=None, embed=True),
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón 'Enviar recordatorio' — seguimiento manual si el candidato no ha respondido."""
     p = _por_codigo(db, codigo, cuenta.id)
     liga = _liga_documentos(p)
-    return await _disparar_mensaje_onboarding(db, p, "recordatorio_documentos", "recordatorio_documentos_enviado", liga, u)
+    return await _disparar_mensaje_onboarding(db, p, "recordatorio_documentos", "recordatorio_documentos_enviado", liga, u, notificar)
