@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Bell,
   BookOpen,
   Briefcase,
+  Building2,
+  ChevronDown,
   ClipboardCheck,
   ClipboardList,
   ExternalLink,
@@ -87,6 +89,113 @@ function NavList({ items, onNavigate }: { items: NavItem[]; onNavigate?: () => v
     </nav>
   );
 }
+
+/* ---------------- Selector de Cuenta (Punto 27) ---------------- */
+
+/** Solo se renderiza cuando el usuario tiene acceso a más de una Cuenta activa.
+ * Muestra la Cuenta seleccionada y un dropdown con las opciones disponibles.
+ * Al seleccionar una Cuenta diferente, persiste en localStorage y navega al Tablero. */
+function SelectorCuenta({ variant = "sidebar" }: { variant?: "sidebar" | "topbar" }) {
+  const { usuario, cuentaActualId, cambiarCuenta } = useSesion();
+  const [abierto, setAbierto] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Cerrar el dropdown al hacer clic fuera
+  useEffect(() => {
+    if (!abierto) return;
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setAbierto(false);
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [abierto]);
+
+  // Regla Fase A: si solo tiene una Cuenta no se muestra ningún selector
+  if (!usuario || usuario.cuentas.length <= 1) return null;
+
+  const cuentaActual = usuario.cuentas.find((c) => c.id === cuentaActualId);
+
+  if (variant === "topbar") {
+    return (
+      <div ref={ref} className="relative">
+        <button
+          id="selector-cuenta-topbar"
+          onClick={() => setAbierto((v) => !v)}
+          aria-haspopup="listbox"
+          aria-expanded={abierto}
+          className="flex items-center gap-1.5 rounded-lg border border-border-soft bg-surface-2 px-2.5 py-1.5 text-[12px] font-medium text-ink-2 transition hover:border-brand/40 hover:bg-brand-soft hover:text-brand"
+        >
+          <Building2 className="h-3.5 w-3.5" />
+          <span className="max-w-[120px] truncate">{cuentaActual?.nombreComercial ?? "Cuenta"}</span>
+          <ChevronDown className={cn("h-3 w-3 transition-transform", abierto && "rotate-180")} />
+        </button>
+        {abierto && (
+          <div
+            role="listbox"
+            className="absolute right-0 top-full z-50 mt-1 min-w-[180px] overflow-hidden rounded-xl border border-border-soft bg-surface shadow-lg"
+          >
+            {usuario.cuentas.map((c) => (
+              <button
+                key={c.id}
+                role="option"
+                aria-selected={c.id === cuentaActualId}
+                onClick={() => { cambiarCuenta(c.id); setAbierto(false); }}
+                className={cn(
+                  "flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm transition hover:bg-surface-2",
+                  c.id === cuentaActualId ? "font-semibold text-brand" : "text-ink-2",
+                )}
+              >
+                {c.id === cuentaActualId && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-brand" />}
+                <span className={c.id === cuentaActualId ? "" : "pl-3.5"}>{c.nombreComercial}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Variant sidebar — se inserta justo debajo del nombre de usuario en TarjetaUsuario
+  return (
+    <div ref={ref} className="relative mt-1">
+      <button
+        id="selector-cuenta-sidebar"
+        onClick={() => setAbierto((v) => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={abierto}
+        className="flex w-full items-center gap-1.5 rounded-lg px-1 py-0.5 text-[11px] text-ink-3 transition hover:text-brand"
+      >
+        <Building2 className="h-3 w-3 shrink-0" />
+        <span className="flex-1 truncate text-left">{cuentaActual?.nombreComercial ?? "Cuenta"}</span>
+        <ChevronDown className={cn("h-3 w-3 shrink-0 transition-transform", abierto && "rotate-180")} />
+      </button>
+      {abierto && (
+        <div
+          role="listbox"
+          className="absolute bottom-full left-0 z-50 mb-1 min-w-full overflow-hidden rounded-xl border border-border-soft bg-surface shadow-lg"
+        >
+          {usuario.cuentas.map((c) => (
+            <button
+              key={c.id}
+              role="option"
+              aria-selected={c.id === cuentaActualId}
+              onClick={() => { cambiarCuenta(c.id); setAbierto(false); }}
+              className={cn(
+                "flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] transition hover:bg-surface-2",
+                c.id === cuentaActualId ? "font-semibold text-brand" : "text-ink-2",
+              )}
+            >
+              {c.id === cuentaActualId && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-brand" />}
+              <span className={c.id === cuentaActualId ? "" : "pl-3.5"}>{c.nombreComercial}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Sidebar content ---------------- */
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const { usuario } = useSesion();
@@ -197,6 +306,8 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="ml-auto flex items-center gap-2">
+            {/* Selector de Cuenta en topbar (solo si el usuario tiene más de una) */}
+            <SelectorCuenta variant="topbar" />
             <ThemeToggle />
             <button className="relative grid h-10 w-10 place-items-center rounded-xl text-ink-2 hover:bg-surface-2" aria-label="Notificaciones">
               <Bell className="h-5 w-5" />
@@ -220,20 +331,24 @@ function TarjetaUsuario() {
   if (cargando) return <div className="h-[68px] animate-pulse rounded-2xl bg-surface-2" />;
   if (!usuario) return null;
   return (
-    <div className="flex items-center gap-3 rounded-2xl border border-border-soft bg-surface-2 p-3">
-      <Avatar name={usuario.nombre} />
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-semibold">{usuario.nombre}</p>
-        <p className="truncate text-xs text-ink-3">{usuario.rol}</p>
+    <div className="flex flex-col gap-1 rounded-2xl border border-border-soft bg-surface-2 p-3">
+      <div className="flex items-center gap-3">
+        <Avatar name={usuario.nombre} />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-semibold">{usuario.nombre}</p>
+          <p className="truncate text-xs text-ink-3">{usuario.rol}</p>
+        </div>
+        <button
+          onClick={salir}
+          className="grid h-8 w-8 place-items-center rounded-lg text-ink-3 transition hover:bg-surface hover:text-brand"
+          aria-label="Cerrar sesión"
+          title="Cerrar sesión"
+        >
+          <LogOut className="h-4 w-4" />
+        </button>
       </div>
-      <button
-        onClick={salir}
-        className="grid h-8 w-8 place-items-center rounded-lg text-ink-3 transition hover:bg-surface hover:text-brand"
-        aria-label="Cerrar sesión"
-        title="Cerrar sesión"
-      >
-        <LogOut className="h-4 w-4" />
-      </button>
+      {/* Selector de Cuenta en sidebar (solo si el usuario tiene más de una) */}
+      <SelectorCuenta variant="sidebar" />
     </div>
   );
 }

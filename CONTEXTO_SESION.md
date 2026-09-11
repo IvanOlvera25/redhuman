@@ -491,3 +491,81 @@ Fase D y todo lo de Cliente arrancan apagados). Idempotente.
 3. Sigue Fase F: agente global "Pregunta a Red Human" (Fase E es transversal, ya se viene
    verificando en cada fase).
 
+## Puntos 2, 27 y 28 — implementados 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+
+### Punto 27 — Selector de Cuenta multi-cuenta
+
+**Backend:**
+- `routers/auth.py::usuario_dict()`: ahora incluye `cuentas: [{id, nombreComercial}]` — lista
+  de Cuentas activas del usuario. Se lee de la relación `u.cuentas` (lazy load de SQLAlchemy).
+- `routers/cuentas.py` (nuevo): `GET /cuentas/actual`, `PATCH /cuentas/actual`,
+  `POST /cuentas/actual/logo`. Solo admin. Registra en bitácora.
+- `main.py`: registra el nuevo router `cuentas`.
+
+**Frontend:**
+- `lib/api.ts`: `headersCuenta()` inyecta `X-Cuenta-Id` en TODAS las peticiones (get y enviar)
+  leyendo `localStorage("rh-cuenta-id")`; `UsuarioRH` gana campo `cuentas`.
+- `components/sesion.tsx`: `cuentaActualId` (leído de localStorage + validado vs la lista del
+  usuario); `cambiarCuenta(id)` persiste en localStorage y navega al Tablero.
+- `components/dashboard/shell.tsx`: `SelectorCuenta` en dos variantes (sidebar dentro de
+  `TarjetaUsuario`, topbar antes del ThemeToggle) — invisible si el usuario solo tiene 1 Cuenta.
+
+**Regla cumplida**: usuario con 1 Cuenta = ningún selector, interfaz idéntica a hoy.
+
+### Punto 2 — Reorganización de Configuración en 6 secciones
+
+`app/dashboard/configuracion/page.tsx` reorganizado en:
+1. **Cuenta y Portal** — formulario editable (nombre_comercial, razón_social, contacto,
+   correo, WhatsApp) + upload de logo. Usa `GET/PATCH /cuentas/actual` y `POST /cuentas/actual/logo`.
+2. **Usuarios y permisos** — lista de usuarios de la Cuenta; crear/editar inline.
+   Usa `GET/POST/PATCH /auth/usuarios` ya existentes.
+3. **Clientes y contactos** — tarjeta existente, sin cambio funcional.
+4. **Plantillas** — solo un enlace a Vacantes → "Plantillas" (no se duplica la gestión).
+5. **Notificaciones** — grilla existente de Fase D, sin cambio funcional.
+6. **Modo prueba** — toggle + botón de borrado agrupados juntos.
+
+Toda la funcionalidad existente se preserva sin ningún cambio de comportamiento.
+
+### Punto 28 — Auditoría de simplificación
+
+Estado verificado contra el código real:
+- ✅ **Selector de Cuenta**: no aparece si el usuario tiene 1 Cuenta (`cuentas.length <= 1`).
+- ✅ **Selector de Cliente en Vacantes/Candidatos**: oculto con `{clientes.length > 0 && ...}`
+  en `vacantes/page.tsx` líneas 308, 790, 859 — correcto.
+- ✅ **Selector de Cliente en Notificaciones**: columnas de Cliente ocultas con
+  `{hayClienteActivo && ...}` — correcto.
+- ⚠️ **Datos demo hardcodeados en shell.tsx**: los badges de nav (Vacantes "24", Candidatos
+  "1.8k", Entrevistas "12", Onboarding "3") son valores estáticos de demostración. No son
+  funcionales pero tampoco bloquean ningún flujo — son estética de demo, no filtros. Pendiente
+  de conectar a datos reales en Fase F o cuando se construya la API de conteos de tablero.
+- ✅ **"Grupo Carbe" en data.ts**: solo en los datos de ejemplo del array `vacantes[]` y
+  `candidatos[]`, que son datos de fallback cuando la API no responde. No se muestra a
+  producción si la API está activa.
+- ✅ **"Grupo Carbe" en configuracion/page.tsx**: es solo el `placeholder` del campo
+  nombre_comercial — texto de ayuda, no un valor por defecto real.
+- ✅ **Herencia automática de Cuenta**: `cuenta_actual` en `deps.py` la inyecta automáticamente
+  en todos los endpoints — no se pide al usuario.
+- ✅ **No repetición de captura**: nombre de empresa candidato-visible se resuelve en el backend
+  (`nombre_empresa_candidato(v)`) — el frontend no captura ese campo.
+- ✅ **Vista previa no obligatoria**: solo un botón opcional en DetalleVacante, no bloquea publicar.
+- ✅ **Opcionalidad de plantillas**: creación de vacante desde cero funciona sin plantilla.
+
+**Único pendiente real de simplificación** (fuera del alcance de esta sesión):
+Conectar los badges de nav a datos reales de la API en vez de valores hardcoded. Se anota
+aquí pero no se toca ahora porque requiere un endpoint nuevo de conteos que no forma parte
+de ninguna fase actualmente planeada.
+
+### Verificación realizada (2026-09-11)
+- Backend: `py_compile` en `auth.py`, `cuentas.py`, `main.py` — exit code 0, sin errores.
+- Frontend: `tsc --noEmit` — exit code 0, sin errores de tipo.
+- Frontend: `next build` — exit code 0, 19 rutas generadas (mismas que antes + tamaño
+  esperable: `configuracion` subió de ~3 kB a ~8.9 kB por las 2 secciones nuevas).
+
+### Siguiente paso
+1. El usuario revisa los cambios de los Puntos 2 y 27 (especialmente probar el selector de
+   Cuenta si existe más de una en el entorno de prueba).
+2. Commit y deploy cuando se apruebe.
+3. El único punto técnico pendiente de limpieza es conectar los badges de navegación
+   (Vacantes/Candidatos/Entrevistas/Onboarding) a conteos reales de la API — anotado como
+   deuda técnica, no es urgente para operación.
+

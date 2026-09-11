@@ -35,9 +35,22 @@ function sesionCaida(ruta: string) {
   window.location.href = `/login?next=${destino}&expirada=1`;
 }
 
+/** Cabecera X-Cuenta-Id — se inyecta en cada request cuando el usuario tiene más de una
+ * Cuenta activa. El backend la exige solo en ese caso (ver deps.py::cuenta_actual).
+ * Devuelve objeto vacío en SSR o cuando no hay Cuenta guardada. */
+function headersCuenta(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  const id = window.localStorage.getItem("rh-cuenta-id");
+  return id ? { "X-Cuenta-Id": id } : {};
+}
+
 async function get<T>(ruta: string): Promise<T | null> {
   try {
-    const r = await fetch(`${API}${ruta}`, { cache: "no-store", credentials: "include" });
+    const r = await fetch(`${API}${ruta}`, {
+      cache: "no-store",
+      credentials: "include",
+      headers: headersCuenta(),
+    });
     if (r.status === 401) sesionCaida(ruta);
     if (!r.ok) return null;
     return (await r.json()) as T;
@@ -60,7 +73,13 @@ async function detalleError(r: Response): Promise<string> {
 
 async function enviar<T>(ruta: string, init: RequestInit): Promise<Resultado<T>> {
   try {
-    const r = await fetch(`${API}${ruta}`, { ...init, credentials: "include" });
+    // Mezclar los headers del llamador con X-Cuenta-Id; el llamador tiene prioridad sobre
+    // todo menos la cabecera de cuenta (Content-Type, etc. no deben ser sobreescritos).
+    const headers = {
+      ...headersCuenta(),
+      ...(init.headers as Record<string, string> | undefined ?? {}),
+    };
+    const r = await fetch(`${API}${ruta}`, { ...init, credentials: "include", headers });
     if (r.status === 401) sesionCaida(ruta);
     if (!r.ok) return { ok: false, error: await detalleError(r) };
     return { ok: true, data: (await r.json()) as T };
@@ -113,6 +132,9 @@ export interface UsuarioRH {
   debeCambiarPass: boolean;
   puedeDecidir: boolean;
   ultimoAcceso: string | null;
+  /** Lista de Cuentas activas a las que tiene acceso este usuario.
+   * Cuando solo hay una, el frontend no muestra ningún selector (regla Fase A). */
+  cuentas: { id: number; nombreComercial: string }[];
 }
 
 export function login(correo: string, password: string) {
@@ -180,6 +202,36 @@ export interface ResumenBorradoPrueba {
 /** Botón «Eliminar postulaciones de prueba» — borra TODOS los candidatos con es_prueba=True. */
 export function eliminarCandidatosPrueba() {
   return post<ResumenBorradoPrueba>("/candidatos/prueba/eliminar");
+}
+
+/* ============================================================
+   Punto 2 · Cuenta y Portal — datos editables de la Cuenta activa (solo admin)
+   ============================================================ */
+
+export interface DatosCuenta {
+  id: number;
+  nombreComercial: string;
+  razonSocial: string;
+  /** Ruta en disco — construir la URL con urlArchivo(logo) para mostrarla. Vacío si no tiene logo. */
+  logo: string;
+  contactoNombre: string;
+  correoComunicacion: string;
+  whatsappComunicacion: string;
+  estado: "Activa" | "Inactiva";
+}
+
+export function fetchCuentaActual() {
+  return get<DatosCuenta>("/cuentas/actual");
+}
+
+export function actualizarCuenta(cambios: Partial<Omit<DatosCuenta, "id" | "logo">>) {
+  return patch<DatosCuenta>("/cuentas/actual", cambios);
+}
+
+export function subirLogoCuenta(archivo: File) {
+  const form = new FormData();
+  form.append("archivo", archivo);
+  return subir<DatosCuenta>("/cuentas/actual/logo", form);
 }
 
 /* ============================================================

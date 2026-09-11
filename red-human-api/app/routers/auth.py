@@ -24,6 +24,13 @@ def usuario_dict(u: Usuario) -> dict:
        "debeCambiarPass": u.debe_cambiar_pass,
        "puedeDecidir": u.puede_decidir(),
        "ultimoAcceso": u.ultimo_acceso.isoformat() if u.ultimo_acceso else None,
+       # Punto 27: lista de Cuentas activas del usuario para el selector multi-cuenta del
+       # frontend. Cuando solo hay una, el selector no aparece (regla de negocio Fase A).
+       "cuentas": [
+           {"id": uc.cuenta.id, "nombreComercial": uc.cuenta.nombre_comercial}
+           for uc in u.cuentas
+           if uc.cuenta.estado == "Activa"
+       ],
    }
 
 def _poner_cookie(resp: Response, token: str) -> None:

@@ -14,33 +14,68 @@ import { fetchConfiguracion, fetchYo, logout as apiLogout, type UsuarioRH } from
    También carga Modo Prueba una sola vez aquí (en vez de que cada componente que lo necesite
    haga su propio GET /configuracion) — lo usan varios sitios a la vez cuando el modal de un
    candidato está abierto (Lote 4: botón "Continuar de todos modos").
+
+   Punto 27 — Selector de Cuenta:
+   Cuando el usuario tiene acceso a más de una Cuenta activa, este contexto expone
+   `cuentaActualId` y `cambiarCuenta()`. Al cambiar de Cuenta:
+     1. Se persiste el id en localStorage con clave "rh-cuenta-id".
+     2. Todas las peticiones a la API incluyen automáticamente X-Cuenta-Id (ver lib/api.ts).
+     3. El usuario es llevado al Tablero para evitar ver datos de la Cuenta anterior.
+   Si el usuario solo tiene una Cuenta, `cuentaActualId` se resuelve sola y el selector
+   no aparece en el shell (regla de negocio confirmada en CONTEXTO_SESION.md).
    ============================================================ */
+
+const CLAVE_STORAGE = "rh-cuenta-id";
 
 interface Contexto {
   usuario: UsuarioRH | null;
   cargando: boolean;
   modoPrueba: boolean;
+  /** Id de la Cuenta activa en esta sesión. Null mientras carga o si el usuario no tiene Cuentas. */
+  cuentaActualId: number | null;
   refrescar: () => Promise<void>;
   salir: () => Promise<void>;
+  /** Cambia la Cuenta activa, la persiste en localStorage y navega al Tablero. */
+  cambiarCuenta: (id: number) => void;
 }
 
 const SesionCtx = createContext<Contexto>({
   usuario: null,
   cargando: true,
   modoPrueba: false,
+  cuentaActualId: null,
   refrescar: async () => {},
   salir: async () => {},
+  cambiarCuenta: () => {},
 });
+
+/** Lee el id guardado en localStorage y lo valida contra la lista de Cuentas del usuario.
+ * Si no está o ya no es válido, cae al primer elemento de la lista. */
+function _resolverCuentaId(usuario: UsuarioRH): number | null {
+  if (usuario.cuentas.length === 0) return null;
+  const guardado = typeof window !== "undefined" ? window.localStorage.getItem(CLAVE_STORAGE) : null;
+  const guardadoNum = guardado ? parseInt(guardado, 10) : null;
+  const valido = guardadoNum !== null && usuario.cuentas.some((c) => c.id === guardadoNum);
+  return valido ? guardadoNum : usuario.cuentas[0].id;
+}
 
 export function ProveedorSesion({ children }: { children: React.ReactNode }) {
   const [usuario, setUsuario] = useState<UsuarioRH | null>(null);
   const [cargando, setCargando] = useState(true);
   const [modoPrueba, setModoPrueba] = useState(false);
+  const [cuentaActualId, setCuentaActualId] = useState<number | null>(null);
   const router = useRouter();
 
   const refrescar = useCallback(async () => {
     const u = await fetchYo();
     setUsuario(u);
+    if (u) {
+      const id = _resolverCuentaId(u);
+      if (id !== null && typeof window !== "undefined") {
+        window.localStorage.setItem(CLAVE_STORAGE, String(id));
+      }
+      setCuentaActualId(id);
+    }
     setCargando(false);
   }, []);
 
@@ -60,8 +95,23 @@ export function ProveedorSesion({ children }: { children: React.ReactNode }) {
     router.push("/login");
   }, [router]);
 
+  const cambiarCuenta = useCallback(
+    (id: number) => {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(CLAVE_STORAGE, String(id));
+      }
+      setCuentaActualId(id);
+      // Recargar contexto navegando al Tablero — evita que el usuario vea datos de la
+      // Cuenta anterior mientras los endpoints responden con la nueva Cuenta.
+      router.push("/dashboard");
+    },
+    [router],
+  );
+
   return (
-    <SesionCtx.Provider value={{ usuario, cargando, modoPrueba, refrescar, salir }}>{children}</SesionCtx.Provider>
+    <SesionCtx.Provider value={{ usuario, cargando, modoPrueba, cuentaActualId, refrescar, salir, cambiarCuenta }}>
+      {children}
+    </SesionCtx.Provider>
   );
 }
 
@@ -90,4 +140,9 @@ export function useEsAdmin() {
  * si esto es `false`, el servidor nunca lo obedece fuera de Modo Prueba. */
 export function useModoPrueba() {
   return useSesion().modoPrueba;
+}
+
+/** Id de la Cuenta activa — util para saber cuál está seleccionada sin acceder al usuario completo. */
+export function useCuentaActualId() {
+  return useSesion().cuentaActualId;
 }
