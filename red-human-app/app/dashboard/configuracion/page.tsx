@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, Building2, FlaskConical, Loader2, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Bell, Building2, FlaskConical, Loader2, Plus, Trash2 } from "lucide-react";
 import { Card, Badge, Button } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
 import { Aviso } from "@/components/dashboard/subida";
@@ -9,12 +9,18 @@ import { useEsAdmin } from "@/components/sesion";
 import {
   actualizarConfiguracion,
   actualizarCliente,
+  actualizarReglaNotificacion,
   crearCliente,
   eliminarCandidatosPrueba,
   fetchClientes,
   fetchConfiguracion,
+  fetchReglasNotificacion,
+  EVENTOS_NOTIFICACION,
+  NOMBRE_EVENTO_NOTIFICACION,
   type Cliente,
   type ConfiguracionSistema,
+  type EventoNotificacion,
+  type ReglaNotificacion,
   type ResumenBorradoPrueba,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -35,6 +41,11 @@ export default function Configuracion() {
   const [creandoCliente, setCreandoCliente] = useState(false);
   const [errorCliente, setErrorCliente] = useState("");
 
+  const [reglas, setReglas] = useState<ReglaNotificacion[]>([]);
+  const [cargandoReglas, setCargandoReglas] = useState(true);
+  const [errorReglas, setErrorReglas] = useState("");
+  const [guardandoRegla, setGuardandoRegla] = useState<EventoNotificacion | null>(null);
+
   useEffect(() => {
     if (!esAdmin) {
       setCargando(false);
@@ -47,6 +58,10 @@ export default function Configuracion() {
     fetchClientes().then((c) => {
       setClientes(c ?? []);
       setCargandoClientes(false);
+    });
+    fetchReglasNotificacion().then((r) => {
+      setReglas(r ?? []);
+      setCargandoReglas(false);
     });
   }, [esAdmin]);
 
@@ -64,9 +79,24 @@ export default function Configuracion() {
     setNuevoCliente("");
   }
 
+  const hayClienteActivo = clientes.some((c) => c.estado === "Activo");
+
   async function alternarEstadoCliente(c: Cliente) {
     const r = await actualizarCliente(c.id, { estado: c.estado === "Activo" ? "Inactivo" : "Activo" });
     if (r.ok) setClientes((prev) => prev.map((x) => (x.id === c.id ? r.data : x)));
+  }
+
+  async function alternarCasillaRegla(regla: ReglaNotificacion, campo: keyof Omit<ReglaNotificacion, "evento">) {
+    setErrorReglas("");
+    setGuardandoRegla(regla.evento);
+    const { evento, ...resto } = regla;
+    const r = await actualizarReglaNotificacion(evento, { ...resto, [campo]: !resto[campo] });
+    setGuardandoRegla(null);
+    if (!r.ok) {
+      setErrorReglas(r.error);
+      return;
+    }
+    setReglas((prev) => prev.map((x) => (x.evento === evento ? r.data : x)));
   }
 
   async function alternarModoPrueba() {
@@ -211,6 +241,77 @@ export default function Configuracion() {
         )}
       </Card>
 
+      <Card className="mt-4 p-5">
+        <div className="flex items-center gap-2">
+          <Bell className="h-[18px] w-[18px] text-brand" />
+          <h3 className="font-display text-base font-bold">Notificaciones</h3>
+        </div>
+        <p className="mt-1.5 max-w-md text-[13px] leading-relaxed text-ink-2">
+          Para cada evento del proceso, elige quién se entera y por qué canal — usando datos que
+          ya existen en la ficha de cada candidato, entrevistador o Cliente, sin pedir captura
+          nueva. Nada se manda por fuera de lo que actives aquí.
+        </p>
+
+        {errorReglas && (
+          <div className="mt-3">
+            <Aviso tono="error">{errorReglas}</Aviso>
+          </div>
+        )}
+
+        {cargandoReglas ? (
+          <Loader2 className="mt-4 h-5 w-5 animate-spin text-ink-3" />
+        ) : (
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[560px] border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-border-faint text-left text-[11px] uppercase tracking-wide text-ink-3">
+                  <th className="py-2 pr-3 font-medium">Evento</th>
+                  <th className="px-2 py-2 text-center font-medium" colSpan={2}>Candidato</th>
+                  <th className="px-2 py-2 text-center font-medium" colSpan={2}>Entrevistador</th>
+                  {hayClienteActivo && (
+                    <th className="px-2 py-2 text-center font-medium" colSpan={2}>Cliente</th>
+                  )}
+                </tr>
+                <tr className="border-b border-border-faint text-center text-[11px] text-ink-3">
+                  <th />
+                  <th className="px-2 pb-1.5 font-normal">Correo</th>
+                  <th className="px-2 pb-1.5 font-normal">WhatsApp</th>
+                  <th className="px-2 pb-1.5 font-normal">Correo</th>
+                  <th className="px-2 pb-1.5 font-normal">WhatsApp</th>
+                  {hayClienteActivo && (
+                    <>
+                      <th className="px-2 pb-1.5 font-normal">Correo</th>
+                      <th className="px-2 pb-1.5 font-normal">WhatsApp</th>
+                    </>
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {EVENTOS_NOTIFICACION.map((evento) => {
+                  const regla = reglas.find((r) => r.evento === evento);
+                  if (!regla) return null;
+                  return (
+                    <tr key={evento} className="border-b border-border-faint last:border-0">
+                      <td className="py-2 pr-3 text-[13px]">{NOMBRE_EVENTO_NOTIFICACION[evento]}</td>
+                      <CasillaRegla regla={regla} campo="candidatoCorreo" ocupado={guardandoRegla === evento} onCambio={alternarCasillaRegla} />
+                      <CasillaRegla regla={regla} campo="candidatoWhatsapp" ocupado={guardandoRegla === evento} onCambio={alternarCasillaRegla} />
+                      <CasillaRegla regla={regla} campo="entrevistadorCorreo" ocupado={guardandoRegla === evento} onCambio={alternarCasillaRegla} />
+                      <CasillaRegla regla={regla} campo="entrevistadorWhatsapp" ocupado={guardandoRegla === evento} onCambio={alternarCasillaRegla} />
+                      {hayClienteActivo && (
+                        <>
+                          <CasillaRegla regla={regla} campo="clienteCorreo" ocupado={guardandoRegla === evento} onCambio={alternarCasillaRegla} />
+                          <CasillaRegla regla={regla} campo="clienteWhatsapp" ocupado={guardandoRegla === evento} onCambio={alternarCasillaRegla} />
+                        </>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
       <Card className="mt-4 border-bad/25 p-5">
         <div className="flex items-start gap-3">
           <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-bad" />
@@ -253,6 +354,31 @@ export default function Configuracion() {
         />
       )}
     </div>
+  );
+}
+
+function CasillaRegla({
+  regla,
+  campo,
+  ocupado,
+  onCambio,
+}: {
+  regla: ReglaNotificacion;
+  campo: keyof Omit<ReglaNotificacion, "evento">;
+  ocupado: boolean;
+  onCambio: (regla: ReglaNotificacion, campo: keyof Omit<ReglaNotificacion, "evento">) => void;
+}) {
+  return (
+    <td className="px-2 py-2 text-center">
+      <input
+        type="checkbox"
+        checked={regla[campo]}
+        disabled={ocupado}
+        onChange={() => onCambio(regla, campo)}
+        className="h-4 w-4 rounded border-border-soft accent-brand disabled:opacity-50"
+        aria-label={`${NOMBRE_EVENTO_NOTIFICACION[regla.evento]} — ${campo}`}
+      />
+    </td>
   );
 }
 

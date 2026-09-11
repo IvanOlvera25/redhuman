@@ -38,6 +38,8 @@ import {
   Clock,
   ArrowUpDown,
   Copy,
+  Pencil,
+  XCircle,
 } from "lucide-react";
 import { Card, Badge, Button, Avatar, Eyebrow, Progress } from "@/components/ui";
 import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
@@ -45,6 +47,7 @@ import { Aviso, Dropzone, pesoLegible } from "@/components/dashboard/subida";
 import {
   candidatos as candidatosDemo,
   type Candidato,
+  type EntrevistaHumana,
   type EtapaCandidato,
   type RecomendacionEntrevistaHumana,
   type ResultadoEntrevistaHumana,
@@ -54,6 +57,7 @@ import {
 import type { DocExpediente, NuevoIngreso } from "@/lib/phase2";
 import {
   autorizarAlta,
+  cancelarEntrevistaHumana,
   cancelarExpediente,
   decidirCandidato,
   enviarPrefiltro,
@@ -67,6 +71,7 @@ import {
   guardarCondicionesContratacion,
   liberarTelefonoCandidato,
   marcarEntrevistaHumanaRealizada,
+  modificarEntrevistaHumana,
   moverEtapaCandidato,
   programarEntrevistaHumana,
   recordatorioDocumentosCandidato,
@@ -2215,11 +2220,28 @@ function PanelEntrevistaHumana({
   const modoPrueba = useModoPrueba();
   const eh = c.entrevistaHumana;
   const [modalResultado, setModalResultado] = useState(false);
+  const [modalModificar, setModalModificar] = useState(false);
   const [marcando, setMarcando] = useState(false);
   const [guardando, setGuardando] = useState(false);
   const [aviso, setAviso] = useState<AvisoEstado>(null);
   const [recordando, setRecordando] = useState(false);
   const [avisoRecordatorio, setAvisoRecordatorio] = useState<AvisoEstado>(null);
+  const [cancelando, setCancelando] = useState(false);
+
+  /** Botón «Cancelar» (Fase D) — no mueve la tarjeta de etapa: RH agenda otra ronda o mueve la
+   * etapa a mano según corresponda. */
+  async function cancelar() {
+    if (!window.confirm("¿Cancelar esta entrevista? No se mueve la etapa del candidato.")) return;
+    setCancelando(true);
+    setAviso(null);
+    const r = await cancelarEntrevistaHumana(c.id);
+    setCancelando(false);
+    if (!r.ok) {
+      setAviso({ tono: "error", texto: r.error });
+      return;
+    }
+    onCambio(r.data);
+  }
 
   /** Ya no pide resultado (Lote 3, Eje 2): solo confirma que la entrevista ocurrió y dispara el
    * correo con la liga al entrevistador. `forzarPrueba` (Lote 4): si Modo Prueba está activo y
@@ -2281,9 +2303,12 @@ function PanelEntrevistaHumana({
       });
       return;
     }
+    const algunoEnviado = r.data.resultados.some((x) => x.enviado);
     setAvisoRecordatorio({
-      tono: r.data.enviado ? "ok" : "error",
-      texto: r.data.enviado ? "Recordatorio enviado por WhatsApp." : "No se pudo enviar por WhatsApp.",
+      tono: algunoEnviado ? "ok" : "warn",
+      texto: algunoEnviado
+        ? "Recordatorio enviado."
+        : "No se envió nada — revisa Configuración → Notificaciones para este evento.",
     });
     onCambio(r.data.candidato);
   }
@@ -2345,7 +2370,9 @@ function PanelEntrevistaHumana({
       )}
 
       <div className="mt-3.5 flex flex-wrap items-center gap-2">
-        {eh.resultado ? (
+        {eh.cancelada ? (
+          <Badge tone="bad" dot>Cancelada</Badge>
+        ) : eh.resultado ? (
           <>
             <Badge tone={eh.resultado === "aprobado" ? "good" : "bad"} dot>
               {eh.resultado === "aprobado" ? "Aprobado" : "No aprobado"}
@@ -2361,6 +2388,12 @@ function PanelEntrevistaHumana({
             </Button>
             <Button size="sm" variant="outline" onClick={() => enviarRecordatorio()} disabled={recordando}>
               <RotateCw className="h-4 w-4" /> {recordando ? "Enviando…" : "Enviar recordatorio"}
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setModalModificar(true)}>
+              <Pencil className="h-4 w-4" /> Modificar
+            </Button>
+            <Button size="sm" variant="outline" className="text-bad" onClick={cancelar} disabled={cancelando}>
+              <XCircle className="h-4 w-4" /> {cancelando ? "Cancelando…" : "Cancelar"}
             </Button>
           </>
         ) : null}
@@ -2395,6 +2428,18 @@ function PanelEntrevistaHumana({
           onCancelar={() => setModalResultado(false)}
           onConfirmar={guardarResultado}
           cargando={guardando}
+        />
+      )}
+
+      {modalModificar && (
+        <ModalModificarEntrevista
+          c={c}
+          eh={eh}
+          onClose={() => setModalModificar(false)}
+          onListo={(datos) => {
+            setModalModificar(false);
+            onCambio(datos);
+          }}
         />
       )}
     </Card>
@@ -2541,6 +2586,7 @@ function ModalProgramarEntrevista({
   const [entrevistadorUsuarioId, setEntrevistadorUsuarioId] = useState<number | null>(null);
   const [entrevistadorNombre, setEntrevistadorNombre] = useState("");
   const [entrevistadorCorreo, setEntrevistadorCorreo] = useState("");
+  const [entrevistadorWhatsapp, setEntrevistadorWhatsapp] = useState("");
   const [fecha, setFecha] = useState("");
   const [hora, setHora] = useState("");
   const [modalidad, setModalidad] = useState<ModalidadEntrevistaHumana>("Videollamada");
@@ -2588,6 +2634,7 @@ function ModalProgramarEntrevista({
       entrevistadorUsuarioId: tipoEntrevistador === "interno" ? entrevistadorUsuarioId : null,
       entrevistadorNombre: tipoEntrevistador === "externo" ? entrevistadorNombre : "",
       entrevistadorCorreo: tipoEntrevistador === "externo" ? entrevistadorCorreo : "",
+      entrevistadorWhatsapp: tipoEntrevistador === "externo" ? entrevistadorWhatsapp : "",
       fecha,
       hora,
       modalidad,
@@ -2671,6 +2718,15 @@ function ModalProgramarEntrevista({
                   value={entrevistadorCorreo}
                   onChange={(e) => setEntrevistadorCorreo(e.target.value)}
                   placeholder="correo@empresa.com"
+                  className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                />
+              </label>
+              <label className="col-span-2 flex flex-col gap-1.5">
+                <span className="text-sm font-medium text-ink-2">WhatsApp (opcional)</span>
+                <input
+                  value={entrevistadorWhatsapp}
+                  onChange={(e) => setEntrevistadorWhatsapp(e.target.value)}
+                  placeholder="10 dígitos"
                   className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
                 />
               </label>
@@ -2770,6 +2826,164 @@ function ModalProgramarEntrevista({
           </Button>
           <Button className="flex-1" onClick={programar} disabled={enviando}>
             {enviando ? "Programando…" : "Programar entrevista"}
+          </Button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ============================================================
+   Modal "Modificar" — Fase D, evento "entrevista_modificada"
+   ============================================================ */
+function ModalModificarEntrevista({
+  c,
+  eh,
+  onClose,
+  onListo,
+}: {
+  c: Candidato;
+  eh: EntrevistaHumana;
+  onClose: () => void;
+  onListo: (c: Candidato) => void;
+}) {
+  const fechaInicial = eh.fecha ? new Date(eh.fecha) : null;
+  const [fecha, setFecha] = useState(fechaInicial ? fechaInicial.toISOString().slice(0, 10) : "");
+  const [hora, setHora] = useState(fechaInicial ? fechaInicial.toTimeString().slice(0, 5) : "");
+  const [modalidad, setModalidad] = useState<ModalidadEntrevistaHumana>((eh.modalidad || "Videollamada") as ModalidadEntrevistaHumana);
+  const [liga, setLiga] = useState(eh.liga || "");
+  const [ubicacion, setUbicacion] = useState(eh.ubicacion || "");
+  const [telefonoContacto, setTelefonoContacto] = useState(eh.telefonoContacto || "");
+  const [comentario, setComentario] = useState(eh.comentario || "");
+  const [error, setError] = useState("");
+  const [enviando, setEnviando] = useState(false);
+
+  async function guardar() {
+    if (!fecha || !hora) {
+      setError("Completa fecha y hora.");
+      return;
+    }
+    if (modalidad === "Videollamada" && !liga.trim()) {
+      setError("Falta la liga de la videollamada.");
+      return;
+    }
+    if (modalidad === "Presencial" && !ubicacion.trim()) {
+      setError("Falta la ubicación de la entrevista.");
+      return;
+    }
+    setEnviando(true);
+    setError("");
+    const r = await modificarEntrevistaHumana(c.id, { fecha, hora, modalidad, liga, ubicacion, telefonoContacto, comentario });
+    setEnviando(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
+    onListo(r.data);
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+      <Card className="w-full max-w-md p-5">
+        <h3 className="font-display text-lg font-bold">Modificar entrevista</h3>
+        <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
+          Con {c.nombre.split(" ")[0]}. Se avisará según lo configurado en Notificaciones.
+        </p>
+
+        <div className="mt-4 flex flex-col gap-3">
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Fecha</span>
+              <input
+                type="date"
+                value={fecha}
+                onChange={(e) => setFecha(e.target.value)}
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Hora</span>
+              <input
+                type="time"
+                value={hora}
+                onChange={(e) => setHora(e.target.value)}
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+          </div>
+
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-ink-2">Modalidad</span>
+            <select
+              value={modalidad}
+              onChange={(e) => setModalidad(e.target.value as ModalidadEntrevistaHumana)}
+              className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+            >
+              {MODALIDADES_ENTREVISTA_HUMANA.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {modalidad === "Videollamada" && (
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Liga de la videollamada</span>
+              <input
+                value={liga}
+                onChange={(e) => setLiga(e.target.value)}
+                placeholder="https://meet.google.com/…"
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+          )}
+          {modalidad === "Presencial" && (
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Ubicación / instrucciones</span>
+              <input
+                value={ubicacion}
+                onChange={(e) => setUbicacion(e.target.value)}
+                placeholder="Dirección o cómo llegar"
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+          )}
+          {modalidad === "Llamada" && (
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Teléfono de contacto (opcional)</span>
+              <input
+                value={telefonoContacto}
+                onChange={(e) => setTelefonoContacto(e.target.value)}
+                placeholder={c.telefono || "Si lo dejas vacío, se usa el teléfono del candidato"}
+                className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+          )}
+
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-ink-2">Comentario (opcional)</span>
+            <textarea
+              value={comentario}
+              onChange={(e) => setComentario(e.target.value)}
+              rows={2}
+              className="rounded-xl border border-border-soft bg-surface px-3.5 py-2.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+            />
+          </label>
+        </div>
+
+        {error && (
+          <div className="mt-3">
+            <Aviso tono="error">{error}</Aviso>
+          </div>
+        )}
+
+        <div className="mt-5 flex gap-3">
+          <Button variant="outline" className="flex-1" onClick={onClose} disabled={enviando}>
+            Cerrar
+          </Button>
+          <Button className="flex-1" onClick={guardar} disabled={enviando}>
+            {enviando ? "Guardando…" : "Guardar cambios"}
           </Button>
         </div>
       </Card>

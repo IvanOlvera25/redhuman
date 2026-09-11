@@ -139,6 +139,7 @@ def _entrevista_humana_dict(eh) -> dict:
         "telefonoContacto": eh.telefono_contacto,
         "comentario": eh.comentario,
         "realizada": eh.realizada,
+        "cancelada": eh.cancelada,
         "resultado": eh.resultado or None,
         "recomendacion": eh.recomendacion or None,
         "resultadoCapturadoPor": eh.resultado_capturado_por or None,

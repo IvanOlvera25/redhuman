@@ -40,8 +40,10 @@ from ..models import (
 from ..serial import archivo_dict, candidato_dict, expediente_dict, nombre_empresa_candidato
 from ..services import archivos as fs
 from ..services import ia
+from ..services import notificaciones
 from ..services.configuracion import modo_prueba_activo, puede_forzar_prueba
 from ..services.correo import enviar_correo
+from ..services.notificaciones import RE_CORREO, TZ_MEXICO
 from ..services.whatsapp import enviar_mensaje, enviar_plantilla
 
 router = APIRouter(prefix="/candidatos", tags=["candidatos"])
@@ -114,7 +116,7 @@ def _actualizar_ultima_actividad(c: Candidato) -> None:
     c.ultima_actividad_en = _ahora()
 
 
-def _recalcular_resultado_apto(c: Candidato) -> None:
+def _recalcular_resultado_apto(c: Candidato) -> str:
     """Actualiza Candidato.resultado_apto aplicando la regla 'el más reciente gana':
 
     1. Contratación / Onboarding → True siempre (llegaron al final del pipeline).
@@ -123,33 +125,49 @@ def _recalcular_resultado_apto(c: Candidato) -> None:
     4. Entrevista IA más reciente evaluada → avanzar=True | no_avanzar=False.
     5. Prefiltro (c.estado) → cumple=True | no_cumple=False | otro=None.
 
-    Se llama tras cualquier cambio que pueda alterar el resultado vigente.
+    Se llama tras cualquier cambio que pueda alterar el resultado vigente. Regresa qué regla
+    decidió el valor final ("contratacion"|"entrevista_humana"|"entrevista_ia"|"prefiltro") —
+    lo usa `_recalcular_resultado_apto_y_notificar` (Fase D) para saber si el cambio vino del
+    prefiltro Zero-Touch (excluido de notificaciones) o de una etapa posterior real.
     """
     # Regla 1: etapas finales del pipeline — llegaron al final del proceso, siempre Aptos.
     if c.etapa in ("Contratación", "Onboarding"):
         c.resultado_apto = True
-        return
+        return "contratacion"
 
     # Regla 3: Entrevista Humana más reciente con resultado registrado
     for eh in reversed(c.entrevistas_humanas):
         if eh.resultado:
             c.resultado_apto = (eh.resultado == "aprobado")
-            return
+            return "entrevista_humana"
 
     # Regla 4: Entrevista IA más reciente evaluada
     for e in reversed(c.entrevistas):
         rec = (e.evaluacion or {}).get("recomendacion", "")
         if rec:
             c.resultado_apto = (rec == "avanzar")
-            return
+            return "entrevista_ia"
 
-    # Regla 5: Prefiltro del agente (fallback)
+    # Regla 5: Prefiltro del agente (fallback) — Zero-Touch, no dispara notificaciones.
     if c.estado == "cumple":
         c.resultado_apto = True
     elif c.estado == "no_cumple":
         c.resultado_apto = False
     else:
         c.resultado_apto = None
+    return "prefiltro"
+
+
+async def _recalcular_resultado_apto_y_notificar(db: Session, c: Candidato, actor: str) -> None:
+    """Fase D, evento 'candidato_apto': dispara la notificación solo cuando resultado_apto pasa
+    a True por una etapa POSTERIOR al prefiltro (Entrevista IA, Entrevista Humana,
+    Contratación) — el apto/no-apto de prefiltro (Zero-Touch) sigue 100% excluido, tal como se
+    confirmó en la investigación de Fase D."""
+    anterior = c.resultado_apto
+    origen = _recalcular_resultado_apto(c)
+    if c.resultado_apto is True and anterior is not True and origen != "prefiltro":
+        eh = c.entrevistas_humanas[-1] if c.entrevistas_humanas else None
+        await notificaciones.disparar(db, "candidato_apto", c, actor, eh=eh)
 
 
 @router.get("")
@@ -681,7 +699,7 @@ class AsignarIn(BaseModel):
 
 
 @router.post("/{codigo}/asignar")
-def asignar(
+async def asignar(
     codigo: str,
     datos: AsignarIn,
     db: Session = Depends(get_db),
@@ -702,7 +720,7 @@ def asignar(
             datos_cv, con_ia = ia.extraer_cv(b64, cv.ruta.rsplit(".", 1)[-1], vac.titulo, vac.requisitos)
             _aplicar_cv(db, c, datos_cv, vac, con_ia)
 
-    _recalcular_resultado_apto(c)  # la nueva vacante puede cambiar el contexto de evaluación
+    await _recalcular_resultado_apto_y_notificar(db, c, u.nombre)  # la nueva vacante puede cambiar el contexto de evaluación
     registrar(db, u.nombre, "candidato_reasignado", "candidato", c.codigo, {"de": anterior, "a": vac.codigo})
     db.commit()
     return candidato_dict(c, detalle=True)
@@ -1022,10 +1040,12 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, 
 
     c.analisis = analisis_actual
     # Fase C: cada turno del prefiltro (mensaje recibido) es actividad; si hubo clasificaci\u00f3n
-    # (ci\u00f3n del agente), recalcular resultado_apto para reflejar cumple/no_cumple reci\u00e9n asignados.
+    # del agente, recalcular resultado_apto para reflejar cumple/no_cumple reci\u00e9n asignados.
+    # (El wrapper de Fase D nunca dispara "candidato_apto" aqu\u00ed: este resultado siempre viene
+    # de la regla de prefiltro, que est\u00e1 expl\u00edcitamente excluida de notificaciones.)
     _actualizar_ultima_actividad(c)
     if cierra_prefiltro:
-        _recalcular_resultado_apto(c)
+        await _recalcular_resultado_apto_y_notificar(db, c, "agente-ia")
     db.commit()
     return {"respuesta": respuesta_final, "clasificacion": clasificacion, "ia": con_ia, "whatsapp": envio}
 
@@ -1098,7 +1118,7 @@ class DecisionIn(BaseModel):
 
 
 @router.post("/{codigo}/decision")
-def decision(
+async def decision(
     codigo: str,
     datos: DecisionIn,
     db: Session = Depends(get_db),
@@ -1118,7 +1138,7 @@ def decision(
     c.etapa = "Prefiltro"
     c.estado = "no_cumple"
     _actualizar_ultima_actividad(c)
-    _recalcular_resultado_apto(c)
+    await _recalcular_resultado_apto_y_notificar(db, c, u.nombre)
     registrar(
         db, u.nombre, "decision_descartar", "candidato", c.codigo,
         {"recomendacion_ia": recomendacion_ia, "comentario": datos.comentario, "correo_rh": u.correo},
@@ -1209,7 +1229,7 @@ async def mover_etapa(
     anterior = c.etapa
     c.etapa = datos.etapa
     _actualizar_ultima_actividad(c)
-    _recalcular_resultado_apto(c)
+    await _recalcular_resultado_apto_y_notificar(db, c, u.nombre)
     registrar(
         db, u.nombre, "etapa_movida", "candidato", c.codigo,
         {"de": anterior, "a": datos.etapa, "comentario": datos.comentario, "correo_rh": u.correo},
@@ -1228,98 +1248,8 @@ MODALIDADES_ENTREVISTA_HUMANA = ("Presencial", "Videollamada", "Llamada")
 # de _parsear_fecha_cita (Zero-Touch), hay que convertir a UTC explícitamente antes de guardar:
 # SQLite descarta el offset de un DateTime(timezone=True) y se queda con los números de reloj
 # tal cual, así que un "11:00" sin convertir se compara después como si ya fuera UTC.
-TZ_MEXICO = ZoneInfo("America/Mexico_City")
-
-_MESES_LARGO = [
-    "enero", "febrero", "marzo", "abril", "mayo", "junio",
-    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
-]
-
-
-def _fecha_hora_legible_mx(dt: datetime) -> str:
-    """UTC guardado -> texto en hora de México, para mensajes al candidato."""
-    local = dt.astimezone(TZ_MEXICO)
-    return f"{local.day} de {_MESES_LARGO[local.month - 1]} a las {local.strftime('%H:%M')}"
-
-
-_RE_CORREO = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
-
-def _detalle_modalidad(eh: EntrevistaHumana, c: Candidato) -> str:
-    """Dato específico de la modalidad — se usa en el WhatsApp y en ambos correos."""
-    if eh.modalidad == "Videollamada" and eh.liga:
-        return f"Liga de la videollamada: {eh.liga}"
-    if eh.modalidad == "Presencial" and eh.ubicacion:
-        return f"Ubicación: {eh.ubicacion}"
-    if eh.modalidad == "Llamada":
-        tel = eh.telefono_contacto or c.telefono
-        if tel:
-            return f"Te contactaremos al {tel}"
-    return ""
-
-
-def _texto_cita_entrevista_humana(eh: EntrevistaHumana, c: Candidato) -> str:
-    """Fragmento reusado por el aviso automático al programar y por el recordatorio manual."""
-    cuando = _fecha_hora_legible_mx(eh.fecha) if eh.fecha else "fecha por confirmar"
-    texto = (
-        f"con {eh.entrevistador or 'nuestro equipo de RH'} el {cuando}, "
-        f"modalidad {eh.modalidad or 'por confirmar'}."
-    )
-    detalle = _detalle_modalidad(eh, c)
-    if detalle:
-        texto += f" {detalle}."
-    if eh.comentario:
-        texto += f" {eh.comentario}"
-    return texto
-
-
-def _html_correo_candidato(eh: EntrevistaHumana, c: Candidato) -> str:
-    cuando = _fecha_hora_legible_mx(eh.fecha) if eh.fecha else "fecha por confirmar"
-    detalle = _detalle_modalidad(eh, c)
-    primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
-    return (
-        f"<p>¡Hola {primer_nombre}!</p>"
-        f"<p>Te confirmamos tu entrevista con <strong>{eh.entrevistador or 'nuestro equipo de RH'}</strong> "
-        f"el <strong>{cuando}</strong>, modalidad <strong>{eh.modalidad}</strong>.</p>"
-        + (f"<p>{detalle}.</p>" if detalle else "")
-        + (f"<p>{eh.comentario}</p>" if eh.comentario else "")
-        + "<p>Saludos,<br>Red Human AI</p>"
-    )
-
-
-def _html_correo_entrevistador(eh: EntrevistaHumana, c: Candidato) -> str:
-    cuando = _fecha_hora_legible_mx(eh.fecha) if eh.fecha else "fecha por confirmar"
-    detalle = _detalle_modalidad(eh, c)
-    return (
-        f"<p>Tienes una entrevista programada con <strong>{c.nombre}</strong> "
-        f"({c.vacante.titulo if c.vacante else 'vacante sin especificar'}) "
-        f"el <strong>{cuando}</strong>, modalidad <strong>{eh.modalidad}</strong>.</p>"
-        + (f"<p>{detalle}.</p>" if detalle else "")
-        + (f"<p>Teléfono del candidato: {c.telefono}</p>" if c.telefono else "")
-        + (f"<p>{eh.comentario}</p>" if eh.comentario else "")
-        + "<p>Saludos,<br>Red Human AI</p>"
-    )
-
-
-def _correo_entrevistador(db: Session, eh: EntrevistaHumana) -> str:
-    """Resuelve el correo del entrevistador de esta ronda — el interno se busca en Usuario (RH
-    no lo vuelve a teclear y puede haber cambiado desde que se programó); el externo ya viene
-    guardado en la propia fila."""
-    if eh.tipo == "interno" and eh.usuario_id:
-        entrevistador = db.query(Usuario).filter(Usuario.id == eh.usuario_id).first()
-        return entrevistador.correo if entrevistador else ""
-    return eh.correo_externo
-
-
-def _html_correo_evaluacion_entrevistador(eh: EntrevistaHumana, c: Candidato, liga: str) -> str:
-    return (
-        f"<p>Gracias por entrevistar a <strong>{c.nombre}</strong> "
-        f"({c.vacante.titulo if c.vacante else 'vacante sin especificar'}).</p>"
-        "<p>Ayúdanos a registrar tu evaluación — te toma menos de un minuto:</p>"
-        f"<p><a href=\"{liga}\">{liga}</a></p>"
-        "<p>Saludos,<br>Red Human AI</p>"
-    )
-
+# (TZ_MEXICO y RE_CORREO viven en services/notificaciones.py — Fase D las reutiliza también
+# para armar el texto de las notificaciones de Entrevista Humana.)
 
 TIPOS_ENTREVISTADOR = ("interno", "externo")
 
@@ -1329,6 +1259,7 @@ class EntrevistaHumanaIn(BaseModel):
     entrevistador_usuario_id: Optional[int] = None  # requerido si tipo_entrevistador == interno
     entrevistador_nombre: str = ""  # requerido si tipo_entrevistador == externo
     entrevistador_correo: str = ""  # requerido si tipo_entrevistador == externo
+    entrevistador_whatsapp: str = ""  # opcional si tipo_entrevistador == externo (Fase D, punto 23)
     fecha: str  # ISO: 2026-09-05
     hora: str  # HH:MM, hora de México
     modalidad: str  # Presencial | Videollamada | Llamada
@@ -1346,8 +1277,8 @@ async def programar_entrevista_humana(
     """Botón «Programar entrevista» del modal — agenda una ronda NUEVA (ver EntrevistaHumana:
     cada llamada crea su propia fila, nunca sobreescribe una anterior — así "Agendar otra
     Entrevista Humana" no borra el resultado de la ronda previa), mueve la tarjeta a Entrevista
-    Humana y avisa al candidato por WhatsApp y por correo (Resend); también avisa por correo a
-    quien entrevista (interno o externo)."""
+    Humana y dispara el evento "entrevista_agendada" (Fase D) — a quién y por qué canal ya no
+    está fijo aquí, lo decide la regla configurada de la Cuenta."""
     c = _por_codigo(db, codigo, cuenta.id)
 
     if datos.tipo_entrevistador not in TIPOS_ENTREVISTADOR:
@@ -1355,6 +1286,7 @@ async def programar_entrevista_humana(
 
     entrevistador_usuario: Optional[Usuario] = None
     correo_entrevistador = ""
+    whatsapp_entrevistador = ""
     if datos.tipo_entrevistador == "interno":
         if not datos.entrevistador_usuario_id:
             raise HTTPException(400, "Selecciona quién entrevista.")
@@ -1372,8 +1304,9 @@ async def programar_entrevista_humana(
         if not nombre_entrevistador:
             raise HTTPException(400, "Indica el nombre de quien entrevista.")
         correo_entrevistador = datos.entrevistador_correo.strip()
-        if not _RE_CORREO.match(correo_entrevistador):
+        if not RE_CORREO.match(correo_entrevistador):
             raise HTTPException(400, "El correo del entrevistador externo no tiene un formato válido.")
+        whatsapp_entrevistador = datos.entrevistador_whatsapp.strip()
 
     if datos.modalidad not in MODALIDADES_ENTREVISTA_HUMANA:
         raise HTTPException(400, f"Modalidad inválida. Usa una de: {', '.join(MODALIDADES_ENTREVISTA_HUMANA)}")
@@ -1398,6 +1331,7 @@ async def programar_entrevista_humana(
         tipo=datos.tipo_entrevistador,
         usuario_id=entrevistador_usuario.id if entrevistador_usuario else None,
         correo_externo=correo_entrevistador if datos.tipo_entrevistador == "externo" else "",
+        whatsapp_externo=whatsapp_entrevistador if datos.tipo_entrevistador == "externo" else "",
         entrevistador=nombre_entrevistador,
         fecha=fecha_hora,
         modalidad=datos.modalidad,
@@ -1410,35 +1344,7 @@ async def programar_entrevista_humana(
     db.add(eh)
     db.flush()
 
-    envio_whatsapp = {"enviado": False, "proveedor": "demo", "detalle": "sin teléfono"}
-    if c.telefono:
-        primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
-        texto = (
-            f"¡Hola {primer_nombre}! 📅 En base a tu entrevista con nuestro asistente de IA, te "
-            f"programamos una entrevista {_texto_cita_entrevista_humana(eh, c)}"
-        )
-        try:
-            envio_whatsapp = await enviar_mensaje(c.telefono, texto)
-        except Exception as ex:  # que WhatsApp falle no debe tumbar el agendado
-            print(f"[whatsapp-send-error] programar_entrevista_humana -> {c.codigo}: {ex}")
-            envio_whatsapp = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
-        db.add(Mensaje(
-            candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
-            enviado=envio_whatsapp.get("enviado", False), wa_id=envio_whatsapp.get("wa_id", ""),
-        ))
-
-    try:
-        correo_candidato = await enviar_correo(c.correo, "Tu entrevista con Red Human AI", _html_correo_candidato(eh, c))
-    except Exception as ex:  # que Resend falle no debe tumbar el agendado
-        print(f"[correo-send-error] programar_entrevista_humana (candidato) -> {c.codigo}: {ex}")
-        correo_candidato = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
-    try:
-        correo_entrevistador_resultado = await enviar_correo(
-            correo_entrevistador, f"Entrevista programada con {c.nombre}", _html_correo_entrevistador(eh, c)
-        )
-    except Exception as ex:
-        print(f"[correo-send-error] programar_entrevista_humana (entrevistador) -> {c.codigo}: {ex}")
-        correo_entrevistador_resultado = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+    resultados = await notificaciones.disparar(db, "entrevista_agendada", c, u.nombre, eh=eh)
 
     registrar(
         db, u.nombre, "entrevista_humana_programada", "candidato", c.codigo,
@@ -1446,9 +1352,7 @@ async def programar_entrevista_humana(
             "de": anterior, "entrevistador": eh.entrevistador,
             "tipo_entrevistador": datos.tipo_entrevistador,
             "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
-            "whatsapp": envio_whatsapp,
-            "correo_candidato": correo_candidato,
-            "correo_entrevistador": correo_entrevistador_resultado,
+            "notificaciones": resultados,
         },
     )
     _actualizar_ultima_actividad(c)
@@ -1466,45 +1370,114 @@ def _ultima_entrevista_humana(c: Candidato) -> EntrevistaHumana:
     return c.entrevistas_humanas[-1]
 
 
+class EntrevistaHumanaModificarIn(BaseModel):
+    fecha: str  # ISO: 2026-09-05
+    hora: str  # HH:MM, hora de México
+    modalidad: str  # Presencial | Videollamada | Llamada
+    liga: str = ""  # obligatoria si modalidad == Videollamada
+    ubicacion: str = ""  # obligatoria si modalidad == Presencial
+    telefono_contacto: str = ""  # opcional si modalidad == Llamada
+    comentario: str = ""
+
+
+@router.patch("/{codigo}/entrevista-humana")
+async def modificar_entrevista_humana(
+    codigo: str, datos: EntrevistaHumanaModificarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Botón «Modificar» — edita fecha/modalidad/liga/ubicación de la ronda vigente y dispara el
+    evento "entrevista_modificada" (Fase D, punto 3 — no existía hasta ahora)."""
+    c = _por_codigo(db, codigo, cuenta.id)
+    eh = _ultima_entrevista_humana(c)
+    if eh.cancelada:
+        raise HTTPException(409, "Esta entrevista fue cancelada; agenda una nueva.")
+    if eh.realizada:
+        raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
+
+    if datos.modalidad not in MODALIDADES_ENTREVISTA_HUMANA:
+        raise HTTPException(400, f"Modalidad inválida. Usa una de: {', '.join(MODALIDADES_ENTREVISTA_HUMANA)}")
+    liga = datos.liga.strip()
+    ubicacion = datos.ubicacion.strip()
+    if datos.modalidad == "Videollamada" and not liga:
+        raise HTTPException(400, "Falta la liga de la videollamada.")
+    if datos.modalidad == "Presencial" and not ubicacion:
+        raise HTTPException(400, "Falta la ubicación de la entrevista.")
+    try:
+        # Se captura en hora de México y se normaliza a UTC antes de guardar (ver TZ_MEXICO).
+        fecha_hora = datetime.fromisoformat(f"{datos.fecha}T{datos.hora}").replace(tzinfo=TZ_MEXICO).astimezone(timezone.utc)
+    except ValueError:
+        raise HTTPException(400, "Fecha u hora inválida (fecha ISO: 2026-09-05, hora: 14:30).")
+
+    eh.fecha = fecha_hora
+    eh.modalidad = datos.modalidad
+    eh.liga = liga if datos.modalidad == "Videollamada" else ""
+    eh.ubicacion = ubicacion if datos.modalidad == "Presencial" else ""
+    eh.telefono_contacto = datos.telefono_contacto.strip() if datos.modalidad == "Llamada" else ""
+    eh.comentario = datos.comentario.strip()
+
+    resultados = await notificaciones.disparar(db, "entrevista_modificada", c, u.nombre, eh=eh)
+    registrar(
+        db, u.nombre, "entrevista_humana_modificada", "candidato", c.codigo,
+        {
+            "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
+            "notificaciones": resultados,
+        },
+    )
+    _actualizar_ultima_actividad(c)
+    db.commit()
+    return candidato_dict(c, detalle=True)
+
+
+@router.post("/{codigo}/entrevista-humana/cancelar")
+async def cancelar_entrevista_humana(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Botón «Cancelar» — dispara el evento "entrevista_cancelada" (Fase D, punto 4 — no existía
+    hasta ahora). No mueve la etapa del candidato automáticamente: RH decide a mano el siguiente
+    paso (agendar otra ronda o mover la etapa), igual que en cualquier otro punto del pipeline."""
+    c = _por_codigo(db, codigo, cuenta.id)
+    eh = _ultima_entrevista_humana(c)
+    if eh.cancelada:
+        raise HTTPException(409, "Esta entrevista ya estaba cancelada.")
+    if eh.realizada:
+        raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
+    eh.cancelada = True
+
+    resultados = await notificaciones.disparar(db, "entrevista_cancelada", c, u.nombre, eh=eh)
+    registrar(
+        db, u.nombre, "entrevista_humana_cancelada", "candidato", c.codigo,
+        {"correo_rh": u.correo, "notificaciones": resultados},
+    )
+    _actualizar_ultima_actividad(c)
+    db.commit()
+    return candidato_dict(c, detalle=True)
+
+
 @router.post("/{codigo}/entrevista-humana/realizada")
 async def marcar_entrevista_humana_realizada(
     codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón «Marcar entrevista realizada» — ya no le pide el resultado a RH: marca que la
-    entrevista ocurrió y le manda al entrevistador la liga pública para que registre su propia
-    evaluación (Aprobado/No aprobado, recomendación, comentario). RH conserva la opción de
-    capturarlo/corregirlo a mano como respaldo — ver POST .../entrevista-humana/resultado."""
+    entrevista ocurrió y dispara el evento "entrevista_humana_terminada" (Fase D) — la liga de
+    evaluación al entrevistador es, ahora, simplemente el destinatario Entrevistador de ese
+    evento; RH conserva la opción de capturar/corregir el resultado a mano como respaldo — ver
+    POST .../entrevista-humana/resultado."""
     c = _por_codigo(db, codigo, cuenta.id)
     if c.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
     eh = _ultima_entrevista_humana(c)
 
     eh.realizada = True
-
-    liga = f"{settings.app_url}/entrevista-humana/{eh.token}"
-    correo_destino = _correo_entrevistador(db, eh)
-    envio_correo = {"enviado": False, "proveedor": "demo", "detalle": "sin correo del entrevistador"}
-    if correo_destino:
-        try:
-            envio_correo = await enviar_correo(
-                correo_destino, f"Tu evaluación de la entrevista con {c.nombre}",
-                _html_correo_evaluacion_entrevistador(eh, c, liga),
-            )
-        except Exception as ex:  # que Resend falle no debe tumbar el marcado
-            print(f"[correo-send-error] marcar_entrevista_humana_realizada -> {c.codigo}: {ex}")
-            envio_correo = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
+    resultados = await notificaciones.disparar(db, "entrevista_humana_terminada", c, u.nombre, eh=eh)
 
     registrar(
         db, u.nombre, "entrevista_humana_marcada_realizada", "candidato", c.codigo,
-        {"correo_entrevistador": envio_correo, "correo_rh": u.correo},
+        {"notificaciones": resultados, "correo_rh": u.correo},
     )
     db.commit()
-    return {
-        "enviado": envio_correo.get("enviado", False),
-        "correo": envio_correo,
-        "candidato": candidato_dict(c, detalle=True),
-    }
+    return {"resultados": resultados, "candidato": candidato_dict(c, detalle=True)}
 
 
 class EntrevistaHumanaResultadoIn(BaseModel):
@@ -1514,7 +1487,7 @@ class EntrevistaHumanaResultadoIn(BaseModel):
 
 
 @router.post("/{codigo}/entrevista-humana/resultado")
-def registrar_resultado_entrevista_humana(
+async def registrar_resultado_entrevista_humana(
     codigo: str, datos: EntrevistaHumanaResultadoIn, forzar_prueba: bool = False,
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
@@ -1546,12 +1519,13 @@ def registrar_resultado_entrevista_humana(
     eh.comentario = comentario
     eh.resultado_capturado_por = "rh"
     _actualizar_ultima_actividad(c)
-    _recalcular_resultado_apto(c)
+    await _recalcular_resultado_apto_y_notificar(db, c, u.nombre)
+    resultados = await notificaciones.disparar(db, "recomendacion_final", c, u.nombre, eh=eh)
     registrar(
         db, u.nombre, "entrevista_humana_resultado_capturado_rh", "candidato", c.codigo,
         {
             "resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario,
-            "corrigio_captura_previa": ya_capturada, "correo_rh": u.correo,
+            "corrigio_captura_previa": ya_capturada, "correo_rh": u.correo, "notificaciones": resultados,
         },
     )
     db.commit()
@@ -1563,34 +1537,24 @@ async def recordatorio_entrevista_humana(
     codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Botón «Enviar recordatorio» — seguimiento manual junto a «Marcar entrevista realizada»,
-    mismo patrón que candidatos._disparar_mensaje_onboarding (enviar_mensaje + Mensaje + bitácora)."""
+    """Botón «Enviar recordatorio» — seguimiento manual junto a «Marcar entrevista realizada».
+    Dispara el evento "recordatorio_entrevista" (Fase D): la regla configurada de la Cuenta
+    decide el envío completo — si "Candidato · WhatsApp" está apagado, este botón no le manda
+    WhatsApp al candidato (puede seguir avisando a entrevistador/cliente si así se configuró)."""
     c = _por_codigo(db, codigo, cuenta.id)
     if c.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
     eh = _ultima_entrevista_humana(c)
     if eh.realizada and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
-    if not c.telefono:
-        raise HTTPException(409, "El candidato no tiene WhatsApp registrado.")
 
-    primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
-    texto = f"¡Hola de nuevo, {primer_nombre}! 👋 Te recordamos tu entrevista {_texto_cita_entrevista_humana(eh, c)}"
-    try:
-        envio = await enviar_mensaje(c.telefono, texto)
-    except Exception as ex:  # que WhatsApp falle no debe tumbar el recordatorio manual de RH
-        print(f"[whatsapp-send-error] recordatorio_entrevista_humana -> {c.codigo}: {ex}")
-        envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
-    db.add(Mensaje(
-        candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
-        enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
-    ))
+    resultados = await notificaciones.disparar(db, "recordatorio_entrevista", c, u.nombre, eh=eh)
     registrar(
         db, u.nombre, "recordatorio_entrevista_humana_enviado", "candidato", c.codigo,
-        {"whatsapp": envio, "correo_rh": u.correo},
+        {"notificaciones": resultados, "correo_rh": u.correo},
     )
     db.commit()
-    return {"enviado": envio.get("enviado", False), "whatsapp": envio, "candidato": candidato_dict(c, detalle=True)}
+    return {"resultados": resultados, "candidato": candidato_dict(c, detalle=True)}
 
 
 # ------------------------------------------------------------
@@ -1660,37 +1624,13 @@ def guardar_condiciones_contratacion(
 # agente (ia.onboarding_turno, ver procesar_prefiltro) listo para dar seguimiento a lo que
 # el candidato conteste después.
 
-def _texto_solicitud_documentos(liga: str) -> str:
-    return (
-        "¡Felicidades por tu contratación! 🎉 Para avanzar, sube tu INE y tu comprobante de "
-        f"domicilio (foto o PDF) desde esta liga: {liga}\n\nEn cuanto los reciba los reviso y "
-        "seguimos con el resto de tu expediente."
-    )
-
-
-def _texto_recordatorio_documentos(liga: str) -> str:
-    return (
-        "Hola de nuevo 👋 Te escribo para dar seguimiento: ¿ya tienes a la mano tu INE y tu "
-        f"comprobante de domicilio? Súbelos desde esta liga en cuanto puedas para no atrasar tu "
-        f"proceso de ingreso: {liga}"
-    )
-
-
-async def _disparar_mensaje_onboarding(db: Session, c: Candidato, texto: str, accion: str, u: Usuario) -> dict:
+async def _disparar_mensaje_onboarding(db: Session, c: Candidato, evento: str, accion: str, liga: str, u: Usuario) -> dict:
     if c.etapa != "Onboarding":
         raise HTTPException(409, "Esta acción es solo para candidatos en la etapa de Onboarding.")
-    envio = {"enviado": False, "proveedor": "demo"}
-    if c.telefono:
-        try:
-            envio = await enviar_mensaje(c.telefono, texto)
-        except Exception as e:  # que WhatsApp falle no debe tumbar el disparo manual de RH
-            print(f"[whatsapp-send-error] {accion} -> {c.codigo}: {e}")
-            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
-    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
-                   enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
-    registrar(db, u.nombre, accion, "candidato", c.codigo, {"whatsapp": envio, "correo_rh": u.correo})
+    resultados = await notificaciones.disparar(db, evento, c, u.nombre, liga=liga)
+    registrar(db, u.nombre, accion, "candidato", c.codigo, {"notificaciones": resultados, "correo_rh": u.correo})
     db.commit()
-    return {"enviado": envio.get("enviado", False), "whatsapp": envio, "candidato": candidato_dict(c, detalle=True)}
+    return {"resultados": resultados, "candidato": candidato_dict(c, detalle=True)}
 
 
 def _liga_documentos(c: Candidato) -> str:
@@ -1712,7 +1652,7 @@ async def solicitar_documentos(
     la liga pública para que el candidato suba sus documentos él mismo."""
     c = _por_codigo(db, codigo, cuenta.id)
     liga = _liga_documentos(c)
-    return await _disparar_mensaje_onboarding(db, c, _texto_solicitud_documentos(liga), "documentos_solicitados", u)
+    return await _disparar_mensaje_onboarding(db, c, "solicitud_documentos", "documentos_solicitados", liga, u)
 
 
 @router.post("/{codigo}/recordatorio-documentos")
@@ -1722,4 +1662,4 @@ async def recordatorio_documentos(
     """Botón 'Enviar recordatorio' — seguimiento manual si el candidato no ha respondido."""
     c = _por_codigo(db, codigo, cuenta.id)
     liga = _liga_documentos(c)
-    return await _disparar_mensaje_onboarding(db, c, _texto_recordatorio_documentos(liga), "recordatorio_documentos_enviado", u)
+    return await _disparar_mensaje_onboarding(db, c, "recordatorio_documentos", "recordatorio_documentos_enviado", liga, u)

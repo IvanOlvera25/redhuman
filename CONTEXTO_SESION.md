@@ -4,11 +4,15 @@
 Especificación completa en Otros_cambios_2.docx (29 puntos), dividida en 6 fases por 
 dependencia real (cada fase depende de que la anterior esté terminada, salvo E que es 
 transversal):
-- Fase A: Modelo de Cuenta, Cliente, Usuarios y permisos — CÓDIGO LISTO, sin commit/deploy;
-  falta correr `migrar_cuentas.py` en producción (ver detalle abajo)
-- Fase B: Vacantes (creación, herencia automática de Cuenta/Cliente, plantillas, vista previa) — CÓDIGO LISTO, sin commit/deploy; depende de que Fase A ya esté desplegada y migrada
-- Fase C: Vistas de Vacantes/Candidatos (tarjetas/lista, filtros, conteos reales por etapa, navegación desde contadores, lógica de "Apto") — CÓDIGO LISTO, sin commit/deploy; incluye script de backfill `backfill_resultado_apto.py`
-- Fase D: Notificaciones configurables por evento/destinatario/canal — PENDIENTE, depende de A, B y de la infraestructura de WhatsApp/correo ya existente
+- Fase A: Modelo de Cuenta, Cliente, Usuarios y permisos — COMPLETA Y DESPLEGADA EN
+  PRODUCCIÓN (confirmado contra `git log`/`git status`, coincide exactamente con
+  `origin/red-human-v2.0`); `migrar_cuentas.py` corrido en producción.
+- Fase B: Vacantes (creación, herencia automática de Cuenta/Cliente, plantillas, vista previa) — COMPLETA Y DESPLEGADA EN PRODUCCIÓN.
+- Fase C: Vistas de Vacantes/Candidatos (tarjetas/lista, filtros, conteos reales por etapa, navegación desde contadores, lógica de "Apto") — COMPLETA Y DESPLEGADA EN PRODUCCIÓN; incluye script de backfill `backfill_resultado_apto.py`.
+- Fase D: Notificaciones configurables por evento/destinatario/canal — CÓDIGO LISTO, sin
+  commit/deploy; ver detalle abajo. Falta correr `scripts/sembrar_reglas_notificacion.py`
+  en producción tras el deploy (siembra reglas que replican el comportamiento de hoy, cero
+  regresión).
 - Fase E: Reglas de simplificación (ocultar selectores cuando no aplican, herencia automática, no repetir capturas) — transversal, se verifica en cada fase, no es un entregable aparte
 - Fase F: Agente global "Pregunta a Red Human" (consulta/analiza/encuentra/ejecuta sobre 
   todo el sistema) — PENDIENTE, depende de que A-D existan con API consistente
@@ -56,11 +60,9 @@ transversal):
    hiciste y cuál es el siguiente paso.
 
 ## Lo último que se hizo
-Se completaron los 13 puntos de ajustes generales (WhatsApp/agente conversacional, ficha 
-del candidato reestructurada en 5 pestañas, historial de entrevistas humanas con liga de 
-evaluación por entrevistador, documentos por liga, carta de intención en PDF, Modo Prueba 
-no bloqueante) — todos desplegados en producción. Ahora arranca la Fase A de la 
-reestructuración multi-cuenta.
+Fase D (notificaciones configurables por evento/destinatario/canal, puntos 22-26)
+diseñada, implementada por completo y verificada — ver sección detallada abajo. Código
+listo, pendiente de revisión del usuario antes de commit/deploy.
 
 ## Lo que sigue
 
@@ -377,8 +379,115 @@ Decisiones de negocio confirmadas por el usuario (no volver a preguntar):
 - Backend: `py_compile` en todos los archivos modificados y scripts sin errores.
 - Frontend: `next build` (con `tsc --noEmit` y linting) completado con exit code 0; 19 rutas generadas limpiamente.
 
-### Siguiente paso
+### Siguiente paso (histórico, ya completado — ver Fase D abajo)
 1. El usuario revisa los cambios de la Fase C.
 2. Deploy y corrida de `scripts/backfill_resultado_apto.py` cuando se apruebe.
 3. Sigue Fase D: Notificaciones configurables por evento/destinatario/canal.
+
+## Diseño e Implementación de Fase D completados — 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+
+**Inventario previo** (reportado y confirmado con el usuario antes de diseñar): 15 puntos de
+envío de WhatsApp/correo hardcodeados en 8 archivos, ningún Cliente notificado nunca. Plan
+completo aprobado en `plan mode` antes de escribir código; 4 decisiones de negocio
+confirmadas por el usuario vía preguntas explícitas (agregar `Usuario.telefono` y
+`EntrevistaHumana.whatsapp_externo`; "Candidato apto" = `resultado_apto`→True en cualquier
+etapa POSTERIOR al prefiltro; los botones manuales de RH quedan 100% gobernados por la
+regla configurada; la siembra inicial replica el comportamiento de hoy, cero regresión).
+Decisión ya tomada por el usuario y solo documentada (no se volvió a preguntar): Entrevista
+IA agendada/terminada (avatar, Zero-Touch) NO se conecta a los eventos 1/6 — sigue
+hardcoded, fuera de configuración, porque toda la familia "agendada/recordatorio/
+modificada/cancelada/terminada" es específica del proceso manual de RH (Entrevista
+**Humana**), no del flujo automático de un solo paso del avatar.
+
+**Modelo de datos nuevo** (`models.py`):
+- `ReglaNotificacion` (`reglas_notificacion`): una fila por `(cuenta_id, evento)`, 6
+  booleanos (`candidato_correo/whatsapp`, `entrevistador_correo/whatsapp`,
+  `cliente_correo/whatsapp`).
+- `NotificacionEnviada` (`notificaciones_enviadas`): bitácora operativa de cada envío
+  (distinta de `Bitacora`, que es la cadena hash LFPDPPP).
+- `EVENTOS_NOTIFICACION`: los 10 eventos configurables (puntos 22-26).
+- Columnas aditivas: `Usuario.telefono`, `EntrevistaHumana.whatsapp_externo`,
+  `EntrevistaHumana.cancelada` (no mueve la etapa del candidato automáticamente).
+
+**Servicio central** `app/services/notificaciones.py` (nuevo) — punto único de entrada
+`disparar(db, evento, c, actor, eh=None, liga="", extra=None)`: resuelve destinatarios
+SIEMPRE desde datos que ya existen (candidato → su ficha; entrevistador → `Usuario` si es
+interno o los campos `_externo` de la `EntrevistaHumana` si es externo; Cliente → TODOS los
+`ClienteContacto` del Cliente de la vacante, omitido en silencio si la vacante no tiene
+Cliente — punto 26), arma el texto (fijo en código, Fase D no incluye editor de
+plantillas), envía por cada canal activado en la regla, y deja rastro en
+`NotificacionEnviada`. Nunca truena: sin Cuenta/regla/dato de contacto, simplemente omite
+ese envío puntual.
+
+**Conexión de los 10 eventos** (reemplazando los 15 puntos de envío ad-hoc):
+`candidatos.py::programar_entrevista_humana` → `entrevista_agendada`;
+`recordatorio_entrevista_humana` → `recordatorio_entrevista`; nuevo
+`PATCH /candidatos/{codigo}/entrevista-humana` → `entrevista_modificada`; nuevo
+`POST .../entrevista-humana/cancelar` → `entrevista_cancelada`; nuevo wrapper
+`_recalcular_resultado_apto_y_notificar` (dispara solo en la transición a `True`,
+excluyendo el prefiltro Zero-Touch) → `candidato_apto`; `marcar_entrevista_humana_realizada`
+→ `entrevista_humana_terminada`; `registrar_resultado_entrevista_humana` y
+`entrevista_humana.py::enviar_resultado` (liga pública del entrevistador) →
+`recomendacion_final`; `contratacion.py::alta` → `contratacion` (se quitó el checkbox
+`avisar_whatsapp`, redundante con la regla configurada); `solicitar_documentos` →
+`solicitud_documentos`; `recordatorio_documentos` y `contratacion.py::recordatorio` (con su
+detalle específico de documentos pendientes/rechazados, vía `extra`) → ambos
+`recordatorio_documentos`.
+
+**Router nuevo** `app/routers/notificaciones.py` (solo admin): `GET /notificaciones/reglas`
+(siembra perezosa de las 10 filas si faltan, todas apagadas), `PATCH
+/notificaciones/reglas/{evento}`, `GET /notificaciones/historial`. Registrado en `main.py`.
+
+**Script de siembra** `scripts/sembrar_reglas_notificacion.py` (nuevo, NO ejecutado —
+requiere `--forzar` + confirmación interactiva): siembra las reglas que replican el
+comportamiento de hoy por cada Cuenta existente (p. ej. `entrevista_agendada` →
+Candidato Correo+WhatsApp y Entrevistador Correo; los 4 eventos que no existían antes de
+Fase D y todo lo de Cliente arrancan apagados). Idempotente.
+
+**Frontend**:
+- `lib/api.ts`: tipos `ReglaNotificacion`/`EventoNotificacion`, `fetchReglasNotificacion`,
+  `actualizarReglaNotificacion`, `modificarEntrevistaHumana`, `cancelarEntrevistaHumana`;
+  tipos de retorno de `solicitarDocumentosCandidato`/`recordatorioDocumentosCandidato`/
+  `marcarEntrevistaHumanaRealizada`/`recordatorioEntrevistaHumana` actualizados a
+  `{ resultados: ResultadoNotificacion[], candidato }` (antes `{ enviado, candidato }`).
+- `app/dashboard/configuracion/page.tsx`: nueva tarjeta "Notificaciones" — grilla de 10
+  eventos × columnas Candidato/Entrevistador/Cliente (Correo y WhatsApp cada una); las
+  columnas de Cliente se ocultan por completo si la Cuenta no tiene ningún Cliente activo.
+- `app/dashboard/candidatos/page.tsx`: 2 acciones nuevas en el panel de Entrevista Humana,
+  "Modificar" (modal con fecha/modalidad/liga/ubicación/teléfono/comentario) y "Cancelar"
+  (confirmación, badge "Cancelada"); campo WhatsApp opcional agregado al formulario de
+  entrevistador externo en "Programar entrevista".
+- `serial.py`: se agregó `cancelada` a la serialización de `EntrevistaHumana` (faltaba,
+  necesario para que el frontend oculte Modificar/Cancelar en una ronda ya cancelada).
+
+**Verificación realizada**:
+- Backend: import-check de todos los archivos tocados; `configure_mappers()` OK; script de
+  siembra compila (`py_compile`), no se ejecutó. Prueba funcional completa con `TestClient`
+  contra una base descartable nueva (nunca `redhuman.db`): los 10 eventos con reglas
+  encendidas (verificando que el dato de contacto real llega — `Usuario.correo/telefono`
+  para entrevistador interno, `correo_externo`/`whatsapp_externo` para externo,
+  `ClienteContacto` para Cliente), el caso "vacante sin Cliente" (cero envíos a Cliente sin
+  importar la regla), la transición única de `candidato_apto` (no se repite si ya era
+  `True`), los 2 endpoints nuevos (incluyendo 409 al modificar/cancelar una ronda ya
+  cancelada o realizada), y reglas apagadas (cero filas nuevas en `NotificacionEnviada`).
+  Todo en verde.
+- Frontend: `tsc --noEmit` y `next build` limpios (19 rutas). Prueba con servidores reales
+  (`uvicorn` + `next dev`, ambos contra una base nueva): login real, páginas
+  `/dashboard/configuracion` y `/dashboard/candidatos` responden 200 con sesión, y los
+  endpoints `GET/PATCH /notificaciones/reglas` y `GET /notificaciones/historial` responden
+  correctamente a través del servidor real (no solo `TestClient`). **Limitación honesta**:
+  no se probó el clic-a-clic de la grilla de checkboxes ni de los modales Modificar/
+  Cancelar en un navegador real (no hay herramienta de automatización de navegador
+  disponible en este entorno) — la cobertura de esa capa es `tsc`/`build` limpios más
+  revisión manual del código, no una prueba de interacción real. Servidores y base de
+  prueba ya detenidos/borrados.
+
+### Siguiente paso
+1. El usuario revisa el código de Fase D (o pide una prueba manual en navegador de la
+   grilla de Configuración → Notificaciones y de Modificar/Cancelar en la ficha del
+   candidato).
+2. Commit y deploy cuando se apruebe, seguido de `scripts/sembrar_reglas_notificacion.py`
+   en producción (siembra reglas que replican el comportamiento de hoy, cero regresión).
+3. Sigue Fase F: agente global "Pregunta a Red Human" (Fase E es transversal, ya se viene
+   verificando en cada fase).
 
