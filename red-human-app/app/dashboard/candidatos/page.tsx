@@ -91,6 +91,7 @@ import {
   type ModalidadEntrevistaHumana,
 } from "@/lib/api";
 import { usePuedeDecidir, useModoPrueba } from "@/components/sesion";
+import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveedor";
 import { cn } from "@/lib/utils";
 
 const etapas: EtapaCandidato[] = [
@@ -201,6 +202,9 @@ function CandidatosContenido() {
   const searchParams = useSearchParams();
 
   const [sel, setSel] = useState<Candidato | null>(null);
+  useAnunciarContextoAgente(
+    sel ? { pantalla: "candidato", entidad: { tipo: "candidato", codigo: sel.id } } : { pantalla: "candidatos" },
+  );
   const [datos, setDatos] = useState<Candidato[]>(candidatosDemo);
   const [vacantes, setVacantes] = useState<Vacante[]>([]);
   const [clientes, setClientes] = useState<Cliente[]>([]);

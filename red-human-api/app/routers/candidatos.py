@@ -177,6 +177,8 @@ def listar(
     estado: Optional[str] = None,
     # --- Fase C: filtros adicionales ---
     fuente: Optional[str] = None,
+    # --- Fase F: búsqueda por nombre (LIKE, mismo patrón que vacantes.listar::busqueda) ---
+    nombre: Optional[str] = None,
     cliente_id: Optional[int] = None,
     responsable_id: Optional[int] = None,
     consentimiento: Optional[bool] = None,
@@ -201,6 +203,8 @@ def listar(
         q = q.filter(Candidato.estado == estado)
     if fuente:
         q = q.filter(Candidato.fuente == fuente)
+    if nombre:
+        q = q.filter(Candidato.nombre.ilike(f"%{nombre.strip()}%"))
     if consentimiento is not None:
         q = q.filter(Candidato.consentimiento.is_(consentimiento))
     if apto is not None:

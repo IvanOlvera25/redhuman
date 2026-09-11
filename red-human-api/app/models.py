@@ -2,10 +2,10 @@ import hashlib
 import json
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from .database import Base
@@ -690,6 +690,25 @@ class Sesion(Base):
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
     usuario: Mapped[Usuario] = relationship(back_populates="sesiones")
+
+
+# ============================================================
+# Fase F — Agente global "Pregunta a Red Human" (punto 29)
+# ============================================================
+
+
+class UsoAgente(Base):
+    """Contador de mensajes del agente por Usuario/día (límite diario, Fase F punto 29,
+    decisión Q7) — NUNCA guarda el texto de la conversación (decisión Q6, es una decisión de
+    privacidad aparte): solo cuántos mensajes mandó cada quien cada día."""
+
+    __tablename__ = "uso_agente"
+    __table_args__ = (UniqueConstraint("usuario_id", "fecha", name="uq_uso_agente_usuario_fecha"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    usuario_id: Mapped[int] = mapped_column(ForeignKey("usuarios.id"), index=True)
+    fecha: Mapped[date] = mapped_column(Date, index=True)
+    mensajes: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Bitacora(Base):

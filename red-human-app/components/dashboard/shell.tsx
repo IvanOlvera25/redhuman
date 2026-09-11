@@ -19,7 +19,6 @@ import {
   LogOut,
   Menu,
   Plus,
-  Search,
   Settings,
   Sparkles,
   Target,
@@ -32,6 +31,8 @@ import { Logo, Avatar, Button } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 import { useSesion } from "@/components/sesion";
+import { BarraAgente } from "@/components/dashboard/agente/barra";
+import { PanelAgente } from "@/components/dashboard/agente/panel";
 
 type NavItem = {
   href: string;
@@ -297,13 +298,9 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
             <Menu className="h-5 w-5" />
           </button>
 
-          <div className="relative hidden max-w-md flex-1 sm:block">
-            <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
-            <input
-              placeholder="Buscar candidatos, vacantes, folios…"
-              className="h-10 w-full rounded-xl border border-border-soft bg-surface-2 pl-10 pr-4 text-sm outline-none transition focus:border-brand focus:bg-surface"
-            />
-          </div>
+          {/* Fase F, punto 29: barra permanente "Pregunta a Red Human" — sustituye el buscador
+              decorativo, no es un módulo aparte. */}
+          <BarraAgente />
 
           <div className="ml-auto flex items-center gap-2">
             {/* Selector de Cuenta en topbar (solo si el usuario tiene más de una) */}
@@ -319,6 +316,8 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
       </header>
 
       <main className="pt-16 lg:pl-64">{children}</main>
+
+      <PanelAgente />
     </div>
   );
 }
