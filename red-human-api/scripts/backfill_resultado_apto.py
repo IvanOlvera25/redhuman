@@ -1,4 +1,4 @@
-﻿"""Backfill de Fase C -- calcula y guarda resultado_apto para todos los candidatos existentes.
+"""Backfill de Fase C -- calcula y guarda resultado_apto para todos los candidatos existentes.
 
 Regla "el mas reciente gana" (identica a _recalcular_resultado_apto en routers/candidatos.py):
   1. Contratacion / Onboarding  -> True siempre (llegaron al final del pipeline).
@@ -65,7 +65,7 @@ def main() -> None:
             cambios.append({"c": c, "antes": c.resultado_apto, "nuevo": nuevo})
 
         # --- Resumen agrupado por Cuenta ---
-        cuentas = {cu.id: cu.nombre for cu in db.query(Cuenta).all()}
+        cuentas = {cu.id: cu.nombre_comercial for cu in db.query(Cuenta).all()}
         por_cuenta: dict[int, dict[str, int]] = {}
         for ch in cambios:
             cid = ch["c"].cuenta_id
