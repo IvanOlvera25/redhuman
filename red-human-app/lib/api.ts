@@ -618,6 +618,12 @@ export function urlArchivoCandidato(codigo: string, archivoId: number) {
   return urlArchivo(`/candidatos/${codigo}/archivos/${archivoId}`);
 }
 
+/** Botón "Reintentar análisis" (Punto 2) — relee un CV ya guardado y reintenta la extracción
+ * con IA, sin pedirle al usuario que lo vuelva a subir. */
+export function reanalizarCvCandidato(codigo: string, archivoId: number) {
+  return post<Candidato>(`/candidatos/${codigo}/archivos/${archivoId}/reanalizar`);
+}
+
 export function registrarConsentimiento(
   codigo: string,
   datos: { acepta?: boolean; medio?: string; evidencia?: string },

@@ -351,6 +351,10 @@ def _aplicar_cv(db: Session, c: Candidato, datos: ia.CVExtraido, vac: Optional[V
     c.experiencia = (datos.experiencia_resumen or c.experiencia)[:240]
     c.cv_datos = datos.model_dump()
 
+    # Merge, NUNCA reemplazo: c.analisis también guarda respuestas_prefiltro (prefiltro por
+    # WhatsApp) — reprocesar un CV después no debe borrar esas respuestas (bug real, punto 2).
+    analisis_actual = dict(c.analisis or {})
+
     ajuste = datos.ajuste
     if ajuste and vac:
         c.score = ajuste.score
@@ -358,14 +362,14 @@ def _aplicar_cv(db: Session, c: Candidato, datos: ia.CVExtraido, vac: Optional[V
         # un CV subido después no reclasifica a quien RH ya avanzó: solo actualiza score y evidencia
         if c.etapa == "Prefiltro":
             c.estado = ajuste.estado
-        c.analisis = {
+        analisis_actual.update({
             "origen": "cv",
             "ia": con_ia,
             "requisitos_cumplidos": ajuste.requisitos_cumplidos,
             "brechas": ajuste.brechas,
             "alertas": datos.alertas,
             "datos_faltantes": datos.datos_faltantes,
-        }
+        })
     else:
         c.estado = "revision" if datos.datos_faltantes else c.estado
         c.evidencia = (
@@ -373,7 +377,27 @@ def _aplicar_cv(db: Session, c: Candidato, datos: ia.CVExtraido, vac: Optional[V
             if datos.datos_faltantes
             else c.evidencia
         )
-        c.analisis = {"origen": "cv", "ia": con_ia, "alertas": datos.alertas, "datos_faltantes": datos.datos_faltantes}
+        analisis_actual.update({"origen": "cv", "ia": con_ia, "alertas": datos.alertas, "datos_faltantes": datos.datos_faltantes})
+
+    c.analisis = analisis_actual
+
+
+def _cv_mas_reciente(c: Candidato) -> Optional[Archivo]:
+    return next((a for a in reversed(c.archivos) if a.tipo == "cv" and fs.existe(a.ruta)), None)
+
+
+async def _reanalizar_cv(db: Session, c: Candidato, vac: Optional[Vacante], cv: Archivo) -> ia.CVExtraido:
+    """Relee un CV ya guardado en disco y vuelve a correr la extracción — mismo patrón que ya
+    usaba `asignar()` inline (punto 2: botón "Reintentar análisis" y reevaluación al reasignar
+    de vacante comparten esta lógica, nunca duplicada)."""
+    with open(cv.ruta, "rb") as f:
+        b64 = base64.standard_b64encode(f.read()).decode()
+    extension = cv.ruta.rsplit(".", 1)[-1]
+    datos, con_ia = ia.extraer_cv(b64, extension, vac.titulo if vac else "", vac.requisitos if vac else "")
+    _aplicar_cv(db, c, datos, vac, con_ia)
+    cv.extraccion = datos.model_dump()
+    cv.notas_ia = "; ".join(datos.alertas) if datos.alertas else ""
+    return datos
 
 
 async def _procesar_cv(
@@ -385,34 +409,47 @@ async def _procesar_cv(
     cuenta_id: int,
     candidato: Optional[Candidato] = None,
 ) -> dict:
-    """Valida el archivo, lo guarda, lo extrae con IA y crea o actualiza al prospecto."""
+    """Valida el archivo, lo guarda, lo extrae con IA y crea o actualiza al prospecto.
+
+    Punto 2: si la extracción con IA truena (red, proveedor caído), el archivo SIGUE
+    guardándose — nunca se pierde un CV que sí llegó a subirse. Sin `datos` no se puede
+    identificar/deduplicar por teléfono/correo extraído, así que ese archivo queda adjunto al
+    candidato ya conocido (`candidato`, si se pasó) o a uno nuevo mínimo con el nombre del
+    archivo; el botón "Reintentar análisis" (`_reanalizar_cv`) completa el resto después."""
     archivo = await fs.validar(subida, "CV")
-    datos, con_ia = ia.extraer_cv(
-        archivo.b64,
-        archivo.extension,
-        vac.titulo if vac else "",
-        vac.requisitos if vac else "",
-    )
+    error_extraccion: Optional[str] = None
+    try:
+        datos, con_ia = ia.extraer_cv(
+            archivo.b64,
+            archivo.extension,
+            vac.titulo if vac else "",
+            vac.requisitos if vac else "",
+        )
+    except Exception as ex:
+        datos, con_ia = None, False
+        error_extraccion = str(ex)
 
     c = candidato
     duplicado = False
     avisos: List[str] = []
     prueba = modo_prueba_activo(db)
-    if c is None and not prueba:
-        telefono = _telefono(datos.telefono)
-        c = _duplicado(db, telefono, datos.correo or "", cuenta_id)
-        duplicado = c is not None
-    if duplicado and c is not None and datos.nombre and _distinto(datos.nombre, c.nombre):
-        # mismo teléfono/correo pero otro nombre: puede ser un contacto compartido o un dato mal capturado
-        avisos.append(
-            f"El CV está a nombre de «{datos.nombre}» pero el contacto ya existía como «{c.nombre}». "
-            "Verifica que sea la misma persona antes de avanzarlo."
-        )
+    if datos is not None:
+        if c is None and not prueba:
+            telefono = _telefono(datos.telefono)
+            c = _duplicado(db, telefono, datos.correo or "", cuenta_id)
+            duplicado = c is not None
+        if duplicado and c is not None and datos.nombre and _distinto(datos.nombre, c.nombre):
+            # mismo teléfono/correo pero otro nombre: puede ser un contacto compartido o un dato mal capturado
+            avisos.append(
+                f"El CV está a nombre de «{datos.nombre}» pero el contacto ya existía como «{c.nombre}». "
+                "Verifica que sea la misma persona antes de avanzarlo."
+            )
+
     if c is None:
         c = Candidato(
             codigo="TMP",
             cuenta_id=cuenta_id,
-            nombre=datos.nombre or archivo.nombre.rsplit(".", 1)[0],
+            nombre=(datos.nombre if datos else None) or archivo.nombre.rsplit(".", 1)[0],
             fuente=fuente,
             vacante_id=vac.id if vac else None,
             es_prueba=prueba,
@@ -423,13 +460,16 @@ async def _procesar_cv(
     elif vac and not c.vacante_id:
         c.vacante_id = vac.id
 
-    _aplicar_cv(db, c, datos, vac, con_ia)
+    if datos is not None:
+        _aplicar_cv(db, c, datos, vac, con_ia)
 
-    notas = avisos + list(datos.alertas)
-    if not datos.es_cv:
+    notas = avisos + (list(datos.alertas) if datos else [])
+    if error_extraccion:
+        notas.insert(0, f"No fue posible analizar el currículum automáticamente: {error_extraccion}")
+    elif not datos.es_cv:
         notas.insert(0, "El archivo no parece un currículum: revísalo manualmente.")
-    # duda de identidad o archivo equivocado → nunca se queda en "cumple" automático
-    if (avisos or not datos.es_cv) and c.estado == "cumple":
+    # duda de identidad, error de análisis o archivo equivocado → nunca se queda en "cumple" automático
+    if (avisos or error_extraccion or (datos and not datos.es_cv)) and c.estado == "cumple":
         c.estado = "revision"
         c.evidencia = f"{notas[0]} · {c.evidencia}"
 
@@ -442,9 +482,9 @@ async def _procesar_cv(
         ruta=ruta,
         mime=archivo.mime,
         tamano=archivo.tamano,
-        estado="recibido" if datos.es_cv else "revision",
+        estado="revision" if (error_extraccion or (datos and not datos.es_cv)) else "recibido",
         notas_ia="; ".join(notas),
-        extraccion=datos.model_dump(),
+        extraccion=datos.model_dump() if datos else {},
         subido_por=subido_por,
     )
     c.archivos.append(reg)  # por la relación, para que la respuesta ya incluya el archivo nuevo
@@ -455,8 +495,9 @@ async def _procesar_cv(
         {
             "ia": con_ia,
             "archivo": archivo.nombre,
-            "es_cv": datos.es_cv,
-            "faltantes": datos.datos_faltantes,
+            "es_cv": datos.es_cv if datos else None,
+            "faltantes": datos.datos_faltantes if datos else [],
+            "error": error_extraccion,
             "score": c.score,
             "vacante": vac.codigo if vac else None,
         },
@@ -466,9 +507,9 @@ async def _procesar_cv(
         "archivo": archivo.nombre,
         "ia": con_ia,
         "duplicado": duplicado,
-        "esCv": datos.es_cv,
+        "esCv": datos.es_cv if datos else None,
         "avisos": notas,
-        "extraccion": datos.model_dump(),
+        "extraccion": datos.model_dump() if datos else {},
         "candidato": candidato_dict(c, detalle=True),
     }
 
@@ -692,6 +733,32 @@ def descargar_archivo(
     return FileResponse(a.ruta, media_type=a.mime, filename=a.nombre)
 
 
+@router.post("/{codigo}/archivos/{archivo_id}/reanalizar")
+async def reanalizar_cv(
+    codigo: str,
+    archivo_id: int,
+    db: Session = Depends(get_db),
+    u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Botón «Reintentar análisis» (punto 2) — relee un CV ya guardado y reintenta la
+    extracción con IA, sin pedirle al usuario que vuelva a subir el archivo."""
+    c = _por_codigo(db, codigo, cuenta.id)
+    a = next((x for x in c.archivos if x.id == archivo_id and x.tipo == "cv"), None)
+    if not a:
+        raise HTTPException(404, "No se encontró ese CV en el candidato.")
+    if not fs.existe(a.ruta):
+        raise HTTPException(410, "El archivo ya no está disponible en el servidor; pide que lo vuelvan a subir.")
+    try:
+        await _reanalizar_cv(db, c, c.vacante, a)
+    except Exception as ex:
+        raise HTTPException(502, f"No fue posible analizar el currículum: {ex}")
+    registrar(db, u.nombre, "cv_reanalizado", "candidato", c.codigo, {"archivo": a.nombre, "score": c.score})
+    _actualizar_ultima_actividad(c)
+    db.commit()
+    return candidato_dict(c, detalle=True)
+
+
 # ------------------------------------------------------------
 # Asignación y reevaluación contra la vacante
 # ------------------------------------------------------------
@@ -717,12 +784,9 @@ async def asignar(
     c.vacante_id = vac.id
 
     if datos.reevaluar and c.cv_datos:
-        cv = next((a for a in reversed(c.archivos) if a.tipo == "cv" and fs.existe(a.ruta)), None)
+        cv = _cv_mas_reciente(c)
         if cv:
-            with open(cv.ruta, "rb") as f:
-                b64 = base64.standard_b64encode(f.read()).decode()
-            datos_cv, con_ia = ia.extraer_cv(b64, cv.ruta.rsplit(".", 1)[-1], vac.titulo, vac.requisitos)
-            _aplicar_cv(db, c, datos_cv, vac, con_ia)
+            await _reanalizar_cv(db, c, vac, cv)
 
     await _recalcular_resultado_apto_y_notificar(db, c, u.nombre)  # la nueva vacante puede cambiar el contexto de evaluación
     registrar(db, u.nombre, "candidato_reasignado", "candidato", c.codigo, {"de": anterior, "a": vac.codigo})

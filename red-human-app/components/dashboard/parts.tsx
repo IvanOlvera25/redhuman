@@ -68,10 +68,11 @@ const estadoConfig: Record<EstadoPrefiltro, { tone: "good" | "warn" | "bad" | "n
   pendiente: { tone: "neutral", label: "Pendiente" },
 };
 
-export function EstadoBadge({ estado }: { estado: EstadoPrefiltro }) {
+export function EstadoBadge({ estado, prefijo = "" }: { estado: EstadoPrefiltro; prefijo?: string }) {
   const c = estadoConfig[estado];
   return (
     <Badge tone={c.tone} dot>
+      {prefijo}
       {c.label}
     </Badge>
   );

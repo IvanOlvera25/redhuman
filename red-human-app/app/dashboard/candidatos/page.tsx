@@ -40,6 +40,7 @@ import {
   Copy,
   Pencil,
   XCircle,
+  RefreshCw,
 } from "lucide-react";
 import { Card, Badge, Button, Avatar, Eyebrow, Progress } from "@/components/ui";
 import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
@@ -74,6 +75,7 @@ import {
   modificarEntrevistaHumana,
   moverEtapaCandidato,
   programarEntrevistaHumana,
+  reanalizarCvCandidato,
   recordatorioDocumentosCandidato,
   recordatorioEntrevistaHumana,
   registrarConsentimiento,
@@ -1235,7 +1237,7 @@ function ModalCandidato({
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
-            <EstadoBadge estado={c.estado} />
+            <EstadoBadge estado={c.estado} prefijo="Prefiltro: " />
             <button
               onClick={onClose}
               className="grid h-9 w-9 place-items-center rounded-xl text-ink-2 hover:bg-surface-2 transition"
@@ -1314,7 +1316,7 @@ function ModalCandidato({
 
           {c.etapa === "Entrevista Humana" && <PanelEntrevistaHumana c={c} live={live} onCambio={onCambio} />}
 
-          {tab === "resumen" && <PestanaResumen c={c} />}
+          {tab === "resumen" && <PestanaResumen c={c} live={live} onCambio={onCambio} setTab={setTab} />}
           {tab === "evaluaciones" && <PestanaEvaluaciones c={c} />}
           {tab === "documentos" && <PestanaDocumentos c={c} live={live} onCambio={onCambio} setAviso={setAviso} />}
           {tab === "whatsapp" && <PestanaWhatsApp c={c} live={live} onCambio={onCambio} />}
@@ -1466,54 +1468,255 @@ function ModalCandidato({
 }
 
 /* ============================================================
-   PESTAÑA 1: Resumen (contacto + vistazo rápido del CV)
+   PESTAÑA 1: Resumen — síntesis y decisión rápida (Punto 3, secciones A-G)
+
+   Distribución (Punto 3): aquí solo va la síntesis para decidir sin entrar a las demás
+   pestañas — el análisis detallado sigue viviendo en Evaluaciones, nunca se duplica un
+   bloque completo, solo se referencia con "Ver detalle en Evaluaciones →".
    ============================================================ */
-function PestanaResumen({ c }: { c: Candidato }) {
-  const cv = (c.cvDatos || {}) as Record<string, unknown>;
-  const anios = cv.anios_experiencia as number | undefined;
-  const resumen = (cv.experiencia_resumen as string) || c.experiencia;
-  const puestoActual = (cv.puesto_actual as string) || "";
-  const ultimoEmpleo = (cv.ultimo_empleo as string) || "";
+
+type EstadoAnalisisCv = "sin_cv" | "analizando" | "error" | "analizado";
+
+/** Punto 2: sin columna de estado nueva — se deriva de si hay un Archivo tipo=cv y si
+ * `cvDatos` trae señales reales de una extracción (nunca "N/D": vacío es vacío). */
+function estadoAnalisisCv(c: Candidato, enVuelo: boolean): EstadoAnalisisCv {
+  if (enVuelo) return "analizando";
+  const tieneCv = (c.listaArchivos ?? []).some((a) => a.tipo === "cv");
+  if (!tieneCv) return "sin_cv";
+  const cv = c.cvDatos ?? {};
+  const tieneExtraccion = Boolean(
+    cv.resumen_profesional || cv.experiencia_resumen || cv.puesto_actual || (cv.habilidades && cv.habilidades.length),
+  );
+  return tieneExtraccion ? "analizado" : "error";
+}
+
+const TONOS_RECOMENDACION: Record<string, { card: string; texto: string; icon: typeof CheckCircle2 }> = {
+  "Avanzar a contratación": { card: "border-good/30 bg-good-soft/20", texto: "text-good", icon: CheckCircle2 },
+  "Realizar entrevista humana": { card: "border-warn/30 bg-warn-soft/20", texto: "text-warn", icon: UserCheck },
+  "No avanzar": { card: "border-bad/30 bg-bad-soft/20", texto: "text-bad", icon: XCircle },
+};
+
+function PestanaResumen({
+  c,
+  live,
+  onCambio,
+  setTab,
+}: {
+  c: Candidato;
+  live: boolean;
+  onCambio: (c: Candidato) => void;
+  setTab: (t: TabCandidato) => void;
+}) {
+  const [reanalizando, setReanalizando] = useState(false);
+  const [errorCv, setErrorCv] = useState("");
+  const cv = c.cvDatos ?? {};
+  const estadoCv = estadoAnalisisCv(c, reanalizando);
+  const ultimoCv = [...(c.listaArchivos ?? [])].reverse().find((a) => a.tipo === "cv");
+
+  async function reintentarAnalisis() {
+    if (!ultimoCv) return;
+    setReanalizando(true);
+    setErrorCv("");
+    const r = await reanalizarCvCandidato(c.id, ultimoCv.id);
+    setReanalizando(false);
+    if (!r.ok) {
+      setErrorCv(r.error);
+      return;
+    }
+    onCambio(r.data);
+  }
+
+  // --- A. Datos principales — aprovecha automáticamente la extracción del CV, nunca "N/D". ---
+  const datosPrincipales: { icon: typeof MapPin; v: string }[] = [];
+  if (c.ubicacion) datosPrincipales.push({ icon: MapPin, v: c.ubicacion });
+  if (c.telefono) datosPrincipales.push({ icon: Phone, v: c.telefono });
+  if (c.correo) datosPrincipales.push({ icon: Mail, v: c.correo });
+  if (cv.puesto_actual) datosPrincipales.push({ icon: Briefcase, v: cv.puesto_actual });
+  if (cv.ultimo_empleo) datosPrincipales.push({ icon: Building2, v: cv.ultimo_empleo });
+  if (cv.anios_experiencia != null) datosPrincipales.push({ icon: CalendarClock, v: `${cv.anios_experiencia} años de experiencia` });
+  datosPrincipales.push({ icon: Globe, v: `Canal: ${c.fuente}` });
+
+  const tonoRecomendacion = c.recomendacionRedHuman ? TONOS_RECOMENDACION[c.recomendacionRedHuman] : null;
 
   return (
     <div className="flex flex-col gap-5">
-      {/* Datos de contacto rápidos */}
+      {/* A. Datos principales */}
       <div className="flex flex-wrap gap-2">
-        {c.ubicacion && <Info icon={MapPin} v={c.ubicacion} />}
-        {c.telefono && <Info icon={Phone} v={c.telefono} />}
-        {c.correo && <Info icon={Mail} v={c.correo} />}
-        {c.experiencia && <Info icon={Briefcase} v={c.experiencia} />}
-        {c.fuente === "WhatsApp" && <Info icon={MessageCircle} v="Canal: WhatsApp" />}
+        {datosPrincipales.map((d, i) => (
+          <Info key={i} icon={d.icon} v={d.v} />
+        ))}
       </div>
 
-      {/* Análisis y Extracción del Currículum */}
+      {/* B. Perfil extraído del CV */}
       <div>
-        <Eyebrow>Análisis y Extracción del Currículum</Eyebrow>
+        <Eyebrow>Perfil extraído del CV</Eyebrow>
         <Card className="mt-2 p-5">
-          <p className="text-sm leading-relaxed text-ink-2">{resumen || "Sin resumen de experiencia disponible."}</p>
+          {estadoCv === "sin_cv" && <p className="text-sm text-ink-3">Currículum no recibido.</p>}
 
-          <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-            {anios != null && (
-              <div className="rounded-xl bg-surface-2 p-3">
-                <span className="block font-mono text-[10px] text-ink-3">Experiencia total</span>
-                <span className="text-sm font-bold text-ink">{anios} años</span>
-              </div>
-            )}
-            {puestoActual && (
-              <div className="rounded-xl bg-surface-2 p-3">
-                <span className="block font-mono text-[10px] text-ink-3">Puesto más reciente</span>
-                <span className="truncate text-sm font-bold text-ink">{puestoActual}</span>
-              </div>
-            )}
-            {ultimoEmpleo && (
-              <div className="rounded-xl bg-surface-2 p-3 col-span-2 sm:col-span-1">
-                <span className="block font-mono text-[10px] text-ink-3">Última empresa / periodo</span>
-                <span className="truncate text-sm font-bold text-ink">{ultimoEmpleo}</span>
-              </div>
-            )}
-          </div>
+          {estadoCv === "analizando" && (
+            <p className="flex items-center gap-2 text-sm text-ink-3">
+              <Loader2 className="h-4 w-4 animate-spin" /> Analizando currículum…
+            </p>
+          )}
+
+          {estadoCv === "error" && (
+            <div>
+              <p className="text-sm text-bad">No fue posible analizar el currículum.</p>
+              {live && ultimoCv && (
+                <Button size="sm" variant="outline" className="mt-3" onClick={reintentarAnalisis} disabled={reanalizando}>
+                  <RefreshCw className={cn("h-3.5 w-3.5", reanalizando && "animate-spin")} />
+                  {reanalizando ? "Reintentando…" : "Reintentar análisis"}
+                </Button>
+              )}
+              {errorCv && <p className="mt-2 text-xs text-bad">{errorCv}</p>}
+            </div>
+          )}
+
+          {estadoCv === "analizado" && (
+            <div className="flex flex-col gap-4">
+              <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-2">
+                {cv.resumen_profesional || cv.experiencia_resumen}
+              </p>
+
+              {Boolean(cv.experiencia_relevante) && (
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-wider text-ink-3">Experiencia relevante para esta vacante</p>
+                  <p className="mt-1 break-words text-sm leading-relaxed text-ink-2">{cv.experiencia_relevante}</p>
+                </div>
+              )}
+
+              {Boolean(cv.estudios?.length) && (
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-wider text-ink-3">Formación principal</p>
+                  <ul className="mt-1.5 space-y-1">
+                    {cv.estudios!.slice(0, 3).map((e, i) => (
+                      <li key={i} className="flex items-start gap-1.5 text-sm leading-relaxed text-ink-2">
+                        <GraduationCap className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-3" /> <span className="break-words">{e}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {Boolean(cv.conocimientos_relevantes?.length) && (
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-wider text-ink-3">Conocimientos relevantes para la vacante</p>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {cv.conocimientos_relevantes!.map((h, i) => (
+                      <span
+                        key={i}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-brand/25 bg-brand-soft px-2.5 py-1 text-xs font-medium text-brand"
+                      >
+                        <Award className="h-3.5 w-3.5 text-brand" /> {h}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {live && ultimoCv && (
+                <button
+                  onClick={reintentarAnalisis}
+                  disabled={reanalizando}
+                  className="self-start text-[11px] font-semibold text-brand hover:underline disabled:opacity-50"
+                >
+                  {reanalizando ? "Reanalizando…" : "Reanalizar con el CV más reciente"}
+                </button>
+              )}
+            </div>
+          )}
         </Card>
       </div>
+
+      {/* C. Prefiltro */}
+      <div>
+        <Eyebrow>Prefiltro</Eyebrow>
+        <Card className="mt-2 p-4">
+          {!c.prefiltroResumen ? (
+            <p className="text-sm text-ink-3">Prefiltro en curso — todavía no hay criterios evaluados.</p>
+          ) : c.prefiltroResumen.incumplidos.length > 0 ? (
+            <div>
+              <p className="text-sm font-semibold text-warn">
+                Prefiltro: incumple {c.prefiltroResumen.incumplidos.length} de {c.prefiltroResumen.total} criterios
+              </p>
+              <ul className="mt-2 space-y-1">
+                {c.prefiltroResumen.incumplidos.map((x, i) => (
+                  <li key={i} className="break-words text-xs leading-relaxed text-ink-2">• {x}</li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <p className="text-sm font-semibold text-good">
+              Prefiltro: Cumple {c.prefiltroResumen.cumple} de {c.prefiltroResumen.total} criterios
+            </p>
+          )}
+        </Card>
+      </div>
+
+      {/* D. Afinidad con la vacante */}
+      {c.afinidadGlobal != null && (
+        <div>
+          <Eyebrow>Afinidad con la vacante</Eyebrow>
+          <Card className="mt-2 p-5">
+            <div className="flex flex-wrap items-center gap-4">
+              <ScoreRing score={c.afinidadGlobal} />
+              <p className="font-display text-lg font-bold text-ink">Afinidad: {c.afinidadGlobal}/100</p>
+            </div>
+            {c.sintesisAfinidad && <p className="mt-3 break-words text-sm leading-relaxed text-ink-2">{c.sintesisAfinidad}</p>}
+            <button onClick={() => setTab("evaluaciones")} className="mt-3 text-[11px] font-semibold text-brand hover:underline">
+              Ver detalle en Evaluaciones →
+            </button>
+          </Card>
+        </div>
+      )}
+
+      {/* E. Fortalezas principales */}
+      {Boolean(c.fortalezasPrincipales?.length) && (
+        <div>
+          <Eyebrow>Fortalezas principales</Eyebrow>
+          <Card className="mt-2 border-good/30 bg-good-soft/20 p-4">
+            <ul className="space-y-1.5">
+              {c.fortalezasPrincipales!.map((f, i) => (
+                <li key={i} className="flex items-start gap-1.5 text-sm leading-relaxed text-ink-2">
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-good" /> <span className="break-words">{f}</span>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        </div>
+      )}
+
+      {/* F. Puntos por validar — solo lo que requiere intervención humana */}
+      {Boolean(c.puntosPorValidar?.length) && (
+        <div>
+          <Eyebrow>Puntos por validar</Eyebrow>
+          <Card className="mt-2 border-warn/30 bg-warn-soft/20 p-4">
+            <ul className="space-y-1.5">
+              {c.puntosPorValidar!.map((p, i) => (
+                <li key={i} className="flex items-start gap-1.5 text-sm leading-relaxed text-ink-2">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warn" /> <span className="break-words">{p}</span>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        </div>
+      )}
+
+      {/* G. Recomendación de Red Human — destacada */}
+      {c.recomendacionRedHuman && tonoRecomendacion && (
+        <Card className={cn("p-5", tonoRecomendacion.card)}>
+          <div className="flex items-start gap-3">
+            <tonoRecomendacion.icon className={cn("mt-0.5 h-6 w-6 shrink-0", tonoRecomendacion.texto)} />
+            <div>
+              <p className="font-mono text-[10px] font-bold uppercase tracking-wider text-ink-3">Recomendación de Red Human</p>
+              <p className={cn("font-display text-lg font-bold", tonoRecomendacion.texto)}>{c.recomendacionRedHuman}</p>
+              {c.recomendacionMotivo && (
+                <p className="mt-1.5 break-words text-sm leading-relaxed text-ink-2">{c.recomendacionMotivo}</p>
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
@@ -1777,7 +1980,7 @@ function PestanaDocumentos({
             {habilidades.map((h, i) => (
               <span
                 key={i}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-brand/20 bg-brand-soft/40 px-3 py-1.5 text-xs font-medium text-brand-ink"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-brand/25 bg-brand-soft px-3 py-1.5 text-xs font-medium text-brand"
               >
                 <Award className="h-3.5 w-3.5 text-brand" /> {h}
               </span>

@@ -336,6 +336,22 @@ class CVExtraido(BaseModel):
     estudios: List[str] = Field(default_factory=list)
     habilidades: List[str] = Field(default_factory=list)
     idiomas: List[str] = Field(default_factory=list)
+    # --- Ficha de candidato, punto 3.B: perfil profesional listo para decidir sin leer el CV completo ---
+    resumen_profesional: str = Field(
+        description="Resumen profesional de 3 A 5 líneas (más completo que experiencia_resumen): "
+        "quién es, su trayectoria y su fortaleza principal. Español mexicano, tono neutral."
+    )
+    experiencia_relevante: Optional[str] = Field(
+        default=None,
+        description="1-2 frases de la experiencia del CV que sea específicamente relevante para la vacante de "
+        "referencia (no un resumen genérico). Null si no se dio una vacante de referencia.",
+    )
+    conocimientos_relevantes: List[str] = Field(
+        default_factory=list,
+        description="Subconjunto de las habilidades/conocimientos del CV que aplican directamente a los "
+        "requisitos de la vacante de referencia (no la lista completa de habilidades). Vacío si no se dio "
+        "una vacante de referencia.",
+    )
     datos_faltantes: List[str] = Field(default_factory=list, description="Datos que no aparecen o no son legibles en el CV.")
     alertas: List[str] = Field(
         default_factory=list,
@@ -371,6 +387,7 @@ def extraer_cv(
         demo = CVExtraido(
             nombre=None,
             experiencia_resumen="Modo demo: agrega OPENAI_API_KEY para extraer los datos reales del CV.",
+            resumen_profesional="Modo demo: agrega OPENAI_API_KEY para generar el resumen profesional real del CV.",
             datos_faltantes=["extracción real pendiente de API key"],
             es_cv=True,
             ajuste=AjustePerfil(
@@ -388,9 +405,12 @@ def extraer_cv(
     contexto = (
         f"\n\nVACANTE DE REFERENCIA\n- Puesto: {vacante_titulo}\n- Requisitos indispensables: {vacante_requisitos or 'no especificados'}\n"
         "Llena `ajuste` comparando el CV contra estos requisitos. Sé conservador: si un requisito no se puede "
-        "acreditar con el CV, va en brechas y el estado no puede ser 'cumple'."
+        "acreditar con el CV, va en brechas y el estado no puede ser 'cumple'. Llena también "
+        "`experiencia_relevante` (qué de su trayectoria aplica a ESTA vacante) y `conocimientos_relevantes` "
+        "(el subconjunto de sus habilidades que aplica a ESTA vacante, no la lista completa)."
         if vacante_titulo
-        else "\n\nNo hay vacante de referencia: deja `ajuste` en null."
+        else "\n\nNo hay vacante de referencia: deja `ajuste`, `experiencia_relevante` y "
+        "`conocimientos_relevantes` en null/vacío."
     )
 
     ext = extension.lower().lstrip(".")
@@ -429,7 +449,9 @@ def extraer_cv(
             "Eres el extractor de CVs de Red Human AI (México). Extrae SOLO lo que realmente aparece en el "
             "documento; si un dato no existe o no es legible, déjalo nulo y regístralo en datos_faltantes. "
             "Nunca inventes información ni infieras datos sensibles (edad, sexo, estado civil, embarazo, "
-            "religión, salud, origen). Tu salida es insumo para una persona de RH que toma la decisión final."
+            "religión, salud, origen). Tu salida es insumo para una persona de RH que toma la decisión final. "
+            "Llena SIEMPRE `resumen_profesional` (3-5 líneas, más completo que experiencia_resumen): quién es "
+            "el candidato, su trayectoria y su fortaleza principal, en español mexicano."
             + contexto
         ),
         input=[

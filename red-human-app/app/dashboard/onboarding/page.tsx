@@ -616,7 +616,7 @@ function HistorialCandidato({ candidatoId }: { candidatoId?: string }) {
         {habilidades.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {habilidades.map((h, i) => (
-              <span key={i} className="rounded-md bg-brand-soft/50 px-2 py-0.5 text-[11px] text-brand-ink">
+              <span key={i} className="rounded-md bg-brand-soft px-2 py-0.5 text-[11px] text-brand">
                 {h}
               </span>
             ))}
