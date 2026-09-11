@@ -146,6 +146,109 @@ def _entrevista_humana_dict(eh) -> dict:
     }
 
 
+def _dedupe_cap(items: List[Optional[str]], maximo: int) -> List[str]:
+    vistos = set()
+    salida: List[str] = []
+    for it in items:
+        if not it:
+            continue
+        clave = it.strip().casefold()
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        salida.append(it.strip())
+        if len(salida) >= maximo:
+            break
+    return salida
+
+
+def _sintesis_global(c: Candidato) -> dict:
+    """Puntos 3 (D/E/F/G) y 5: combina CV + Prefiltro + Entrevista IA + Entrevista Humana en
+    una sola síntesis — determinista, SIN llamada a IA nueva (decisión confirmada). Se calcula
+    al vuelo en cada lectura, nunca se persiste: así "recalcular cuando el CV se carga después"
+    se cumple gratis, sin enganchar este cálculo en cada punto de mutación."""
+    a = c.analisis or {}
+    ultima_eh = c.entrevistas_humanas[-1] if c.entrevistas_humanas else None
+    ultima_ent = c.entrevistas[-1] if c.entrevistas else None
+    eval_ia = (ultima_ent.evaluacion or {}) if ultima_ent else {}
+    match_ia = eval_ia.get("match_perfil")
+    respuestas = a.get("respuestas_prefiltro") or []
+
+    # --- C. Prefiltro: "Cumple X de Y criterios" (o solo los incumplimientos) ---
+    prefiltro_resumen = None
+    if respuestas:
+        cumple_n = sum(1 for r in respuestas if r.get("cumple") is True)
+        incumplidos = [r.get("criterio") or r.get("pregunta") for r in respuestas if r.get("cumple") is False]
+        prefiltro_resumen = {"cumple": cumple_n, "total": len(respuestas), "incumplidos": incumplidos}
+
+    # --- D. Afinidad global: score CV/Prefiltro, promediado con match de Entrevista IA si la
+    # hay, ajustado por el resultado de Entrevista Humana si la hay (la señal más autoritativa:
+    # una persona real ya evaluó). Cada fuente usada queda citada en `sintesisAfinidad`. ---
+    afinidad: Optional[int] = None
+    fuentes: List[str] = []
+    if c.score:
+        afinidad = c.score
+        fuentes.append(f"CV/Prefiltro: {c.score}/100 de ajuste")
+    if match_ia is not None:
+        afinidad = round(((afinidad or 0) + match_ia) / 2) if afinidad is not None else match_ia
+        fuentes.append(f"Entrevista IA: {match_ia}% de match")
+    if ultima_eh and ultima_eh.resultado:
+        legible = "aprobado" if ultima_eh.resultado == "aprobado" else "no aprobado"
+        fuentes.append(f"Entrevista Humana con {ultima_eh.entrevistador or 'RH'}: {legible}")
+        objetivo = 100 if ultima_eh.resultado == "aprobado" else 0
+        afinidad = round(objetivo if afinidad is None else afinidad * 0.5 + objetivo * 0.5)
+    if afinidad is not None:
+        afinidad = max(0, min(100, afinidad))
+
+    # --- E/F. Fortalezas principales y puntos por validar — unión deduplicada de lo que cada
+    # etapa YA calificó, prioridad a la señal más reciente (Entrevista > Prefiltro > CV). ---
+    fortalezas = _dedupe_cap(
+        [*(eval_ia.get("fortalezas") or []),
+         *[r.get("criterio") or r.get("pregunta") for r in respuestas if r.get("cumple") is True],
+         *(a.get("requisitos_cumplidos") or [])],
+        4,
+    )
+    puntos_por_validar = _dedupe_cap(
+        [*(eval_ia.get("riesgos") or []),
+         *[r.get("criterio") or r.get("pregunta") for r in respuestas if r.get("cumple") is False],
+         *(a.get("brechas") or []),
+         *([f"Segunda entrevista sugerida" + (f": {ultima_eh.comentario}" if ultima_eh.comentario else "")]
+           if ultima_eh and ultima_eh.recomendacion == "segunda_entrevista" else [])],
+        4,
+    )
+
+    # --- G. Recomendación de Red Human — reusa el "más reciente gana" de resultado_apto
+    # (Fase C/D), nunca reinventa la lógica de negocio. ---
+    recomendacion: Optional[str] = None
+    motivo = ""
+    if c.resultado_apto is False:
+        recomendacion = "No avanzar"
+        motivo = "El resultado más reciente del proceso marca al candidato como no apto."
+    elif ultima_eh and ultima_eh.recomendacion == "no_avanzar":
+        recomendacion = "No avanzar"
+        motivo = "El entrevistador humano recomendó no avanzar."
+    elif c.resultado_apto is True and ultima_eh and ultima_eh.resultado == "aprobado" and ultima_eh.recomendacion == "avanzar":
+        recomendacion = "Avanzar a contratación"
+        motivo = "La Entrevista Humana confirmó al candidato como aprobado, con recomendación de avanzar."
+    elif c.resultado_apto is True:
+        recomendacion = "Realizar entrevista humana"
+        motivo = (
+            "La Entrevista Humana sugiere una segunda ronda antes de decidir."
+            if ultima_eh and ultima_eh.recomendacion == "segunda_entrevista"
+            else "Compatible según CV/Prefiltro/Entrevista IA, pero falta la validación de una Entrevista Humana."
+        )
+
+    return {
+        "prefiltroResumen": prefiltro_resumen,
+        "afinidadGlobal": afinidad,
+        "sintesisAfinidad": " · ".join(fuentes),
+        "fortalezasPrincipales": fortalezas,
+        "puntosPorValidar": puntos_por_validar,
+        "recomendacionRedHuman": recomendacion,
+        "recomendacionMotivo": motivo,
+    }
+
+
 def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
     exp = c.expediente
     ultima = c.entrevistas[-1] if c.entrevistas else None
@@ -159,8 +262,8 @@ def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
         "estado": c.estado,
         "etapa": c.etapa,
         "score": c.score,
-        "experiencia": c.experiencia or "N/D",
-        "ubicacion": c.ubicacion or "N/D",
+        "experiencia": c.experiencia or "",
+        "ubicacion": c.ubicacion or "",
         "aplicado": hace(c.creado_en),
         "tono": (c.id or 0) % 4,
         "evidencia": c.evidencia or "Prefiltro en curso.",
@@ -210,6 +313,7 @@ def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
 
     return {
         **base,
+        **_sintesis_global(c),
         "cvDatos": c.cv_datos or {},
         "analisis": c.analisis or {},
         "listaArchivos": [archivo_dict(a) for a in c.archivos],

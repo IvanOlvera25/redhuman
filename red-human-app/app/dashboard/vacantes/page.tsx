@@ -1660,41 +1660,51 @@ function DetalleVacante({
 
         {live && puedeDecidir && (
           <div className="flex flex-col gap-3 border-t border-border-faint pt-5">
-            <div>
-              <Eyebrow>Distribuir en</Eyebrow>
-              <div className="mt-2.5 flex flex-wrap gap-2">
-                {PLATAFORMAS.map((p) => {
-                  const activo = destinos.includes(p.api);
-                  return (
-                    <button
-                      key={p.clave}
-                      onClick={() =>
-                        setDestinos((d) => (activo ? d.filter((x) => x !== p.api) : [...d, p.api]))
-                      }
-                      className={cn(
-                        "rounded-full border px-3 py-1.5 text-[13px] font-medium transition",
-                        activo
-                          ? "border-brand bg-brand-soft text-brand"
-                          : "border-border-soft text-ink-2 hover:border-brand/40",
-                      )}
-                    >
-                      {p.nombre}
-                    </button>
-                  );
-                })}
+            {v.estado === "Publicada" ? (
+              // Punto 1: mientras esté Publicada, "Publicar" deja de mostrarse — el único
+              // indicador de estatus accionable es el toggle Cerrar/Reabrir de abajo.
+              <div className="flex items-center justify-center gap-2 rounded-xl border border-good/30 bg-good-soft px-4 py-2.5 text-sm font-semibold text-good">
+                <Check className="h-4 w-4" /> Publicada
               </div>
-            </div>
+            ) : v.estado !== "Cerrada" ? (
+              <>
+                <div>
+                  <Eyebrow>Distribuir en</Eyebrow>
+                  <div className="mt-2.5 flex flex-wrap gap-2">
+                    {PLATAFORMAS.map((p) => {
+                      const activo = destinos.includes(p.api);
+                      return (
+                        <button
+                          key={p.clave}
+                          onClick={() =>
+                            setDestinos((d) => (activo ? d.filter((x) => x !== p.api) : [...d, p.api]))
+                          }
+                          className={cn(
+                            "rounded-full border px-3 py-1.5 text-[13px] font-medium transition",
+                            activo
+                              ? "border-brand bg-brand-soft text-brand"
+                              : "border-border-soft text-ink-2 hover:border-brand/40",
+                          )}
+                        >
+                          {p.nombre}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
 
-            <div className="flex gap-3">
-              <Button variant="outline" className="flex-1" onClick={regenerar} disabled={Boolean(ocupado)}>
-                <RefreshCw className={cn("h-4 w-4", ocupado === "regenerar" && "animate-spin")} />
-                {ocupado === "regenerar" ? "Generando…" : "Regenerar con IA"}
-              </Button>
-              <Button className="flex-1" onClick={publicar} disabled={Boolean(ocupado) || !destinos.length}>
-                <Send className="h-4 w-4" />
-                {ocupado === "publicar" ? "Publicando…" : "Publicar"}
-              </Button>
-            </div>
+                <div className="flex gap-3">
+                  <Button variant="outline" className="flex-1" onClick={regenerar} disabled={Boolean(ocupado)}>
+                    <RefreshCw className={cn("h-4 w-4", ocupado === "regenerar" && "animate-spin")} />
+                    {ocupado === "regenerar" ? "Generando…" : "Regenerar con IA"}
+                  </Button>
+                  <Button className="flex-1" onClick={publicar} disabled={Boolean(ocupado) || !destinos.length}>
+                    <Send className="h-4 w-4" />
+                    {ocupado === "publicar" ? "Publicando…" : "Publicar"}
+                  </Button>
+                </div>
+              </>
+            ) : null}
 
             {(v.estado === "Publicada" || v.estado === "Cerrada") && (
               <div>

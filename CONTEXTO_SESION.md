@@ -687,13 +687,151 @@ lógica de visibilidad nueva que nunca existió). Igual que los badges de nav de
 queda anotado como un ticket aparte — implementar "Mío/Mi equipo" de verdad en los endpoints
 de lectura (mínimo candidatos/vacantes) es trabajo nuevo, no reparación de Fase F.
 
+### Siguiente paso (histórico — Fase D/F y Puntos 2/27/28 ya se comitearon y desplegaron,
+### confirmado contra `git log`/`git status` al arrancar la siguiente sesión de trabajo)
+1. ~~El usuario revisa el código de Fase F~~ — hecho, comiteado (`5e176a5` y anteriores) y en
+   producción junto con Fase D y los Puntos 2/27/28.
+2. Correr `scripts/sembrar_reglas_notificacion.py` en producción sigue pendiente (Fase D, sin
+   relación con Fase F) — verificar con el usuario si ya se corrió.
+3. Fase E (simplificación) es transversal y ya se viene verificando en cada fase — no queda
+   ningún entregable aparte pendiente salvo la deuda técnica de "Mío/Mi equipo" anotada arriba.
+
+## 6 correcciones de UI y datos reportadas por Raúl — completadas 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+
+Con A-F ya en producción, Raúl reportó 6 problemas puntuales sobre la ficha de candidato y
+vacantes. Investigación completa contra el código real (yo directo + 2 forks en paralelo para
+los puntos 1 y 4) antes de proponer nada; plan completo aprobado en plan mode. **Ninguno tocó
+`models.py` ni `migraciones.py`** — cero cambios de esquema, tal como pidió el usuario
+explícitamente; toda la información nueva vive en las columnas `JSON` que ya existían
+(`Candidato.analisis`, `cv_datos`, `Archivo.extraccion`).
+
+**Decisiones de negocio confirmadas por el usuario (no volver a preguntar):**
+1. "Afinidad" y "Recomendación de Red Human" (síntesis de CV+Prefiltro+Entrevista IA+Entrevista
+   Humana) se calculan con una función determinista en Python, **sin ninguna llamada nueva a
+   IA** — se recalcula al vuelo en cada lectura, nunca se persiste.
+2. El hallazgo de que WhatsApp nunca descarga archivos adjuntos (un CV mandado por WhatsApp
+   como documento se pierde en silencio) **queda fuera de este lote**, documentado como deuda
+   técnica aparte (ver abajo) — es una integración nueva, no un ajuste de UI/datos.
+
+**Punto 1 — Botón "Publicar" no reflejaba el estado**: el bloque "Distribuir en/Regenerar/
+Publicar" en `vacantes/page.tsx::DetalleVacante` no chequeaba `v.estado` — se mostraba
+accionable aunque la vacante ya estuviera Publicada. Fix: se oculta por completo cuando
+`estado === "Publicada"` o `"Cerrada"`, mostrando un indicador no-accionable "Publicada ✓"; el
+toggle "Cerrar/Reabrir vacante" que ya existía (y ya reactivaba correctamente el flujo de
+Publicar al reabrir) no se tocó.
+
+**Punto 2 — "N/D" en análisis de CV pese a tener CV cargado**: 3 causas reales, las 3
+corregidas:
+- El "N/D" era un fallback de `serial.py` (`c.experiencia or "N/D"`) leakeando a la ficha —
+  la nueva pestaña Resumen (Punto 3) ya no lee ese campo, usa `cv_datos` directo.
+- **Bug real de pérdida de datos**: `_aplicar_cv()` reemplazaba `c.analisis` completo en vez
+  de hacer merge — reprocesar un CV borraba `respuestas_prefiltro` ya guardadas. Corregido con
+  el mismo patrón de merge que ya usaba el código del prefiltro.
+- **No había forma de reintentar un análisis fallido**: `_procesar_cv` llamaba a la IA antes
+  de guardar el `Archivo` — si fallaba, se perdía el archivo. Ahora el archivo SIEMPRE se
+  guarda (con nota de error si la IA falló) y hay un endpoint nuevo
+  `POST /candidatos/{codigo}/archivos/{archivo_id}/reanalizar` (botón "Reintentar análisis")
+  que relee el archivo de disco sin pedirle al usuario que lo vuelva a subir.
+- `ia.py::CVExtraido` ganó 3 campos (`resumen_profesional` 3-5 líneas, `experiencia_relevante`,
+  `conocimientos_relevantes`) que antes no existían y que el Punto 3.B necesitaba.
+- Estados en la ficha (sin CV / analizando / error+reintentar / analizado) se derivan en el
+  frontend de si hay un `Archivo` tipo=cv y si `cvDatos` trae señales reales — sin columna de
+  estado nueva.
+
+**Punto 3 — Rediseño completo de la pestaña "Resumen"** (el cambio más grande): reemplaza por
+completo `PestanaResumen` en `candidatos/page.tsx` con las 7 secciones A-G pedidas (Datos
+principales, Perfil extraído del CV, Prefiltro con conteo de criterios, Afinidad con la
+vacante, Fortalezas principales, Puntos por validar, Recomendación de Red Human destacada).
+Nuevo helper `serial.py::_sintesis_global(c)` (llamado solo en `candidato_dict(detalle=True)`)
+calcula `prefiltroResumen`, `afinidadGlobal`, `sintesisAfinidad`, `fortalezasPrincipales`,
+`puntosPorValidar`, `recomendacionRedHuman`, `recomendacionMotivo` — todo determinista,
+documentado con su fórmula exacta:
+- **Afinidad**: `c.score` (CV/Prefiltro) solo; promediado con el match de Entrevista IA si la
+  hay; ajustado 50/50 hacia 100 o hacia 0 según el resultado de Entrevista Humana si la hay
+  (la señal más autoritativa). Cada fuente usada se cita en `sintesisAfinidad`.
+- **Recomendación**: reusa el "más reciente gana" de `resultado_apto` (Fase C/D) — `False` en
+  cualquier etapa posterior al prefiltro o `recomendacion == "no_avanzar"` → "No avanzar";
+  `resultado_apto` True + Entrevista Humana aprobada + "avanzar" → "Avanzar a contratación";
+  compatible pero sin Entrevista Humana completa (o "segunda_entrevista") → "Realizar
+  entrevista humana"; aún en Prefiltro → sin recomendación.
+- **Fortalezas/Puntos por validar**: unión deduplicada (máx. 4) de lo que cada etapa YA
+  calificó (`requisitos_cumplidos`/`brechas` del CV, criterios cumple/no-cumple del prefiltro,
+  `fortalezas`/`riesgos` de la Entrevista IA) — prioridad a la señal más reciente.
+La pestaña Evaluaciones no se tocó (ya cumplía el rol de "análisis detallado") — Resumen solo
+la referencia con "Ver detalle en Evaluaciones →", nunca duplica un bloque completo. El
+indicador `EstadoBadge` del header del modal ahora antepone "Prefiltro: " (nuevo prop
+`prefijo`, opcional, no afecta los otros 2 usos compactos del componente).
+
+**Punto 4 — Contraste de chips**: causa raíz encontrada por el fork — `--brand-ink: #ffffff`
+(blanco fijo) combinado a mano con `bg-brand-soft/40` (rosa casi blanco en tema claro) en 2
+chips ad-hoc de Habilidades que no usaban el componente `Badge` ya existente y correcto
+(`components/ui.tsx::toneMap`, `bg-{tono}-soft` + `text-{tono}`, usado en toda la plataforma
+sin este problema). Corregidos los 2 únicos casos reales:
+`candidatos/page.tsx` (CV y documentos) y `onboarding/page.tsx` (duplicado ahí).
+
+**Punto 5 — El CV debe alimentar la evaluación**: confirmado que
+`ia.py::evaluar_entrevista()` (Entrevista IA/avatar) ya recibía solo `titulo, requisitos,
+transcript` — nunca CV — no se tocó. Lo que faltaba (afinidad/recomendación integrando todas
+las fuentes con origen identificable) es exactamente `_sintesis_global()` del Punto 3, mismo
+trabajo. "Recalcular cuando el CV se carga después" se cumple gratis: nada se persiste, cada
+lectura recalcula con los datos más recientes.
+
+**Punto 6 — Overflow**: los únicos 2 `truncate` problemáticos reales (puesto/empresa-periodo
+en la Resumen vieja) quedaron reemplazados de raíz por el rediseño del Punto 3, construido sin
+`truncate` ni alturas fijas desde el inicio (`break-words`, `whitespace-pre-wrap`, contenedores
+que crecen con el contenido).
+
+### Deuda técnica documentada — CVs recibidos por WhatsApp se pierden en silencio
+
+`services/whatsapp.py::parsear_webhook`/`_texto_de_meta` nunca descargan archivos adjuntos —
+un documento/CV mandado por WhatsApp se reduce a su caption (si tiene) y el archivo real nunca
+se guarda ni se analiza; no hay ninguna referencia a `media_id`/descarga de medios en todo el
+backend. Decisión explícita del usuario: fuera del lote de estas 6 correcciones (es una
+integración nueva — descarga de media vía Graph API de Meta —, no un ajuste de UI/datos).
+Pendiente como ticket aparte.
+
+### Verificación realizada (2026-09-11)
+- Backend: import-check de los 3 archivos tocados (`ia.py`, `candidatos.py`, `serial.py`).
+  `TestClient` contra una base descartable (con `OPENAI_API_KEY` forzada a vacío en la
+  regresión automática): merge de `analisis` ya no borra `respuestas_prefiltro` al reprocesar
+  un CV; `_procesar_cv` guarda el `Archivo` aunque `ia.extraer_cv` truene (mockeado); el
+  endpoint de reanálisis relee el archivo de disco y actualiza `cvDatos`; los 3 campos nuevos
+  de `CVExtraido` llegan hasta la respuesta; `_sintesis_global` probado con las 4
+  combinaciones de señales (solo CV, +Entrevista IA, +Entrevista Humana aprobada, +Entrevista
+  Humana no aprobada) confirmando que `afinidadGlobal`/`recomendacionRedHuman` dan el valor
+  esperado en cada caso; regresión de `POST /vacantes/{codigo}/publicar` sin cambios. Todo en
+  verde.
+- Frontend: `tsc --noEmit` y `next build` limpios (19 rutas). Prueba con servidores reales
+  (`uvicorn`+`next dev` contra una base nueva): login real, las 4 páginas tocadas responden
+  200; se subió un CV real a través del servidor real y se confirmó en la respuesta que
+  `respuestas_prefiltro` sobrevive, los 3 campos nuevos de `cvDatos` llegan, y
+  `prefiltroResumen`/`afinidadGlobal`/`sintesisAfinidad`/`fortalezasPrincipales`/
+  `puntosPorValidar` se calculan correctamente; el endpoint de reanálisis respondió 200; la
+  vacante sembrada como "Publicada" se confirmó con ese estado vía `GET /vacantes/{codigo}`.
+  **Limitación honesta** (igual que en fases anteriores): sin navegador real disponible en
+  este entorno, no se probó clic-a-clic del botón "Publicar"/"Reintentar análisis" ni el
+  contraste visual de los chips en ambos temas — esa capa se cubre con `tsc`/`build` limpios,
+  el smoke test de servidores reales, y la revisión manual del código (incluida la cita exacta
+  de la causa raíz de cada punto). Servidores y base de prueba ya detenidos/borrados.
+
+### Fórmula de Afinidad/Recomendación (Punto 3.D/3.G) — APROBADA explícitamente por el
+### usuario, 2026-09-11, con ejemplos numéricos — no volver a preguntar ni resimular
+
+Se le presentó la fórmula exacta de `_sintesis_global()` más 3 ejemplos numéricos paso a paso
+(solo Prefiltro; Prefiltro+Entrevista IA; las 3 fuentes con Entrevista Humana aprobada) y una
+pregunta explícita sobre el peso de la Entrevista Humana en el promedio acumulado (~50% del
+acumulado en cada paso, no 33% parejo entre las 3 fuentes). **Confirmó tal cual está
+implementada, sin cambios**: el peso ~50% de la Entrevista Humana es intencional y coherente
+con el principio de human-in-the-loop que ya rige el resto del sistema (LFPDPPP, decisiones
+firmadas por una persona) — una persona real evaluando debe pesar más que el análisis
+automático de CV o de la Entrevista IA/avatar. Código de `serial.py::_sintesis_global` sigue
+exactamente como se implementó, cero cambios derivados de esta conversación.
+
 ### Siguiente paso
-1. El usuario revisa el código de Fase F (o pide una prueba manual en navegador de la barra
-   "Pregunta a Red Human" desde varias pantallas, incluyendo confirmar una acción propuesta).
-2. Commit y deploy cuando se apruebe — junto con TODO lo demás pendiente en esta rama (Fase D,
-   Puntos 2/27/28), nada se ha comiteado todavía.
-3. Correr `scripts/sembrar_reglas_notificacion.py` en producción tras el deploy (pendiente de
-   Fase D, sin relación con Fase F).
-4. Fase E (simplificación) es transversal y ya se viene verificando en cada fase — no queda
-   ningún entregable aparte pendiente salvo la deuda técnica anotada arriba.
+1. El usuario, si puede, prueba en navegador: publicar una vacante y ver el botón cambiar de
+   estado; subir un CV y ver la nueva pestaña Resumen; el contraste del chip de Habilidades en
+   tema claro y oscuro. La fórmula de Afinidad/Recomendación ya no requiere revisión — aprobada.
+2. Commit y deploy cuando se apruebe.
+3. Decidir si el hallazgo de CVs por WhatsApp entra a un backlog formal (ya documentado arriba
+   con el diagnóstico completo, listo para investigar-planear cuando se priorice).
 

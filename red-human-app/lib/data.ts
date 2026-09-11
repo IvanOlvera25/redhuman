@@ -45,6 +45,32 @@ export interface EntrevistaHumana {
   resultadoCapturadoPor: CapturadoPor | null;
 }
 
+/** Extracción del CV (services/ia.py::CVExtraido) — ver Punto 2/3.B. Todo es opcional: el
+ * candidato puede no tener CV, o el análisis puede haber fallado (ver estadoAnalisisCv en
+ * candidatos/page.tsx). */
+export interface CvDatos {
+  nombre?: string | null;
+  correo?: string | null;
+  telefono?: string | null;
+  ubicacion?: string | null;
+  anios_experiencia?: number | null;
+  experiencia_resumen?: string;
+  puesto_actual?: string | null;
+  ultimo_empleo?: string | null;
+  estudios?: string[];
+  habilidades?: string[];
+  idiomas?: string[];
+  /** 3-5 líneas, más completo que experiencia_resumen (Punto 3.B). */
+  resumen_profesional?: string;
+  /** Solo cuando se extrajo con una vacante de referencia. */
+  experiencia_relevante?: string | null;
+  conocimientos_relevantes?: string[];
+  datos_faltantes?: string[];
+  alertas?: string[];
+  es_cv?: boolean;
+  [key: string]: unknown;
+}
+
 export interface Candidato {
   id: string;
   nombre: string;
@@ -98,8 +124,17 @@ export interface Candidato {
   /** Nombre del Cliente de la vacante del candidato, si aplica. Null si no tiene vacante o
    * la vacante no tiene Cliente. Permite la columna "Cliente" en la vista lista sin JOIN extra. */
   clienteVacante?: string | null;
+  /* --- Puntos 3/5: síntesis global (CV + Prefiltro + Entrevista IA + Entrevista Humana),
+   * calculada al vuelo en cada lectura del detalle — nunca se persiste, siempre está al día. --- */
+  prefiltroResumen?: { cumple: number; total: number; incumplidos: string[] } | null;
+  afinidadGlobal?: number | null;
+  sintesisAfinidad?: string;
+  fortalezasPrincipales?: string[];
+  puntosPorValidar?: string[];
+  recomendacionRedHuman?: "No avanzar" | "Realizar entrevista humana" | "Avanzar a contratación" | null;
+  recomendacionMotivo?: string;
   /* solo en el detalle (GET /candidatos/{codigo}) */
-  cvDatos?: Record<string, unknown>;
+  cvDatos?: CvDatos;
   analisis?: {
     origen?: string;
     ia?: boolean;
