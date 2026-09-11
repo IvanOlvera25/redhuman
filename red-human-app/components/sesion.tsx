@@ -83,11 +83,13 @@ export function ProveedorSesion({ children }: { children: React.ReactNode }) {
     refrescar();
   }, [refrescar]);
 
+  // Modo Prueba se relee al cambiar de Cuenta (Punto 9) y cuando Configuración lo alterna
+  // (esa sección llama refrescar()).
   useEffect(() => {
     fetchConfiguracion().then((cfg) => {
       if (cfg) setModoPrueba(cfg.modoPrueba);
     });
-  }, []);
+  }, [cuentaActualId, usuario?.id]);
 
   const salir = useCallback(async () => {
     await apiLogout();
@@ -101,8 +103,8 @@ export function ProveedorSesion({ children }: { children: React.ReactNode }) {
         window.localStorage.setItem(CLAVE_STORAGE, String(id));
       }
       setCuentaActualId(id);
-      // Recargar contexto navegando al Tablero — evita que el usuario vea datos de la
-      // Cuenta anterior mientras los endpoints responden con la nueva Cuenta.
+      // Navegar al Tablero evita ver datos de la Cuenta anterior; además <PorCuenta> (layout)
+      // remonta todo el dashboard con la nueva Cuenta, aunque la ruta no cambie.
       router.push("/dashboard");
     },
     [router],

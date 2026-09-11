@@ -46,7 +46,7 @@ def nombre_empresa_candidato(v: Vacante) -> str:
     Cuenta — nunca el texto libre `empresa` salvo que la vacante no tenga Cuenta (no debería
     pasar tras la migración de Fase A, es solo un respaldo defensivo)."""
     if v.cliente_id and v.mostrar_cliente_candidato and v.cliente:
-        return v.cliente.nombre
+        return v.cliente.nombre_visible
     if v.cuenta:
         return v.cuenta.nombre_comercial
     return v.empresa or ""
@@ -67,6 +67,7 @@ def vacante_dict(
         "empresa": v.empresa,
         # --- Fase B: Cliente/Responsable/Colaboradores/visibilidad ---
         "cliente": v.cliente.nombre if v.cliente else None,
+        "clienteId": v.cliente_id,
         "responsable": v.responsable.nombre if v.responsable else None,
         "colaboradores": colaboradores or [],
         "mostrarClienteCandidato": v.mostrar_cliente_candidato,

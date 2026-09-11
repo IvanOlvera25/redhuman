@@ -41,6 +41,8 @@ import {
   type MensajePrefiltro,
 } from "@/lib/api";
 import { useNombreRH, usePuedeDecidir } from "@/components/sesion";
+import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
+import type { NotificarAccion } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const docConfig: Record<
@@ -197,19 +199,23 @@ function Expediente({
 
   const soloLectura = !live || !puedeDecidir || n.estado === "alta";
 
-  async function solicitarFaltantes() {
+  // Punto 12: confirmación ligera con la línea "Notificar: … · Editar" antes de cada acción.
+  const [confirmacion, setConfirmacion] = useState<null | "solicitar" | "recordatorio" | "alta">(null);
+
+  async function solicitarFaltantes(notificar?: NotificarAccion) {
     if (!live || !n.candidatoId) return exigeApi();
     setOcupado("solicitar");
-    const r = await solicitarDocumentosCandidato(n.candidatoId);
+    const r = await solicitarDocumentosCandidato(n.candidatoId, notificar);
     setOcupado("");
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
-    setAviso({ tono: "ok", texto: "Solicitud de documentos enviada por WhatsApp." });
+    const enviados = r.data.resultados.filter((x) => x.enviado).length;
+    setAviso(enviados > 0 ? { tono: "ok", texto: `Solicitud de documentos enviada (${enviados} envío(s)).` } : { tono: "info", texto: "No había ningún destinatario activo — revisa la línea «Notificar» o Configuración → Notificaciones." });
   }
 
-  async function recordatorio() {
+  async function recordatorio(notificar?: NotificarAccion) {
     if (!live || !n.expedienteId) return exigeApi();
     setOcupado("recordatorio");
-    const r = await enviarRecordatorio(n.expedienteId);
+    const r = await enviarRecordatorio(n.expedienteId, notificar);
     setOcupado("");
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
     setAviso(
@@ -220,10 +226,10 @@ function Expediente({
     onActualizado(r.data.expediente);
   }
 
-  async function alta() {
+  async function alta(notificar?: NotificarAccion) {
     if (!live || !n.expedienteId) return exigeApi();
     setOcupado("alta");
-    const r = await autorizarAlta(n.expedienteId);
+    const r = await autorizarAlta(n.expedienteId, undefined, false, notificar);
     setOcupado("");
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
     setAviso({ tono: "ok", texto: `Alta autorizada por ${yo} y registrada en la bitácora ✓ — movido a Colaboradores.` });
@@ -451,11 +457,11 @@ function Expediente({
 
         {!soloLectura && (
           <div className="mt-3 flex flex-wrap gap-2.5">
-            <Button variant="outline" size="sm" onClick={solicitarFaltantes} disabled={Boolean(ocupado)}>
+            <Button variant="outline" size="sm" onClick={() => setConfirmacion("solicitar")} disabled={Boolean(ocupado)}>
               <MessageCircle className="h-4 w-4" />
               {ocupado === "solicitar" ? "Enviando…" : "Solicitar documentos faltantes"}
             </Button>
-            <Button variant="outline" size="sm" onClick={recordatorio} disabled={Boolean(ocupado)}>
+            <Button variant="outline" size="sm" onClick={() => setConfirmacion("recordatorio")} disabled={Boolean(ocupado)}>
               <Send className="h-4 w-4" />
               {ocupado === "recordatorio" ? "Enviando…" : "Enviar recordatorio"}
             </Button>
@@ -510,10 +516,43 @@ function Expediente({
         {/* Siempre visible y habilitado en Onboarding — el progreso de documentos ya no lo
             oculta ni lo deshabilita. Si faltan documentos obligatorios, el backend rechaza
             la petición (409) y el mensaje aparece arriba en {aviso}; el botón nunca desaparece. */}
-        <Button size="lg" className="w-full" disabled={Boolean(ocupado) || n.estado === "alta"} onClick={alta}>
+        <Button size="lg" className="w-full" disabled={Boolean(ocupado) || n.estado === "alta"} onClick={() => setConfirmacion("alta")}>
           <FileCheck2 className="h-5 w-5" />
           {n.estado === "alta" ? "Alta completada ✓" : ocupado === "alta" ? "Dando de alta…" : "DAR DE ALTA COMO COLABORADOR"}
         </Button>
+
+        {confirmacion === "solicitar" && (
+          <ConfirmacionAccion
+            titulo="Solicitar documentos faltantes"
+            evento="solicitud_documentos"
+            hayEntrevistador={false}
+            etiquetaConfirmar="Enviar"
+            onCancelar={() => setConfirmacion(null)}
+            onConfirmar={async (nt) => { setConfirmacion(null); await solicitarFaltantes(nt); }}
+          />
+        )}
+        {confirmacion === "recordatorio" && (
+          <ConfirmacionAccion
+            titulo="Enviar recordatorio de documentos"
+            texto="Se enviará con el detalle de los documentos pendientes o rechazados."
+            evento="recordatorio_documentos"
+            hayEntrevistador={false}
+            etiquetaConfirmar="Enviar"
+            onCancelar={() => setConfirmacion(null)}
+            onConfirmar={async (nt) => { setConfirmacion(null); await recordatorio(nt); }}
+          />
+        )}
+        {confirmacion === "alta" && (
+          <ConfirmacionAccion
+            titulo="Dar de alta como colaborador"
+            texto={`RH autoriza el alta: la decisión queda firmada por ${yo} en la bitácora y el registro se mueve a Colaboradores.`}
+            evento="contratacion"
+            hayEntrevistador={false}
+            etiquetaConfirmar="Dar de alta"
+            onCancelar={() => setConfirmacion(null)}
+            onConfirmar={async (nt) => { setConfirmacion(null); await alta(nt); }}
+          />
+        )}
 
         <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-human/25 bg-human-soft/50 p-3">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-human" />

@@ -6,7 +6,6 @@ import {
   MapPin,
   Users,
   X,
-  Wand2,
   Check,
   Send,
   Briefcase,
@@ -29,6 +28,15 @@ import {
   MoreHorizontal,
 } from "lucide-react";
 import { Button, Card, Badge, Eyebrow } from "@/components/ui";
+import { Area, Field, Selector, ToggleSiNo } from "@/components/dashboard/campos";
+import {
+  CONTENIDO_VACIO,
+  FormularioContenidoVacante,
+  contenidoComoPayload,
+  contenidoDesdePlantilla,
+  tieneContenidoManual,
+  type ContenidoVacante,
+} from "@/components/dashboard/vacantes/formulario-contenido";
 import { PageHeader } from "@/components/dashboard/parts";
 import { Aviso, BotonCopiar } from "@/components/dashboard/subida";
 import { vacantes as vacantesDemo, type Vacante } from "@/lib/data";
@@ -45,8 +53,7 @@ import {
   fetchClientes,
   fetchEntrevistadores,
   fetchPlantillas,
-  crearPlantilla,
-  eliminarPlantilla,
+  guardarVacanteComoPlantilla,
   type BloquePlataforma,
   type CriterioFiltro,
   type VacanteGenerada,
@@ -84,7 +91,6 @@ export default function Vacantes() {
     sel ? { pantalla: "vacante", entidad: { tipo: "vacante", codigo: sel.id } } : { pantalla: "vacantes" },
   );
   const [verPrevia, setVerPrevia] = useState<string | null>(null);
-  const [gestionPlantillas, setGestionPlantillas] = useState(false);
   const [datos, setDatos] = useState<Vacante[]>(vacantesDemo);
   const [live, setLive] = useState(false);
   const [cambiandoEstatus, setCambiandoEstatus] = useState("");
@@ -231,11 +237,6 @@ export default function Vacantes() {
             <List className="h-4 w-4" />
           </button>
         </div>
-        {puedeDecidir && (
-          <Button size="sm" variant="outline" onClick={() => setGestionPlantillas(true)}>
-            <Sparkles className="h-4 w-4" /> Plantillas
-          </Button>
-        )}
         {puedeDecidir && (
           <Button size="sm" onClick={() => setOpen(true)}>
             <Plus className="h-4 w-4" /> Nueva vacante
@@ -604,7 +605,6 @@ export default function Vacantes() {
 
       {verPrevia && <VistaPreviaVacante codigo={verPrevia} onClose={() => setVerPrevia(null)} />}
 
-      {gestionPlantillas && <GestionPlantillas onClose={() => setGestionPlantillas(false)} />}
     </div>
   );
 }
@@ -630,107 +630,54 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
     fetchPlantillas(clienteParaPlantilla || undefined).then((p) => setPlantillas(p ?? []));
   }, [paso, clienteParaPlantilla]);
 
+  // Punto 11: UN solo formulario de contenido, compartido con Configuración → Plantillas.
+  const [contenido, setContenido] = useState<ContenidoVacante>(CONTENIDO_VACIO);
+  const [empresa, setEmpresa] = useState("");
+  const [notas, setNotas] = useState("");
+
   function elegirPlantilla(p: Plantilla) {
     setPlantillaBase(p);
-    setF((prev) => ({
-      ...prev,
-      titulo: p.titulo || prev.titulo,
-      area: p.area || prev.area,
-      sueldo: p.sueldo || prev.sueldo,
-      modalidad: p.modalidad || prev.modalidad,
-      requisitos: p.requisitos || prev.requisitos,
-    }));
+    setContenido(contenidoDesdePlantilla(p)); // precarga TODOS los campos (antes solo 5)
     if (p.clienteId) setClienteId(p.clienteId);
     setPaso("formulario");
   }
-
-  const [f, setF] = useState({
-    titulo: "",
-    area: "",
-    ubicacion: "",
-    sueldo: "",
-    empresa: "",
-    modalidad: "Presencial",
-    requisitos: "",
-    notas: "",
-  });
-  const set = (k: keyof typeof f) => (v: string) => setF((prev) => ({ ...prev, [k]: v }));
 
   const [clienteId, setClienteId] = useState<number | "">("");
   const [responsableId, setResponsableId] = useState<number | "">("");
   const [colaboradoresIds, setColaboradoresIds] = useState<number[]>([]);
   const [mostrarCliente, setMostrarCliente] = useState(true);
 
+  // Bloques de publicación por plataforma (occ/linkedin/portal) que solo produce el generador:
+  // se conservan aparte del contenido editable para mandarlos en `publicaciones`.
   const [gen, setGen] = useState<VacanteGenerada | null>(null);
-  const [generando, setGenerando] = useState(false);
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState("");
   const [destinos, setDestinos] = useState<string[]>(["WhatsApp", "Portal"]);
 
-  async function generar() {
-    if (!f.titulo.trim()) {
-      setError("El título del puesto es obligatorio.");
-      return;
-    }
-    setGenerando(true);
-    setError("");
-    const r = await generarVacanteIA(f);
-    setGenerando(false);
-    if (!r.ok) {
-      setError(r.error);
-      return;
-    }
-    setGen(r.data);
-  }
-
   async function guardar(publicar: boolean) {
+    if (!contenido.titulo.trim()) {
+      setError("El nombre del puesto es obligatorio.");
+      return;
+    }
     setGuardando(true);
     setError("");
-    // El contenido viene de lo que la IA generó en esta sesión si se corrió; si no, de la
-    // plantilla elegida (si hubo); si tampoco, se manda vacío y generar_si_falta deja que la
-    // API lo genere sola al guardar.
-    const contenido = gen
-      ? {
-          descripcion: gen.descripcion,
-          resumen: gen.resumen,
-          perfil_ideal: gen.perfil_ideal,
-          responsabilidades: gen.responsabilidades,
-          requisitos_deseables: gen.requisitos_deseables,
-          beneficios: gen.beneficios,
-          palabras_clave: gen.palabras_clave,
-          seniority: gen.seniority,
-          avisos_cumplimiento: gen.avisos_cumplimiento,
-          texto_whatsapp: gen.texto_whatsapp,
-          preguntas_filtro: gen.preguntas_filtro,
-          publicaciones: {
-            whatsapp: { titulo: f.titulo, copy: gen.texto_whatsapp, page: gen.texto_whatsapp, etiquetas: [] },
+    const manual = tieneContenidoManual(contenido);
+    const r = await crearVacante({
+      ...contenidoComoPayload(contenido),
+      empresa,
+      notas,
+      publicaciones: gen
+        ? {
+            whatsapp: { titulo: contenido.titulo, copy: contenido.texto_whatsapp, page: contenido.texto_whatsapp, etiquetas: [] },
             occ: gen.occ,
             linkedin: gen.linkedin,
             portal: gen.portal,
-          },
-        }
-      : plantillaBase
-        ? {
-            descripcion: plantillaBase.descripcion,
-            resumen: plantillaBase.resumen,
-            perfil_ideal: plantillaBase.perfilIdeal,
-            responsabilidades: plantillaBase.responsabilidades,
-            requisitos_deseables: plantillaBase.requisitosDeseables,
-            beneficios: plantillaBase.beneficios,
-            palabras_clave: plantillaBase.palabrasClave,
-            seniority: plantillaBase.seniority,
-            avisos_cumplimiento: plantillaBase.avisosCumplimiento,
-            texto_whatsapp: plantillaBase.textoWhatsapp,
-            preguntas_filtro: plantillaBase.preguntasFiltro,
           }
-        : {};
-
-    const r = await crearVacante({
-      ...f,
-      ...contenido,
+        : {},
       publicar,
       plataformas: publicar ? destinos : [],
-      generar_si_falta: !gen && !plantillaBase, // sin IA ni plantilla, la API genera el contenido
+      // sin contenido capturado ni IA ni plantilla, la API genera el contenido al guardar
+      generar_si_falta: !gen && !plantillaBase && !manual,
       cliente_id: clienteId || null,
       responsable_id: responsableId || null,
       colaboradores_ids: colaboradoresIds,
@@ -775,7 +722,7 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
               </span>
               <div>
                 <p className="font-display text-base font-bold">Usar plantilla</p>
-                <p className="mt-1 text-sm text-ink-3">Precarga puesto, descripción, requisitos y preguntas.</p>
+                <p className="mt-1 text-sm text-ink-3">Precarga puesto, descripción, responsabilidades, requisitos, condiciones y criterios.</p>
               </div>
             </button>
           </div>
@@ -810,8 +757,8 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
           )}
           {plantillas.length === 0 ? (
             <Aviso tono="info">
-              No hay plantillas {clienteParaPlantilla ? "para este Cliente ni generales" : "generales"} todavía.
-              Cierra esta ventana y crea la vacante desde cero.
+              No hay plantillas {clienteParaPlantilla ? "para este Cliente ni generales" : "generales"} todavía. Se
+              administran en Configuración → Plantillas; también puedes crear la vacante desde cero.
             </Aviso>
           ) : (
             <div className="flex flex-col gap-2.5">
@@ -837,29 +784,25 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
 
   return (
     <Panel titulo="Nueva vacante" eyebrow="Distribuidor de vacantes" onClose={onClose} ancho="max-w-3xl">
-      <div className="flex flex-col gap-5 p-6">
+      <div className="flex flex-col gap-6 p-6">
         {plantillaBase && (
           <Aviso tono="ok">
             Formulario precargado desde la plantilla «{plantillaBase.nombre}». Puedes editar cualquier campo.
           </Aviso>
         )}
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Título del puesto" value={f.titulo} onChange={set("titulo")} placeholder="Ej. Repartidor en motocicleta" full />
-          <Field label="Área" value={f.area} onChange={set("area")} placeholder="Ej. Logística" />
-          <Field label="Empresa" value={f.empresa} onChange={set("empresa")} placeholder="Ej. Red Human S.A. de C.V." />
-          <Field label="Ubicación" value={f.ubicacion} onChange={set("ubicacion")} placeholder="Ej. Ciudad de México, CDMX" />
-          <Field label="Sueldo" value={f.sueldo} onChange={set("sueldo")} placeholder="Ej. $12,000 - $15,000 mensuales" />
-          <Selector
-            label="Modalidad"
-            value={f.modalidad}
-            onChange={set("modalidad")}
-            opciones={["Presencial", "Híbrido", "Remoto"]}
-          />
-        </div>
+        <FormularioContenidoVacante
+          value={contenido}
+          onChange={setContenido}
+          onGenerado={setGen}
+          notasIA={notas}
+          onNotasIA={setNotas}
+          empresa={empresa}
+        />
 
         {/* Cuenta (automática) / Cliente / Responsable / Colaboradores — Fase B, punto 8 */}
         <div className="grid gap-4 border-t border-border-faint pt-5 sm:grid-cols-2">
+          <Field label="Empresa (texto libre, opcional)" value={empresa} onChange={setEmpresa} placeholder="Solo si difiere de la Cuenta/Cliente" />
           {clientes.length > 0 && (
             <label className="flex flex-col gap-1.5">
               <span className="text-sm font-medium text-ink-2">Cliente (opcional)</span>
@@ -928,75 +871,41 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
           />
         )}
 
-        <Area
-          label="Requisitos indispensables"
-          value={f.requisitos}
-          onChange={set("requisitos")}
-          placeholder="Ej. Licencia de conducir vigente, disponibilidad de horario"
-          ayuda="Sepáralos con comas. La IA quita cualquier criterio discriminatorio (edad, sexo, estado civil) y te avisa."
-        />
-        <Area
-          label="Notas para la IA (opcional)"
-          value={f.notas}
-          onChange={set("notas")}
-          rows={2}
-          ayuda="Horario, prestaciones superiores, tono deseado, detalles del equipo…"
-        />
-
         {error && <Aviso tono="error">{error}</Aviso>}
 
-        <Button onClick={generar} disabled={generando} className="w-full">
-          {generando ? (
-            <>
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-brand-ink/40 border-t-brand-ink" />
-              Generando publicación por plataforma…
-            </>
-          ) : (
-            <>
-              <Wand2 className="h-4 w-4" /> {gen ? "Volver a generar" : "Generar publicación con IA"}
-            </>
-          )}
-        </Button>
+        {gen && <ResultadoGeneracion gen={gen} />}
 
-        {gen && (
-          <>
-            <ResultadoGeneracion gen={gen} />
-
-            <div>
-              <Eyebrow>Publicar en</Eyebrow>
-              <div className="mt-3 grid gap-2.5 sm:grid-cols-2">
-                {PLATAFORMAS.map((p) => {
-                  const activo = destinos.includes(p.api);
-                  return (
-                    <button
-                      key={p.clave}
-                      onClick={() =>
-                        setDestinos((d) => (activo ? d.filter((x) => x !== p.api) : [...d, p.api]))
-                      }
-                      className={cn(
-                        "flex items-center gap-3 rounded-xl border p-3 text-left transition",
-                        activo ? "border-brand bg-brand-soft/50" : "border-border-soft bg-surface hover:border-brand/40",
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "grid h-5 w-5 shrink-0 place-items-center rounded-md border",
-                          activo ? "border-brand bg-brand text-brand-ink" : "border-border-soft",
-                        )}
-                      >
-                        {activo && <Check className="h-3.5 w-3.5" />}
-                      </span>
-                      <div className="min-w-0">
-                        <p className="text-sm font-semibold">{p.nombre}</p>
-                        <p className="truncate text-xs text-ink-3">{p.nota}</p>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </>
-        )}
+        <div>
+          <Eyebrow>Publicar en</Eyebrow>
+          <div className="mt-3 grid gap-2.5 sm:grid-cols-2">
+            {PLATAFORMAS.map((p) => {
+              const activo = destinos.includes(p.api);
+              return (
+                <button
+                  key={p.clave}
+                  onClick={() => setDestinos((d) => (activo ? d.filter((x) => x !== p.api) : [...d, p.api]))}
+                  className={cn(
+                    "flex items-center gap-3 rounded-xl border p-3 text-left transition",
+                    activo ? "border-brand bg-brand-soft/50" : "border-border-soft bg-surface hover:border-brand/40",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "grid h-5 w-5 shrink-0 place-items-center rounded-md border",
+                      activo ? "border-brand bg-brand text-brand-ink" : "border-border-soft",
+                    )}
+                  >
+                    {activo && <Check className="h-3.5 w-3.5" />}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold">{p.nombre}</p>
+                    <p className="truncate text-xs text-ink-3">{p.nota}</p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
         <div className="flex items-center gap-3 border-t border-border-faint pt-5">
           <Button variant="outline" className="flex-1" onClick={() => guardar(false)} disabled={guardando}>
@@ -1008,138 +917,6 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
         </div>
       </div>
     </Panel>
-  );
-}
-
-/* ============================================================
-   Gestión de Plantillas (Fase B, punto 11)
-   ============================================================ */
-function GestionPlantillas({ onClose }: { onClose: () => void }) {
-  const [clientes, setClientes] = useState<Cliente[]>([]);
-  const [plantillas, setPlantillas] = useState<Plantilla[]>([]);
-  const [cargando, setCargando] = useState(true);
-  const [crear, setCrear] = useState(false);
-
-  const recargar = useCallback(async () => {
-    const p = await fetchPlantillas();
-    setPlantillas(p ?? []);
-  }, []);
-
-  useEffect(() => {
-    fetchClientes("Activo").then((c) => setClientes(c ?? []));
-    recargar().then(() => setCargando(false));
-  }, [recargar]);
-
-  async function desactivar(id: number) {
-    await eliminarPlantilla(id);
-    recargar();
-  }
-
-  return (
-    <Panel titulo="Plantillas de vacante" eyebrow="General de la Cuenta o de un Cliente" onClose={onClose} ancho="max-w-2xl">
-      <div className="flex flex-col gap-4 p-6">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-sm text-ink-2">
-            Precargan puesto, descripción, requisitos y preguntas al crear una vacante.
-          </p>
-          <Button size="sm" variant="outline" onClick={() => setCrear((v) => !v)}>
-            <Plus className="h-4 w-4" /> {crear ? "Cancelar" : "Nueva"}
-          </Button>
-        </div>
-
-        {crear && (
-          <FormularioPlantilla
-            clientes={clientes}
-            onCreada={() => {
-              setCrear(false);
-              recargar();
-            }}
-          />
-        )}
-
-        {cargando ? (
-          <p className="text-sm text-ink-3">Cargando…</p>
-        ) : plantillas.length === 0 ? (
-          <Aviso tono="info">
-            Todavía no hay ninguna plantilla. Créala aquí, o desde el detalle de una vacante con
-            «Guardar este contenido como plantilla reutilizable».
-          </Aviso>
-        ) : (
-          <ul className="flex flex-col divide-y divide-border-faint">
-            {plantillas.map((p) => (
-              <li key={p.id} className="flex items-center justify-between gap-3 py-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold">{p.nombre}</p>
-                  <p className="truncate text-xs text-ink-3">{p.titulo || "Sin título precargado"}</p>
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  {p.clienteNombre ? <Badge tone="brand">{p.clienteNombre}</Badge> : <Badge tone="neutral">General</Badge>}
-                  <button onClick={() => desactivar(p.id)} className="text-xs font-medium text-bad hover:underline">
-                    Desactivar
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-function FormularioPlantilla({ clientes, onCreada }: { clientes: Cliente[]; onCreada: () => void }) {
-  const [nombre, setNombre] = useState("");
-  const [clienteId, setClienteId] = useState<number | "">("");
-  const [titulo, setTitulo] = useState("");
-  const [requisitos, setRequisitos] = useState("");
-  const [descripcion, setDescripcion] = useState("");
-  const [guardando, setGuardando] = useState(false);
-  const [error, setError] = useState("");
-
-  async function crear() {
-    if (!nombre.trim()) {
-      setError("El nombre de la plantilla es obligatorio.");
-      return;
-    }
-    setGuardando(true);
-    setError("");
-    const r = await crearPlantilla({ nombre: nombre.trim(), cliente_id: clienteId || null, titulo, requisitos, descripcion });
-    setGuardando(false);
-    if (!r.ok) {
-      setError(r.error);
-      return;
-    }
-    onCreada();
-  }
-
-  return (
-    <Card className="flex flex-col gap-3 p-4">
-      <Field label="Nombre de la plantilla" value={nombre} onChange={setNombre} placeholder="Ej. Vendedor de piso estándar" full />
-      {clientes.length > 0 && (
-        <label className="flex flex-col gap-1.5">
-          <span className="text-sm font-medium text-ink-2">Alcance</span>
-          <select
-            value={clienteId}
-            onChange={(e) => setClienteId(e.target.value ? Number(e.target.value) : "")}
-            className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
-          >
-            <option value="">General de la Cuenta</option>
-            {clientes.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.nombre}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      <Field label="Título del puesto" value={titulo} onChange={setTitulo} placeholder="Ej. Vendedor de piso" />
-      <Area label="Requisitos" value={requisitos} onChange={setRequisitos} rows={2} />
-      <Area label="Descripción" value={descripcion} onChange={setDescripcion} rows={3} />
-      {error && <Aviso tono="error">{error}</Aviso>}
-      <Button size="sm" onClick={crear} disabled={guardando}>
-        {guardando ? "Guardando…" : "Crear plantilla"}
-      </Button>
-    </Card>
   );
 }
 
@@ -1510,40 +1287,21 @@ function DetalleVacante({
 
   const [mostrarGuardarPlantilla, setMostrarGuardarPlantilla] = useState(false);
   const [nombrePlantilla, setNombrePlantilla] = useState("");
+  const [alcancePlantilla, setAlcancePlantilla] = useState<"general" | "cliente">("general");
   const [guardandoPlantilla, setGuardandoPlantilla] = useState(false);
 
-  /** Guarda el contenido ya generado de esta vacante como una Plantilla general (Fase B, punto
-   * 11) — la forma más natural de armar una plantilla rica sin capturar todo a mano. Se puede
-   * mover a un Cliente específico después desde la gestión de Plantillas. */
+  /** «Guardar como plantilla» (Punto 11): el servidor copia los campos compartidos de esta
+   * vacante — General de la Cuenta o del Cliente de la vacante, a elección. */
   async function guardarComoPlantilla() {
     if (!nombrePlantilla.trim()) return;
     setGuardandoPlantilla(true);
-    const r = await crearPlantilla({
-      nombre: nombrePlantilla.trim(),
-      titulo: v.titulo,
-      area: v.area,
-      modalidad: v.modalidad,
-      sueldo: v.sueldo,
-      requisitos: v.requisitos ?? "",
-      descripcion: v.descripcion ?? "",
-      resumen: v.resumen ?? "",
-      perfil_ideal: v.perfilIdeal ?? "",
-      responsabilidades: v.responsabilidades ?? [],
-      requisitos_deseables: v.requisitosDeseables ?? [],
-      beneficios: v.beneficios ?? [],
-      palabras_clave: v.palabrasClave ?? [],
-      seniority: v.seniority ?? "",
-      avisos_cumplimiento: v.avisosCumplimiento ?? [],
-      preguntas_filtro: (v.criterios ?? []) as CriterioFiltro[],
-      texto_whatsapp: v.textoWhatsapp ?? "",
-      texto_bolsa: v.textoBolsa ?? "",
-    });
+    const r = await guardarVacanteComoPlantilla(v.id, nombrePlantilla.trim(), alcancePlantilla === "cliente" ? v.clienteId ?? null : null);
     setGuardandoPlantilla(false);
     if (!r.ok) {
       setAviso({ tono: "error", texto: r.error });
       return;
     }
-    setAviso({ tono: "ok", texto: `Plantilla "${r.data.nombre}" creada — ya se puede sugerir en nuevas vacantes.` });
+    setAviso({ tono: "ok", texto: `Plantilla "${r.data.nombre}" creada — se administra en Configuración → Plantillas y ya se sugiere en nuevas vacantes.` });
     setMostrarGuardarPlantilla(false);
     setNombrePlantilla("");
   }
@@ -1633,13 +1391,23 @@ function DetalleVacante({
         {live && puedeDecidir && tieneContenido && (
           <div className="rounded-xl border border-border-soft p-4">
             {mostrarGuardarPlantilla ? (
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <input
                   value={nombrePlantilla}
                   onChange={(e) => setNombrePlantilla(e.target.value)}
                   placeholder="Nombre de la plantilla"
-                  className="h-10 flex-1 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+                  className="h-10 min-w-[200px] flex-1 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
                 />
+                {v.clienteId && (
+                  <select
+                    value={alcancePlantilla}
+                    onChange={(e) => setAlcancePlantilla(e.target.value as "general" | "cliente")}
+                    className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand"
+                  >
+                    <option value="general">General de la Cuenta</option>
+                    <option value="cliente">Solo para {v.cliente || "este Cliente"}</option>
+                  </select>
+                )}
                 <Button size="sm" onClick={guardarComoPlantilla} disabled={guardandoPlantilla || !nombrePlantilla.trim()}>
                   {guardandoPlantilla ? "Guardando…" : "Guardar"}
                 </Button>
@@ -1652,7 +1420,7 @@ function DetalleVacante({
                 onClick={() => setMostrarGuardarPlantilla(true)}
                 className="text-sm font-medium text-brand hover:underline"
               >
-                Guardar este contenido como plantilla reutilizable
+                Guardar como plantilla
               </button>
             )}
           </div>
@@ -1855,123 +1623,3 @@ function ListaCorta({ titulo, items }: { titulo: string; items: string[] }) {
   );
 }
 
-function Field({
-  label,
-  value,
-  onChange,
-  placeholder,
-  full,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  full?: boolean;
-}) {
-  return (
-    <label className={cn("flex flex-col gap-1.5", full && "sm:col-span-2")}>
-      <span className="text-sm font-medium text-ink-2">{label}</span>
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
-      />
-    </label>
-  );
-}
-
-function Selector({
-  label,
-  value,
-  onChange,
-  opciones,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  opciones: string[];
-}) {
-  return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-sm font-medium text-ink-2">{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
-      >
-        {opciones.map((o) => (
-          <option key={o} value={o}>
-            {o}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function ToggleSiNo({
-  label,
-  ayuda,
-  valor,
-  onChange,
-}: {
-  label: string;
-  ayuda?: string;
-  valor: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <div>
-      <span className="text-sm font-medium text-ink-2">{label}</span>
-      <div className="mt-1.5 flex gap-2">
-        {[
-          { texto: "Sí", val: true },
-          { texto: "No", val: false },
-        ].map((o) => (
-          <button
-            key={o.texto}
-            onClick={() => onChange(o.val)}
-            className={cn(
-              "rounded-full border px-4 py-1.5 text-[13px] font-medium transition",
-              valor === o.val ? "border-brand bg-brand-soft text-brand" : "border-border-soft text-ink-2 hover:border-brand/40",
-            )}
-          >
-            {o.texto}
-          </button>
-        ))}
-      </div>
-      {ayuda && <p className="mt-1.5 text-xs leading-relaxed text-ink-3">{ayuda}</p>}
-    </div>
-  );
-}
-
-function Area({
-  label,
-  value,
-  onChange,
-  rows = 3,
-  ayuda,
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  rows?: number;
-  ayuda?: string;
-  placeholder?: string;
-}) {
-  return (
-    <div>
-      <label className="mb-1.5 block text-sm font-medium text-ink-2">{label}</label>
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        rows={rows}
-        placeholder={placeholder}
-        className="w-full rounded-xl border border-border-soft bg-surface px-3.5 py-2.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
-      />
-      {ayuda && <p className="mt-1.5 text-xs leading-relaxed text-ink-3">{ayuda}</p>}
-    </div>
-  );
-}

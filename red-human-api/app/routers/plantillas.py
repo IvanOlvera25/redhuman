@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import Cliente, Cuenta, Plantilla, Usuario, registrar
+from ..models import CAMPOS_PLANTILLA, Cliente, Cuenta, Plantilla, Usuario, Vacante, registrar
 
 router = APIRouter(prefix="/plantillas", tags=["plantillas"])
 
@@ -23,6 +23,7 @@ def _plantilla_dict(p: Plantilla) -> dict:
         "activa": p.activa,
         "titulo": p.titulo,
         "area": p.area,
+        "ubicacion": p.ubicacion,
         "modalidad": p.modalidad,
         "sueldo": p.sueldo,
         "requisitos": p.requisitos,
@@ -40,6 +41,7 @@ def _plantilla_dict(p: Plantilla) -> dict:
         "textoBolsa": p.texto_bolsa,
         "creadoPor": p.creado_por,
         "creada": p.creada_en.isoformat(),
+        "actualizada": (p.actualizada_en or p.creada_en).isoformat(),
     }
 
 
@@ -88,6 +90,7 @@ class PlantillaIn(BaseModel):
     cliente_id: Optional[int] = None
     titulo: str = ""
     area: str = ""
+    ubicacion: str = ""
     modalidad: str = "Presencial"
     sueldo: str = "A convenir"
     requisitos: str = ""
@@ -135,6 +138,7 @@ class ActualizarIn(BaseModel):
     activa: Optional[bool] = None
     titulo: Optional[str] = None
     area: Optional[str] = None
+    ubicacion: Optional[str] = None
     modalidad: Optional[str] = None
     sueldo: Optional[str] = None
     requisitos: Optional[str] = None
@@ -185,3 +189,58 @@ def eliminar(
     registrar(db, u.nombre, "plantilla_desactivada", "plantilla", str(p.id), {})
     db.commit()
     return {"ok": True}
+
+
+# ------------------------------------------------------------
+# Punto 11 — Duplicar y "Guardar como plantilla" desde una vacante
+# ------------------------------------------------------------
+
+
+def _copiar_contenido(origen, destino) -> None:
+    """Copia los campos compartidos Vacante/Plantilla (CAMPOS_PLANTILLA) — única lista, para que
+    duplicar, guardar-desde-vacante y (en el frontend) usar-plantilla nunca diverjan."""
+    for campo in CAMPOS_PLANTILLA:
+        valor = getattr(origen, campo)
+        setattr(destino, campo, list(valor) if isinstance(valor, list) else valor)
+
+
+@router.post("/{plantilla_id}/duplicar", status_code=201)
+def duplicar(
+    plantilla_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    """Acción «Duplicar» del listado: copia activa con el mismo alcance (General/Cliente)."""
+    origen = _por_id(db, plantilla_id, cuenta.id)
+    copia = Plantilla(cuenta_id=cuenta.id, cliente_id=origen.cliente_id, nombre=f"Copia de {origen.nombre}"[:150], creado_por=u.nombre)
+    _copiar_contenido(origen, copia)
+    db.add(copia)
+    db.flush()
+    registrar(db, u.nombre, "plantilla_duplicada", "plantilla", str(copia.id), {"origen": origen.id, "nombre": copia.nombre})
+    db.commit()
+    return _plantilla_dict(copia)
+
+
+class DesdeVacanteIn(BaseModel):
+    nombre: str
+    cliente_id: Optional[int] = None  # None = General de la Cuenta
+
+
+@router.post("/desde-vacante/{codigo}", status_code=201)
+def desde_vacante(
+    codigo: str, datos: DesdeVacanteIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Acción «Guardar como plantilla» desde una vacante existente: el servidor copia los campos
+    compartidos (el frontend ya no arma la copia a mano)."""
+    if not datos.nombre.strip():
+        raise HTTPException(400, "El nombre de la plantilla es obligatorio.")
+    v = db.query(Vacante).filter(Vacante.codigo == codigo, Vacante.cuenta_id == cuenta.id).first()
+    if not v:
+        raise HTTPException(404, "Vacante no encontrada")
+    _validar_cliente(db, cuenta.id, datos.cliente_id)
+    p = Plantilla(cuenta_id=cuenta.id, cliente_id=datos.cliente_id, nombre=datos.nombre.strip(), creado_por=u.nombre)
+    _copiar_contenido(v, p)
+    db.add(p)
+    db.flush()
+    registrar(db, u.nombre, "plantilla_creada", "plantilla", str(p.id), {"nombre": p.nombre, "cliente_id": p.cliente_id, "vacante": v.codigo})
+    db.commit()
+    return _plantilla_dict(p)

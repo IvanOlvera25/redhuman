@@ -44,3 +44,11 @@ Plataforma SaaS de agente de IA de RH para México. `red-human-app` (Next.js 15)
 - Crear postulaciones SOLO con `candidatos.crear_postulacion` / `postulacion_para_vacante` (código `P-{8800+id}` de la propia postulación).
 - Kanban (B4): `GET /candidatos` regresa solo postulaciones activas salvo `mostrar_cerradas=true` (toggle "Mostrar cerradas") o `activa=` explícito.
 - Base existente: correr `scripts/migrar_postulaciones.py --forzar` una vez ANTES de arrancar la versión nueva; la API se niega a arrancar (RuntimeError en lifespan) si hay candidatos sin postulación — la migración de datos nunca corre sola. Prueba de regresión: `scripts/verificar_fase2.py` (modo demo, base desechable).
+
+## Configuración administrativa (Puntos 9-13)
+
+- Cuentas: un Administrador solo ve/administra las Cuentas vinculadas a él (`usuario_cuentas`); `GET/PATCH /cuentas/{id}` responde 404 para una ajena. `Cuenta.nombre` (interno) ≠ `nombre_comercial` (candidatos); leer siempre `nombre_visible`.
+- Notificaciones: `services/notificaciones.disparar(..., override=)` acepta ajustes SOLO para esa acción (`NotificarIn`, body `notificar`); la regla guardada nunca se toca desde una acción. Los eventos automáticos (`candidato_apto`, no-show, liga externa) nunca mandan override. En el frontend, toda acción manual que notifica pasa por `LineaNotificar`/`ConfirmacionAccion`.
+- Plantillas: el contenido compartido Vacante↔Plantilla es `models.CAMPOS_PLANTILLA` (única lista); el formulario de contenido es uno solo (`components/dashboard/vacantes/formulario-contenido.tsx`) para Nueva vacante y Configuración → Plantillas.
+- Modo Prueba: la ventana de nueva sesión se lee de `ConfiguracionSistema.modo_prueba_ventana_min` (nunca hardcodearla).
+- Al cambiar de Cuenta, `<PorCuenta>` (layout del dashboard) remonta todo el árbol: no cachear datos por Cuenta fuera de React.

@@ -8,7 +8,7 @@ autoriza siempre una persona de RH.
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -20,6 +20,7 @@ from ..serial import colaborador_dict, expediente_dict, nombre_empresa_candidato
 from ..services import archivos as fs
 from ..services import ia
 from ..services import notificaciones
+from ..services.notificaciones import NotificarIn, override_de
 from ..services.configuracion import puede_forzar_prueba
 
 router = APIRouter(prefix="/contratacion", tags=["contratacion"])
@@ -331,21 +332,24 @@ def quitar_documento(
 
 @router.post("/expedientes/{exp_id}/recordatorio")
 async def recordatorio(
-    exp_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+    exp_id: int, notificar: Optional[NotificarIn] = Body(default=None, embed=True),
+    db: Session = Depends(get_db), _: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
 ):
     e = _expediente(db, exp_id, cuenta.id)
     pendientes = e.pendientes
     if not pendientes:
         return {"enviado": False, "detalle": "Sin documentos pendientes 🎉", "expediente": expediente_dict(e)}
 
-    c = e.candidato
+    # Fase 2: las notificaciones van por la POSTULACION del expediente (no por la persona).
+    p = e.postulacion
     rechazados = [d for d in e.documentos if d.estado == "rechazado"]
     detalle_rechazos = "".join(f"\n• {d.tipo}: {d.notas_ia}" for d in rechazados if d.notas_ia)
     resultados: List[dict] = []
-    if c:
+    if p:
         resultados = await notificaciones.disparar(
-            db, "recordatorio_documentos", c, "agente-ia",
+            db, "recordatorio_documentos", p, "agente-ia",
             extra={"pendientes": pendientes, "detalle_rechazos": detalle_rechazos, "puesto": e.puesto or "tu nuevo puesto"},
+            override=override_de(notificar),
         )
     registrar(db, "agente-ia", "recordatorio_enviado", "expediente", str(e.id), {"pendientes": pendientes, "notificaciones": resultados})
     db.commit()
@@ -399,6 +403,7 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
 
 class AltaIn(BaseModel):
     fecha_ingreso: Optional[str] = None
+    notificar: Optional[NotificarIn] = None  # Punto 12
 
 
 @router.post("/expedientes/{exp_id}/alta")
@@ -444,7 +449,9 @@ async def alta(
     if p:
         # La postulación cierra su ciclo: queda como historial "contratado" de la persona.
         p.cerrar("contratado")
-        resultados = await notificaciones.disparar(db, "contratacion", p, u.nombre, extra={"fecha_ingreso": e.fecha_ingreso})
+        resultados = await notificaciones.disparar(
+            db, "contratacion", p, u.nombre, extra={"fecha_ingreso": e.fecha_ingreso}, override=override_de(datos.notificar)
+        )
 
     db.commit()
     return {

@@ -127,7 +127,7 @@ function SelectorCuenta({ variant = "sidebar" }: { variant?: "sidebar" | "topbar
           className="flex items-center gap-1.5 rounded-lg border border-border-soft bg-surface-2 px-2.5 py-1.5 text-[12px] font-medium text-ink-2 transition hover:border-brand/40 hover:bg-brand-soft hover:text-brand"
         >
           <Building2 className="h-3.5 w-3.5" />
-          <span className="max-w-[120px] truncate">{cuentaActual?.nombreComercial ?? "Cuenta"}</span>
+          <span className="max-w-[120px] truncate">{cuentaActual?.nombre ?? cuentaActual?.nombreComercial ?? "Cuenta"}</span>
           <ChevronDown className={cn("h-3 w-3 transition-transform", abierto && "rotate-180")} />
         </button>
         {abierto && (
@@ -147,7 +147,7 @@ function SelectorCuenta({ variant = "sidebar" }: { variant?: "sidebar" | "topbar
                 )}
               >
                 {c.id === cuentaActualId && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-brand" />}
-                <span className={c.id === cuentaActualId ? "" : "pl-3.5"}>{c.nombreComercial}</span>
+                <span className={c.id === cuentaActualId ? "" : "pl-3.5"}>{c.nombre || c.nombreComercial}</span>
               </button>
             ))}
           </div>
@@ -167,7 +167,7 @@ function SelectorCuenta({ variant = "sidebar" }: { variant?: "sidebar" | "topbar
         className="flex w-full items-center gap-1.5 rounded-lg px-1 py-0.5 text-[11px] text-ink-3 transition hover:text-brand"
       >
         <Building2 className="h-3 w-3 shrink-0" />
-        <span className="flex-1 truncate text-left">{cuentaActual?.nombreComercial ?? "Cuenta"}</span>
+        <span className="flex-1 truncate text-left">{cuentaActual?.nombre ?? cuentaActual?.nombreComercial ?? "Cuenta"}</span>
         <ChevronDown className={cn("h-3 w-3 shrink-0 transition-transform", abierto && "rotate-180")} />
       </button>
       {abierto && (
@@ -187,7 +187,7 @@ function SelectorCuenta({ variant = "sidebar" }: { variant?: "sidebar" | "topbar
               )}
             >
               {c.id === cuentaActualId && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-brand" />}
-              <span className={c.id === cuentaActualId ? "" : "pl-3.5"}>{c.nombreComercial}</span>
+              <span className={c.id === cuentaActualId ? "" : "pl-3.5"}>{c.nombre || c.nombreComercial}</span>
             </button>
           ))}
         </div>

@@ -1,5 +1,6 @@
-"""Clientes — empresas para las que recluta una Cuenta (Fase B, reestructuración multi-cuenta,
-punto 8). Sin contactos de Cliente todavía — fuera de alcance de esta fase."""
+"""Clientes y contactos — empresas para las que recluta una Cuenta (Fase B, punto 8) y sus
+personas de contacto (Punto 10). Un contacto NO es un usuario del sistema: solo recibe las
+notificaciones de Cliente configuradas en Fase D (services/notificaciones.py)."""
 
 from typing import Optional
 
@@ -9,15 +10,40 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import Cliente, Cuenta, Usuario, registrar
+from ..models import Cliente, ClienteContacto, Cuenta, Usuario, registrar
+from .auth import CORREO_RE
 
 router = APIRouter(prefix="/clientes", tags=["clientes"])
 
 ESTADOS = ("Activo", "Inactivo")
 
 
-def _cliente_dict(c: Cliente) -> dict:
-    return {"id": c.id, "nombre": c.nombre, "estado": c.estado, "creado": c.creado_en.isoformat()}
+def _contacto_dict(k: ClienteContacto) -> dict:
+    return {
+        "id": k.id,
+        "nombre": k.nombre,
+        "apellidos": k.apellidos,
+        "nombreCompleto": f"{k.nombre} {k.apellidos}".strip(),
+        "puesto": k.puesto,
+        "correo": k.correo,
+        "telefono": k.telefono,
+    }
+
+
+def _cliente_dict(c: Cliente, detalle: bool = False) -> dict:
+    base = {
+        "id": c.id,
+        "nombre": c.nombre,
+        "razonSocial": c.razon_social,
+        "nombreComercial": c.nombre_comercial,
+        "nombreVisible": c.nombre_visible,
+        "estado": c.estado,
+        "contactos": len(c.contactos),
+        "creado": c.creado_en.isoformat(),
+    }
+    if detalle:
+        base["listaContactos"] = [_contacto_dict(k) for k in c.contactos]
+    return base
 
 
 def _por_id(db: Session, cliente_id: int, cuenta_id: int) -> Cliente:
@@ -25,6 +51,13 @@ def _por_id(db: Session, cliente_id: int, cuenta_id: int) -> Cliente:
     if not c:
         raise HTTPException(404, "Cliente no encontrado")
     return c
+
+
+def _contacto_por_id(c: Cliente, contacto_id: int) -> ClienteContacto:
+    k = next((x for x in c.contactos if x.id == contacto_id), None)
+    if not k:
+        raise HTTPException(404, "Contacto no encontrado")
+    return k
 
 
 @router.get("")
@@ -40,8 +73,18 @@ def listar(
     return [_cliente_dict(c) for c in q.all()]
 
 
+@router.get("/{cliente_id}")
+def detalle(
+    cliente_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    """Ficha del cliente: datos generales + contactos."""
+    return _cliente_dict(_por_id(db, cliente_id, cuenta.id), detalle=True)
+
+
 class CrearIn(BaseModel):
     nombre: str
+    razon_social: str = ""
+    nombre_comercial: str = ""
     estado: str = "Activo"
 
 
@@ -61,16 +104,21 @@ def crear(
     if existente:
         raise HTTPException(409, f"Ya existe un Cliente llamado '{existente.nombre}' en esta Cuenta.")
 
-    c = Cliente(cuenta_id=cuenta.id, nombre=nombre, estado=datos.estado)
+    c = Cliente(
+        cuenta_id=cuenta.id, nombre=nombre, razon_social=datos.razon_social.strip(),
+        nombre_comercial=datos.nombre_comercial.strip(), estado=datos.estado,
+    )
     db.add(c)
     db.flush()
-    registrar(db, u.nombre, "cliente_creado", "cliente", str(c.id), {"nombre": c.nombre})
+    registrar(db, u.nombre, "cliente_creado", "cliente", str(c.id), {"nombre": c.nombre, "correo_rh": u.correo})
     db.commit()
-    return _cliente_dict(c)
+    return _cliente_dict(c, detalle=True)
 
 
 class ActualizarIn(BaseModel):
     nombre: Optional[str] = None
+    razon_social: Optional[str] = None
+    nombre_comercial: Optional[str] = None
     estado: Optional[str] = None
 
 
@@ -88,13 +136,94 @@ def actualizar(
 
     cambios = []
     if datos.nombre is not None and datos.nombre.strip():
-        c.nombre = datos.nombre.strip()
+        nombre = datos.nombre.strip()
+        otro = db.query(Cliente).filter(Cliente.cuenta_id == cuenta.id, Cliente.nombre.ilike(nombre), Cliente.id != c.id).first()
+        if otro:
+            raise HTTPException(409, f"Ya existe un Cliente llamado '{otro.nombre}' en esta Cuenta.")
+        c.nombre = nombre
         cambios.append("nombre")
+    if datos.razon_social is not None:
+        c.razon_social = datos.razon_social.strip()
+        cambios.append("razon_social")
+    if datos.nombre_comercial is not None:
+        c.nombre_comercial = datos.nombre_comercial.strip()
+        cambios.append("nombre_comercial")
     if datos.estado is not None:
         c.estado = datos.estado
         cambios.append("estado")
 
     if cambios:
-        registrar(db, u.nombre, "cliente_editado", "cliente", str(c.id), {"campos": cambios})
+        registrar(db, u.nombre, "cliente_editado", "cliente", str(c.id), {"campos": cambios, "correo_rh": u.correo})
         db.commit()
-    return _cliente_dict(c)
+    return _cliente_dict(c, detalle=True)
+
+
+# ------------------------------------------------------------
+# Contactos del cliente (Punto 10) — nombre, apellidos, puesto, correo, WhatsApp/teléfono
+# ------------------------------------------------------------
+
+
+class ContactoIn(BaseModel):
+    nombre: str
+    apellidos: str = ""
+    puesto: str = ""
+    correo: str = ""
+    telefono: str = ""
+
+
+def _validar_contacto(datos: ContactoIn) -> None:
+    if not datos.nombre.strip():
+        raise HTTPException(400, "El nombre del contacto es obligatorio.")
+    if datos.correo.strip() and not CORREO_RE.match(datos.correo.strip()):
+        raise HTTPException(400, "El correo del contacto no tiene un formato válido.")
+    if not datos.correo.strip() and not datos.telefono.strip():
+        raise HTTPException(400, "Captura al menos un correo o un WhatsApp/teléfono para poder notificarlo.")
+
+
+@router.post("/{cliente_id}/contactos", status_code=201)
+def agregar_contacto(
+    cliente_id: int, datos: ContactoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    c = _por_id(db, cliente_id, cuenta.id)
+    _validar_contacto(datos)
+    k = ClienteContacto(
+        nombre=datos.nombre.strip(), apellidos=datos.apellidos.strip(), puesto=datos.puesto.strip(),
+        correo=datos.correo.strip().lower(), telefono=datos.telefono.strip(),
+    )
+    c.contactos.append(k)
+    db.flush()
+    registrar(db, u.nombre, "contacto_cliente_agregado", "cliente", str(c.id), {"contacto": k.id, "nombre": f"{k.nombre} {k.apellidos}".strip(), "correo_rh": u.correo})
+    db.commit()
+    return _cliente_dict(c, detalle=True)
+
+
+@router.patch("/{cliente_id}/contactos/{contacto_id}")
+def editar_contacto(
+    cliente_id: int, contacto_id: int, datos: ContactoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    c = _por_id(db, cliente_id, cuenta.id)
+    k = _contacto_por_id(c, contacto_id)
+    _validar_contacto(datos)
+    k.nombre = datos.nombre.strip()
+    k.apellidos = datos.apellidos.strip()
+    k.puesto = datos.puesto.strip()
+    k.correo = datos.correo.strip().lower()
+    k.telefono = datos.telefono.strip()
+    registrar(db, u.nombre, "contacto_cliente_editado", "cliente", str(c.id), {"contacto": k.id, "correo_rh": u.correo})
+    db.commit()
+    return _cliente_dict(c, detalle=True)
+
+
+@router.delete("/{cliente_id}/contactos/{contacto_id}")
+def eliminar_contacto(
+    cliente_id: int, contacto_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    c = _por_id(db, cliente_id, cuenta.id)
+    k = _contacto_por_id(c, contacto_id)
+    registrar(db, u.nombre, "contacto_cliente_eliminado", "cliente", str(c.id), {"contacto": k.id, "nombre": f"{k.nombre} {k.apellidos}".strip(), "correo_rh": u.correo})
+    c.contactos.remove(k)  # delete-orphan
+    db.commit()
+    return _cliente_dict(c, detalle=True)

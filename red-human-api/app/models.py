@@ -710,7 +710,10 @@ class Cuenta(Base):
     __tablename__ = "cuentas"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    nombre_comercial: Mapped[str] = mapped_column(String(200))
+    # Punto 9: nombre interno con el que RH identifica la Cuenta (listados/selector). Vacío en
+    # las cuentas previas → en lecturas se resuelve `nombre or nombre_comercial` (ver nombre_visible).
+    nombre: Mapped[str] = mapped_column(String(200), default="")
+    nombre_comercial: Mapped[str] = mapped_column(String(200))  # lo que ven candidatos/portal
     razon_social: Mapped[str] = mapped_column(String(200), default="")
     logo: Mapped[str] = mapped_column(String(400), default="")  # ruta en disco
     contacto_nombre: Mapped[str] = mapped_column(String(150), default="")
@@ -723,6 +726,10 @@ class Cuenta(Base):
     clientes: Mapped[List["Cliente"]] = relationship(back_populates="cuenta")
     usuarios: Mapped[List["UsuarioCuenta"]] = relationship(back_populates="cuenta")
 
+    @property
+    def nombre_visible(self) -> str:
+        return self.nombre or self.nombre_comercial
+
 
 class Cliente(Base):
     """Empresa para la que recluta una Cuenta."""
@@ -732,10 +739,17 @@ class Cliente(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
     nombre: Mapped[str] = mapped_column(String(200))
+    # Punto 10: razón social y nombre comercial (el candidato ve nombre_comercial si existe).
+    razon_social: Mapped[str] = mapped_column(String(200), default="")
+    nombre_comercial: Mapped[str] = mapped_column(String(200), default="")
     estado: Mapped[str] = mapped_column(String(20), default="Activo")  # Activo | Inactivo
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
     cuenta: Mapped["Cuenta"] = relationship(back_populates="clientes")
+
+    @property
+    def nombre_visible(self) -> str:
+        return self.nombre_comercial or self.nombre
     contactos: Mapped[List["ClienteContacto"]] = relationship(
         back_populates="cliente", cascade="all, delete-orphan"
     )
@@ -749,6 +763,7 @@ class ClienteContacto(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     cliente_id: Mapped[int] = mapped_column(ForeignKey("clientes.id"), index=True)
     nombre: Mapped[str] = mapped_column(String(150))
+    apellidos: Mapped[str] = mapped_column(String(150), default="")  # Punto 10
     puesto: Mapped[str] = mapped_column(String(120), default="")
     correo: Mapped[str] = mapped_column(String(200), default="")
     telefono: Mapped[str] = mapped_column(String(30), default="")
@@ -773,6 +788,7 @@ class Plantilla(Base):
     # --- contenido reutilizable: mismos campos/tipos que Vacante ---
     titulo: Mapped[str] = mapped_column(String(200), default="")
     area: Mapped[str] = mapped_column(String(100), default="")
+    ubicacion: Mapped[str] = mapped_column(String(150), default="")  # Punto 11 ("condiciones")
     modalidad: Mapped[str] = mapped_column(String(30), default="Presencial")
     sueldo: Mapped[str] = mapped_column(String(80), default="A convenir")
     requisitos: Mapped[str] = mapped_column(Text, default="")
@@ -791,9 +807,20 @@ class Plantilla(Base):
 
     creado_por: Mapped[str] = mapped_column(String(150), default="")
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora, nullable=True)
 
     cuenta: Mapped["Cuenta"] = relationship()
     cliente: Mapped[Optional["Cliente"]] = relationship()
+
+
+# Punto 11: contenido reutilizable que comparten Vacante y Plantilla (mismo nombre y tipo en
+# ambos modelos). Es la única lista: crear vacante desde plantilla, guardar vacante como plantilla
+# y duplicar plantilla copian exactamente estos campos.
+CAMPOS_PLANTILLA = [
+    "titulo", "area", "ubicacion", "modalidad", "sueldo", "requisitos", "descripcion", "resumen",
+    "perfil_ideal", "responsabilidades", "requisitos_deseables", "beneficios", "palabras_clave",
+    "seniority", "avisos_cumplimiento", "preguntas_filtro", "texto_whatsapp", "texto_bolsa",
+]
 
 
 class UsuarioCuenta(Base):
@@ -942,6 +969,9 @@ class ConfiguracionSistema(Base):
     # Modo Prueba: mientras esté activo, webhooks._buscar_o_crear_candidato deja de deduplicar
     # conversaciones frías (Candidato.es_prueba=True); nunca aparecen en listados/reportes de RH.
     modo_prueba: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Punto 13: minutos sin actividad tras los cuales, con Modo Prueba activo, el siguiente
+    # mensaje del mismo WhatsApp arranca una postulación de prueba nueva (ver webhooks.py).
+    modo_prueba_ventana_min: Mapped[int] = mapped_column(Integer, default=60)
 
 
 # ============================================================

@@ -257,6 +257,7 @@ export interface Vacante {
   actualizada?: string;
   /* --- Fase B: Cliente/Responsable/Colaboradores/visibilidad --- */
   cliente?: string | null;
+  clienteId?: number | null;
   responsable?: string | null;
   colaboradores?: string[];
   mostrarClienteCandidato?: boolean;

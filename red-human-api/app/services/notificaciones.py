@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -302,6 +303,48 @@ async def _enviar_y_registrar(
     return envio
 
 
+FLAGS_NOTIFICACION = (
+    "candidato_correo", "candidato_whatsapp",
+    "entrevistador_correo", "entrevistador_whatsapp",
+    "cliente_correo", "cliente_whatsapp",
+)
+
+
+class NotificarIn(BaseModel):
+    """Cuerpo opcional `notificar` de las acciones manuales (Punto 12): lo que RH ajustó en la
+    línea "Notificar: … · Editar" solo para esta acción. None = usar la regla predeterminada."""
+    candidato_correo: Optional[bool] = None
+    candidato_whatsapp: Optional[bool] = None
+    entrevistador_correo: Optional[bool] = None
+    entrevistador_whatsapp: Optional[bool] = None
+    cliente_correo: Optional[bool] = None
+    cliente_whatsapp: Optional[bool] = None
+
+
+def override_de(datos: Optional[NotificarIn]) -> Optional[dict]:
+    """Dict con los flags explícitos (los None se omiten) o None si no se ajustó nada."""
+    if datos is None:
+        return None
+    valores = {k: v for k, v in datos.model_dump().items() if v is not None}
+    return valores or None
+
+
+class _ReglaEfectiva:
+    """Regla predeterminada de la Cuenta + override de UNA acción (Punto 12). Los flags que el
+    override no menciona (None) conservan el valor de la regla guardada; la regla en sí nunca se
+    modifica desde aquí."""
+
+    def __init__(self, regla: Optional[ReglaNotificacion], override: Optional[dict]):
+        for flag in FLAGS_NOTIFICACION:
+            valor = (override or {}).get(flag)
+            if valor is None:
+                valor = bool(getattr(regla, flag)) if regla else False
+            setattr(self, flag, bool(valor))
+
+    def alguno(self) -> bool:
+        return any(getattr(self, f) for f in FLAGS_NOTIFICACION)
+
+
 async def disparar(
     db: Session,
     evento: str,
@@ -311,14 +354,22 @@ async def disparar(
     eh: Optional[EntrevistaHumana] = None,
     liga: str = "",
     extra: Optional[dict] = None,
+    override: Optional[dict] = None,
 ) -> List[dict]:
     """Punto único de entrada del sistema de notificaciones (Fase D). Nunca truena: si falta la
-    Cuenta, la regla, o el dato de contacto, simplemente no manda ese envío en particular."""
+    Cuenta, la regla, o el dato de contacto, simplemente no manda ese envío en particular.
+
+    `override` (Punto 12): flags que RH ajustó SOLO para esta acción desde la línea
+    "Notificar: … · Editar"; sustituyen a la regla guardada únicamente en esta llamada. Los
+    eventos automáticos (transición a apto, no-show, liga externa) nunca mandan override."""
     extra = extra or {}
     if not c.cuenta_id:
         return []
-    regla = _regla(db, c.cuenta_id, evento)
-    if not regla:
+    regla_guardada = _regla(db, c.cuenta_id, evento)
+    if not regla_guardada and not override:
+        return []
+    regla = _ReglaEfectiva(regla_guardada, override)
+    if not regla.alguno():
         return []
     eh = eh or (c.entrevistas_humanas[-1] if c.entrevistas_humanas else None)
 

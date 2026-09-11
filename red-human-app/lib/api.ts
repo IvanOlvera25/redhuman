@@ -134,7 +134,7 @@ export interface UsuarioRH {
   ultimoAcceso: string | null;
   /** Lista de Cuentas activas a las que tiene acceso este usuario.
    * Cuando solo hay una, el frontend no muestra ningún selector (regla Fase A). */
-  cuentas: { id: number; nombreComercial: string }[];
+  cuentas: { id: number; nombre: string; nombreComercial: string }[];
 }
 
 export function login(correo: string, password: string) {
@@ -180,23 +180,33 @@ export function actualizarUsuario(
 
 export interface ConfiguracionSistema {
   modoPrueba: boolean;
+  /** Punto 13: minutos sin actividad para que una conversación de prueba arranque una sesión nueva. */
+  modoPruebaVentanaMin: number;
   candidatosPrueba: number;
+  postulacionesPrueba: number;
 }
 
 export function fetchConfiguracion() {
   return get<ConfiguracionSistema>("/configuracion");
 }
 
-export function actualizarConfiguracion(modoPrueba: boolean) {
-  return patch<ConfiguracionSistema>("/configuracion", { modo_prueba: modoPrueba });
+export function actualizarConfiguracion(cambios: { modoPrueba?: boolean; modoPruebaVentanaMin?: number }) {
+  return patch<ConfiguracionSistema>("/configuracion", {
+    modo_prueba: cambios.modoPrueba,
+    modo_prueba_ventana_min: cambios.modoPruebaVentanaMin,
+  });
 }
 
 export interface ResumenBorradoPrueba {
   candidatos: number;
+  postulaciones: number;
   mensajes: number;
   entrevistas: number;
   expedientes: number;
   documentos: number;
+  notificaciones: number;
+  /** Colaboradores dados de alta desde una prueba: NO se borran, RH decide desde Colaboradores. */
+  colaboradoresConservados: number;
 }
 
 /** Botón «Eliminar postulaciones de prueba» — borra TODOS los candidatos con es_prueba=True. */
@@ -210,6 +220,8 @@ export function eliminarCandidatosPrueba() {
 
 export interface DatosCuenta {
   id: number;
+  /** Punto 9: nombre interno de la cuenta (listados/selector). */
+  nombre: string;
   nombreComercial: string;
   razonSocial: string;
   /** Ruta en disco — construir la URL con urlArchivo(logo) para mostrarla. Vacío si no tiene logo. */
@@ -218,20 +230,85 @@ export interface DatosCuenta {
   correoComunicacion: string;
   whatsappComunicacion: string;
   estado: "Activa" | "Inactiva";
+  esActual: boolean;
+  usuarios: number;
+  clientes: number;
 }
+
+export interface UsuarioDeCuenta {
+  id: number;
+  nombre: string;
+  correo: string;
+  puesto: string;
+  rol: RolUsuario;
+  activo: boolean;
+}
+
+/** Ficha completa (Punto 9): datos generales + usuarios + clientes + portal. */
+export interface FichaCuenta extends DatosCuenta {
+  usuariosDetalle: UsuarioDeCuenta[];
+  clientesDetalle: { id: number; nombre: string; nombreComercial: string; estado: string; contactos: number }[];
+  portal: { logo: string; nombreComercial: string; url: string };
+}
+
+export type CamposCuenta = {
+  nombre?: string;
+  nombre_comercial?: string;
+  razon_social?: string;
+  contacto_nombre?: string;
+  correo_comunicacion?: string;
+  whatsapp_comunicacion?: string;
+  estado?: "Activa" | "Inactiva";
+};
 
 export function fetchCuentaActual() {
-  return get<DatosCuenta>("/cuentas/actual");
+  return get<FichaCuenta>("/cuentas/actual");
 }
 
-export function actualizarCuenta(cambios: Partial<Omit<DatosCuenta, "id" | "logo">>) {
-  return patch<DatosCuenta>("/cuentas/actual", cambios);
+export function actualizarCuenta(cambios: CamposCuenta) {
+  return patch<FichaCuenta>("/cuentas/actual", cambios);
 }
 
 export function subirLogoCuenta(archivo: File) {
   const form = new FormData();
   form.append("archivo", archivo);
-  return subir<DatosCuenta>("/cuentas/actual/logo", form);
+  return subir<FichaCuenta>("/cuentas/actual/logo", form);
+}
+
+/** Solo las Cuentas a las que el admin está vinculado (nunca todas las del sistema). */
+export function fetchCuentas() {
+  return get<DatosCuenta[]>("/cuentas");
+}
+
+export function crearCuenta(datos: CamposCuenta & { nombre: string }) {
+  return post<FichaCuenta>("/cuentas", datos);
+}
+
+export function fetchCuenta(id: number) {
+  return get<FichaCuenta>(`/cuentas/${id}`);
+}
+
+export function actualizarCuentaPorId(id: number, cambios: CamposCuenta) {
+  return patch<FichaCuenta>(`/cuentas/${id}`, cambios);
+}
+
+export function subirLogoCuentaPorId(id: number, archivo: File) {
+  const form = new FormData();
+  form.append("archivo", archivo);
+  return subir<FichaCuenta>(`/cuentas/${id}/logo`, form);
+}
+
+/** «+ Agregar usuario» en la ficha: si el correo ya existe se vincula (nuevo=false); si no, se
+ * crea y `passwordTemporal` viene UNA sola vez para que el admin se la comparta. */
+export function agregarUsuarioCuenta(cuentaId: number, datos: { nombre?: string; correo: string; rol?: RolUsuario; puesto?: string; password?: string }) {
+  return post<{ usuario: UsuarioDeCuenta; nuevo: boolean; passwordTemporal: string | null; cuenta: FichaCuenta }>(
+    `/cuentas/${cuentaId}/usuarios`,
+    datos,
+  );
+}
+
+export function quitarUsuarioCuenta(cuentaId: number, usuarioId: number) {
+  return eliminar<FichaCuenta>(`/cuentas/${cuentaId}/usuarios/${usuarioId}`);
 }
 
 /* ============================================================
@@ -280,6 +357,48 @@ export interface ReglaNotificacion {
 
 export function fetchReglasNotificacion() {
   return get<ReglaNotificacion[]>("/notificaciones/reglas");
+}
+
+/** Punto 12: ajuste de destinatarios/canales SOLO para una acción (línea "Notificar: … · Editar").
+ * Un flag ausente/undefined = usar la configuración predeterminada. */
+export interface NotificarAccion {
+  candidatoCorreo?: boolean;
+  candidatoWhatsapp?: boolean;
+  entrevistadorCorreo?: boolean;
+  entrevistadorWhatsapp?: boolean;
+  clienteCorreo?: boolean;
+  clienteWhatsapp?: boolean;
+}
+
+export function notificarSnake(n?: NotificarAccion | null) {
+  if (!n) return undefined;
+  return {
+    candidato_correo: n.candidatoCorreo,
+    candidato_whatsapp: n.candidatoWhatsapp,
+    entrevistador_correo: n.entrevistadorCorreo,
+    entrevistador_whatsapp: n.entrevistadorWhatsapp,
+    cliente_correo: n.clienteCorreo,
+    cliente_whatsapp: n.clienteWhatsapp,
+  };
+}
+
+/** Botón «Guardar configuración de notificaciones»: manda la matriz completa en una sola llamada. */
+export function guardarReglasNotificacion(reglas: ReglaNotificacion[]) {
+  return enviar<ReglaNotificacion[]>("/notificaciones/reglas", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(
+      reglas.map((r) => ({
+        evento: r.evento,
+        candidato_correo: r.candidatoCorreo,
+        candidato_whatsapp: r.candidatoWhatsapp,
+        entrevistador_correo: r.entrevistadorCorreo,
+        entrevistador_whatsapp: r.entrevistadorWhatsapp,
+        cliente_correo: r.clienteCorreo,
+        cliente_whatsapp: r.clienteWhatsapp,
+      })),
+    ),
+  });
 }
 
 export function actualizarReglaNotificacion(evento: EventoNotificacion, cambios: Omit<ReglaNotificacion, "evento">) {
@@ -444,23 +563,59 @@ export function fetchPublicacion(codigo: string, plataforma: string) {
    Fase B · Clientes (empresas para las que recluta una Cuenta)
    ============================================================ */
 
+export interface ContactoCliente {
+  id: number;
+  nombre: string;
+  apellidos: string;
+  nombreCompleto: string;
+  puesto: string;
+  correo: string;
+  telefono: string;
+}
+
 export interface Cliente {
   id: number;
   nombre: string;
+  razonSocial: string;
+  nombreComercial: string;
+  /** Lo que ve el candidato: nombre comercial si existe, si no el nombre. */
+  nombreVisible: string;
   estado: "Activo" | "Inactivo";
+  /** Conteo de contactos; la lista completa solo viene en la ficha (`listaContactos`). */
+  contactos: number;
+  listaContactos?: ContactoCliente[];
   creado: string;
 }
+
+export type CamposCliente = { nombre?: string; razon_social?: string; nombre_comercial?: string; estado?: "Activo" | "Inactivo" };
+export type CamposContacto = { nombre: string; apellidos?: string; puesto?: string; correo?: string; telefono?: string };
 
 export function fetchClientes(estado?: string) {
   return get<Cliente[]>(`/clientes${estado ? `?estado=${estado}` : ""}`);
 }
 
-export function crearCliente(nombre: string) {
-  return post<Cliente>("/clientes", { nombre });
+export function fetchCliente(id: number) {
+  return get<Cliente>(`/clientes/${id}`);
 }
 
-export function actualizarCliente(id: number, cambios: { nombre?: string; estado?: string }) {
+export function crearCliente(datos: CamposCliente & { nombre: string }) {
+  return post<Cliente>("/clientes", datos);
+}
+
+export function actualizarCliente(id: number, cambios: CamposCliente) {
   return patch<Cliente>(`/clientes/${id}`, cambios);
+}
+
+export function agregarContactoCliente(clienteId: number, datos: CamposContacto) {
+  return post<Cliente>(`/clientes/${clienteId}/contactos`, datos);
+}
+
+export function editarContactoCliente(clienteId: number, contactoId: number, datos: CamposContacto) {
+  return patch<Cliente>(`/clientes/${clienteId}/contactos/${contactoId}`, datos);
+}
+
+export function eliminarContactoCliente(clienteId: number, contactoId: number) {
+  return eliminar<Cliente>(`/clientes/${clienteId}/contactos/${contactoId}`);
 }
 
 /* ============================================================
@@ -475,6 +630,7 @@ export interface Plantilla {
   activa: boolean;
   titulo: string;
   area: string;
+  ubicacion: string;
   modalidad: string;
   sueldo: string;
   requisitos: string;
@@ -491,6 +647,8 @@ export interface Plantilla {
   textoWhatsapp: string;
   textoBolsa: string;
   creadoPor: string;
+  /** Última actualización (Punto 11); igual a `creada` si nunca se editó. */
+  actualizada: string;
   creada: string;
 }
 
@@ -499,6 +657,7 @@ export interface DatosPlantilla {
   cliente_id?: number | null;
   titulo?: string;
   area?: string;
+  ubicacion?: string;
   modalidad?: string;
   sueldo?: string;
   requisitos?: string;
@@ -537,6 +696,15 @@ export function actualizarPlantilla(id: number, cambios: Partial<DatosPlantilla>
 /** No borra — desactiva (deja de sugerirse, pero las vacantes ya creadas desde ella conservan la referencia). */
 export function eliminarPlantilla(id: number) {
   return eliminar<{ ok: boolean }>(`/plantillas/${id}`);
+}
+
+export function duplicarPlantilla(id: number) {
+  return post<Plantilla>(`/plantillas/${id}/duplicar`);
+}
+
+/** «Guardar como plantilla» desde una vacante: el servidor copia los campos compartidos. */
+export function guardarVacanteComoPlantilla(codigo: string, nombre: string, clienteId?: number | null) {
+  return post<Plantilla>(`/plantillas/desde-vacante/${codigo}`, { nombre, cliente_id: clienteId ?? null });
 }
 
 /* ============================================================
@@ -660,12 +828,16 @@ export interface ResultadoNotificacion {
 /** Onboarding · Zero-Touch fase 2 — RH detona el mensaje, la IA da seguimiento por WhatsApp.
  * Quién recibe qué (candidato/entrevistador/cliente, correo/WhatsApp) ya no es fijo: lo decide
  * la regla configurada en Configuración → Notificaciones para este evento. */
-export function solicitarDocumentosCandidato(codigo: string) {
-  return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(`/candidatos/${codigo}/solicitar-documentos`);
+export function solicitarDocumentosCandidato(codigo: string, notificar?: NotificarAccion) {
+  return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(`/candidatos/${codigo}/solicitar-documentos`, {
+    notificar: notificarSnake(notificar),
+  });
 }
 
-export function recordatorioDocumentosCandidato(codigo: string) {
-  return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(`/candidatos/${codigo}/recordatorio-documentos`);
+export function recordatorioDocumentosCandidato(codigo: string, notificar?: NotificarAccion) {
+  return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(`/candidatos/${codigo}/recordatorio-documentos`, {
+    notificar: notificarSnake(notificar),
+  });
 }
 
 export function asignarVacante(codigo: string, vacante: string) {
@@ -700,6 +872,7 @@ export function programarEntrevistaHumana(
     ubicacion?: string;
     telefonoContacto?: string;
     comentario?: string;
+    notificar?: NotificarAccion;
   },
 ) {
   return post<Candidato>(`/candidatos/${codigo}/entrevista-humana`, {
@@ -715,6 +888,7 @@ export function programarEntrevistaHumana(
     ubicacion: datos.ubicacion ?? "",
     telefono_contacto: datos.telefonoContacto ?? "",
     comentario: datos.comentario ?? "",
+    notificar: notificarSnake(datos.notificar),
   });
 }
 
@@ -730,6 +904,7 @@ export function modificarEntrevistaHumana(
     ubicacion?: string;
     telefonoContacto?: string;
     comentario?: string;
+    notificar?: NotificarAccion;
   },
 ) {
   return patch<Candidato>(`/candidatos/${codigo}/entrevista-humana`, {
@@ -740,21 +915,23 @@ export function modificarEntrevistaHumana(
     ubicacion: datos.ubicacion ?? "",
     telefono_contacto: datos.telefonoContacto ?? "",
     comentario: datos.comentario ?? "",
+    notificar: notificarSnake(datos.notificar),
   });
 }
 
 /** Botón «Cancelar» — Fase D, evento "entrevista_cancelada". No mueve la etapa del candidato:
  * RH agenda otra ronda o mueve la tarjeta a mano según corresponda. */
-export function cancelarEntrevistaHumana(codigo: string) {
-  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/cancelar`);
+export function cancelarEntrevistaHumana(codigo: string, notificar?: NotificarAccion) {
+  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/cancelar`, { notificar: notificarSnake(notificar) });
 }
 
 /** Ya no pide resultado — solo confirma que la entrevista ocurrió y dispara el correo con la
  * liga pública al entrevistador (ver registrarResultadoEntrevistaHumana para la captura manual).
  * `forzarPrueba` (Lote 4): inerte salvo que Modo Prueba esté activo en el servidor. */
-export function marcarEntrevistaHumanaRealizada(codigo: string, forzarPrueba = false) {
+export function marcarEntrevistaHumanaRealizada(codigo: string, forzarPrueba = false, notificar?: NotificarAccion) {
   return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(
     `/candidatos/${codigo}/entrevista-humana/realizada${forzarPrueba ? "?forzar_prueba=true" : ""}`,
+    { notificar: notificarSnake(notificar) },
   );
 }
 
@@ -762,19 +939,21 @@ export function marcarEntrevistaHumanaRealizada(codigo: string, forzarPrueba = f
  * corregir un resultado ya capturado, por eso mismo endpoint para "capturar" y "corregir". */
 export function registrarResultadoEntrevistaHumana(
   codigo: string,
-  datos: { resultado: ResultadoEntrevistaHumana; recomendacion: RecomendacionEntrevistaHumana; comentario?: string },
+  datos: { resultado: ResultadoEntrevistaHumana; recomendacion: RecomendacionEntrevistaHumana; comentario?: string; notificar?: NotificarAccion },
   forzarPrueba = false,
 ) {
   return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/resultado${forzarPrueba ? "?forzar_prueba=true" : ""}`, {
     resultado: datos.resultado,
     recomendacion: datos.recomendacion,
     comentario: datos.comentario ?? "",
+    notificar: notificarSnake(datos.notificar),
   });
 }
 
-export function recordatorioEntrevistaHumana(codigo: string, forzarPrueba = false) {
+export function recordatorioEntrevistaHumana(codigo: string, forzarPrueba = false, notificar?: NotificarAccion) {
   return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(
     `/candidatos/${codigo}/entrevista-humana/recordatorio${forzarPrueba ? "?forzar_prueba=true" : ""}`,
+    { notificar: notificarSnake(notificar) },
   );
 }
 
@@ -1201,18 +1380,19 @@ export function agregarDocumento(expedienteId: number, tipo: string, obligatorio
   return post<NuevoIngreso>(`/contratacion/expedientes/${expedienteId}/documentos/agregar`, { tipo, obligatorio });
 }
 
-export function enviarRecordatorio(expedienteId: number) {
+export function enviarRecordatorio(expedienteId: number, notificar?: NotificarAccion) {
   return post<{ enviado: boolean; pendientes?: string[]; detalle?: string; expediente: NuevoIngreso }>(
     `/contratacion/expedientes/${expedienteId}/recordatorio`,
+    { notificar: notificarSnake(notificar) },
   );
 }
 
 /** `forzarPrueba` (Lote 4): inerte salvo que Modo Prueba esté activo en el servidor — el
  * bloqueo de "expediente ya dado de alta" NUNCA se salta, ni con este flag. */
-export function autorizarAlta(expedienteId: number, fechaIngreso?: string, forzarPrueba = false) {
+export function autorizarAlta(expedienteId: number, fechaIngreso?: string, forzarPrueba = false, notificar?: NotificarAccion) {
   return post<{ ok: boolean; expediente: NuevoIngreso }>(
     `/contratacion/expedientes/${expedienteId}/alta${forzarPrueba ? "?forzar_prueba=true" : ""}`,
-    { fecha_ingreso: fechaIngreso ?? null },
+    { fecha_ingreso: fechaIngreso ?? null, notificar: notificarSnake(notificar) },
   );
 }
 
