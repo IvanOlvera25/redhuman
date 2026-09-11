@@ -15,7 +15,14 @@ import { useState } from "react";
 import { ChevronDown, ChevronUp, Sparkles, X } from "lucide-react";
 import { Button, Eyebrow } from "@/components/ui";
 import { Area, Field, ListaEditable, Selector } from "@/components/dashboard/campos";
-import { generarVacanteIA, type CriterioFiltro, type Plantilla, type VacanteGenerada } from "@/lib/api";
+import {
+  generarVacanteIA,
+  ENFOQUES_ENTREVISTA,
+  type CriterioFiltro,
+  type EnfoqueEntrevista,
+  type Plantilla,
+  type VacanteGenerada,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export interface ContenidoVacante {
@@ -30,6 +37,8 @@ export interface ContenidoVacante {
   sueldo: string;
   beneficios: string[];
   preguntas_filtro: CriterioFiltro[];
+  /** Fase 4 (Punto 6): enfoque de la Entrevista IA — solo 2 niveles. */
+  enfoque_entrevista: EnfoqueEntrevista;
   /* --- avanzado (los llena la IA; editables pero colapsados) --- */
   resumen: string;
   perfil_ideal: string;
@@ -52,6 +61,7 @@ export const CONTENIDO_VACIO: ContenidoVacante = {
   sueldo: "",
   beneficios: [],
   preguntas_filtro: [],
+  enfoque_entrevista: "profesional",
   resumen: "",
   perfil_ideal: "",
   palabras_clave: [],
@@ -83,6 +93,7 @@ export function contenidoDesdePlantilla(p: Plantilla): ContenidoVacante {
     sueldo: p.sueldo === "A convenir" ? "" : p.sueldo,
     beneficios: [...(p.beneficios ?? [])],
     preguntas_filtro: [...(p.preguntasFiltro ?? [])],
+    enfoque_entrevista: p.enfoqueEntrevista ?? "profesional",
     resumen: p.resumen,
     perfil_ideal: p.perfilIdeal,
     palabras_clave: [...(p.palabrasClave ?? [])],
@@ -133,6 +144,7 @@ export function contenidoComoPayload(c: ContenidoVacante) {
     requisitos_deseables: c.requisitos_deseables,
     beneficios: c.beneficios,
     preguntas_filtro: c.preguntas_filtro,
+    enfoque_entrevista: c.enfoque_entrevista,
     resumen: c.resumen,
     perfil_ideal: c.perfil_ideal,
     palabras_clave: c.palabras_clave,
@@ -217,7 +229,8 @@ export function FormularioContenidoVacante({
   conIA = true,
   notasIA,
   onNotasIA,
-  empresa,
+  clienteId,
+  mostrarCliente = true,
 }: {
   value: ContenidoVacante;
   onChange: (c: ContenidoVacante) => void;
@@ -226,12 +239,16 @@ export function FormularioContenidoVacante({
   conIA?: boolean;
   notasIA?: string;
   onNotasIA?: (v: string) => void;
-  empresa?: string;
+  /** Fase 4 (Punto 1): el nombre de empresa que usa la IA lo resuelve el servidor con la regla
+   * Cliente visible / Cuenta; aquí solo viaja el contexto (nada de texto libre). */
+  clienteId?: number | null;
+  mostrarCliente?: boolean;
 }) {
   const set = <K extends keyof ContenidoVacante>(k: K) => (v: ContenidoVacante[K]) => onChange({ ...value, [k]: v });
   const [generando, setGenerando] = useState(false);
   const [errorIA, setErrorIA] = useState("");
   const [avanzado, setAvanzado] = useState(false);
+  const [empresaIA, setEmpresaIA] = useState("");
 
   async function generar() {
     if (!value.titulo.trim()) {
@@ -247,7 +264,8 @@ export function FormularioContenidoVacante({
       sueldo: value.sueldo,
       requisitos: value.requisitos,
       modalidad: value.modalidad,
-      empresa,
+      cliente_id: clienteId ?? null,
+      mostrar_cliente_candidato: mostrarCliente,
       notas: notasIA,
     });
     setGenerando(false);
@@ -257,6 +275,7 @@ export function FormularioContenidoVacante({
     }
     onChange(contenidoDesdeGenerado(value, r.data));
     onGenerado?.(r.data);
+    if (r.data.empresa) setEmpresaIA(r.data.empresa);
   }
 
   return (
@@ -285,6 +304,11 @@ export function FormularioContenidoVacante({
             </div>
           )}
           {errorIA && <p className="mt-2 text-xs text-bad">{errorIA}</p>}
+          {empresaIA && !errorIA && (
+            <p className="mt-2 text-xs text-ink-3">
+              Contenido generado a nombre de <b className="text-ink">{empresaIA}</b> (según el Cliente y “mostrar cliente al candidato”).
+            </p>
+          )}
         </div>
       )}
 
@@ -318,6 +342,20 @@ export function FormularioContenidoVacante({
 
       <Seccion titulo="Criterios de prefiltro" ayuda="Preguntas cerradas que el agente hace por WhatsApp; las marcadas como 'descarta' son knock-out.">
         <CriteriosEditor items={value.preguntas_filtro} onChange={set("preguntas_filtro")} />
+      </Seccion>
+
+      <Seccion titulo="Entrevista IA" ayuda="Define qué tan a fondo conversa Alma con el candidato; cambia el guion, la entrevista y la evaluación.">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Selector
+            label="Enfoque de entrevista"
+            value={value.enfoque_entrevista}
+            onChange={(v) => set("enfoque_entrevista")(v as EnfoqueEntrevista)}
+            opciones={ENFOQUES_ENTREVISTA.map((e) => ({ valor: e.valor, texto: e.texto }))}
+          />
+          <p className="self-end pb-2 text-xs leading-relaxed text-ink-3">
+            {ENFOQUES_ENTREVISTA.find((e) => e.valor === value.enfoque_entrevista)?.detalle}
+          </p>
+        </div>
       </Seccion>
 
       <section>

@@ -25,11 +25,22 @@ import {
   iniciarEntrevista,
   turnoEntrevista,
   finalizarEntrevista,
+  type CierreEntrevista,
   type EntrevistaPublica,
 } from "@/lib/api";
 
-type Fase = "cargando" | "no_disponible" | "consentimiento" | "conectando" | "sala" | "finalizando" | "fin";
+type Fase = "cargando" | "no_disponible" | "consentimiento" | "conectando" | "sala" | "finalizando" | "fin" | "interrumpida";
 type Msg = { rol: "assistant" | "user"; texto: string };
+
+/* Fase 4 (Punto 3) — silencio. La regla del documento define la frase del inicio; la variante
+   intermedia es un supuesto ajustable. Los tiempos son conservadores para no interrumpir a
+   alguien que está pensando. */
+const SILENCIO_INICIO_SEG = 12;
+const SILENCIO_ENTREVISTA_SEG = 25;
+const MAX_AVISOS_SILENCIO = 2;
+/* Despedida fija de Alma — debe coincidir con ia.DESPEDIDA_ENTREVISTA en el backend (fallback
+   "marcador" del cierre automático; el servidor la verifica de todos modos). */
+const DESPEDIDA = "con esto terminamos la entrevista";
 
 export default function SalaEntrevista() {
   const params = useParams();
@@ -43,12 +54,14 @@ export default function SalaEntrevista() {
   const [texto, setTexto] = useState("");
   const [pensando, setPensando] = useState(false);
 
-  const anamRef = useRef<{ stopStreaming?: () => Promise<void> } | null>(null);
+  const anamRef = useRef<{ stopStreaming?: () => Promise<void>; talk?: (t: string) => Promise<void> } | null>(null);
   const transcriptRef = useRef<Msg[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
   // evita finalizar dos veces: el clic manual en "Terminar" también dispara CONNECTION_CLOSED
   // como efecto de stopStreaming(), así que ambos caminos se guardan con la misma bandera.
   const finalizadoRef = useRef(false);
+  const nombreRef = useRef("");
+  const silencioRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; avisos: number; hablando: boolean }>({ timer: null, avisos: 0, hablando: false });
 
   useEffect(() => {
     // precalienta el chunk del SDK del avatar; el clic solo tiene que iniciar el stream
@@ -56,10 +69,50 @@ export default function SalaEntrevista() {
     fetchEntrevistaPublica(token).then((i) => {
       if (!i) return setFase("no_disponible");
       setInfo(i);
+      nombreRef.current = i.candidato;
       if (i.estado === "completada" || i.estado === "evaluada") return setFase("fin");
+      if (i.estado === "interrumpida") return setFase("interrumpida");
       setFase("consentimiento");
     });
   }, [token]);
+
+  /** Cierre único (Fase 4): cualquiera de los caminos (automático, botón, desconexión) pasa por aquí
+   * UNA sola vez; el servidor verifica `cierre` contra el transcript y decide evaluada/interrumpida. */
+  const cerrar = useCallback(
+    async (cierre: CierreEntrevista, conTranscript: boolean) => {
+      if (finalizadoRef.current) return;
+      finalizadoRef.current = true;
+      if (silencioRef.current.timer) clearTimeout(silencioRef.current.timer);
+      setFase("finalizando");
+      try {
+        await anamRef.current?.stopStreaming?.();
+      } catch {}
+      const r = await finalizarEntrevista(token, conTranscript ? transcriptRef.current : undefined, cierre);
+      setFase(r.ok && r.data.estado === "interrumpida" ? "interrumpida" : "fin");
+    },
+    [token],
+  );
+
+  /** Silencio (avatar): si la persona no habla, Alma repite la frase del documento; máximo 2 veces.
+   * Antes del primer turno del candidato pregunta si está listo; después, pide repetir la respuesta. */
+  const programarAvisoSilencio = useCallback(() => {
+    const st = silencioRef.current;
+    if (st.timer) clearTimeout(st.timer);
+    const sinTurnoCandidato = !transcriptRef.current.some((m) => m.rol === "user");
+    const seg = sinTurnoCandidato ? SILENCIO_INICIO_SEG : SILENCIO_ENTREVISTA_SEG;
+    st.timer = setTimeout(async () => {
+      if (finalizadoRef.current || st.hablando || st.avisos >= MAX_AVISOS_SILENCIO) return;
+      st.avisos += 1;
+      const nombre = nombreRef.current || "";
+      const frase = sinTurnoCandidato
+        ? `${nombre}, no te escuché. ¿Estás listo?`
+        : `${nombre}, no te escuché. ¿Me repites tu respuesta?`;
+      try {
+        await anamRef.current?.talk?.(frase);
+      } catch {}
+      programarAvisoSilencio();
+    }, seg * 1000);
+  }, []);
 
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
@@ -79,26 +132,41 @@ export default function SalaEntrevista() {
         const client = createClient(s.session_token);
         const anam = client as unknown as {
           stopStreaming?: () => Promise<void>;
+          talk?: (t: string) => Promise<void>;
           addListener: (ev: string, cb: (...args: any[]) => void) => void;
         };
         anamRef.current = anam;
+        if (s.nombre) nombreRef.current = s.nombre;
         anam.addListener(AnamEvent.MESSAGE_HISTORY_UPDATED, (historial: { role: string; content: string }[]) => {
           transcriptRef.current = historial.map((m) => ({
             rol: m.role === "persona" ? "assistant" : "user",
             texto: m.content,
           }));
           setMensajes(transcriptRef.current.slice(-4));
+          // Cierre automático (Fase 4, Punto 4 — fallback "marcador"): Alma se despide con una frase
+          // fija; el servidor verifica que esté en el transcript antes de aceptar el cierre.
+          const ultimo = transcriptRef.current[transcriptRef.current.length - 1];
+          if (ultimo?.rol === "assistant" && ultimo.texto.toLowerCase().includes(DESPEDIDA)) {
+            if (silencioRef.current.timer) clearTimeout(silencioRef.current.timer);
+            // deja que termine de decir la despedida antes de cortar el stream
+            setTimeout(() => cerrar("marcador", true), 6000);
+          }
         });
-        // Respaldo automático: si Anam corta la conexión por cualquier motivo (fin normal,
-        // timeout de ANAM_MAX_SESION_SEG, falla de red) sin que el candidato haya dado clic en
-        // "Terminar entrevista", igual cerramos y evaluamos — no debe quedar como "en_curso" para
-        // siempre. El botón manual sigue funcionando igual, esto es solo un respaldo adicional.
-        anam.addListener(AnamEvent.CONNECTION_CLOSED, () => {
-          if (finalizadoRef.current) return;
-          finalizadoRef.current = true;
-          setFase("finalizando");
-          finalizarEntrevista(token, transcriptRef.current).then(() => setFase("fin"));
+        // Silencio: se reprograma cada vez que la persona termina de hablar; se pausa mientras habla.
+        anam.addListener(AnamEvent.USER_SPEECH_STARTED, () => {
+          silencioRef.current.hablando = true;
+          if (silencioRef.current.timer) clearTimeout(silencioRef.current.timer);
         });
+        anam.addListener(AnamEvent.USER_SPEECH_ENDED, () => {
+          silencioRef.current.hablando = false;
+          silencioRef.current.avisos = 0;
+          programarAvisoSilencio();
+        });
+        anam.addListener(AnamEvent.SESSION_READY, () => programarAvisoSilencio());
+        // Respaldo: si Anam corta la conexión (timeout de ANAM_MAX_SESION_SEG, falla de red) sin
+        // que hubiera cierre automático ni botón, igual se cierra — el servidor lo registra como
+        // "desconexion" y, si casi no hubo turnos, la deja como interrumpida para que RH la reabra.
+        anam.addListener(AnamEvent.CONNECTION_CLOSED, () => cerrar("desconexion", true));
         setModo("avatar");
         setFase("sala");
         // el elemento <video id="avatar-video"> ya está montado al entrar a "sala"
@@ -131,23 +199,11 @@ export default function SalaEntrevista() {
     }
     const r = turno.data;
     setMensajes((m) => [...m, { rol: "assistant", texto: r.respuesta }]);
-    if (r.terminada) {
-      setFase("finalizando");
-      await finalizarEntrevista(token);
-      setFase("fin");
-    }
-  }, [texto, pensando, token]);
+    // Cierre automático en modo texto: la IA marcó `terminada` y se despidió; el servidor verifica.
+    if (r.terminada) await cerrar("texto", false);
+  }, [texto, pensando, token, cerrar]);
 
-  const terminar = useCallback(async () => {
-    if (finalizadoRef.current) return;
-    finalizadoRef.current = true;
-    setFase("finalizando");
-    try {
-      await anamRef.current?.stopStreaming?.();
-    } catch {}
-    await finalizarEntrevista(token, modo === "avatar" ? transcriptRef.current : undefined);
-    setFase("fin");
-  }, [token, modo]);
+  const terminar = useCallback(() => cerrar("manual", modo === "avatar"), [cerrar, modo]);
 
   return (
     <main className="min-h-svh bg-bg">
@@ -319,6 +375,19 @@ export default function SalaEntrevista() {
                 Conversación grabada con tu consentimiento. La decisión final la toma una persona de RH.
               </p>
             </div>
+          </Card>
+        )}
+
+        {fase === "interrumpida" && (
+          <Card className="p-8 text-center">
+            <span className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-warn/10">
+              <Phone className="h-7 w-7 rotate-[135deg] text-warn" />
+            </span>
+            <h1 className="font-display mt-4 text-2xl font-bold">La entrevista se interrumpió</h1>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">
+              Se perdió la conexión antes de que pudiéramos platicar. No te preocupes: el equipo de RH
+              {info ? ` de ${info.empresa}` : ""} puede reabrir esta misma liga para que la retomes.
+            </p>
           </Card>
         )}
 

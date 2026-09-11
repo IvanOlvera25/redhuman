@@ -16,9 +16,13 @@ import {
   ExternalLink,
   UserPlus,
   Zap,
+  AlertTriangle,
+  RotateCcw,
 } from "lucide-react";
 import { Card, Badge, Button, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
+import { PerfilProfundoVista } from "@/components/dashboard/perfil-profundo";
+import { usePuedeDecidir } from "@/components/sesion";
 import { cn } from "@/lib/utils";
 import {
   fetchEntrevistas,
@@ -27,6 +31,8 @@ import {
   agendarEntrevista,
   entrevistaInmediata,
   fetchMetricasEntrevistas,
+  reabrirEntrevista,
+  NOMBRE_CIERRE,
   type Entrevista,
   type EvaluacionEntrevista,
   type MetricasEntrevistas,
@@ -44,6 +50,8 @@ const estadoEntrevista: Record<Entrevista["estado"], { label: string; tone: "goo
   en_curso: { label: "En curso", tone: "neutral" },
   completada: { label: "Completada", tone: "neutral" },
   evaluada: { label: "Evaluada", tone: "good" },
+  // Fase 4: cerró por desconexión/tiempo sin turnos suficientes; RH puede reabrir la misma liga.
+  interrumpida: { label: "Interrumpida", tone: "bad" },
 };
 
 const recomendacionUI: Record<EvaluacionEntrevista["recomendacion"], { label: string; clase: string }> = {
@@ -60,6 +68,9 @@ export default function Entrevistas() {
   const [apiViva, setApiViva] = useState(false);
   const [open, setOpen] = useState(false);
   const [seleccionada, setSeleccionada] = useState<string | null>(null);
+  const [reabriendo, setReabriendo] = useState<string | null>(null);
+  const [aviso, setAviso] = useState<string | null>(null);
+  const puedeDecidir = usePuedeDecidir();
 
   const recargar = useCallback(() => {
     fetchEntrevistas().then((e) => {
@@ -86,6 +97,17 @@ export default function Entrevistas() {
     (seleccionada && entrevistas.find((e) => e.id === seleccionada && e.evaluacion)) ||
     entrevistas.find((e) => e.estado === "evaluada" && e.evaluacion);
 
+  /** Reapertura explícita (Fase 4): archiva el intento anterior en el servidor y vuelve a `programada`. */
+  async function reabrir(e: Entrevista) {
+    if (!window.confirm(`¿Reabrir la entrevista de ${e.nombre}? El intento anterior se archiva y la misma liga vuelve a servir.`)) return;
+    setReabriendo(e.id);
+    const r = await reabrirEntrevista(e.id, "Reapertura desde el tablero de Entrevistas");
+    setReabriendo(null);
+    setAviso(r.ok ? `Entrevista de ${e.nombre} reabierta; comparte de nuevo la liga.` : "No se pudo reabrir la entrevista.");
+    setTimeout(() => setAviso(null), 4000);
+    if (r.ok) recargar();
+  }
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
       <PageHeader title="Entrevistas" subtitle="Motor de entrevistas por voz y video con evidencia y consentimiento.">
@@ -98,6 +120,9 @@ export default function Entrevistas() {
           <Zap className="h-4 w-4" /> Nueva entrevista
         </Button>
       </PageHeader>
+      {aviso && (
+        <p className="mt-3 rounded-xl border border-border-soft bg-surface-2 px-4 py-2 text-sm text-ink-2">{aviso}</p>
+      )}
 
       {/* Métricas */}
       {metricas && (
@@ -240,6 +265,30 @@ export default function Entrevistas() {
                     ))}
                   </div>
                 )}
+                {evaluada.evaluacion.riesgos.length > 0 && (
+                  <div className="mt-3 space-y-1.5">
+                    {evaluada.evaluacion.riesgos.slice(0, 3).map((f, i) => (
+                      <p key={i} className="flex gap-2 text-xs leading-relaxed text-ink-2">
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" /> {f}
+                      </p>
+                    ))}
+                  </div>
+                )}
+                {evaluada.evaluacion.evidencia && (
+                  <p className="mt-3 rounded-lg bg-surface-2 px-3 py-2 text-xs italic leading-relaxed text-ink-2">
+                    “{evaluada.evaluacion.evidencia}”
+                  </p>
+                )}
+                {evaluada.evaluacion.perfil && (
+                  <div className="mt-4">
+                    <PerfilProfundoVista perfil={evaluada.evaluacion.perfil} compacto />
+                  </div>
+                )}
+                <p className="mt-3 font-mono text-[11px] text-ink-3">
+                  Cierre: {NOMBRE_CIERRE[evaluada.cierre ?? ""]}
+                  {evaluada.turnosCandidato != null ? ` · ${evaluada.turnosCandidato} respuestas` : ""}
+                  {evaluada.intentosPrevios ? ` · ${evaluada.intentosPrevios} intento(s) previo(s)` : ""}
+                </p>
               </>
             ) : (
               <p className="mt-2 text-sm leading-relaxed text-ink-2">
@@ -257,7 +306,14 @@ export default function Entrevistas() {
             <div className="max-h-[24rem] divide-y divide-border-faint overflow-y-auto">
               {apiViva && entrevistas.length > 0 ? (
                 entrevistas.map((e) => (
-                  <FilaEntrevista key={e.id} e={e} activa={evaluada?.id === e.id} onVer={() => setSeleccionada(e.id)} />
+                  <FilaEntrevista
+                    key={e.id}
+                    e={e}
+                    activa={evaluada?.id === e.id}
+                    onVer={() => setSeleccionada(e.id)}
+                    onReabrir={puedeDecidir && e.estado === "interrumpida" ? () => reabrir(e) : undefined}
+                    reabriendo={reabriendo === e.id}
+                  />
                 ))
               ) : apiViva ? (
                 <p className="px-5 py-6 text-sm text-ink-3">
@@ -301,10 +357,14 @@ function FilaEntrevista({
   e,
   activa,
   onVer,
+  onReabrir,
+  reabriendo = false,
 }: {
   e: Entrevista;
   activa: boolean;
   onVer: () => void;
+  onReabrir?: () => void;
+  reabriendo?: boolean;
 }) {
   const [copiada, setCopiada] = useState(false);
   const est = estadoEntrevista[e.estado];
@@ -336,7 +396,19 @@ function FilaEntrevista({
         </p>
       </div>
       <Badge tone={est.tone}>{est.label}</Badge>
-      {e.estado === "programada" || e.estado === "en_curso" ? (
+      {e.estado === "interrumpida" && onReabrir ? (
+        <button
+          onClick={(ev) => {
+            ev.stopPropagation();
+            onReabrir();
+          }}
+          disabled={reabriendo}
+          title={`Reabrir (cierre: ${NOMBRE_CIERRE[e.cierre ?? ""]})`}
+          className="flex h-8 shrink-0 items-center gap-1 rounded-lg px-2 text-xs font-medium text-brand transition hover:bg-brand-soft disabled:opacity-50"
+        >
+          <RotateCcw className={cn("h-3.5 w-3.5", reabriendo && "animate-spin")} /> Reabrir
+        </button>
+      ) : e.estado === "programada" || e.estado === "en_curso" ? (
         <button
           onClick={(ev) => {
             ev.stopPropagation();

@@ -16,8 +16,8 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import PLATAFORMAS, Cliente, Cuenta, Plantilla, Postulacion, Usuario, UsuarioCuenta, Vacante, registrar, slugificar
-from ..serial import nombre_empresa_candidato, vacante_dict
+from ..models import ENFOQUES_ENTREVISTA, PLATAFORMAS, Cliente, Cuenta, Plantilla, Postulacion, Usuario, UsuarioCuenta, Vacante, registrar, slugificar
+from ..serial import nombre_empresa, nombre_empresa_candidato, vacante_dict
 from ..services import ia
 
 router = APIRouter(prefix="/vacantes", tags=["vacantes"])
@@ -160,25 +160,43 @@ class GenerarIn(BaseModel):
     ubicacion: str = ""
     sueldo: str = "A convenir"
     requisitos: str = ""
-    empresa: str = "Grupo Carbe"
+    # Fase 4 (Punto 1): el nombre de empresa que ve el candidato NUNCA es texto libre — lo resuelve
+    # el servidor con la misma regla que nombre_empresa_candidato: Cliente (si está marcado para
+    # mostrarse) o nombre comercial de la Cuenta. `empresa` se acepta por compatibilidad y se ignora.
+    empresa: str = ""
+    cliente_id: Optional[int] = None
+    mostrar_cliente_candidato: bool = True
     modalidad: str = "Presencial"
     notas: str = ""
 
 
-def _generar(datos: GenerarIn):
+def _empresa_resuelta(db: Session, cuenta: Cuenta, cliente_id: Optional[int], mostrar_cliente: bool) -> str:
+    cliente = None
+    if cliente_id is not None:
+        cliente = db.query(Cliente).filter(Cliente.id == cliente_id, Cliente.cuenta_id == cuenta.id).first()
+        if not cliente:
+            raise HTTPException(400, "El Cliente indicado no existe en esta Cuenta.")
+    return nombre_empresa(cuenta, cliente, mostrar_cliente)
+
+
+def _generar(datos: GenerarIn, empresa: str):
     if not datos.titulo.strip():
         raise HTTPException(400, "El título del puesto es obligatorio para generar la publicación.")
     return ia.generar_vacante(
         datos.titulo, datos.area, datos.ubicacion, datos.sueldo,
-        datos.requisitos, datos.empresa, datos.modalidad, datos.notas,
+        datos.requisitos, empresa, datos.modalidad, datos.notas,
     )
 
 
 @router.post("/generar")
-def generar(datos: GenerarIn, _: Usuario = Depends(usuario_decisor)):
-    """Genera contenido base + publicación por plataforma + criterios de prefiltro."""
-    resultado, con_ia = _generar(datos)
-    return {"ia": con_ia, **resultado.model_dump(by_alias=True)}
+def generar(
+    datos: GenerarIn, db: Session = Depends(get_db), _: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    """Genera contenido base + publicación por plataforma + criterios de prefiltro. Todo lo generado
+    nombra a la empresa con la regla Cliente-visible / Cuenta (Punto 1)."""
+    empresa = _empresa_resuelta(db, cuenta, datos.cliente_id, datos.mostrar_cliente_candidato)
+    resultado, con_ia = _generar(datos, empresa)
+    return {"ia": con_ia, "empresa": empresa, **resultado.model_dump(by_alias=True)}
 
 
 def _aplicar_generado(v: Vacante, g: ia.VacanteGenerada) -> None:
@@ -233,6 +251,7 @@ class CrearIn(GenerarIn):
     colaboradores_ids: List[int] = []
     mostrar_cliente_candidato: bool = True
     plantilla_id: Optional[int] = None  # solo trazabilidad de qué plantilla se usó, si alguna
+    enfoque_entrevista: str = "profesional"  # Fase 4 (Punto 6): profesional | profesional_personal
 
 
 @router.post("", status_code=201)
@@ -252,6 +271,8 @@ def crear(
     plataformas = [p for p in datos.plataformas if p in PLATAFORMAS]
     if datos.publicar and not plataformas:
         plataformas = ["WhatsApp", "Portal"]
+    if datos.enfoque_entrevista not in ENFOQUES_ENTREVISTA:
+        raise HTTPException(400, f"Enfoque de entrevista inválido. Usa uno de: {', '.join(ENFOQUES_ENTREVISTA)}")
 
     v = Vacante(
         codigo="TMP",
@@ -263,7 +284,8 @@ def crear(
         plantilla_id=datos.plantilla_id,
         titulo=datos.titulo.strip(),
         area=datos.area,
-        empresa=datos.empresa,
+        empresa="",  # se fija abajo con la regla (Punto 1): nunca texto libre
+        enfoque_entrevista=datos.enfoque_entrevista,
         ubicacion=datos.ubicacion,
         modalidad=datos.modalidad,
         sueldo=datos.sueldo,
@@ -285,14 +307,16 @@ def crear(
         publicaciones=datos.publicaciones,
     )
 
+    # Punto 1: `Vacante.empresa` guarda el nombre RESUELTO (Cliente visible o Cuenta), nunca texto
+    # libre. Se resuelve con `nombre_empresa` (cuenta + cliente ya validados) porque las relaciones
+    # de `v` todavía no están cargadas antes del flush.
+    cliente_obj = db.query(Cliente).filter(Cliente.id == datos.cliente_id).first() if datos.cliente_id else None
+    v.empresa = nombre_empresa(cuenta, cliente_obj, datos.mostrar_cliente_candidato)
+
     con_ia = None
     if datos.generar_si_falta and not datos.publicaciones and not datos.descripcion:
         entrada_generador = GenerarIn(**datos.model_dump(include=set(GenerarIn.model_fields)))
-        # el candidato debe ver el mismo nombre que resolverá vacante_dict/nombre_empresa_candidato
-        # (Cliente si aplica y está visible, si no el nombre de la Cuenta) — no el texto libre que
-        # se haya tecleado en el campo `empresa` del formulario.
-        entrada_generador.empresa = nombre_empresa_candidato(v)
-        generado, con_ia = _generar(entrada_generador)
+        generado, con_ia = _generar(entrada_generador, v.empresa)
         _aplicar_generado(v, generado)
 
     db.add(v)
@@ -376,6 +400,7 @@ class ActualizarIn(BaseModel):
     responsable_id: Optional[int] = None
     colaboradores_ids: Optional[List[int]] = None
     mostrar_cliente_candidato: Optional[bool] = None
+    enfoque_entrevista: Optional[str] = None  # Fase 4 (Punto 6)
 
 
 @router.patch("/{codigo}")
@@ -393,9 +418,15 @@ def actualizar(
         cambios["colaboradores_ids"] = colaboradores_validos
     if datos.estado is not None and datos.estado not in ESTADOS:
         raise HTTPException(400, f"Estado inválido. Usa uno de: {', '.join(ESTADOS)}")
+    if datos.enfoque_entrevista is not None and datos.enfoque_entrevista not in ENFOQUES_ENTREVISTA:
+        raise HTTPException(400, f"Enfoque de entrevista inválido. Usa uno de: {', '.join(ENFOQUES_ENTREVISTA)}")
+    cambios.pop("empresa", None)  # Punto 1: nunca texto libre; se recalcula abajo
 
     for campo, valor in cambios.items():
         setattr(v, campo, valor)
+    db.flush()
+    db.refresh(v)  # recarga cliente/cuenta si cambió cliente_id
+    v.empresa = nombre_empresa_candidato(v)
     if datos.titulo:
         v.slug = _slug_unico(db, v.titulo, v.id)
     if datos.publicaciones:
@@ -418,7 +449,7 @@ def regenerar(
     """Vuelve a generar todo el contenido de una vacante existente con los datos ya capturados."""
     v = _por_codigo(db, codigo, cuenta.id)
     generado, con_ia = ia.generar_vacante(
-        v.titulo, v.area, v.ubicacion, v.sueldo, v.requisitos, nombre_empresa_candidato(v), v.modalidad, datos.notas
+        v.titulo, v.area, v.ubicacion, v.sueldo, v.requisitos, v.empresa or nombre_empresa_candidato(v), v.modalidad, datos.notas
     )
     _aplicar_generado(v, generado)
     registrar(db, u.nombre, "vacante_regenerada", "vacante", v.codigo, {"ia": con_ia, "notas": datos.notas})

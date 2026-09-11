@@ -480,9 +480,10 @@ def _html_carta_intencion(e: Expediente) -> str:
     documento formal (encabezado, cuerpo, firma) porque esto se imprime/firma, no se lee en un
     correo."""
     c = e.candidato
+    vac = e.postulacion.vacante if e.postulacion else None  # Fase 2: la vacante es de la postulación
     nombre = c.nombre if c else "[Nombre del colaborador]"
-    empresa = (nombre_empresa_candidato(c.vacante) if c and c.vacante else "") or "la empresa"
-    puesto = e.puesto or (c.vacante.titulo if c and c.vacante else "") or "el puesto"
+    empresa = (nombre_empresa_candidato(vac) if vac else "") or "la empresa"
+    puesto = e.puesto or (vac.titulo if vac else "") or "el puesto"
     sueldo = e.sueldo or "por definir"
     tipo_contratacion = e.tipo_contratacion or "por definir"
     ubicacion = e.ubicacion or (c.ubicacion if c else "") or "por definir"

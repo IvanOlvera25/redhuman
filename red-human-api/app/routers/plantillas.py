@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import CAMPOS_PLANTILLA, Cliente, Cuenta, Plantilla, Usuario, Vacante, registrar
+from ..models import CAMPOS_PLANTILLA, ENFOQUES_ENTREVISTA, Cliente, Cuenta, Plantilla, Usuario, Vacante, registrar
 
 router = APIRouter(prefix="/plantillas", tags=["plantillas"])
 
@@ -39,6 +39,7 @@ def _plantilla_dict(p: Plantilla) -> dict:
         "preguntasFiltro": p.preguntas_filtro or [],  # = "evaluaciones" (ver spec Fase B)
         "textoWhatsapp": p.texto_whatsapp,
         "textoBolsa": p.texto_bolsa,
+        "enfoqueEntrevista": p.enfoque_entrevista or "profesional",
         "creadoPor": p.creado_por,
         "creada": p.creada_en.isoformat(),
         "actualizada": (p.actualizada_en or p.creada_en).isoformat(),
@@ -106,6 +107,7 @@ class PlantillaIn(BaseModel):
     preguntas_filtro: List[dict] = []
     texto_whatsapp: str = ""
     texto_bolsa: str = ""
+    enfoque_entrevista: str = "profesional"
 
 
 @router.post("", status_code=201)
@@ -118,6 +120,8 @@ def crear(
     if not datos.nombre.strip():
         raise HTTPException(400, "El nombre de la plantilla es obligatorio.")
     _validar_cliente(db, cuenta.id, datos.cliente_id)
+    if datos.enfoque_entrevista not in ENFOQUES_ENTREVISTA:
+        raise HTTPException(400, f"Enfoque de entrevista inválido. Usa uno de: {', '.join(ENFOQUES_ENTREVISTA)}")
 
     campos = datos.model_dump()
     campos["nombre"] = campos["nombre"].strip()
@@ -154,6 +158,7 @@ class ActualizarIn(BaseModel):
     preguntas_filtro: Optional[List[dict]] = None
     texto_whatsapp: Optional[str] = None
     texto_bolsa: Optional[str] = None
+    enfoque_entrevista: Optional[str] = None
 
 
 @router.patch("/{plantilla_id}")
@@ -167,6 +172,8 @@ def actualizar(
     p = _por_id(db, plantilla_id, cuenta.id)
     if datos.cliente_id is not None:
         _validar_cliente(db, cuenta.id, datos.cliente_id)
+    if datos.enfoque_entrevista is not None and datos.enfoque_entrevista not in ENFOQUES_ENTREVISTA:
+        raise HTTPException(400, f"Enfoque de entrevista inválido. Usa uno de: {', '.join(ENFOQUES_ENTREVISTA)}")
 
     cambios = datos.model_dump(exclude_none=True)
     for campo, valor in cambios.items():

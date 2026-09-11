@@ -28,7 +28,7 @@ import {
   MoreHorizontal,
 } from "lucide-react";
 import { Button, Card, Badge, Eyebrow } from "@/components/ui";
-import { Area, Field, Selector, ToggleSiNo } from "@/components/dashboard/campos";
+import { Area, Selector, ToggleSiNo } from "@/components/dashboard/campos";
 import {
   CONTENIDO_VACIO,
   FormularioContenidoVacante,
@@ -54,6 +54,7 @@ import {
   fetchEntrevistadores,
   fetchPlantillas,
   guardarVacanteComoPlantilla,
+  ENFOQUES_ENTREVISTA,
   type BloquePlataforma,
   type CriterioFiltro,
   type VacanteGenerada,
@@ -632,7 +633,6 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
 
   // Punto 11: UN solo formulario de contenido, compartido con Configuración → Plantillas.
   const [contenido, setContenido] = useState<ContenidoVacante>(CONTENIDO_VACIO);
-  const [empresa, setEmpresa] = useState("");
   const [notas, setNotas] = useState("");
 
   function elegirPlantilla(p: Plantilla) {
@@ -664,7 +664,6 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
     const manual = tieneContenidoManual(contenido);
     const r = await crearVacante({
       ...contenidoComoPayload(contenido),
-      empresa,
       notas,
       publicaciones: gen
         ? {
@@ -797,12 +796,14 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
           onGenerado={setGen}
           notasIA={notas}
           onNotasIA={setNotas}
-          empresa={empresa}
+          clienteId={clienteId || null}
+          mostrarCliente={mostrarCliente}
         />
 
-        {/* Cuenta (automática) / Cliente / Responsable / Colaboradores — Fase B, punto 8 */}
+        {/* Cuenta (automática) / Cliente / Responsable / Colaboradores — Fase B, punto 8.
+            Fase 4 (Punto 1): ya no hay "Empresa" en texto libre — el nombre lo resuelve el servidor
+            con la regla Cliente visible / nombre comercial de la Cuenta. */}
         <div className="grid gap-4 border-t border-border-faint pt-5 sm:grid-cols-2">
-          <Field label="Empresa (texto libre, opcional)" value={empresa} onChange={setEmpresa} placeholder="Solo si difiere de la Cuenta/Cliente" />
           {clientes.length > 0 && (
             <label className="flex flex-col gap-1.5">
               <span className="text-sm font-medium text-ink-2">Cliente (opcional)</span>
@@ -1217,6 +1218,20 @@ function RelacionesVacante({ v, onCambio }: { v: Vacante; onCambio: () => void }
           onChange={(valor) => guardar({ mostrar_cliente_candidato: valor })}
         />
       )}
+
+      {/* Fase 4 (Punto 6): enfoque de la Entrevista IA por vacante; aplica a las entrevistas que se
+          agenden después (el guion se genera al agendar). */}
+      <div className="grid gap-4 border-t border-border-faint pt-4 sm:grid-cols-2">
+        <Selector
+          label="Enfoque de la Entrevista IA"
+          value={v.enfoqueEntrevista ?? "profesional"}
+          onChange={(valor) => guardar({ enfoque_entrevista: valor })}
+          opciones={ENFOQUES_ENTREVISTA.map((e) => ({ valor: e.valor, texto: e.texto }))}
+        />
+        <p className="self-end pb-2 text-xs leading-relaxed text-ink-3">
+          {ENFOQUES_ENTREVISTA.find((e) => e.valor === (v.enfoqueEntrevista ?? "profesional"))?.detalle}
+        </p>
+      </div>
     </Card>
   );
 }

@@ -52,6 +52,8 @@ class Vacante(Base):
     texto_bolsa: Mapped[str] = mapped_column(Text, default="")
     preguntas_filtro: Mapped[list] = mapped_column(JSON, default=list)  # [str] (legado) o [PreguntaFiltro]
     plataformas: Mapped[list] = mapped_column(JSON, default=list)
+    # Fase 4 (Punto 6): qué cubre la Entrevista IA — ver ENFOQUES_ENTREVISTA. Solo 2 niveles.
+    enfoque_entrevista: Mapped[str] = mapped_column(String(30), default="profesional")
 
     # --- contenido enriquecido del generador (módulo 3.5) ---
     resumen: Mapped[str] = mapped_column(Text, default="")
@@ -409,6 +411,16 @@ class Archivo(Base):
     candidato: Mapped[Candidato] = relationship(back_populates="archivos")
 
 
+ESTADOS_ENTREVISTA = ["programada", "en_curso", "completada", "evaluada", "interrumpida"]
+# herramienta = tool `terminar_entrevista` del avatar · marcador = despedida detectada en el
+# transcript · texto = `terminada` del modo texto · manual = botón del candidato ·
+# desconexion = CONNECTION_CLOSED / red · tiempo = tope de sesión.
+CIERRES_ENTREVISTA = ["herramienta", "marcador", "texto", "manual", "desconexion", "tiempo"]
+# Con estos cierres la entrevista se considera completa y se evalúa; con los demás, si el candidato
+# habló poco, queda `interrumpida` (RH puede reabrir).
+CIERRES_COMPLETOS = ("herramienta", "marcador", "texto", "manual")
+
+
 class Entrevista(Base):
     """Entrevista estructurada con agente IA (módulo 3.10) — avatar de video o texto."""
 
@@ -420,10 +432,19 @@ class Entrevista(Base):
     postulacion_id: Mapped[Optional[int]] = mapped_column(ForeignKey("postulaciones.id"), nullable=True, index=True)
     token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # liga pública para el candidato
     tipo: Mapped[str] = mapped_column(String(12), default="avatar")  # avatar | texto
-    estado: Mapped[str] = mapped_column(String(20), default="programada")  # programada | en_curso | completada | evaluada
-    guion: Mapped[dict] = mapped_column(JSON, default=dict)  # {enfoque, preguntas[]}
+    # programada | en_curso | completada | evaluada | interrumpida (ver ESTADOS_ENTREVISTA)
+    estado: Mapped[str] = mapped_column(String(20), default="programada")
+    guion: Mapped[dict] = mapped_column(JSON, default=dict)  # {enfoque, temas[], preguntas[]} (preguntas = legado)
     transcript: Mapped[list] = mapped_column(JSON, default=list)  # [{rol, texto}]
-    evaluacion: Mapped[dict] = mapped_column(JSON, default=dict)  # EvaluacionEntrevista
+    evaluacion: Mapped[dict] = mapped_column(JSON, default=dict)  # EvaluacionEntrevista (+ perfil profundo, Fase 4)
+    # Fase 4 (Punto 4): cómo terminó — señal que el backend pudo verificar (ver CIERRES_ENTREVISTA).
+    # Vacío mientras sigue abierta. La transición a evaluada/interrumpida SOLO ocurre en /finalizar.
+    cierre: Mapped[str] = mapped_column(String(20), default="")
+    iniciada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    finalizada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Reapertura explícita por RH: cada intento anterior se archiva aquí ({transcript, evaluacion,
+    # cierre, finalizada_en}) — nunca se pisa ni se borra.
+    intentos_previos: Mapped[list] = mapped_column(JSON, default=list)
     consentimiento: Mapped[bool] = mapped_column(Boolean, default=False)
     consentimiento_fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     programada_para: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -804,6 +825,7 @@ class Plantilla(Base):
     preguntas_filtro: Mapped[list] = mapped_column(JSON, default=list)  # = "evaluaciones" (ver spec Fase B)
     texto_whatsapp: Mapped[str] = mapped_column(Text, default="")
     texto_bolsa: Mapped[str] = mapped_column(Text, default="")
+    enfoque_entrevista: Mapped[str] = mapped_column(String(30), default="profesional")  # Fase 4
 
     creado_por: Mapped[str] = mapped_column(String(150), default="")
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
@@ -820,7 +842,11 @@ CAMPOS_PLANTILLA = [
     "titulo", "area", "ubicacion", "modalidad", "sueldo", "requisitos", "descripcion", "resumen",
     "perfil_ideal", "responsabilidades", "requisitos_deseables", "beneficios", "palabras_clave",
     "seniority", "avisos_cumplimiento", "preguntas_filtro", "texto_whatsapp", "texto_bolsa",
+    "enfoque_entrevista",
 ]
+
+# Fase 4 (Punto 6): enfoque de la Entrevista IA por vacante. Solo estos 2 niveles — nunca más.
+ENFOQUES_ENTREVISTA = ["profesional", "profesional_personal"]
 
 
 class UsuarioCuenta(Base):

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Spike Fase 4 — tools de Anam con LLM custom</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; max-width: 900px; }
+    video { width: 320px; height: 240px; background: #111; border-radius: 12px; }
+    #log { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; background: #f4f4f4; padding: 12px; border-radius: 8px; height: 320px; overflow: auto; }
+    .ok { color: #157347; font-weight: 700; } .bad { color: #b02a37; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h2>Spike Fase 4 — ¿el LLM custom invoca la tool <code>terminar_entrevista</code>?</h2>
+  <p>1) Corre <code>scripts/spike_anam_tools.py</code> y pega aquí el token CON tools. 2) Conecta, di «sí, listo»,
+     contesta la pregunta y espera la despedida. 3) Revisa el log: <b>TOOL_CALL_STARTED</b> = Anam sí manda la tool
+     al LLM custom (señal primaria viable); si solo ves la despedida sin tool → fallback «marcador».</p>
+  <input id="token" placeholder="sessionToken" style="width: 70%" />
+  <button id="conectar">Conectar</button>
+  <button id="detener">Detener</button>
+  <p><video id="avatar-video" autoplay playsinline></video></p>
+  <div id="log"></div>
+  <script type="module">
+    import { createClient, AnamEvent } from "https://esm.sh/@anam-ai/js-sdk@4.23.1";
+    const log = (m, cls) => { const d = document.createElement("div"); if (cls) d.className = cls; d.textContent = `${new Date().toISOString().slice(11, 19)}  ${m}`; document.getElementById("log").appendChild(d); };
+    let client = null;
+    document.getElementById("conectar").onclick = async () => {
+      const token = document.getElementById("token").value.trim();
+      if (!token) return log("Pega el sessionToken", "bad");
+      client = createClient(token);
+      for (const ev of ["SESSION_READY", "CONNECTION_ESTABLISHED", "CONNECTION_CLOSED", "USER_SPEECH_STARTED", "USER_SPEECH_ENDED", "TALK_STREAM_INTERRUPTED", "SERVER_WARNING"]) {
+        client.addListener(AnamEvent[ev], (p) => log(`${ev} ${p ? JSON.stringify(p).slice(0, 120) : ""}`));
+      }
+      client.addListener(AnamEvent.MESSAGE_HISTORY_UPDATED, (h) => { const u = h[h.length - 1]; if (u) log(`MSG ${u.role}: ${u.content}`); });
+      client.addListener(AnamEvent.TOOL_CALL_STARTED, (p) => log(`TOOL_CALL_STARTED ${JSON.stringify(p)}`, "ok"));
+      client.addListener(AnamEvent.TOOL_CALL_COMPLETED, (p) => log(`TOOL_CALL_COMPLETED ${JSON.stringify(p)}`, "ok"));
+      client.addListener(AnamEvent.TOOL_CALL_FAILED, (p) => log(`TOOL_CALL_FAILED ${JSON.stringify(p)}`, "bad"));
+      client.addListener(AnamEvent.CLIENT_TOOL_EVENT_RECEIVED, (p) => log(`CLIENT_TOOL_EVENT_RECEIVED ${JSON.stringify(p)}`, "ok"));
+      client.registerToolCallHandler("terminar_entrevista", {
+        onStart: async (p) => { log(`HANDLER terminar_entrevista onStart ${JSON.stringify(p)}`, "ok"); return "ok"; },
+        onComplete: async (p) => log(`HANDLER onComplete ${JSON.stringify(p)}`, "ok"),
+        onFail: async (p) => log(`HANDLER onFail ${JSON.stringify(p)}`, "bad"),
+      });
+      try { await client.streamToVideoElement("avatar-video"); log("streaming…"); } catch (e) { log(`ERROR ${e}`, "bad"); }
+    };
+    document.getElementById("detener").onclick = async () => { try { await client?.stopStreaming(); log("stopStreaming()"); } catch (e) { log(`ERROR ${e}`, "bad"); } };
+  </script>
+</body>
+</html>

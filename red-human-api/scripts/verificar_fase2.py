@@ -256,6 +256,25 @@ with TestClient(app) as client:
     check(r.status_code == 200 and r.json()["candidatos"] == 1 and r.json()["postulaciones"] == 4, "eliminar prueba borra persona + sus 4 postulaciones en cascada")
     check(db.query(Postulacion).filter_by(codigo=P2).first() is None and db.query(Expediente).get(exp_p2) is None, "…y sus expedientes/mensajes")
 
+    # ---------- 11. Liga pública de entrevista (regresión: se rompió con Fase 2 y se corrigió en Fase 4) ----------
+    p_ent = db.query(Postulacion).filter(Postulacion.vacante_id.isnot(None), Postulacion.activa.is_(True)).first()
+    r = client.post("/entrevistas", json={"candidato": p_ent.codigo, "avisar_whatsapp": False})
+    check(r.status_code == 201, "agendar entrevista IA")
+    tok = r.json()["token"]
+    r = client.get(f"/entrevistas/publica/{tok}")
+    check(r.status_code == 200 and r.json()["puesto"] == p_ent.vacante.titulo, "GET /entrevistas/publica/{token}: puesto desde la postulación")
+    client.post(f"/entrevistas/publica/{tok}/consentimiento", json={"acepta": True})
+    r = client.post(f"/entrevistas/publica/{tok}/sesion")
+    check(r.status_code == 200 and r.json()["modo"] == "texto", "POST /sesion (modo texto)")
+    r = client.post(f"/entrevistas/publica/{tok}/turno", json={"texto": "sí, listo"})
+    check(r.status_code == 200 and r.json()["respuesta"], "POST /turno responde")
+    for _ in range(10):
+        r = client.post(f"/entrevistas/publica/{tok}/turno", json={"texto": "respuesta"})
+        if r.json()["terminada"]:
+            break
+    r = client.post(f"/entrevistas/publica/{tok}/finalizar", json={"cierre": "texto"})
+    check(r.status_code == 200 and r.json()["estado"] == "evaluada" and r.json()["cierre"] == "texto", "POST /finalizar evalúa y registra el cierre")
+
     db.close()
 
 print(f"\n🎉 Fase 2 verificada: {OK} comprobaciones OK.")

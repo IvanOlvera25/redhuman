@@ -792,42 +792,108 @@ def onboarding_turno(nombre_candidato: str, vacante_titulo: str, historial: List
 
 
 # ============================================================
-# 3b) Entrevista estructurada (módulo 3.10) — guion, turnos y evaluación
+# Entrevista IA (módulo 3.10) — Fase 4: guion por temas, entrevistadora con protocolo y evaluación
+# con conocimiento profundo del candidato.
 # ============================================================
+
+# Datos que la entrevistadora y la evaluadora tienen PROHIBIDO pedir, inferir o registrar (LFT art. 3
+# y 133, LFPDPPP). Si el candidato los menciona por su cuenta, se ignoran: no se repreguntan, no
+# se anotan como evidencia ni pesan en ninguna conclusión. Regla no negociable del documento.
+DATOS_SENSIBLES_PROHIBIDOS = (
+    "estado civil, hijos o planes de tener hijos, con quién vive, religión, salud o embarazo, "
+    "discapacidad, orientación sexual, edad exacta, origen étnico, opinión política, situación "
+    "económica o deudas personales"
+)
+
+# Qué cubre cada enfoque de entrevista (Punto 6). Solo estos dos niveles.
+ENFOQUE_ENTREVISTA_TEMAS = {
+    "profesional": (
+        "experiencia real, conocimientos del puesto, nivel de responsabilidad, criterio, resolución "
+        "de problemas, toma de decisiones, comunicación, manejo de presión y errores, manejo de "
+        "conflicto, motivadores laborales, estilo de trabajo, relación con jefaturas, objetivos y "
+        "expectativas de crecimiento profesional"
+    ),
+    "profesional_personal": (
+        "todo lo del enfoque profesional Y ADEMÁS objetivos personales no sensibles, prioridades de "
+        "vida en relación con el trabajo, motivadores más amplios, disciplina y hábitos, valores, "
+        "visión de futuro"
+    ),
+}
+
+
+def _enfoque_valido(enfoque: str) -> str:
+    return enfoque if enfoque in ENFOQUE_ENTREVISTA_TEMAS else "profesional"
 
 
 class GuionEntrevista(BaseModel):
     enfoque: str = Field(description="En 1-2 frases, qué debe validar esta entrevista para este puesto y este candidato.")
-    preguntas: List[str] = Field(description="5 a 7 preguntas abiertas de entrevista, ordenadas, en español mexicano.")
-
-
-def _guion_demo(titulo: str) -> GuionEntrevista:
-    return GuionEntrevista(
-        enfoque=f"Validar experiencia real, disponibilidad y motivación para {titulo}.",
-        preguntas=[
-            "Cuéntame de tu experiencia más reciente relacionada con este puesto.",
-            "¿Cuál ha sido el reto más difícil que has enfrentado en un trabajo y cómo lo resolviste?",
-            "¿Qué te motivó a postularte a esta vacante?",
-            "¿Cómo es tu disponibilidad de horario y traslado?",
-            "¿Qué esperas de tu siguiente trabajo?",
-        ],
+    temas: List[str] = Field(
+        default_factory=list,
+        description="5 a 7 temas a cubrir, en orden sugerido de lo general a lo específico. Son áreas, no preguntas.",
+    )
+    preguntas: List[str] = Field(
+        description=(
+            "5 a 7 preguntas abiertas de REFERENCIA (una por tema), en español mexicano, cortas. La "
+            "entrevistadora las usa como inspiración de tono, nunca como script literal."
+        )
     )
 
 
-def guion_entrevista(titulo: str, requisitos: str, candidato_resumen: str) -> Tuple[GuionEntrevista, bool]:
+def _guion_demo(titulo: str, enfoque_entrevista: str = "profesional") -> GuionEntrevista:
+    temas = [
+        "Experiencia reciente relacionada con el puesto",
+        "Responsabilidades y nivel de autonomía",
+        "Resolución de un problema real",
+        "Manejo de presión y errores",
+        "Motivación para este puesto",
+        "Disponibilidad y condiciones",
+    ]
+    preguntas = [
+        "Cuéntame de tu experiencia más reciente relacionada con este puesto.",
+        "¿Qué decisiones tomabas tú y cuáles pasaban por tu jefe?",
+        "Cuéntame de un problema difícil que resolviste en el trabajo.",
+        "¿Cómo reaccionas cuando algo sale mal por un error tuyo?",
+        "¿Qué te motivó a postularte a esta vacante?",
+        "¿Cómo es tu disponibilidad de horario y traslado?",
+    ]
+    if enfoque_entrevista == "profesional_personal":
+        temas.append("Objetivos personales y visión de futuro")
+        preguntas.append("¿Cómo te ves en dos o tres años?")
+    return GuionEntrevista(
+        enfoque=f"Validar experiencia real, criterio y motivación para {titulo}.",
+        temas=temas,
+        preguntas=preguntas,
+    )
+
+
+def guion_entrevista(
+    titulo: str,
+    requisitos: str,
+    candidato_resumen: str,
+    enfoque_entrevista: str = "profesional",
+    perfil_ideal: str = "",
+    responsabilidades: Optional[List[str]] = None,
+) -> Tuple[GuionEntrevista, bool]:
+    """Guion por TEMAS (Fase 4): la entrevistadora cubre áreas y profundiza según la respuesta; las
+    preguntas son solo referencia. `enfoque_entrevista` (Punto 6) decide qué áreas entran."""
+    enfoque_entrevista = _enfoque_valido(enfoque_entrevista)
     client = _client()
     if client is None:
-        return _guion_demo(titulo), False
+        return _guion_demo(titulo, enfoque_entrevista), False
 
     resp = client.responses.parse(
         model=MODEL,
         instructions=(
-            "Diseñas guiones de entrevista para Red Human AI (RH en México). Genera preguntas abiertas, "
-            "conductuales y ligadas a los requisitos del puesto; adapta 1-2 preguntas al perfil del candidato. "
-            "Prohibido preguntar datos sensibles (salud, embarazo, religión, estado civil, orientación)."
+            "Diseñas guiones de entrevista para Red Human AI (RH en México). Devuelve TEMAS a cubrir (áreas, "
+            "de lo general a lo específico) y una pregunta corta de referencia por tema, abierta y conductual, "
+            "ligada a los requisitos del puesto; adapta 1-2 temas al perfil del candidato. "
+            f"Áreas permitidas para este enfoque ({enfoque_entrevista}): {ENFOQUE_ENTREVISTA_TEMAS[enfoque_entrevista]}. "
+            f"PROHIBIDO cualquier tema sobre: {DATOS_SENSIBLES_PROHIBIDOS}."
         ),
         input=(
             f"Puesto: {titulo}\nRequisitos indispensables: {requisitos}\n"
+            f"Perfil ideal: {perfil_ideal or 'no especificado'}\n"
+            f"Responsabilidades: {'; '.join(responsabilidades or []) or 'no especificadas'}\n"
             f"Resumen del candidato: {candidato_resumen or 'sin información previa'}"
         ),
         text_format=GuionEntrevista,
@@ -835,23 +901,96 @@ def guion_entrevista(titulo: str, requisitos: str, candidato_resumen: str) -> Tu
     return resp.output_parsed, True
 
 
-def prompt_entrevistador(titulo: str, requisitos: str, candidato_nombre: str, preguntas: List[str]) -> str:
-    """System prompt compartido por el avatar (Anam) y el modo texto — misma personalidad en ambos canales."""
-    lista = "\n".join(f"{i + 1}. {p}" for i, p in enumerate(preguntas))
+def temas_de_guion(guion: dict) -> List[str]:
+    """Temas del guion; para guiones previos a Fase 4 (solo `preguntas`) usa las preguntas como temas."""
+    g = guion or {}
+    return list(g.get("temas") or g.get("preguntas") or [])
+
+
+# Despedida FIJA de la entrevistadora: es el marcador que el navegador detecta y que el servidor
+# verifica en /finalizar (Punto 4, fallback "marcador"). Cambiarla aquí cambia la verificación.
+DESPEDIDA_ENTREVISTA = "Con esto terminamos la entrevista"
+
+
+def mensaje_inicial_entrevista(nombre: str, empresa: str) -> str:
+    """Saludo hablado por el avatar (initialMessage) — texto exacto del documento para el inicio."""
+    return f"Hola {nombre}, soy Alma, de Red Human. {nombre}, cuando estés listo comenzamos. Dime, ¿estás listo?"
+
+
+def prompt_entrevistador(
+    titulo: str,
+    requisitos: str,
+    candidato_nombre: str,
+    preguntas: Optional[List[str]] = None,
+    *,
+    empresa: str = "",
+    temas: Optional[List[str]] = None,
+    enfoque: str = "",
+    enfoque_entrevista: str = "profesional",
+    ubicacion: str = "",
+    modalidad: str = "",
+    sueldo: str = "",
+    beneficios: Optional[List[str]] = None,
+    area: str = "",
+) -> str:
+    """System prompt compartido por el avatar (Anam) y el modo texto — misma personalidad en ambos.
+
+    Fase 4 (Punto 3): protocolo de inicio y silencio, sin numerar, una pregunta por intervención, de
+    lo general a lo específico, sin repetir lo ya respondido, entrevistadora (no lectora de
+    cuestionario). El guion es referencia de temas, nunca script literal ni obligatorio de agotar."""
+    enfoque_entrevista = _enfoque_valido(enfoque_entrevista)
+    temas = temas or preguntas or []
+    lista_temas = "\n".join(f"- {t}" for t in temas) or "- Experiencia relacionada con el puesto"
+    referencia = "\n".join(f"- {p}" for p in (preguntas or []))
+    condiciones = "; ".join(
+        x for x in [
+            f"ubicación: {ubicacion}" if ubicacion else "",
+            f"modalidad: {modalidad}" if modalidad else "",
+            f"sueldo: {sueldo}" if sueldo and sueldo != "A convenir" else "",
+            f"beneficios: {', '.join(beneficios)}" if beneficios else "",
+            f"área: {area}" if area else "",
+        ] if x
+    ) or "sin datos adicionales"
+    empresa_txt = empresa or "la empresa"
     return (
-        "Eres 'Alma', la entrevistadora virtual de Red Human AI (México). Eres una IA y lo dices con "
-        f"naturalidad si te preguntan. Entrevistas a {candidato_nombre} para el puesto de {titulo}. "
-        f"Requisitos indispensables: {requisitos}.\n\nGuion de preguntas:\n{lista}\n\n"
-        "Reglas: (1) tono cálido, profesional y breve — una sola pregunta a la vez; (2) haz máximo una "
-        "repregunta corta por tema cuando la respuesta sea vaga; (3) no prometas nada sobre el resultado: "
-        "la decisión la toma una persona de RH; (4) nunca pidas datos sensibles (salud, embarazo, religión, "
-        "estado civil); (5) al terminar el guion, agradece y despídete indicando que RH le contactará."
+        f"Eres 'Alma', entrevistadora virtual de Red Human (México). Eres una IA y lo dices con naturalidad "
+        f"si te preguntan. Entrevistas a {candidato_nombre} para el puesto de {titulo} en {empresa_txt}. "
+        f"Cuando hables de la empresa, llámala siempre «{empresa_txt}», nunca de otra forma.\n"
+        f"Requisitos indispensables: {requisitos or 'no especificados'}.\n"
+        f"Condiciones concretas de la vacante: {condiciones}. Si el candidato pregunta por horario, ubicación, "
+        "modalidad o sueldo, usa EXACTAMENTE estos datos; lo que no esté aquí, di que RH lo confirmará. "
+        "Nunca hables en genérico cuando tienes el dato.\n\n"
+        f"Objetivo de la entrevista: {enfoque or 'validar experiencia real, criterio y motivación para el puesto'}.\n"
+        f"Enfoque: {enfoque_entrevista} — cubre: {ENFOQUE_ENTREVISTA_TEMAS[enfoque_entrevista]}.\n"
+        f"Temas a cubrir (en este orden aproximado):\n{lista_temas}\n"
+        + (f"Preguntas de referencia (inspiración de tono, NO script; no tienes que hacerlas todas ni tal cual):\n{referencia}\n" if referencia else "")
+        + "\n"
+        "PROTOCOLO DE INICIO: tu primer mensaje ya le preguntó a la persona si está lista. Si contesta "
+        "afirmativo (sí, listo, lista, adelante, vamos, claro, ok, dale), comienza DE INMEDIATO con la "
+        "primera pregunta, sin volver a pedir confirmación nunca más. Si contesta que no o pide un momento, "
+        "responde solo: «Tómate tu tiempo, avísame cuando estés listo» y espera. Si recibes un turno vacío "
+        f"o sin contenido antes de empezar, di: «{candidato_nombre}, no te escuché. ¿Estás listo?».\n\n"
+        "CÓMO ENTREVISTAS: (1) frases cortas y lenguaje sencillo, en español mexicano; (2) UNA sola pregunta "
+        "principal por intervención — jamás dos preguntas en la misma oración; (3) primero pregunta algo "
+        "general del tema y luego profundiza según lo que responda, con repreguntas también cortas (máximo "
+        "dos por tema); (4) NUNCA digas 'Pregunta 1', 'Pregunta 2', ni numeres ni enumeres las preguntas; "
+        "(5) si la persona ya respondió algo que ibas a preguntar después, NO lo vuelvas a preguntar: "
+        "reconoce brevemente y sigue con lo siguiente; (6) compórtate como una entrevistadora que conversa, "
+        "no como quien lee un cuestionario: reacciona a lo que dice, conecta temas, sé cálida y profesional; "
+        "(7) no evalúes en voz alta, no prometas nada sobre el resultado: la decisión la toma una persona "
+        "de RH; (8) cuando ya tengas suficiente de un tema, cambia de tema sin anunciarlo.\n\n"
+        f"CUMPLIMIENTO (NO NEGOCIABLE): nunca preguntes, insinúes ni registres datos sobre {DATOS_SENSIBLES_PROHIBIDOS}. "
+        "Si la persona los menciona por su cuenta, no repreguntes, no comentes y sigue con el tema laboral.\n\n"
+        "CIERRE: cuando hayas cubierto los temas (o la persona no tenga más que aportar), despídete en un "
+        f"solo mensaje que empiece EXACTAMENTE con «{DESPEDIDA_ENTREVISTA}, {candidato_nombre}.» seguido de un "
+        "agradecimiento breve y de que el equipo de RH le contactará. Después de despedirte no hagas más "
+        "preguntas ni reabras la conversación."
     )
 
 
 class TurnoEntrevista(BaseModel):
     respuesta: str = Field(description="Siguiente mensaje de la entrevistadora, breve, español mexicano.")
-    terminada: bool = Field(description="true solo cuando ya se hicieron todas las preguntas y te despediste.")
+    terminada: bool = Field(description="true solo cuando ya cubriste los temas y te despediste en este mensaje.")
 
 
 def entrevista_turno(system_prompt: str, historial: List[dict]) -> Tuple[TurnoEntrevista, bool]:
@@ -859,12 +998,22 @@ def entrevista_turno(system_prompt: str, historial: List[dict]) -> Tuple[TurnoEn
     client = _client()
     if client is None:
         n_agente = sum(1 for m in historial if m["rol"] == "assistant")
+        n_usuario = sum(1 for m in historial if m["rol"] == "user")
         demo_qs = _guion_demo("el puesto").preguntas
-        if n_agente < len(demo_qs):
-            return TurnoEntrevista(respuesta=demo_qs[n_agente], terminada=False), False
+        ultimo = (historial[-1]["texto"] if historial else "").strip().lower()
+        # Protocolo de inicio: el primer turno del candidato es la confirmación de que está listo.
+        if n_usuario == 1 and n_agente == 1:
+            afirmativo = any(w in ultimo for w in ("si", "sí", "listo", "lista", "adelante", "vamos", "claro", "ok", "dale"))
+            if not afirmativo:
+                return TurnoEntrevista(respuesta="Tómate tu tiempo, avísame cuando estés listo.", terminada=False), False
+        # n_agente incluye el saludo inicial: la pregunta i-ésima es demo_qs[n_agente - 1]
+        i = max(0, n_agente - 1)
+        if i < len(demo_qs):
+            return TurnoEntrevista(respuesta=demo_qs[i], terminada=False), False
+        nombre = "gracias"
         return (
             TurnoEntrevista(
-                respuesta="¡Muchas gracias por tu tiempo! El equipo de RH revisará tu entrevista y te contactará pronto. 😊",
+                respuesta=f"{DESPEDIDA_ENTREVISTA}, {nombre}. ¡Muchas gracias por tu tiempo! El equipo de RH revisará tu entrevista y te contactará pronto. 😊",
                 terminada=True,
             ),
             False,
@@ -880,10 +1029,40 @@ def entrevista_turno(system_prompt: str, historial: List[dict]) -> Tuple[TurnoEn
     return resp.output_parsed, True
 
 
+# ---------- Evaluación: recomendación + conocimiento profundo del candidato (Punto 5) ----------
+
+DIMENSIONES_PERFIL = [
+    "motivadores", "estilo_trabajo", "valores", "decisiones", "aprendizaje",
+    "resiliencia", "objetivos", "riesgos", "compatibilidad", "relacion_jefatura",
+]
+
+
+class DimensionPerfil(BaseModel):
+    evaluado: bool = Field(description="false si la entrevista no dio información suficiente sobre esta dimensión.")
+    conclusion: str = Field(default="", description="1-2 frases. Vacío si no se evaluó.")
+    evidencia: List[str] = Field(default_factory=list, description="Citas o paráfrasis textuales del candidato que sustentan la conclusión.")
+
+
+class PerfilProfundo(BaseModel):
+    """Conocimiento profundo del candidato (Punto 5). Cada conclusión trae la evidencia que la
+    sustenta; lo que la entrevista no cubrió queda como evaluado=false, nunca inventado."""
+    motivadores: DimensionPerfil = Field(description="Qué lo mueve en el trabajo (y en lo personal solo si el enfoque lo incluye).")
+    estilo_trabajo: DimensionPerfil = Field(description="Cómo trabaja: organización, autonomía, colaboración, comunicación.")
+    valores: DimensionPerfil = Field(description="Valores profesionales que muestra.")
+    decisiones: DimensionPerfil = Field(description="Criterio, toma de decisiones y nivel de responsabilidad real.")
+    aprendizaje: DimensionPerfil = Field(description="Cómo aprende y cómo maneja errores.")
+    resiliencia: DimensionPerfil = Field(description="Manejo de presión, conflicto y adversidad.")
+    objetivos: DimensionPerfil = Field(description="Objetivos y expectativas de crecimiento.")
+    riesgos: DimensionPerfil = Field(description="Señales de riesgo para el puesto (brechas, inconsistencias, rotación).")
+    compatibilidad: DimensionPerfil = Field(description="Ajuste con el puesto y las condiciones ofrecidas.")
+    relacion_jefatura: DimensionPerfil = Field(description="Cómo se relaciona con jefes y autoridad.")
+
+
 class EvaluacionEntrevista(BaseModel):
     resumen: str = Field(description="Resumen ejecutivo de la entrevista en 2-3 frases para RH.")
     fortalezas: List[str] = Field(description="2 a 4 fortalezas observadas, con evidencia de lo que dijo la persona.")
     riesgos: List[str] = Field(default_factory=list, description="0 a 3 focos de atención o brechas contra los requisitos.")
+    areas_desarrollo: List[str] = Field(default_factory=list, description="0 a 3 áreas de desarrollo, con evidencia.")
     calif_experiencia: float = Field(description="0 a 10 — solidez de la experiencia contra los requisitos.")
     calif_comunicacion: float = Field(description="0 a 10 — claridad y estructura al comunicar.")
     match_perfil: int = Field(description="0 a 100 — empate global con el perfil del puesto.")
@@ -891,9 +1070,32 @@ class EvaluacionEntrevista(BaseModel):
         description="Recomendación PRELIMINAR para RH; la decisión final siempre es humana."
     )
     evidencia: str = Field(description="Citas o paráfrasis concretas de la entrevista que sustentan la recomendación.")
+    perfil: Optional[PerfilProfundo] = Field(default=None, description="Conocimiento profundo del candidato con evidencia por dimensión.")
 
 
-def evaluar_entrevista(titulo: str, requisitos: str, transcript: List[dict]) -> Tuple[EvaluacionEntrevista, bool]:
+def _perfil_demo() -> PerfilProfundo:
+    d = lambda c, e: DimensionPerfil(evaluado=True, conclusion=c, evidencia=[e])  # noqa: E731
+    no = DimensionPerfil(evaluado=False)
+    return PerfilProfundo(
+        motivadores=d("Le motiva la estabilidad y aprender del puesto.", "«Me interesa un lugar donde pueda crecer»"),
+        estilo_trabajo=d("Ordenado y orientado a cumplir.", "«Me gusta llevar todo anotado»"),
+        valores=no, decisiones=d("Decide dentro de su ámbito y escala lo demás.", "«Lo que no me toca lo consulto con mi jefe»"),
+        aprendizaje=no, resiliencia=d("Reconoce errores y corrige.", "«Cuando me equivoco lo digo y lo arreglo»"),
+        objetivos=no, riesgos=no, compatibilidad=d("Disponibilidad compatible con la vacante.", "«Puedo el horario que me digan»"),
+        relacion_jefatura=no,
+    )
+
+
+def evaluar_entrevista(
+    titulo: str,
+    requisitos: str,
+    transcript: List[dict],
+    *,
+    perfil_ideal: str = "",
+    temas: Optional[List[str]] = None,
+    enfoque_entrevista: str = "profesional",
+) -> Tuple[EvaluacionEntrevista, bool]:
+    enfoque_entrevista = _enfoque_valido(enfoque_entrevista)
     client = _client()
     if client is None:
         return (
@@ -901,11 +1103,13 @@ def evaluar_entrevista(titulo: str, requisitos: str, transcript: List[dict]) -> 
                 resumen="Modo demo: agrega OPENAI_API_KEY para evaluar la entrevista real.",
                 fortalezas=["Completó la entrevista"],
                 riesgos=[],
+                areas_desarrollo=[],
                 calif_experiencia=7.0,
                 calif_comunicacion=7.0,
                 match_perfil=70,
                 recomendacion="revision",
                 evidencia="Evaluación simulada (modo demo).",
+                perfil=_perfil_demo(),
             ),
             False,
         )
@@ -915,14 +1119,23 @@ def evaluar_entrevista(titulo: str, requisitos: str, transcript: List[dict]) -> 
         model=MODEL,
         instructions=(
             "Evalúas entrevistas laborales para Red Human AI (México). Califica SOLO con base en lo dicho en la "
-            "transcripción — nunca inventes ni infieras datos sensibles. Tu salida es una RECOMENDACIÓN preliminar: "
-            "la decisión final la toma una persona de RH (human-in-the-loop, LFPDPPP). Sé objetivo y cita evidencia."
+            "transcripción — nunca inventes. Tu salida es una RECOMENDACIÓN preliminar: la decisión final la toma "
+            "una persona de RH (human-in-the-loop, LFPDPPP). Sé objetivo y cita evidencia textual del candidato en "
+            "cada conclusión. Construye el perfil profundo por dimensión; si la entrevista no cubrió una dimensión, "
+            "márcala evaluado=false y déjala vacía — jamás la rellenes por inferencia. "
+            f"Enfoque de la entrevista: {enfoque_entrevista} ({ENFOQUE_ENTREVISTA_TEMAS[enfoque_entrevista]}); "
+            "no evalúes dimensiones personales si el enfoque es solo profesional. "
+            f"CUMPLIMIENTO (NO NEGOCIABLE): nunca registres, cites ni uses datos sobre {DATOS_SENSIBLES_PROHIBIDOS}, "
+            "aunque el candidato los haya mencionado; omítelos por completo."
         ),
-        input=f"Puesto: {titulo}\nRequisitos indispensables: {requisitos}\n\nTranscripción:\n{dialogo}",
+        input=(
+            f"Puesto: {titulo}\nRequisitos indispensables: {requisitos}\nPerfil ideal: {perfil_ideal or 'no especificado'}\n"
+            f"Temas que la entrevista debía cubrir: {'; '.join(temas or []) or 'no especificados'}\n\n"
+            f"Transcripción:\n{dialogo}"
+        ),
         text_format=EvaluacionEntrevista,
     )
     return resp.output_parsed, True
-
 
 # ============================================================
 # 3.5) Capacitación (Fase 1) — generación de curso con IA
