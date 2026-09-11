@@ -95,10 +95,25 @@ class Vacante(Base):
     cliente: Mapped[Optional["Cliente"]] = relationship()
     cuenta: Mapped[Optional["Cuenta"]] = relationship()
 
-    candidatos: Mapped[List["Candidato"]] = relationship(back_populates="vacante")
+    # Fase 2: las aplicaciones a esta vacante (una tarjeta del Kanban cada una).
+    postulaciones: Mapped[List["Postulacion"]] = relationship(back_populates="vacante", order_by="Postulacion.id")
 
 
 class Candidato(Base):
+    """PERSONA (maestro de identidad) — Fase 2 (Puntos 7/8).
+
+    Un candidato es una persona: nombre, contacto, WhatsApp, CV y archivos. Todo lo que es
+    "proceso" (etapa, estado, score, chat, entrevistas, expediente) vive en `Postulacion`:
+    una persona puede aplicar a varias vacantes a lo largo del tiempo y cada aplicación es
+    una tarjeta distinta en el Kanban.
+
+    Ruteo de WhatsApp (decisión 2026-09-11): `postulacion_conversacion_id` apunta a la
+    postulación "en conversación" — lo mueve SOLO el candidato (un mensaje entrante suyo o
+    una selección explícita en la lista interactiva), nunca un mensaje saliente de RH o del
+    sistema (B1). Si el puntero no sirve y hay más de una postulación esperando respuesta,
+    el webhook PREGUNTA con una lista interactiva; nunca adivina (ver webhooks.py).
+    """
+
     __tablename__ = "candidatos"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -109,67 +124,224 @@ class Candidato(Base):
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
     experiencia: Mapped[str] = mapped_column(String(250), default="")
     fuente: Mapped[str] = mapped_column(String(30), default="Formulario")  # Formulario|WhatsApp|OCC|LinkedIn|Indeed|RH
-    estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # cumple|revision|no_cumple|pendiente
-    etapa: Mapped[str] = mapped_column(String(30), default="Prefiltro")  # ver ETAPAS_CANDIDATO
+    cv_datos: Mapped[dict] = mapped_column(JSON, default=dict)
+    wa_nombre: Mapped[str] = mapped_column(String(200), default="")  # nombre del perfil de WhatsApp
+    wa_id: Mapped[str] = mapped_column(String(30), default="", index=True)  # ID de WhatsApp (tel tal como lo envía Meta)
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    # Modo Prueba (solo admin, ver ConfiguracionSistema): nunca aparece en listados/reportes de RH.
+    es_prueba: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Cuenta (Fase A multi-cuenta).
+    cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
+    # Postulación con la que está conversando por WhatsApp ahora mismo (ver docstring).
+    postulacion_conversacion_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("postulaciones.id", use_alter=True, name="fk_candidato_postulacion_conversacion"), nullable=True
+    )
+
+    # --- LEGADO (pre-Fase 2): estado de proceso que antes vivía en la persona. Solo lo lee
+    # scripts/migrar_postulaciones.py para crear la Postulación inicial; NINGÚN endpoint lo
+    # escribe ni lo lee ya. Se conservan sin tocar hasta correr la migración de datos.
+    vacante_id: Mapped[Optional[int]] = mapped_column(ForeignKey("vacantes.id"), nullable=True)
+    estado: Mapped[str] = mapped_column(String(20), default="pendiente")
+    etapa: Mapped[str] = mapped_column(String(30), default="Prefiltro")
     score: Mapped[int] = mapped_column(Integer, default=0)
     evidencia: Mapped[str] = mapped_column(Text, default="")
-    cv_datos: Mapped[dict] = mapped_column(JSON, default=dict)
-    # detalle del match del CV contra la vacante: {requisitos_cumplidos[], brechas[], origen}
     analisis: Mapped[dict] = mapped_column(JSON, default=dict)
     consentimiento: Mapped[bool] = mapped_column(Boolean, default=False)
     consentimiento_fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     prefiltro_completo: Mapped[bool] = mapped_column(Boolean, default=False)
-    # --- Zero-Touch fase 1: videollamada agendada por la IA (herramienta agendar_videollamada) ---
-    # No confundir con el módulo de Entrevista (avatar/token público, tabla `entrevistas`): esto es
-    # la liga de videollamada que el agente ofrece por WhatsApp justo después del prefiltro.
     videollamada_agendada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     videollamada_liga: Mapped[str] = mapped_column(String(300), default="")
-    # true en cuanto se manda el mensaje de rescate por inasistencia — evita reenviarlo cada 5 min
     videollamada_aviso_noshow_enviado: Mapped[bool] = mapped_column(Boolean, default=False)
-    # --- Entrevista Humana: LEGADO — puente para scripts/migrar_entrevistas_humanas.py.
-    # Reemplazadas por la tabla EntrevistaHumana (uno a muchos, ver abajo); ya no las lee ni
-    # las escribe ningún endpoint. Se conservan sin tocar hasta correr la migración de datos.
-    entrevista_humana_entrevistador: Mapped[str] = mapped_column(String(150), default="")  # nombre a mostrar (usuario.nombre si es interno, tecleado si es externo)
-    entrevista_humana_tipo: Mapped[str] = mapped_column(String(20), default="")  # interno | externo
+    ultima_actividad_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    resultado_apto: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # LEGADO más antiguo — puente para scripts/migrar_entrevistas_humanas.py.
+    entrevista_humana_entrevistador: Mapped[str] = mapped_column(String(150), default="")
+    entrevista_humana_tipo: Mapped[str] = mapped_column(String(20), default="")
     entrevista_humana_usuario_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
     entrevista_humana_correo_externo: Mapped[str] = mapped_column(String(200), default="")
     entrevista_humana_fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    entrevista_humana_modalidad: Mapped[str] = mapped_column(String(20), default="")  # Presencial|Videollamada|Llamada
-    entrevista_humana_liga: Mapped[str] = mapped_column(String(300), default="")  # obligatoria si modalidad=Videollamada
-    entrevista_humana_ubicacion: Mapped[str] = mapped_column(String(300), default="")  # obligatoria si modalidad=Presencial
-    entrevista_humana_telefono_contacto: Mapped[str] = mapped_column(String(30), default="")  # opcional si modalidad=Llamada
+    entrevista_humana_modalidad: Mapped[str] = mapped_column(String(20), default="")
+    entrevista_humana_liga: Mapped[str] = mapped_column(String(300), default="")
+    entrevista_humana_ubicacion: Mapped[str] = mapped_column(String(300), default="")
+    entrevista_humana_telefono_contacto: Mapped[str] = mapped_column(String(30), default="")
     entrevista_humana_comentario: Mapped[str] = mapped_column(Text, default="")
     entrevista_humana_realizada: Mapped[bool] = mapped_column(Boolean, default=False)
-    entrevista_humana_resultado: Mapped[str] = mapped_column(String(20), default="")  # aprobado | no_aprobado
-    entrevista_humana_recomendacion: Mapped[str] = mapped_column(String(30), default="")  # avanzar | no_avanzar | segunda_entrevista
-    wa_nombre: Mapped[str] = mapped_column(String(200), default="")  # nombre del perfil de WhatsApp
-    wa_id: Mapped[str] = mapped_column(String(30), default="", index=True)  # ID de WhatsApp (tel tal como lo envía Meta)
-    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
-    # Fase C: última actividad relevante (cambio de etapa, evaluación, entrevista, mensaje, documento,
-    # nota, contratación, onboarding). Se actualiza en los endpoints correspondientes; NULL para
-    # candidatos sin actividad registrada desde el deploy de Fase C (backfill via script).
-    ultima_actividad_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    # Fase C: resultado vigente más reciente de todas las evaluaciones (Prefiltro IA, Entrevista IA,
-    # Entrevista Humana). True=Apto, False=No apto, None=sin evaluación todavía. El filtro "Aptos" usa
-    # este campo en vez de `estado` para respetar la regla "el más reciente gana".
-    resultado_apto: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-    # Modo Prueba (solo admin, ver ConfiguracionSistema): nunca aparece en listados/reportes de RH.
-    es_prueba: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Cuenta (Fase A multi-cuenta) — directo, no vía join a Vacante: vacante_id es nullable y no
-    # todo candidato tiene una vacante asignada.
-    cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
+    entrevista_humana_resultado: Mapped[str] = mapped_column(String(20), default="")
+    entrevista_humana_recomendacion: Mapped[str] = mapped_column(String(30), default="")
 
-    vacante_id: Mapped[Optional[int]] = mapped_column(ForeignKey("vacantes.id"), nullable=True)
-    vacante: Mapped[Optional[Vacante]] = relationship(back_populates="candidatos")
-    mensajes: Mapped[List["Mensaje"]] = relationship(back_populates="candidato", order_by="Mensaje.id")
-    expediente: Mapped[Optional["Expediente"]] = relationship(back_populates="candidato", uselist=False)
-    entrevistas: Mapped[List["Entrevista"]] = relationship(back_populates="candidato", order_by="Entrevista.id")
-    entrevistas_humanas: Mapped[List["EntrevistaHumana"]] = relationship(
-        back_populates="candidato", order_by="EntrevistaHumana.id", cascade="all, delete-orphan"
-    )
+    # --- Relaciones de persona ---
     archivos: Mapped[List["Archivo"]] = relationship(
         back_populates="candidato", order_by="Archivo.id", cascade="all, delete-orphan"
     )
+    postulaciones: Mapped[List["Postulacion"]] = relationship(
+        back_populates="candidato", order_by="Postulacion.id",
+        primaryjoin="Candidato.id == Postulacion.candidato_id", foreign_keys="Postulacion.candidato_id",
+        cascade="all, delete-orphan",
+    )
+    postulacion_conversacion: Mapped[Optional["Postulacion"]] = relationship(
+        primaryjoin="Candidato.postulacion_conversacion_id == Postulacion.id",
+        foreign_keys=[postulacion_conversacion_id], post_update=True,
+    )
+    # Vistas de solo lectura sobre TODAS las postulaciones de la persona (historial completo).
+    # Cada hijo también cuelga de su Postulación; escribir siempre por la Postulación.
+    mensajes: Mapped[List["Mensaje"]] = relationship(
+        order_by="Mensaje.id", viewonly=True,
+        primaryjoin="Candidato.id == Mensaje.candidato_id", foreign_keys="Mensaje.candidato_id",
+    )
+    entrevistas: Mapped[List["Entrevista"]] = relationship(
+        order_by="Entrevista.id", viewonly=True,
+        primaryjoin="Candidato.id == Entrevista.candidato_id", foreign_keys="Entrevista.candidato_id",
+    )
+    entrevistas_humanas: Mapped[List["EntrevistaHumana"]] = relationship(
+        order_by="EntrevistaHumana.id", viewonly=True,
+        primaryjoin="Candidato.id == EntrevistaHumana.candidato_id", foreign_keys="EntrevistaHumana.candidato_id",
+    )
+    expedientes: Mapped[List["Expediente"]] = relationship(
+        order_by="Expediente.id", viewonly=True,
+        primaryjoin="Candidato.id == Expediente.candidato_id", foreign_keys="Expediente.candidato_id",
+    )
+
+    @property
+    def postulaciones_activas(self) -> List["Postulacion"]:
+        return [p for p in self.postulaciones if p.activa]
+
+
+# Cómo nació la postulación — alimenta "por fuente" en /metricas.
+ORIGENES_POSTULACION = ["formulario", "whatsapp", "rh_directo", "cv_masivo", "reinicio_prueba", "migracion"]
+# Por qué se cerró (activa=False). "" mientras sigue en curso.
+MOTIVOS_CIERRE = ["descartado", "contratado", "reinicio_prueba", "prueba_expirada"]
+
+
+class Postulacion(Base):
+    """Una aplicación de una persona (`Candidato`) a una `Vacante` — la unidad del Kanban.
+
+    Aquí vive TODO el estado del proceso: etapa, clasificación del prefiltro, score, chat,
+    entrevistas (IA y humanas) y el expediente de contratación (decisión P5: la contratación
+    es resultado de una aplicación específica). `vacante_id` es nullable solo mientras el
+    candidato elige vacante por WhatsApp (menú inicial).
+    """
+
+    __tablename__ = "postulaciones"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)  # P-####
+    candidato_id: Mapped[int] = mapped_column(ForeignKey("candidatos.id"), index=True)
+    vacante_id: Mapped[Optional[int]] = mapped_column(ForeignKey("vacantes.id"), nullable=True, index=True)
+    cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
+
+    activa: Mapped[bool] = mapped_column(Boolean, default=True)  # False = cerrada (ver motivo_cierre)
+    motivo_cierre: Mapped[str] = mapped_column(String(30), default="")  # ver MOTIVOS_CIERRE
+    cerrada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    origen: Mapped[str] = mapped_column(String(30), default="formulario")  # ver ORIGENES_POSTULACION
+    # Copia de Candidato.es_prueba al crear (para filtrar métricas sin JOIN).
+    es_prueba: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # --- Estado del proceso ---
+    etapa: Mapped[str] = mapped_column(String(30), default="Prefiltro")  # ver ETAPAS_CANDIDATO
+    estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # cumple | revision | no_cumple | pendiente
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    evidencia: Mapped[str] = mapped_column(Text, default="")
+    # detalle del match del CV contra la vacante + respuestas_prefiltro + flags de conversación
+    analisis: Mapped[dict] = mapped_column(JSON, default=dict)
+    prefiltro_completo: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Fase C: resultado vigente ("el más reciente gana"), ver candidatos._recalcular_resultado_apto.
+    resultado_apto: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    ultima_actividad_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # --- Consentimiento LFPDPPP: por proceso de selección ---
+    consentimiento: Mapped[bool] = mapped_column(Boolean, default=False)
+    consentimiento_fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # --- Zero-Touch fase 1: videollamada agendada por el agente (herramienta agendar_videollamada) ---
+    videollamada_agendada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    videollamada_liga: Mapped[str] = mapped_column(String(300), default="")
+    videollamada_aviso_noshow_enviado: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+    # --- Relaciones ---
+    candidato: Mapped["Candidato"] = relationship(
+        back_populates="postulaciones",
+        primaryjoin="Postulacion.candidato_id == Candidato.id", foreign_keys=[candidato_id],
+    )
+    vacante: Mapped[Optional["Vacante"]] = relationship(back_populates="postulaciones")
+    cuenta: Mapped[Optional["Cuenta"]] = relationship()
+    mensajes: Mapped[List["Mensaje"]] = relationship(
+        back_populates="postulacion", order_by="Mensaje.id", cascade="all, delete-orphan"
+    )
+    entrevistas: Mapped[List["Entrevista"]] = relationship(
+        back_populates="postulacion", order_by="Entrevista.id", cascade="all, delete-orphan"
+    )
+    entrevistas_humanas: Mapped[List["EntrevistaHumana"]] = relationship(
+        back_populates="postulacion", order_by="EntrevistaHumana.id", cascade="all, delete-orphan"
+    )
+    expediente: Mapped[Optional["Expediente"]] = relationship(
+        back_populates="postulacion", uselist=False, cascade="all, delete-orphan"
+    )
+
+    # --- Datos de persona, delegados (solo lectura) — así los serializadores y las plantillas
+    # de mensajes pueden leer p.nombre / p.telefono sin conocer la separación. ---
+    @property
+    def nombre(self) -> str:
+        return self.candidato.nombre if self.candidato else ""
+
+    @property
+    def correo(self) -> str:
+        return self.candidato.correo if self.candidato else ""
+
+    @property
+    def telefono(self) -> str:
+        return self.candidato.telefono if self.candidato else ""
+
+    @property
+    def ubicacion(self) -> str:
+        return self.candidato.ubicacion if self.candidato else ""
+
+    @property
+    def experiencia(self) -> str:
+        return self.candidato.experiencia if self.candidato else ""
+
+    @property
+    def fuente(self) -> str:
+        return self.candidato.fuente if self.candidato else "Formulario"
+
+    @property
+    def wa_id(self) -> str:
+        return self.candidato.wa_id if self.candidato else ""
+
+    @property
+    def wa_nombre(self) -> str:
+        return self.candidato.wa_nombre if self.candidato else ""
+
+    @property
+    def archivos(self) -> list:
+        return self.candidato.archivos if self.candidato else []
+
+    @property
+    def cv_datos(self) -> dict:
+        return self.candidato.cv_datos if self.candidato else {}
+
+    @property
+    def espera_respuesta(self) -> bool:
+        """True si el agente está a media conversación con el candidato por ESTA postulación:
+        prefiltro en curso, coordinando videollamada u onboarding. Es lo que el webhook usa para
+        saber entre qué postulaciones tendría que elegir un mensaje entrante."""
+        if not self.activa:
+            return False
+        if self.etapa == "Onboarding":
+            return True
+        if self.etapa == "Prefiltro":
+            return not self.prefiltro_completo
+        if self.etapa == "Entrevista IA":
+            return self.estado == "cumple" and not self.videollamada_agendada_en
+        # Evaluación / Entrevista Humana / Contratación: RH ya tomó el control — aunque el
+        # prefiltro haya quedado a medias, el agente no tiene nada que preguntar por chat.
+        return False
+
+    def cerrar(self, motivo: str) -> None:
+        self.activa = False
+        self.motivo_cierre = motivo
+        self.cerrada_en = ahora()
 
 
 class EntrevistaHumana(Base):
@@ -181,7 +353,11 @@ class EntrevistaHumana(Base):
     __tablename__ = "entrevistas_humanas"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # candidato_id (persona) se conserva desnormalizado para consultas de historial; la
+    # entrevista pertenece a la Postulación. NULL en postulacion_id = registro previo a la
+    # migración de Fase 2 (scripts/migrar_postulaciones.py lo rellena).
     candidato_id: Mapped[int] = mapped_column(ForeignKey("candidatos.id"), index=True)
+    postulacion_id: Mapped[Optional[int]] = mapped_column(ForeignKey("postulaciones.id"), nullable=True, index=True)
     entrevistador: Mapped[str] = mapped_column(String(150), default="")  # nombre a mostrar (usuario.nombre si es interno, tecleado si es externo)
     tipo: Mapped[str] = mapped_column(String(20), default="")  # interno | externo
     usuario_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
@@ -208,7 +384,8 @@ class EntrevistaHumana(Base):
     resultado_capturado_por: Mapped[str] = mapped_column(String(20), default="")
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
-    candidato: Mapped["Candidato"] = relationship(back_populates="entrevistas_humanas")
+    candidato: Mapped["Candidato"] = relationship(foreign_keys=[candidato_id])
+    postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="entrevistas_humanas")
 
 
 class Archivo(Base):
@@ -239,7 +416,8 @@ class Entrevista(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)
-    candidato_id: Mapped[int] = mapped_column(ForeignKey("candidatos.id"), index=True)
+    candidato_id: Mapped[int] = mapped_column(ForeignKey("candidatos.id"), index=True)  # persona (historial)
+    postulacion_id: Mapped[Optional[int]] = mapped_column(ForeignKey("postulaciones.id"), nullable=True, index=True)
     token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # liga pública para el candidato
     tipo: Mapped[str] = mapped_column(String(12), default="avatar")  # avatar | texto
     estado: Mapped[str] = mapped_column(String(20), default="programada")  # programada | en_curso | completada | evaluada
@@ -255,14 +433,16 @@ class Entrevista(Base):
     liga_meet: Mapped[str] = mapped_column(String(300), default="")
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
-    candidato: Mapped[Candidato] = relationship(back_populates="entrevistas")
+    candidato: Mapped[Candidato] = relationship(foreign_keys=[candidato_id])
+    postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="entrevistas")
 
 
 class Mensaje(Base):
     __tablename__ = "mensajes"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    candidato_id: Mapped[int] = mapped_column(ForeignKey("candidatos.id"), index=True)
+    candidato_id: Mapped[int] = mapped_column(ForeignKey("candidatos.id"), index=True)  # persona (historial)
+    postulacion_id: Mapped[Optional[int]] = mapped_column(ForeignKey("postulaciones.id"), nullable=True, index=True)
     rol: Mapped[str] = mapped_column(String(12))  # user | assistant
     texto: Mapped[str] = mapped_column(Text)
     canal: Mapped[str] = mapped_column(String(20), default="whatsapp")  # whatsapp | web | simulador
@@ -272,7 +452,8 @@ class Mensaje(Base):
     wa_id: Mapped[str] = mapped_column(String(80), default="", index=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
-    candidato: Mapped[Candidato] = relationship(back_populates="mensajes")
+    candidato: Mapped[Candidato] = relationship(foreign_keys=[candidato_id])
+    postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="mensajes")
 
 
 # ============================================================
@@ -407,7 +588,11 @@ class Expediente(Base):
     __tablename__ = "expedientes"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    candidato_id: Mapped[int] = mapped_column(ForeignKey("candidatos.id"), unique=True)
+    # Fase 2 (decisión P5): el expediente pertenece a la Postulación (uno por postulación).
+    # candidato_id (persona) se conserva para contratacion.py / historial; una persona puede
+    # tener varios expedientes a lo largo del tiempo (uno por contratación).
+    candidato_id: Mapped[Optional[int]] = mapped_column(ForeignKey("candidatos.id"), nullable=True, index=True)
+    postulacion_id: Mapped[Optional[int]] = mapped_column(ForeignKey("postulaciones.id"), unique=True, nullable=True)
     puesto: Mapped[str] = mapped_column(String(200), default="")
     # --- condiciones finales de contratación (formulario de la etapa Contratación) ---
     sueldo: Mapped[str] = mapped_column(String(80), default="")
@@ -430,7 +615,8 @@ class Expediente(Base):
     token: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True, nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
-    candidato: Mapped[Candidato] = relationship(back_populates="expediente")
+    candidato: Mapped[Optional[Candidato]] = relationship(foreign_keys=[candidato_id])
+    postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="expediente")
     documentos: Mapped[List["Documento"]] = relationship(
         back_populates="expediente", order_by="Documento.id", cascade="all, delete-orphan"
     )

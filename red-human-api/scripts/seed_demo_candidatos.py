@@ -351,6 +351,11 @@ def sembrar_demo(db) -> None:
         ))
     print(f"  {c6.codigo} — {c6.nombre} (Onboarding, checklist avanzado)")
 
+    # Fase 2: los DEMO se escriben en forma legado (proceso en la persona) y aquí se
+    # convierten a Postulaciones — misma lógica que scripts/migrar_postulaciones.py.
+    from app.migraciones import migrar_postulaciones
+    migrar_postulaciones(db)
+
     registrar(
         db, "sistema", "semilla_demo_cargada", "sistema", "seed_demo",
         {"vacante": v.codigo, "candidatos": [f"{PREFIJO}C-{i:02d}" for i in range(1, 7)]},

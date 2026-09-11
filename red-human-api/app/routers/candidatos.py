@@ -1,22 +1,26 @@
-"""Módulo 1 · Reclutamiento — Candidatos: ingesta, CV, prefiltro y decisión HITL (3.6–3.9).
+"""Módulo 1 · Reclutamiento — Candidatos y Postulaciones: ingesta, CV, prefiltro y decisión HITL (3.6–3.9).
 
-La salida del pipeline es el enlace con el Módulo 2: `/candidatos/{codigo}/seleccionar`
-crea el expediente de contratación y arranca la solicitud de documentos.
+Fase 2 (Puntos 7/8): `Candidato` es la PERSONA (identidad: teléfono, correo, WhatsApp, CV) y
+`Postulacion` es cada aplicación a una vacante — la unidad del Kanban (decisión P4) y la dueña
+del chat, las entrevistas y el expediente (decisión P5). Todos los endpoints `/{codigo}/...`
+reciben el código de la Postulación (P-####); por compatibilidad también aceptan el de la
+persona (C-####), resuelto a su postulación en conversación / más reciente activa.
+
+La salida del pipeline es el enlace con el Módulo 2: al entrar a Contratación se abre el
+expediente de ESA postulación y arranca la solicitud de documentos.
 """
 
 import base64
-import json
 import re
 import secrets
 import unicodedata
 from datetime import datetime, timezone
-from typing import List, Optional
-from zoneinfo import ZoneInfo
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -33,16 +37,16 @@ from ..models import (
     EntrevistaHumana,
     Expediente,
     Mensaje,
+    Postulacion,
     Usuario,
     Vacante,
     registrar,
 )
-from ..serial import archivo_dict, candidato_dict, expediente_dict, nombre_empresa_candidato
+from ..serial import archivo_dict, expediente_dict, nombre_empresa_candidato, postulacion_dict
 from ..services import archivos as fs
 from ..services import ia
 from ..services import notificaciones
 from ..services.configuracion import modo_prueba_activo, puede_forzar_prueba
-from ..services.correo import enviar_correo
 from ..services.notificaciones import RE_CORREO, TZ_MEXICO
 from ..services.whatsapp import enviar_mensaje, enviar_plantilla
 
@@ -55,11 +59,126 @@ PLANTILLA_INICIO_ENTREVISTA = "inicio_entrevista_rh"
 TIPOS_ARCHIVO = ["cv", "carta", "certificado", "identificacion", "otro"]
 
 
-def _por_codigo(db: Session, codigo: str, cuenta_id: int) -> Candidato:
+# ============================================================
+# Resolución de códigos y creación de postulaciones
+# ============================================================
+
+
+def _por_codigo(db: Session, codigo: str, cuenta_id: int) -> Postulacion:
+    """P-#### → esa postulación. C-#### (ligas viejas: bitácora, colaboradores, agente) → la
+    postulación con la que la persona está conversando; si no, su última activa; si no, la
+    última que tuvo. Una persona sin postulaciones no es una tarjeta: 404."""
+    if codigo.startswith("P-"):
+        p = db.query(Postulacion).filter(Postulacion.codigo == codigo, Postulacion.cuenta_id == cuenta_id).first()
+        if not p:
+            raise HTTPException(404, "Postulación no encontrada")
+        return p
     c = db.query(Candidato).filter(Candidato.codigo == codigo, Candidato.cuenta_id == cuenta_id).first()
     if not c:
         raise HTTPException(404, "Candidato no encontrado")
-    return c
+    p = _postulacion_principal(c)
+    if not p:
+        raise HTTPException(404, "El candidato no tiene ninguna postulación")
+    return p
+
+
+def _postulacion_principal(c: Candidato) -> Optional[Postulacion]:
+    conv = c.postulacion_conversacion
+    if conv and conv.activa:
+        return conv
+    activas = c.postulaciones_activas
+    if activas:
+        return activas[-1]
+    return c.postulaciones[-1] if c.postulaciones else None
+
+
+def crear_postulacion(
+    db: Session,
+    c: Candidato,
+    vac: Optional[Vacante],
+    cuenta_id: int,
+    origen: str,
+    *,
+    consentimiento: bool = False,
+    etapa: str = "Prefiltro",
+    es_prueba: bool = False,
+) -> Postulacion:
+    """ÚNICO lugar donde nace una Postulación (webhooks, entrevistas y scripts la reutilizan):
+    el código P-#### siempre sale del id de la postulación, nunca del de la persona."""
+    p = Postulacion(
+        codigo="TMP",
+        candidato_id=c.id,
+        vacante_id=vac.id if vac else None,
+        cuenta_id=cuenta_id,
+        origen=origen,
+        etapa=etapa,
+        es_prueba=es_prueba or c.es_prueba,
+        consentimiento=consentimiento,
+        consentimiento_fecha=datetime.now(timezone.utc) if consentimiento else None,
+    )
+    db.add(p)
+    db.flush()
+    p.codigo = f"P-{8800 + p.id}"
+    c.postulaciones.append(p)
+    return p
+
+
+def postulacion_para_vacante(
+    db: Session, c: Candidato, vac: Optional[Vacante], cuenta_id: int, origen: str, **kw
+) -> Tuple[Postulacion, bool]:
+    """Decisión 2026-09-11 (reaplicar): si la persona ya tiene una postulación ACTIVA para esa
+    misma vacante se reutiliza (no se duplica la tarjeta); si la anterior está cerrada
+    (descartado / contratado / reinicio) se crea una nueva y la vieja queda como historial.
+    Regresa (postulacion, es_nueva)."""
+    vac_id = vac.id if vac else None
+    for p in reversed(c.postulaciones_activas):
+        if p.vacante_id == vac_id:
+            if kw.get("consentimiento") and not p.consentimiento:
+                p.consentimiento = True
+                p.consentimiento_fecha = datetime.now(timezone.utc)
+            return p, False
+    return crear_postulacion(db, c, vac, cuenta_id, origen, **kw), True
+
+
+def fijar_conversacion(p: Postulacion) -> None:
+    """Marca a `p` como la postulación con la que la persona está conversando por WhatsApp
+    (ver Candidato.postulacion_conversacion_id).
+
+    Decisión 2026-09-11 (B1): el puntero se mueve SOLO por acciones del candidato — un mensaje
+    entrante suyo o una selección explícita en la lista interactiva (ver webhooks.py). Nunca
+    por un mensaje saliente/proactivo de RH o del sistema (plantilla de inicio, aviso de apto,
+    recordatorio, notificación): escribirle sobre la postulación B no debe secuestrar en
+    silencio una conversación en curso sobre A."""
+    if p.candidato and p.candidato.postulacion_conversacion_id != p.id:
+        p.candidato.postulacion_conversacion_id = p.id
+
+
+def guardar_mensaje(
+    db: Session, p: Postulacion, rol: str, texto: str, canal: str, envio: Optional[dict] = None, wa_id: str = ""
+) -> Mensaje:
+    """Todo mensaje cuelga de la Postulación (y de la persona, para el historial completo).
+    Solo un mensaje ENTRANTE del candidato (rol "user") fija la conversación en esa
+    postulación; los salientes (rol "assistant") nunca la mueven — ver fijar_conversacion."""
+    envio = envio or {}
+    m = Mensaje(
+        candidato_id=p.candidato_id, postulacion_id=p.id, rol=rol, texto=texto, canal=canal,
+        enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "") or wa_id,
+    )
+    db.add(m)
+    if rol == "user":
+        fijar_conversacion(p)
+    return m
+
+
+async def _enviar_whatsapp(p: Postulacion, texto: str, canal: str = "whatsapp") -> dict:
+    """Envía por WhatsApp si el canal es whatsapp y hay teléfono; que Meta falle nunca tumba el flujo."""
+    if canal != "whatsapp" or not p.telefono:
+        return {"enviado": False, "proveedor": "demo"}
+    try:
+        return await enviar_mensaje(p.telefono, texto)
+    except Exception as e:
+        print(f"[whatsapp-send-error] {p.codigo}: {e}")
+        return {"enviado": False, "proveedor": "error", "detalle": str(e)}
 
 
 def _vacante(db: Session, codigo: Optional[str], cuenta_id: int) -> Optional[Vacante]:
@@ -88,9 +207,9 @@ def _distinto(a: str, b: str) -> bool:
 
 
 def _duplicado(db: Session, telefono: str, correo: str, cuenta_id: int, excluir: Optional[int] = None) -> Optional[Candidato]:
-    """Nunca empareja contra un candidato de Modo Prueba (`es_prueba=True`); tampoco cruza
-    Cuentas — dos empresas reclutadoras distintas en la plataforma no deben verse como
-    'el mismo candidato duplicado' entre sí."""
+    """Busca a la PERSONA por teléfono o correo (identidad, no proceso). Nunca empareja contra
+    un candidato de Modo Prueba (`es_prueba=True`); tampoco cruza Cuentas — dos empresas
+    reclutadoras distintas en la plataforma no deben verse como 'el mismo candidato'."""
     q = db.query(Candidato).filter(Candidato.es_prueba.is_(False), Candidato.cuenta_id == cuenta_id)
     if excluir:
         q = q.filter(Candidato.id != excluir)
@@ -103,71 +222,74 @@ def _duplicado(db: Session, telefono: str, correo: str, cuenta_id: int, excluir:
     return None
 
 
+def _crear_candidato(db: Session, cuenta_id: int, nombre: str, fuente: str, es_prueba: bool, **campos) -> Candidato:
+    c = Candidato(codigo="TMP", cuenta_id=cuenta_id, nombre=nombre, fuente=fuente, es_prueba=es_prueba, **campos)
+    db.add(c)
+    db.flush()
+    c.codigo = f"C-{8800 + c.id}"
+    return c
+
+
 # ============================================================
 # Fase C — Helpers de actividad y resultado "Apto"
 # ============================================================
 
 
-def _actualizar_ultima_actividad(c: Candidato) -> None:
-    """Registra que hubo actividad relevante en este candidato ahora mismo.
-    Debe llamarse justo antes de db.commit() en cualquier endpoint que modifique
-    el estado del candidato (etapa, evaluación, documento, mensaje, consentimiento)."""
+def _actualizar_ultima_actividad(p: Postulacion) -> None:
+    """Registra que hubo actividad relevante en esta postulación ahora mismo. Debe llamarse
+    justo antes de db.commit() en cualquier endpoint que modifique su estado (etapa,
+    evaluación, documento, mensaje, consentimiento)."""
     from ..models import ahora as _ahora
-    c.ultima_actividad_en = _ahora()
+    p.ultima_actividad_en = _ahora()
 
 
-def _recalcular_resultado_apto(c: Candidato) -> str:
-    """Actualiza Candidato.resultado_apto aplicando la regla 'el más reciente gana':
+def _recalcular_resultado_apto(p: Postulacion) -> str:
+    """Actualiza Postulacion.resultado_apto aplicando la regla 'el más reciente gana':
 
     1. Contratación / Onboarding → True siempre (llegaron al final del pipeline).
-    2. Descartado (decision() -> estado='no_cumple' sin evaluaciones posteriores) → False.
     3. EntrevistaHumana más reciente con resultado → aprobado=True | no_aprobado=False.
     4. Entrevista IA más reciente evaluada → avanzar=True | no_avanzar=False.
-    5. Prefiltro (c.estado) → cumple=True | no_cumple=False | otro=None.
+    5. Prefiltro (p.estado) → cumple=True | no_cumple=False | otro=None.
 
-    Se llama tras cualquier cambio que pueda alterar el resultado vigente. Regresa qué regla
-    decidió el valor final ("contratacion"|"entrevista_humana"|"entrevista_ia"|"prefiltro") —
-    lo usa `_recalcular_resultado_apto_y_notificar` (Fase D) para saber si el cambio vino del
-    prefiltro Zero-Touch (excluido de notificaciones) o de una etapa posterior real.
+    Regresa qué regla decidió ("contratacion"|"entrevista_humana"|"entrevista_ia"|"prefiltro")
+    — lo usa `_recalcular_resultado_apto_y_notificar` (Fase D) para saber si el cambio vino
+    del prefiltro Zero-Touch (excluido de notificaciones) o de una etapa posterior real.
     """
-    # Regla 1: etapas finales del pipeline — llegaron al final del proceso, siempre Aptos.
-    if c.etapa in ("Contratación", "Onboarding"):
-        c.resultado_apto = True
+    if p.etapa in ("Contratación", "Onboarding"):
+        p.resultado_apto = True
         return "contratacion"
-
-    # Regla 3: Entrevista Humana más reciente con resultado registrado
-    for eh in reversed(c.entrevistas_humanas):
+    for eh in reversed(p.entrevistas_humanas):
         if eh.resultado:
-            c.resultado_apto = (eh.resultado == "aprobado")
+            p.resultado_apto = (eh.resultado == "aprobado")
             return "entrevista_humana"
-
-    # Regla 4: Entrevista IA más reciente evaluada
-    for e in reversed(c.entrevistas):
+    for e in reversed(p.entrevistas):
         rec = (e.evaluacion or {}).get("recomendacion", "")
         if rec:
-            c.resultado_apto = (rec == "avanzar")
+            p.resultado_apto = (rec == "avanzar")
             return "entrevista_ia"
-
-    # Regla 5: Prefiltro del agente (fallback) — Zero-Touch, no dispara notificaciones.
-    if c.estado == "cumple":
-        c.resultado_apto = True
-    elif c.estado == "no_cumple":
-        c.resultado_apto = False
+    if p.estado == "cumple":
+        p.resultado_apto = True
+    elif p.estado == "no_cumple":
+        p.resultado_apto = False
     else:
-        c.resultado_apto = None
+        p.resultado_apto = None
     return "prefiltro"
 
 
-async def _recalcular_resultado_apto_y_notificar(db: Session, c: Candidato, actor: str) -> None:
+async def _recalcular_resultado_apto_y_notificar(db: Session, p: Postulacion, actor: str) -> None:
     """Fase D, evento 'candidato_apto': dispara la notificación solo cuando resultado_apto pasa
     a True por una etapa POSTERIOR al prefiltro (Entrevista IA, Entrevista Humana,
-    Contratación) — el apto/no-apto de prefiltro (Zero-Touch) sigue 100% excluido, tal como se
-    confirmó en la investigación de Fase D."""
-    anterior = c.resultado_apto
-    origen = _recalcular_resultado_apto(c)
-    if c.resultado_apto is True and anterior is not True and origen != "prefiltro":
-        eh = c.entrevistas_humanas[-1] if c.entrevistas_humanas else None
-        await notificaciones.disparar(db, "candidato_apto", c, actor, eh=eh)
+    Contratación) — el apto/no-apto de prefiltro (Zero-Touch) sigue 100% excluido."""
+    anterior = p.resultado_apto
+    origen = _recalcular_resultado_apto(p)
+    if p.resultado_apto is True and anterior is not True and origen != "prefiltro":
+        eh = p.entrevistas_humanas[-1] if p.entrevistas_humanas else None
+        await notificaciones.disparar(db, "candidato_apto", p, actor, eh=eh)
+
+
+# ============================================================
+# Listado (Kanban: una tarjeta por Postulación) y detalle
+# ============================================================
 
 
 @router.get("")
@@ -175,107 +297,130 @@ def listar(
     vacante: Optional[str] = None,
     etapa: Optional[str] = None,
     estado: Optional[str] = None,
-    # --- Fase C: filtros adicionales ---
     fuente: Optional[str] = None,
-    # --- Fase F: búsqueda por nombre (LIKE, mismo patrón que vacantes.listar::busqueda) ---
     nombre: Optional[str] = None,
-    cliente_id: Optional[int] = None,
-    responsable_id: Optional[int] = None,
     consentimiento: Optional[bool] = None,
-    apto: Optional[bool] = None,           # True → resultado_apto == True; False → == False
-    duplicados: Optional[bool] = None,     # True → candidatos con tel/correo repetido en la Cuenta
+    duplicados: bool = False,
+    apto: Optional[bool] = None,           # Fase C: True=Aptos, False=No aptos, None=todos
+    cliente_id: Optional[int] = None,      # Fase C: filtrar por Cliente de la vacante
+    responsable_id: Optional[int] = None,  # Fase C: filtrar por responsable de la vacante
     score_min: Optional[int] = None,       # Score CV mínimo (0-100)
     score_max: Optional[int] = None,       # Score CV máximo (0-100)
+    candidato: Optional[str] = None,       # Todas las postulaciones de una persona (C-####)
+    activa: Optional[bool] = None,         # filtro explícito: True = en curso, False = cerradas
+    mostrar_cerradas: bool = False,        # B4: por defecto el Kanban solo muestra activas
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     # A diferencia de /metricas y los conteos por vacante, este listado (el Kanban de RH) SÍ
-    # incluye a los candidatos de Modo Prueba (es_prueba=True) — el frontend los distingue con
+    # incluye a las postulaciones de Modo Prueba (es_prueba=True) — el frontend las distingue con
     # un badge "Prueba" para que un admin pueda seguir su propio flujo de pruebas visualmente.
-    q = db.query(Candidato).filter(Candidato.cuenta_id == cuenta.id).order_by(Candidato.id.desc())
+    q = (
+        db.query(Postulacion)
+        .join(Candidato, Postulacion.candidato_id == Candidato.id)
+        .filter(Postulacion.cuenta_id == cuenta.id)
+        .order_by(Postulacion.id.desc())
+    )
+    # B4 (decisión 2026-09-11): las cerradas (descartado/contratado/reinicio) se ocultan salvo
+    # que RH active "Mostrar cerradas" o pida un filtro `activa` explícito.
+    if activa is not None:
+        q = q.filter(Postulacion.activa.is_(activa))
+    elif not mostrar_cerradas:
+        q = q.filter(Postulacion.activa.is_(True))
     if vacante:
         v = _vacante(db, vacante, cuenta.id)
-        q = q.filter(Candidato.vacante_id == v.id)
+        q = q.filter(Postulacion.vacante_id == v.id)
     if etapa:
-        q = q.filter(Candidato.etapa == etapa)
+        q = q.filter(Postulacion.etapa == etapa)
     if estado:
-        q = q.filter(Candidato.estado == estado)
+        q = q.filter(Postulacion.estado == estado)
     if fuente:
         q = q.filter(Candidato.fuente == fuente)
     if nombre:
         q = q.filter(Candidato.nombre.ilike(f"%{nombre.strip()}%"))
+    if candidato:
+        q = q.filter(Candidato.codigo == candidato)
     if consentimiento is not None:
-        q = q.filter(Candidato.consentimiento.is_(consentimiento))
+        q = q.filter(Postulacion.consentimiento.is_(consentimiento))
     if apto is not None:
-        q = q.filter(Candidato.resultado_apto.is_(apto))
+        q = q.filter(Postulacion.resultado_apto.is_(apto))
     if score_min is not None:
-        q = q.filter(Candidato.score >= score_min)
+        q = q.filter(Postulacion.score >= score_min)
     if score_max is not None:
-        q = q.filter(Candidato.score <= score_max)
+        q = q.filter(Postulacion.score <= score_max)
     if cliente_id is not None:
-        q = q.join(Vacante, Candidato.vacante_id == Vacante.id).filter(Vacante.cliente_id == cliente_id)
+        q = q.join(Vacante, Postulacion.vacante_id == Vacante.id).filter(Vacante.cliente_id == cliente_id)
     if responsable_id is not None:
-        q = q.join(Vacante, Candidato.vacante_id == Vacante.id, isouter=True).filter(Vacante.responsable_id == responsable_id)
+        q = q.join(Vacante, Postulacion.vacante_id == Vacante.id, isouter=True).filter(Vacante.responsable_id == responsable_id)
     if duplicados:
-        # Candidatos cuyo teléfono normalizado o correo en minúsculas aparece más de una vez
-        # en la misma Cuenta — misma lógica que _duplicado(), pero para MOSTRAR, no para bloquear.
-        from sqlalchemy import select
+        # PERSONAS cuyo teléfono normalizado o correo en minúsculas aparece más de una vez en la
+        # misma Cuenta — misma lógica que _duplicado(), pero para MOSTRAR, no para bloquear.
+        # (Una persona con varias postulaciones NO es duplicado: es la misma fila en `candidatos`.)
         tel_dup = (
             select(Candidato.telefono)
-            .where(Candidato.cuenta_id == cuenta.id, Candidato.telefono != "", Candidato.es_prueba.is_(False))
+            .where(Candidato.cuenta_id == cuenta.id, Candidato.telefono != "")
             .group_by(Candidato.telefono)
             .having(func.count(Candidato.id) > 1)
         ).scalar_subquery()
         correo_dup = (
             select(func.lower(Candidato.correo))
-            .where(Candidato.cuenta_id == cuenta.id, Candidato.correo != "", Candidato.es_prueba.is_(False))
+            .where(Candidato.cuenta_id == cuenta.id, Candidato.correo != "")
             .group_by(func.lower(Candidato.correo))
             .having(func.count(Candidato.id) > 1)
         ).scalar_subquery()
-        from sqlalchemy import or_
         q = q.filter(or_(Candidato.telefono.in_(tel_dup), func.lower(Candidato.correo).in_(correo_dup)))
-    return [candidato_dict(c) for c in q.all()]
+    return [postulacion_dict(p) for p in q.all()]
 
 
 @router.post("/prueba/eliminar")
 def eliminar_candidatos_prueba(
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_admin), cuenta: Cuenta = Depends(cuenta_actual)
 ):
-    """Botón «Eliminar postulaciones de prueba» (solo admin) — borra TODOS los candidatos
-    con `es_prueba=True` de la Cuenta activa y lo que cuelga de ellos. Mismo patrón de cascada
-    que scripts/borrar_demo_candidatos.py (que borra por prefijo de código en vez de por flag)."""
+    """Botón «Eliminar postulaciones de prueba» (solo admin) — borra TODAS las personas con
+    `es_prueba=True` de la Cuenta activa y lo que cuelga de ellas (postulaciones, mensajes,
+    entrevistas, expedientes y documentos). Mismo patrón de cascada que
+    scripts/borrar_demo_candidatos.py (que borra por prefijo de código en vez de por flag)."""
     candidatos = db.query(Candidato).filter(Candidato.es_prueba.is_(True), Candidato.cuenta_id == cuenta.id).all()
     if not candidatos:
-        return {"candidatos": 0, "mensajes": 0, "entrevistas": 0, "expedientes": 0, "documentos": 0}
+        return {"candidatos": 0, "postulaciones": 0, "mensajes": 0, "entrevistas": 0, "expedientes": 0, "documentos": 0}
 
     ids = [c.id for c in candidatos]
-    n_msj = db.query(Mensaje).filter(Mensaje.candidato_id.in_(ids)).delete(synchronize_session=False)
-    n_ent = db.query(Entrevista).filter(Entrevista.candidato_id.in_(ids)).delete(synchronize_session=False)
-
-    # Expediente uno por uno (no bulk delete) para que la cascada del ORM se lleve
-    # también sus Documento — Expediente.documentos tiene cascade="all, delete-orphan".
+    # Expedientes uno por uno (no bulk delete) para que la cascada del ORM se lleve también
+    # sus Documento — Expediente.documentos tiene cascade="all, delete-orphan".
     expedientes = db.query(Expediente).filter(Expediente.candidato_id.in_(ids)).all()
     n_doc = sum(len(e.documentos) for e in expedientes)
     for e in expedientes:
         db.delete(e)
     db.flush()
+    # Hijos por persona (cubre también los registros previos a la migración, con postulacion_id NULL).
+    n_msj = db.query(Mensaje).filter(Mensaje.candidato_id.in_(ids)).delete(synchronize_session=False)
+    n_ent = db.query(Entrevista).filter(Entrevista.candidato_id.in_(ids)).delete(synchronize_session=False)
+    db.query(EntrevistaHumana).filter(EntrevistaHumana.candidato_id.in_(ids)).delete(synchronize_session=False)
+    for c in candidatos:
+        c.postulacion_conversacion_id = None
+    db.flush()
+    n_post = db.query(Postulacion).filter(Postulacion.candidato_id.in_(ids)).delete(synchronize_session=False)
+    db.expire_all()
 
     codigos = [c.codigo for c in candidatos]
     for c in candidatos:
-        db.delete(c)  # Candidato.archivos también tiene cascade="all, delete-orphan"
+        db.delete(c)  # Candidato.archivos tiene cascade="all, delete-orphan"
 
     registrar(
         db, u.nombre, "candidatos_prueba_borrados", "sistema", "modo_prueba",
         {"candidatos": codigos, "correo_rh": u.correo},
     )
     db.commit()
-    return {"candidatos": len(candidatos), "mensajes": n_msj, "entrevistas": n_ent, "expedientes": len(expedientes), "documentos": n_doc}
+    return {
+        "candidatos": len(candidatos), "postulaciones": n_post, "mensajes": n_msj,
+        "entrevistas": n_ent, "expedientes": len(expedientes), "documentos": n_doc,
+    }
 
 
 @router.get("/{codigo}")
 def detalle(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
-    return candidato_dict(_por_codigo(db, codigo, cuenta.id), detalle=True)
+    return postulacion_dict(_por_codigo(db, codigo, cuenta.id), detalle=True)
 
 
 # ------------------------------------------------------------
@@ -302,47 +447,38 @@ def ingresar(
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     if not datos.nombre.strip():
-        raise HTTPException(400, "El nombre del candidato es obligatorio.")
+        raise HTTPException(400, "El nombre es obligatorio.")
     vac = _vacante(db, datos.vacante, cuenta.id)
     telefono = _telefono(datos.telefono)
     prueba = modo_prueba_activo(db)
 
-    # dedup básico por teléfono o correo (módulo 3.6) — con Modo Prueba activo se salta siempre:
-    # cada alta es una postulación nueva e independiente marcada es_prueba=True.
-    if not prueba:
-        existente = _duplicado(db, telefono, datos.correo, cuenta.id)
-        if existente:
-            return {"duplicado": True, **candidato_dict(existente)}
-
-    c = Candidato(
-        codigo="TMP",
-        cuenta_id=cuenta.id,
-        nombre=datos.nombre.strip(),
-        correo=datos.correo.strip(),
-        telefono=telefono,
-        ubicacion=datos.ubicacion,
-        experiencia=datos.experiencia,
-        fuente=datos.fuente,
-        vacante_id=vac.id if vac else None,
-        consentimiento=datos.consentimiento,
-        consentimiento_fecha=datetime.now(timezone.utc) if datos.consentimiento else None,
-        es_prueba=prueba,
+    # dedup por teléfono o correo (módulo 3.6): la PERSONA se reutiliza; lo que se crea es una
+    # postulación nueva. Con Modo Prueba activo se salta siempre: cada alta es independiente.
+    c = None if prueba else _duplicado(db, telefono, datos.correo, cuenta.id)
+    nuevo_candidato = c is None
+    if c is None:
+        c = _crear_candidato(
+            db, cuenta.id, datos.nombre.strip(), datos.fuente, prueba,
+            correo=datos.correo.strip(), telefono=telefono, ubicacion=datos.ubicacion, experiencia=datos.experiencia,
+        )
+    p, nueva = postulacion_para_vacante(db, c, vac, cuenta.id, "rh_directo", consentimiento=datos.consentimiento)
+    registrar(
+        db, "sistema", "candidato_ingresado", "postulacion", p.codigo,
+        {"candidato": c.codigo, "fuente": datos.fuente, "vacante": datos.vacante, "persona_nueva": nuevo_candidato, "postulacion_nueva": nueva},
     )
-    db.add(c)
-    db.flush()
-    c.codigo = f"C-{8800 + c.id}"
-    registrar(db, "sistema", "candidato_ingresado", "candidato", c.codigo, {"fuente": datos.fuente, "vacante": datos.vacante})
     db.commit()
-    return {"duplicado": False, **candidato_dict(c)}
+    # `duplicado` = la persona ya existía (el frontend avisa "ya estaba registrado").
+    return {"duplicado": not nuevo_candidato, "postulacionNueva": nueva, **postulacion_dict(p, detalle=True)}
 
 
 # ------------------------------------------------------------
-# Extractor de CV (módulo 3.7) — PDF o imagen, uno o varios a la vez
+# CV (ruta 2: carga por RH) — extracción con IA + match contra la vacante
 # ------------------------------------------------------------
 
 
-def _aplicar_cv(db: Session, c: Candidato, datos: ia.CVExtraido, vac: Optional[Vacante], con_ia: bool) -> None:
-    """Vuelca la extracción sobre el candidato: datos de contacto + match contra la vacante."""
+def _aplicar_cv(c: Candidato, p: Postulacion, datos: ia.CVExtraido, vac: Optional[Vacante], con_ia: bool) -> None:
+    """Vuelca la extracción: datos de contacto sobre la PERSONA, match contra la vacante sobre
+    la POSTULACIÓN."""
     if datos.nombre and (not c.nombre or c.nombre.startswith("Candidato")):
         c.nombre = datos.nombre
     c.correo = c.correo or (datos.correo or "")
@@ -351,17 +487,17 @@ def _aplicar_cv(db: Session, c: Candidato, datos: ia.CVExtraido, vac: Optional[V
     c.experiencia = (datos.experiencia_resumen or c.experiencia)[:240]
     c.cv_datos = datos.model_dump()
 
-    # Merge, NUNCA reemplazo: c.analisis también guarda respuestas_prefiltro (prefiltro por
-    # WhatsApp) — reprocesar un CV después no debe borrar esas respuestas (bug real, punto 2).
-    analisis_actual = dict(c.analisis or {})
+    # Merge, NUNCA reemplazo: p.analisis también guarda respuestas_prefiltro (prefiltro por
+    # WhatsApp) — reprocesar un CV después no debe borrar esas respuestas.
+    analisis_actual = dict(p.analisis or {})
 
     ajuste = datos.ajuste
     if ajuste and vac:
-        c.score = ajuste.score
-        c.evidencia = ajuste.evidencia
+        p.score = ajuste.score
+        p.evidencia = ajuste.evidencia
         # un CV subido después no reclasifica a quien RH ya avanzó: solo actualiza score y evidencia
-        if c.etapa == "Prefiltro":
-            c.estado = ajuste.estado
+        if p.etapa == "Prefiltro":
+            p.estado = ajuste.estado
         analisis_actual.update({
             "origen": "cv",
             "ia": con_ia,
@@ -371,30 +507,29 @@ def _aplicar_cv(db: Session, c: Candidato, datos: ia.CVExtraido, vac: Optional[V
             "datos_faltantes": datos.datos_faltantes,
         })
     else:
-        c.estado = "revision" if datos.datos_faltantes else c.estado
-        c.evidencia = (
+        p.estado = "revision" if datos.datos_faltantes else p.estado
+        p.evidencia = (
             "Datos faltantes en el CV: " + ", ".join(datos.datos_faltantes)
             if datos.datos_faltantes
-            else c.evidencia
+            else p.evidencia
         )
         analisis_actual.update({"origen": "cv", "ia": con_ia, "alertas": datos.alertas, "datos_faltantes": datos.datos_faltantes})
 
-    c.analisis = analisis_actual
+    p.analisis = analisis_actual
 
 
 def _cv_mas_reciente(c: Candidato) -> Optional[Archivo]:
     return next((a for a in reversed(c.archivos) if a.tipo == "cv" and fs.existe(a.ruta)), None)
 
 
-async def _reanalizar_cv(db: Session, c: Candidato, vac: Optional[Vacante], cv: Archivo) -> ia.CVExtraido:
-    """Relee un CV ya guardado en disco y vuelve a correr la extracción — mismo patrón que ya
-    usaba `asignar()` inline (punto 2: botón "Reintentar análisis" y reevaluación al reasignar
-    de vacante comparten esta lógica, nunca duplicada)."""
+async def _reanalizar_cv(p: Postulacion, vac: Optional[Vacante], cv: Archivo) -> ia.CVExtraido:
+    """Relee un CV ya guardado en disco y vuelve a correr la extracción — el botón "Reintentar
+    análisis" y la reevaluación al reasignar de vacante comparten esta lógica."""
     with open(cv.ruta, "rb") as f:
         b64 = base64.standard_b64encode(f.read()).decode()
     extension = cv.ruta.rsplit(".", 1)[-1]
     datos, con_ia = ia.extraer_cv(b64, extension, vac.titulo if vac else "", vac.requisitos if vac else "")
-    _aplicar_cv(db, c, datos, vac, con_ia)
+    _aplicar_cv(p.candidato, p, datos, vac, con_ia)
     cv.extraccion = datos.model_dump()
     cv.notas_ia = "; ".join(datos.alertas) if datos.alertas else ""
     return datos
@@ -407,15 +542,17 @@ async def _procesar_cv(
     fuente: str,
     subido_por: str,
     cuenta_id: int,
-    candidato: Optional[Candidato] = None,
+    postulacion: Optional[Postulacion] = None,
+    origen: str = "cv_masivo",
 ) -> dict:
-    """Valida el archivo, lo guarda, lo extrae con IA y crea o actualiza al prospecto.
+    """Valida el archivo, lo guarda, lo extrae con IA y crea o actualiza a la persona y su
+    postulación para `vac`.
 
-    Punto 2: si la extracción con IA truena (red, proveedor caído), el archivo SIGUE
-    guardándose — nunca se pierde un CV que sí llegó a subirse. Sin `datos` no se puede
-    identificar/deduplicar por teléfono/correo extraído, así que ese archivo queda adjunto al
-    candidato ya conocido (`candidato`, si se pasó) o a uno nuevo mínimo con el nombre del
-    archivo; el botón "Reintentar análisis" (`_reanalizar_cv`) completa el resto después."""
+    Si la extracción con IA truena (red, proveedor caído), el archivo SIGUE guardándose — nunca
+    se pierde un CV que sí llegó a subirse. Sin `datos` no se puede identificar/deduplicar por
+    teléfono/correo extraído, así que ese archivo queda adjunto a la postulación ya conocida
+    (`postulacion`, si se pasó) o a una nueva mínima con el nombre del archivo; el botón
+    "Reintentar análisis" (`_reanalizar_cv`) completa el resto después."""
     archivo = await fs.validar(subida, "CV")
     error_extraccion: Optional[str] = None
     try:
@@ -429,7 +566,8 @@ async def _procesar_cv(
         datos, con_ia = None, False
         error_extraccion = str(ex)
 
-    c = candidato
+    p = postulacion
+    c = p.candidato if p else None
     duplicado = False
     avisos: List[str] = []
     prueba = modo_prueba_activo(db)
@@ -446,22 +584,14 @@ async def _procesar_cv(
             )
 
     if c is None:
-        c = Candidato(
-            codigo="TMP",
-            cuenta_id=cuenta_id,
-            nombre=(datos.nombre if datos else None) or archivo.nombre.rsplit(".", 1)[0],
-            fuente=fuente,
-            vacante_id=vac.id if vac else None,
-            es_prueba=prueba,
+        c = _crear_candidato(
+            db, cuenta_id, (datos.nombre if datos else None) or archivo.nombre.rsplit(".", 1)[0], fuente, prueba,
         )
-        db.add(c)
-        db.flush()
-        c.codigo = f"C-{8800 + c.id}"
-    elif vac and not c.vacante_id:
-        c.vacante_id = vac.id
+    if p is None:
+        p, _nueva = postulacion_para_vacante(db, c, vac, cuenta_id, origen)
 
     if datos is not None:
-        _aplicar_cv(db, c, datos, vac, con_ia)
+        _aplicar_cv(c, p, datos, vac, con_ia)
 
     notas = avisos + (list(datos.alertas) if datos else [])
     if error_extraccion:
@@ -469,9 +599,9 @@ async def _procesar_cv(
     elif not datos.es_cv:
         notas.insert(0, "El archivo no parece un currículum: revísalo manualmente.")
     # duda de identidad, error de análisis o archivo equivocado → nunca se queda en "cumple" automático
-    if (avisos or error_extraccion or (datos and not datos.es_cv)) and c.estado == "cumple":
-        c.estado = "revision"
-        c.evidencia = f"{notas[0]} · {c.evidencia}"
+    if (avisos or error_extraccion or (datos and not datos.es_cv)) and p.estado == "cumple":
+        p.estado = "revision"
+        p.evidencia = f"{notas[0]} · {p.evidencia}"
 
     # el consecutivo evita que un segundo CV con el mismo nombre pise al anterior en disco
     consecutivo = len(c.archivos) + 1
@@ -491,14 +621,15 @@ async def _procesar_cv(
     db.flush()
 
     registrar(
-        db, "agente-ia", "cv_extraido", "candidato", c.codigo,
+        db, "agente-ia", "cv_extraido", "postulacion", p.codigo,
         {
+            "candidato": c.codigo,
             "ia": con_ia,
             "archivo": archivo.nombre,
             "es_cv": datos.es_cv if datos else None,
             "faltantes": datos.datos_faltantes if datos else [],
             "error": error_extraccion,
-            "score": c.score,
+            "score": p.score,
             "vacante": vac.codigo if vac else None,
         },
     )
@@ -510,7 +641,7 @@ async def _procesar_cv(
         "esCv": datos.es_cv if datos else None,
         "avisos": notas,
         "extraccion": datos.model_dump() if datos else {},
-        "candidato": candidato_dict(c, detalle=True),
+        "candidato": postulacion_dict(p, detalle=True),
     }
 
 
@@ -547,25 +678,25 @@ async def subir_cv(
     }
 
 
-async def _disparar_plantilla_inicio(db: Session, c: Candidato) -> dict:
-    """Rompe el hielo por WhatsApp justo después de guardar al candidato, usando la plantilla
-    aprobada de Meta (nunca texto libre: la web no cuenta como 'el candidato escribió primero')."""
-    if not c.telefono:
+async def _disparar_plantilla_inicio(db: Session, p: Postulacion) -> dict:
+    """Rompe el hielo por WhatsApp justo después de guardar la postulación, usando la plantilla
+    aprobada de Meta (nunca texto libre: la web no cuenta como 'el candidato escribió primero').
+    Es un mensaje saliente: NO mueve la conversación — si el candidato ya estaba a media
+    conversación sobre otra postulación, su respuesta sigue yendo a aquella; si esta es la
+    única que espera respuesta, el webhook la elige; si hay varias, le pregunta (B1)."""
+    if not p.telefono:
         return {"enviado": False, "detalle": "El candidato no dejó WhatsApp."}
-    primer_nombre = (c.nombre or "").split(" ")[0] or "candidato(a)"
-    envio = await enviar_plantilla(c.telefono, PLANTILLA_INICIO_ENTREVISTA, [primer_nombre])
+    primer_nombre = (p.nombre or "").split(" ")[0] or "candidato(a)"
+    envio = await enviar_plantilla(p.telefono, PLANTILLA_INICIO_ENTREVISTA, [primer_nombre])
     texto_mensaje = (
         f"[Plantilla de WhatsApp «{PLANTILLA_INICIO_ENTREVISTA}»] Hola {primer_nombre}, ¡gracias por tu interés! Empecemos con tu proceso."
         if envio.get("enviado")
-        else f"[Fallo de envío Meta] La plantilla «{PLANTILLA_INICIO_ENTREVISTA}» no pudo entregarse a {c.telefono}: {envio.get('detalle', 'sin detalle')}."
+        else f"[Fallo de envío Meta] La plantilla «{PLANTILLA_INICIO_ENTREVISTA}» no pudo entregarse a {p.telefono}: {envio.get('detalle', 'sin detalle')}."
     )
-    db.add(Mensaje(
-        candidato_id=c.id, rol="assistant", texto=texto_mensaje,
-        canal="whatsapp", enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
-    ))
+    guardar_mensaje(db, p, "assistant", texto_mensaje, "whatsapp", envio)
     registrar(
-        db, "sistema", "plantilla_inicio_enviada", "candidato", c.codigo,
-        {"plantilla": PLANTILLA_INICIO_ENTREVISTA, "whatsapp": envio},
+        db, "sistema", "plantilla_inicio_enviada", "postulacion", p.codigo,
+        {"candidato": p.candidato.codigo, "plantilla": PLANTILLA_INICIO_ENTREVISTA, "whatsapp": envio},
     )
     return envio
 
@@ -581,7 +712,8 @@ async def postular(
     cv: Optional[UploadFile] = File(default=None, description="CV en PDF o imagen"),
     db: Session = Depends(get_db),
 ):
-    """Postulación desde la página pública `/aplicar/[slug]` — un solo paso para el candidato."""
+    """Postulación desde la página pública `/aplicar/[slug]` — un solo paso para el candidato.
+    Una misma persona puede postularse a varias vacantes: cada una es su propia Postulación."""
     if not nombre.strip():
         raise HTTPException(400, "Necesitamos tu nombre completo.")
     if not consentimiento:
@@ -603,29 +735,12 @@ async def postular(
     tel = _telefono(telefono)
     prueba = modo_prueba_activo(db)
 
-    c = None
-    if not prueba:
-        c = _duplicado(db, tel, correo, vac.cuenta_id)
-        if c and c.etapa != "Prefiltro":
-            # Ya avanzó del prefiltro (en esta vacante o en otra): no lo mezclamos con una
-            # postulación nueva — antes esto pisaba silenciosamente su vacante_id.
-            raise HTTPException(
-                409,
-                f"Ya tienes un proceso en curso para la vacante «{c.vacante.titulo if c.vacante else 'otra posición'}» "
-                f"(etapa: {c.etapa}). Contacta a RH si necesitas darle seguimiento.",
-            )
-    # Con Modo Prueba activo, `c` siempre queda en None aquí: cada llamada es una postulación
-    # nueva e independiente, sin importar cuánto pasó desde la anterior ni la etapa de esa otra.
-
-    nuevo = c is None
+    # Con Modo Prueba activo, `c` siempre queda en None aquí: cada llamada es una persona nueva
+    # e independiente, sin importar cuánto pasó desde la anterior.
+    c = None if prueba else _duplicado(db, tel, correo, vac.cuenta_id)
+    nuevo_candidato = c is None
     if c is None:
-        c = Candidato(
-            codigo="TMP", cuenta_id=vac.cuenta_id, nombre=nombre.strip(), telefono=tel, correo=correo.strip(),
-            fuente="Formulario", es_prueba=prueba,
-        )
-        db.add(c)
-        db.flush()
-        c.codigo = f"C-{8800 + c.id}"
+        c = _crear_candidato(db, vac.cuenta_id, nombre.strip(), "Formulario", prueba, telefono=tel, correo=correo.strip())
     else:
         if nombre.strip() and (not c.nombre or c.nombre.startswith("Candidato")):
             c.nombre = nombre.strip()
@@ -634,45 +749,43 @@ async def postular(
         if correo.strip() and not c.correo:
             c.correo = correo.strip()
 
-    # Antes: `if not c.vacante_id: ...` — se quedaba pegado a la primera vacante para siempre.
-    # El guard de arriba ya garantiza que solo llegamos aquí si es seguro reasignar: candidato
-    # nuevo, o uno existente que sigue en Prefiltro sin avance real.
-    c.vacante_id = vac.id
-
-    c.consentimiento = True
-    c.consentimiento_fecha = datetime.now(timezone.utc)
+    # Reaplicar (decisión 2026-09-11): activa para esta vacante → se reutiliza; cerrada → nueva.
+    p, nueva_postulacion = postulacion_para_vacante(db, c, vac, vac.cuenta_id, "formulario", consentimiento=True)
     registrar(
-        db, c.codigo, "consentimiento_otorgado", "candidato", c.codigo,
-        {"medio": "portal", "vacante": vac.codigo, "aviso_privacidad": "aceptado en /aplicar"},
+        db, c.codigo, "consentimiento_otorgado", "postulacion", p.codigo,
+        {"candidato": c.codigo, "medio": "portal", "vacante": vac.codigo, "aviso_privacidad": "aceptado en /aplicar"},
     )
 
     resultado_cv = {"ok": False, "avisos": []}
     if cv and cv.filename:
         try:
-            resultado_cv = await _procesar_cv(db, cv, vac, "Formulario", c.codigo, vac.cuenta_id, candidato=c)
+            resultado_cv = await _procesar_cv(db, cv, vac, "Formulario", c.codigo, vac.cuenta_id, postulacion=p, origen="formulario")
         except Exception as e:
             print(f"[postular-cv-error] Error procesando CV: {e}")
             resultado_cv = {"ok": False, "avisos": [f"No se pudo extraer el CV: {e}"]}
 
-    registrar(db, "sistema", "postulacion_recibida", "candidato", c.codigo, {"vacante": vac.codigo, "nuevo": nuevo})
+    registrar(
+        db, "sistema", "postulacion_recibida", "postulacion", p.codigo,
+        {"candidato": c.codigo, "vacante": vac.codigo, "persona_nueva": nuevo_candidato, "postulacion_nueva": nueva_postulacion},
+    )
     db.commit()
 
-    # Zero-Touch: dispara la plantilla de Meta ("recibimos tu postulación") ya con el candidato
-    # comprometido a disco — vacante_id y consentimiento incluidos — solo para candidatos nuevos,
-    # para no volver a "romper el hielo" con alguien que ya nos escribió. Antes se mandaba ANTES
-    # del commit: si el candidato respondía muy rápido (p. ej. mientras _procesar_cv seguía
-    # llamando a la IA), el webhook corría en otra transacción que todavía no veía este registro
-    # y creaba un candidato duplicado sin vacante — el agente le mandaba el menú de vacantes en
-    # vez de continuar el prefiltro.
-    if nuevo:
-        await _disparar_plantilla_inicio(db, c)
+    # Zero-Touch: dispara la plantilla de Meta ("recibimos tu postulación") ya con la postulación
+    # comprometida a disco — vacante y consentimiento incluidos — solo para postulaciones nuevas,
+    # para no volver a "romper el hielo" en una que ya está en curso. Se manda DESPUÉS del commit:
+    # si el candidato responde muy rápido, el webhook corre en otra transacción que ya ve este
+    # registro y la conversación queda fijada en esta postulación.
+    if nueva_postulacion:
+        await _disparar_plantilla_inicio(db, p)
         db.commit()
 
     return {
         "ok": True,
         "candidato": c.codigo,
+        "postulacion": p.codigo,
         "nombre": c.nombre,
-        "nuevo": nuevo,
+        "nuevo": nuevo_candidato,
+        "postulacionNueva": nueva_postulacion,
         "cv": {"procesado": resultado_cv.get("ok", False), "avisos": resultado_cv.get("avisos", [])},
     }
 
@@ -686,13 +799,16 @@ async def subir_archivo(
     u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Adjunta un archivo a un prospecto existente. Si es CV, vuelve a extraer y recalificar."""
-    c = _por_codigo(db, codigo, cuenta.id)
+    """Adjunta un archivo a la persona (los archivos son de la persona: un CV sirve para todas
+    sus postulaciones). Si es CV, vuelve a extraer y recalifica ESTA postulación."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    c = p.candidato
     if tipo not in TIPOS_ARCHIVO:
         raise HTTPException(400, f"Tipo inválido. Usa uno de: {', '.join(TIPOS_ARCHIVO)}")
 
     if tipo == "cv":
-        resultado = await _procesar_cv(db, archivo, c.vacante, c.fuente, u.nombre, cuenta.id, candidato=c)
+        resultado = await _procesar_cv(db, archivo, p.vacante, c.fuente, u.nombre, cuenta.id, postulacion=p)
+        _actualizar_ultima_actividad(p)
         db.commit()
         return resultado
 
@@ -710,10 +826,10 @@ async def subir_archivo(
     )
     c.archivos.append(reg)
     db.flush()
-    registrar(db, u.nombre, "archivo_adjuntado", "candidato", c.codigo, {"tipo": tipo, "archivo": validado.nombre})
-    _actualizar_ultima_actividad(c)
+    registrar(db, u.nombre, "archivo_adjuntado", "postulacion", p.codigo, {"candidato": c.codigo, "tipo": tipo, "archivo": validado.nombre})
+    _actualizar_ultima_actividad(p)
     db.commit()
-    return {"ok": True, "archivo": archivo_dict(reg), "candidato": candidato_dict(c, detalle=True)}
+    return {"ok": True, "archivo": archivo_dict(reg), "candidato": postulacion_dict(p, detalle=True)}
 
 
 @router.get("/{codigo}/archivos/{archivo_id}")
@@ -724,13 +840,13 @@ def descargar_archivo(
     _: Usuario = Depends(usuario_actual),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    c = _por_codigo(db, codigo, cuenta.id)
+    c = _por_codigo(db, codigo, cuenta.id).candidato
     a = next((x for x in c.archivos if x.id == archivo_id), None)
     if not a:
         raise HTTPException(404, "Archivo no encontrado")
     if not fs.existe(a.ruta):
         raise HTTPException(410, "El archivo ya no está disponible en el servidor.")
-    return FileResponse(a.ruta, media_type=a.mime, filename=a.nombre)
+    return FileResponse(a.ruta, media_type=a.mime or "application/octet-stream", filename=a.nombre)
 
 
 @router.post("/{codigo}/archivos/{archivo_id}/reanalizar")
@@ -741,31 +857,31 @@ async def reanalizar_cv(
     u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Botón «Reintentar análisis» (punto 2) — relee un CV ya guardado y reintenta la
-    extracción con IA, sin pedirle al usuario que vuelva a subir el archivo."""
-    c = _por_codigo(db, codigo, cuenta.id)
-    a = next((x for x in c.archivos if x.id == archivo_id and x.tipo == "cv"), None)
+    """Botón «Reintentar análisis» — relee un CV ya guardado y reintenta la extracción con IA,
+    sin pedirle al usuario que vuelva a subir el archivo."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    a = next((x for x in p.candidato.archivos if x.id == archivo_id and x.tipo == "cv"), None)
     if not a:
-        raise HTTPException(404, "No se encontró ese CV en el candidato.")
+        raise HTTPException(404, "CV no encontrado")
     if not fs.existe(a.ruta):
         raise HTTPException(410, "El archivo ya no está disponible en el servidor; pide que lo vuelvan a subir.")
     try:
-        await _reanalizar_cv(db, c, c.vacante, a)
+        await _reanalizar_cv(p, p.vacante, a)
     except Exception as ex:
         raise HTTPException(502, f"No fue posible analizar el currículum: {ex}")
-    registrar(db, u.nombre, "cv_reanalizado", "candidato", c.codigo, {"archivo": a.nombre, "score": c.score})
-    _actualizar_ultima_actividad(c)
+    registrar(db, u.nombre, "cv_reanalizado", "postulacion", p.codigo, {"archivo": a.nombre, "score": p.score})
+    _actualizar_ultima_actividad(p)
     db.commit()
-    return candidato_dict(c, detalle=True)
+    return postulacion_dict(p, detalle=True)
 
 
 # ------------------------------------------------------------
-# Asignación y reevaluación contra la vacante
+# Reasignar de vacante / reiniciar (Modo Prueba)
 # ------------------------------------------------------------
 
 
 class AsignarIn(BaseModel):
-    vacante: str
+    vacante: str  # código VAC-####
     reevaluar: bool = True
 
 
@@ -777,41 +893,56 @@ async def asignar(
     u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Mueve al prospecto a otra vacante y, si tiene CV, recalcula el match."""
-    c = _por_codigo(db, codigo, cuenta.id)
+    """Mueve ESTA postulación a otra vacante (corrección manual de RH) y, si hay CV, recalcula
+    el match. Si la persona ya tiene una postulación activa para la vacante destino no se
+    duplica: RH debe trabajar sobre esa."""
+    p = _por_codigo(db, codigo, cuenta.id)
     vac = _vacante(db, datos.vacante, cuenta.id)
-    anterior = c.vacante.codigo if c.vacante else None
-    c.vacante_id = vac.id
+    otra = next((x for x in p.candidato.postulaciones_activas if x.vacante_id == vac.id and x.id != p.id), None)
+    if otra:
+        raise HTTPException(409, f"Esta persona ya tiene la postulación {otra.codigo} activa para «{vac.titulo}».")
+    anterior = p.vacante.codigo if p.vacante else None
+    p.vacante_id = vac.id
 
-    if datos.reevaluar and c.cv_datos:
-        cv = _cv_mas_reciente(c)
+    if datos.reevaluar:
+        cv = _cv_mas_reciente(p.candidato)
         if cv:
-            await _reanalizar_cv(db, c, vac, cv)
+            await _reanalizar_cv(p, vac, cv)
 
-    await _recalcular_resultado_apto_y_notificar(db, c, u.nombre)  # la nueva vacante puede cambiar el contexto de evaluación
-    registrar(db, u.nombre, "candidato_reasignado", "candidato", c.codigo, {"de": anterior, "a": vac.codigo})
+    await _recalcular_resultado_apto_y_notificar(db, p, u.nombre)  # la nueva vacante puede cambiar el contexto de evaluación
+    _actualizar_ultima_actividad(p)
+    registrar(db, u.nombre, "candidato_reasignado", "postulacion", p.codigo, {"de": anterior, "a": vac.codigo})
     db.commit()
-    return candidato_dict(c, detalle=True)
+    return postulacion_dict(p, detalle=True)
 
 
-@router.post("/{codigo}/liberar-telefono")
-def liberar_telefono(
+@router.post("/{codigo}/reiniciar")
+def reiniciar_postulacion(
     codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
 ):
-    """SOLO PRUEBAS: limpia teléfono y wa_id del candidato para poder reutilizar el mismo número
-    de WhatsApp en pruebas repetidas sin que `_buscar_o_crear_candidato` (webhooks.py) lo asocie
-    a este registro. No borra el candidato ni sus mensajes/CV/expediente."""
-    c = _por_codigo(db, codigo, cuenta.id)
-    anterior = {"telefono": c.telefono, "wa_id": c.wa_id}
-    c.telefono = ""
-    c.wa_id = ""
-    registrar(db, u.nombre, "telefono_liberado_prueba", "candidato", c.codigo, anterior)
+    """SOLO PRUEBAS (Punto 8) — «Reiniciar prueba»: cierra esta postulación
+    (motivo_cierre='reinicio_prueba') y crea una nueva limpia para la misma persona y la misma
+    vacante, dejándola como la conversación activa. El teléfono y wa_id de la persona no se
+    tocan: así el mismo número de WhatsApp vuelve a empezar el flujo desde cero sin que el
+    webhook lo asocie a la postulación anterior. Reemplaza al viejo «Liberar número»."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    c = p.candidato
+    if not (modo_prueba_activo(db) or c.es_prueba or p.es_prueba):
+        raise HTTPException(409, "Reiniciar una postulación es una acción de Modo Prueba: actívalo en Configuración.")
+    p.cerrar("reinicio_prueba")
+    nueva = crear_postulacion(db, c, p.vacante, cuenta.id, "reinicio_prueba", es_prueba=True)
+    # No se fija la conversación aquí (B1: solo la mueve el candidato): al cerrarse la anterior,
+    # el webhook enruta el siguiente mensaje a la nueva por ser la única que espera respuesta.
+    registrar(
+        db, u.nombre, "postulacion_reiniciada", "postulacion", nueva.codigo,
+        {"candidato": c.codigo, "anterior": p.codigo, "correo_rh": u.correo},
+    )
     db.commit()
-    return candidato_dict(c, detalle=True)
+    return {"ok": True, "candidato": c.codigo, "anterior": p.codigo, "nueva": nueva.codigo, **postulacion_dict(nueva, detalle=True)}
 
 
 # ------------------------------------------------------------
-# Prefiltro conversacional (módulo 3.9)
+# Prefiltro con agente (WhatsApp / simulador) — Zero-Touch
 # ------------------------------------------------------------
 
 
@@ -819,10 +950,10 @@ def liberar_telefono(
 def mensajes(
     codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
 ):
-    c = _por_codigo(db, codigo, cuenta.id)
+    p = _por_codigo(db, codigo, cuenta.id)
     return [
         {"rol": m.rol, "texto": m.texto, "canal": m.canal, "enviado": m.enviado, "ts": m.creado_en.isoformat()}
-        for m in c.mensajes
+        for m in p.mensajes
     ]
 
 
@@ -835,95 +966,66 @@ class MensajeIn(BaseModel):
 UMBRAL_ZERO_TOUCH = 50
 
 
-def _texto_apto(c: Candidato) -> str:
+def _texto_apto(p: Postulacion) -> str:
     return (
-        f"¡Buenas noticias, {c.nombre.split(' ')[0]}! 🎉 Tu perfil es compatible con lo que buscamos "
+        f"¡Buenas noticias, {p.nombre.split(' ')[0]}! 🎉 Tu perfil es compatible con lo que buscamos "
         "para esta vacante. Cuéntame, ¿qué disponibilidad tienes para una breve videollamada?"
     )
 
 
-async def _avisar_apto_e_iniciar_agenda(db: Session, c: Candidato) -> dict:
+async def _avisar_apto_e_iniciar_agenda(db: Session, p: Postulacion) -> dict:
     """Mensaje que invita al candidato a compartir su disponibilidad — en cuanto responda,
     procesar_prefiltro lo enruta a _procesar_turno_agenda (herramienta agendar_videollamada).
     La usan tanto la clasificación automática de Zero-Touch como el botón manual
     'Enviar a Entrevista IA' (mover_etapa), para que ambos caminos se comporten igual."""
-    texto = _texto_apto(c)
-    envio = {"enviado": False, "proveedor": "demo"}
-    if c.telefono:
-        try:
-            envio = await enviar_mensaje(c.telefono, texto)
-        except Exception as e:  # que WhatsApp falle no debe tumbar el flujo
-            print(f"[whatsapp-send-error] avisar_apto -> {c.codigo}: {e}")
-            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
-    db.add(Mensaje(
-        candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
-        enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
-    ))
+    texto = _texto_apto(p)
+    envio = await _enviar_whatsapp(p, texto)
+    guardar_mensaje(db, p, "assistant", texto, "whatsapp", envio)
     return envio
 
 
-async def _auto_decision_zero_touch(db: Session, c: Candidato) -> dict:
-    """Flujo Zero-Touch: al terminar el prefiltro, clasifica al candidato contra
+async def _auto_decision_zero_touch(db: Session, p: Postulacion) -> dict:
+    """Flujo Zero-Touch: al terminar el prefiltro, clasifica la postulación contra
     UMBRAL_ZERO_TOUCH y le avisa el resultado por WhatsApp sin intervención de RH.
 
     Reemplaza el estado intermedio 'revision' del agente por una decisión binaria
-    (cumple/no_cumple). RH conserva la capacidad de reabrir el caso desde el panel;
-    la bitácora deja constancia de que la acción la tomó el agente ("agente-ia"),
-    no una persona de RH, para no falsear la trazabilidad que exige la LFPDPPP.
+    (cumple/no_cumple). La postulación NO se cierra: la IA solo recomienda (LFPDPPP) — RH
+    conserva la capacidad de reabrir el caso desde el panel o de descartarlo de verdad; la
+    bitácora deja constancia de que la acción la tomó el agente ("agente-ia").
 
-    Regresa {"respuesta": str, "whatsapp": dict} — el ÚNICO mensaje que debe ver el
-    candidato en el turno de cierre del prefiltro (ver procesar_prefiltro: ya no se
-    manda encima el mensaje genérico de turno.respuesta).
+    Regresa {"respuesta": str, "whatsapp": dict} — el ÚNICO mensaje que debe ver el candidato
+    en el turno de cierre del prefiltro (ver procesar_prefiltro).
     """
-    if c.score < UMBRAL_ZERO_TOUCH:
-        c.estado = "no_cumple"
-        accion = "auto_descartado_zero_touch"
+    if p.score < UMBRAL_ZERO_TOUCH:
+        p.estado = "no_cumple"
         texto = (
-            f"Gracias por tu tiempo, {c.nombre.split(' ')[0]}. Después de revisar tus respuestas, "
+            f"Gracias por tu tiempo, {p.nombre.split(' ')[0]}. Después de revisar tus respuestas, "
             "por ahora tu perfil no se alinea con lo que busca esta vacante. Guardamos tu información "
             "por si surge una oportunidad más adelante. ¡Mucho éxito en tu búsqueda! 🙌"
         )
-        registrar(db, "agente-ia", accion, "candidato", c.codigo, {"score": c.score, "umbral": UMBRAL_ZERO_TOUCH})
-        envio = {"enviado": False, "proveedor": "demo"}
-        if c.telefono:
-            try:
-                envio = await enviar_mensaje(c.telefono, texto)
-            except Exception as e:
-                print(f"[zero-touch-whatsapp-error] {c.codigo}: {e}")
-                envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
+        registrar(db, "agente-ia", "auto_descartado_zero_touch", "postulacion", p.codigo, {"score": p.score, "umbral": UMBRAL_ZERO_TOUCH})
+        envio = await _enviar_whatsapp(p, texto)
         # Se guarda igual sin teléfono (p.ej. pruebas por simulador): así el veredicto real
         # siempre queda en el historial, aunque no haya salido por WhatsApp.
-        db.add(Mensaje(
-            candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
-            enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
-        ))
+        guardar_mensaje(db, p, "assistant", texto, "whatsapp", envio)
         return {"respuesta": texto, "whatsapp": envio}
 
-    c.estado = "cumple"
-    # antes la tarjeta solo se movía al agendar la cita, así que un candidato ya clasificado
-    # como apto seguía viéndose "atorado" en Prefiltro mientras coordinaba fecha/hora — se
-    # mueve aquí para que el Kanban refleje la realidad de inmediato.
-    c.etapa = "Entrevista IA"
-    registrar(
-        db, "agente-ia", "auto_apto_zero_touch", "candidato", c.codigo,
-        {"score": c.score, "umbral": UMBRAL_ZERO_TOUCH},
-    )
-    envio = await _avisar_apto_e_iniciar_agenda(db, c)
-    return {"respuesta": _texto_apto(c), "whatsapp": envio}
+    p.estado = "cumple"
+    # antes la tarjeta solo se movía al agendar la cita, así que una postulación ya clasificada
+    # como apta seguía viéndose "atorada" en Prefiltro mientras coordinaba fecha/hora.
+    p.etapa = "Entrevista IA"
+    registrar(db, "agente-ia", "auto_apto_zero_touch", "postulacion", p.codigo, {"score": p.score, "umbral": UMBRAL_ZERO_TOUCH})
+    envio = await _avisar_apto_e_iniciar_agenda(db, p)
+    return {"respuesta": _texto_apto(p), "whatsapp": envio}
 
 
 def _parsear_fecha_cita(valor: str) -> Optional[datetime]:
     """agendar_videollamada debe regresar ISO 8601; si el modelo se equivocó de formato, se
     ignora la fecha — mejor no programar el aviso de no-show que programarlo mal.
 
-    Se normaliza a UTC en automático antes de regresar. SQLite (el motor de esta base, ver
-    database.py) no preserva el offset de un DateTime(timezone=True): al releerlo pierde la
-    zona horaria pero conserva los mismos números de reloj con los que se guardó. Si aquí se
-    devolviera tal cual "09:55:00-06:00" (hora de México), en SQLite quedaría guardado como
-    "09:55:00" a secas, y services/agenda.py lo compararía contra un "ahora" en UTC como si
-    esas 9:55 ya fueran UTC — el aviso de no-show se dispararía varias horas antes de la cita
-    real. Convertir a UTC aquí, antes de guardar, hace que el valor absoluto sea correcto
-    aunque SQLite le quite la etiqueta de zona horaria."""
+    Se normaliza a UTC antes de regresar: SQLite no preserva el offset de un
+    DateTime(timezone=True) — si se guardara "09:55:00-06:00" quedaría "09:55:00" a secas y
+    services/agenda.py lo compararía contra un "ahora" en UTC como si esas 9:55 ya fueran UTC."""
     try:
         dt = datetime.fromisoformat(valor)
     except (TypeError, ValueError):
@@ -933,38 +1035,31 @@ def _parsear_fecha_cita(valor: str) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
-async def _procesar_turno_agenda(db: Session, c: Candidato, historial: List[dict], canal: str) -> dict:
+async def _procesar_turno_agenda(db: Session, p: Postulacion, historial: List[dict], canal: str) -> dict:
     """Turno posterior a la clasificación: coordina la videollamada con la herramienta
     agendar_videollamada (function calling) — ver ia.agenda_turno."""
-    v = c.vacante
+    v = p.vacante
     turno, con_ia = ia.agenda_turno(
-        c.wa_nombre or c.nombre.split(" ")[0], v.titulo if v else "", historial, db=db, candidato=c
+        p.wa_nombre or p.nombre.split(" ")[0], v.titulo if v else "", historial, db=db, candidato=p
     )
 
     respuesta_final = turno.respuesta
     if turno.cita_fecha_hora and turno.cita_liga:
         fecha = _parsear_fecha_cita(turno.cita_fecha_hora)
-        c.videollamada_agendada_en = fecha or datetime.now(timezone.utc)
-        c.videollamada_liga = turno.cita_liga
-        c.etapa = "Entrevista IA"  # ver ETAPAS_CANDIDATO — no cambia el comportamiento de Zero-Touch, solo el nombre de la columna
+        p.videollamada_agendada_en = fecha or datetime.now(timezone.utc)
+        p.videollamada_liga = turno.cita_liga
+        p.etapa = "Entrevista IA"  # ver ETAPAS_CANDIDATO
         registrar(
-            db, "agente-ia", "videollamada_agendada", "candidato", c.codigo,
+            db, "agente-ia", "videollamada_agendada", "postulacion", p.codigo,
             {"fecha_hora": turno.cita_fecha_hora, "liga": turno.cita_liga, "fecha_parseada": bool(fecha)},
         )
         # La liga real se agrega aquí, textual — nunca se manda la que el modelo haya escrito
-        # dentro de turno.respuesta: un token de 32+ caracteres es fácil de transcribir mal, y
-        # eso deja al candidato con una liga que da 404 sin que nadie se entere.
+        # dentro de turno.respuesta: un token de 32+ caracteres es fácil de transcribir mal.
         respuesta_final = f"{turno.respuesta}\n\n{turno.cita_liga}"
 
-    envio = {"enviado": False, "proveedor": "demo"}
-    if canal == "whatsapp" and c.telefono:
-        try:
-            envio = await enviar_mensaje(c.telefono, respuesta_final)
-        except Exception as e:  # que WhatsApp falle no debe tumbar la conversación
-            print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
-            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
-    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=respuesta_final, canal=canal,
-                   enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
+    envio = await _enviar_whatsapp(p, respuesta_final, canal)
+    guardar_mensaje(db, p, "assistant", respuesta_final, canal, envio)
+    _actualizar_ultima_actividad(p)
     db.commit()
     return {
         "respuesta": respuesta_final,
@@ -975,80 +1070,64 @@ async def _procesar_turno_agenda(db: Session, c: Candidato, historial: List[dict
     }
 
 
-async def _procesar_turno_onboarding(db: Session, c: Candidato, historial: List[dict], canal: str) -> dict:
-    """Zero-Touch fase 2: el candidato ya está en Onboarding — el agente ya no evalúa ni agenda,
-    solo acompaña la recolección de documentos (ver ia.onboarding_turno)."""
-    v = c.vacante
-    turno, con_ia = ia.onboarding_turno(c.wa_nombre or c.nombre.split(" ")[0], v.titulo if v else "", historial)
-
-    envio = {"enviado": False, "proveedor": "demo"}
-    if canal == "whatsapp" and c.telefono:
-        try:
-            envio = await enviar_mensaje(c.telefono, turno.respuesta)
-        except Exception as e:  # que WhatsApp falle no debe tumbar la conversación
-            print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
-            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
-    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal,
-                   enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
+async def _procesar_turno_onboarding(db: Session, p: Postulacion, historial: List[dict], canal: str) -> dict:
+    """Zero-Touch fase 2: la postulación ya está en Onboarding — el agente ya no evalúa ni
+    agenda, solo acompaña la recolección de documentos (ver ia.onboarding_turno)."""
+    v = p.vacante
+    turno, con_ia = ia.onboarding_turno(p.wa_nombre or p.nombre.split(" ")[0], v.titulo if v else "", historial)
+    envio = await _enviar_whatsapp(p, turno.respuesta, canal)
+    guardar_mensaje(db, p, "assistant", turno.respuesta, canal, envio)
+    _actualizar_ultima_actividad(p)
     db.commit()
     return {"respuesta": turno.respuesta, "clasificacion": None, "ia": con_ia, "whatsapp": envio}
 
 
-async def _procesar_turno_post_completo(db: Session, c: Candidato, texto: str, canal: str) -> dict:
+async def _procesar_turno_post_completo(db: Session, p: Postulacion, texto: str, canal: str) -> dict:
     """No queda nada pendiente que la IA deba coordinar (no_cumple ya avisado, o cumple con
     videollamada ya agendada) — se responde con un mensaje fijo, sin volver a llamar al modelo."""
-    if c.videollamada_agendada_en:
+    if p.videollamada_agendada_en:
         respuesta = "¡Ya tienes tu videollamada agendada! Si necesitas reagendar, avísame y lo vemos. 🙌"
-    elif c.estado == "no_cumple":
-        # Ya se le avisó el rechazo desde _auto_decision_zero_touch — este mensaje NO debe sonar
-        # a que su proceso sigue activo ni prometer contacto próximo, solo confirmar que ya se
-        # cerró y que sus datos quedan guardados.
+    elif p.estado == "no_cumple":
+        # Ya se le avisó el rechazo — este mensaje NO debe sonar a que su proceso sigue activo.
         respuesta = (
             "Gracias por escribirnos de nuevo. Ya revisamos tu perfil para esta vacante y por ahora "
             "no avanza en el proceso, pero tus datos quedan en nuestra base para futuras oportunidades."
         )
     else:
         respuesta = "¡Gracias! Ya tengo tu información. Estoy procesando tu perfil y en breve te contactamos con los siguientes pasos. 😊"
-    envio = {"enviado": False, "proveedor": "demo"}
-    if canal == "whatsapp" and c.telefono:
-        try:
-            envio = await enviar_mensaje(c.telefono, respuesta)
-        except Exception as e:
-            print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
-            envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
-    db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=respuesta, canal=canal,
-                   enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
+    envio = await _enviar_whatsapp(p, respuesta, canal)
+    guardar_mensaje(db, p, "assistant", respuesta, canal, envio)
     db.commit()
     return {"respuesta": respuesta, "clasificacion": None, "ia": False, "whatsapp": envio}
 
 
-async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, wa_id: str = "") -> dict:
-    """Registra el mensaje del candidato, corre un turno del agente y responde."""
-    db.add(Mensaje(candidato_id=c.id, rol="user", texto=texto, canal=canal, wa_id=wa_id))
+async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str, wa_id: str = "") -> dict:
+    """Registra el mensaje del candidato en ESTA postulación, corre un turno del agente y
+    responde. El historial que ve el modelo es solo el de esta postulación: las preguntas de
+    otra vacante no se mezclan."""
+    guardar_mensaje(db, p, "user", texto, canal, wa_id=wa_id)
     db.flush()
 
-    v = c.vacante
-    mensajes_db = [{"rol": m.rol, "texto": m.texto} for m in c.mensajes]
+    v = p.vacante
+    mensajes_db = [{"rol": m.rol, "texto": m.texto} for m in p.mensajes]
     if mensajes_db and mensajes_db[-1]["texto"] == texto and mensajes_db[-1]["rol"] == "user":
         historial = mensajes_db
     else:
         historial = mensajes_db + [{"rol": "user", "texto": texto}]
 
-    # Zero-Touch fase 2: candidato ya en Onboarding -> el agente ya no evalúa ni agenda, solo
-    # acompaña documentos. Va ANTES que las ramas de fase 1 a propósito: sin este check, un
-    # candidato en Onboarding (que ya trae prefiltro_completo=True y estado="cumple" de fases
-    # previas) caería por error en la rama de "ya tienes tu videollamada agendada".
-    if c.etapa == "Onboarding":
-        return await _procesar_turno_onboarding(db, c, historial, canal)
+    # Zero-Touch fase 2: ya en Onboarding -> el agente solo acompaña documentos. Va ANTES que las
+    # ramas de fase 1 a propósito: sin este check, una postulación en Onboarding (que ya trae
+    # prefiltro_completo=True y estado="cumple") caería en "ya tienes tu videollamada agendada".
+    if p.etapa == "Onboarding":
+        return await _procesar_turno_onboarding(db, p, historial, canal)
 
-    # Zero-Touch fase 1: ya clasificado como apto y sin videollamada agendada -> seguimos la
-    # conversación con la herramienta de agendamiento en vez de re-correr la clasificación.
-    if c.prefiltro_completo and c.estado == "cumple" and not c.videollamada_agendada_en:
-        return await _procesar_turno_agenda(db, c, historial, canal)
+    # Zero-Touch fase 1: apto y sin videollamada agendada -> herramienta de agendamiento.
+    if p.prefiltro_completo and p.estado == "cumple" and not p.videollamada_agendada_en:
+        return await _procesar_turno_agenda(db, p, historial, canal)
 
     # Ya no hay nada más que resolver (no_cumple avisado, o cita ya agendada): respuesta fija.
-    if c.prefiltro_completo:
-        return await _procesar_turno_post_completo(db, c, texto, canal)
+    if p.prefiltro_completo:
+        return await _procesar_turno_post_completo(db, p, texto, canal)
 
     turno, con_ia = ia.prefiltro_turno(
         v.titulo if v else "vacante general",
@@ -1061,59 +1140,43 @@ async def procesar_prefiltro(db: Session, c: Candidato, texto: str, canal: str, 
         modalidad=v.modalidad if v else "",
         beneficios=(v.beneficios or []) if v else [],
         perfil_ideal=v.perfil_ideal if v else "",
-        nombre_candidato=c.wa_nombre or c.nombre.split(" ")[0],
+        nombre_candidato=p.wa_nombre or p.nombre.split(" ")[0],
     )
 
-    analisis_actual = dict(c.analisis or {})
+    analisis_actual = dict(p.analisis or {})
     if turno.respuestas_extraidas:
         analisis_actual["respuestas_prefiltro"] = [r.model_dump() for r in turno.respuestas_extraidas]
 
-    cierra_prefiltro = turno.clasificacion_lista and turno.estado and not c.prefiltro_completo
+    cierra_prefiltro = turno.clasificacion_lista and turno.estado and not p.prefiltro_completo
 
     if cierra_prefiltro:
-        # Turno de cierre: turno.respuesta es el mensaje genérico ("gracias, RH revisará") que
-        # la regla (7) del prompt le pide al modelo para no filtrarle el resultado real al
-        # candidato — nunca debe llegar por WhatsApp ni quedar en el historial: no aporta nada
-        # que _auto_decision_zero_touch no vuelva a decir con el veredicto real, y mandar los
-        # dos seguidos (uno genérico, luego el real) confundía al candidato. Se descarta aquí
-        # sin guardarlo.
-        c.score = turno.score or 0
-        c.evidencia = turno.evidencia or ""
-        c.prefiltro_completo = True
+        # Turno de cierre: turno.respuesta es el mensaje genérico ("gracias, RH revisará") — nunca
+        # debe llegar por WhatsApp ni quedar en el historial: _auto_decision_zero_touch manda el
+        # veredicto real y mandar los dos seguidos confundía al candidato.
+        p.score = turno.score or 0
+        p.evidencia = turno.evidencia or ""
+        p.prefiltro_completo = True
         analisis_actual.update({"origen": "prefiltro", "ia": con_ia})
         registrar(
-            db, "agente-ia", "prefiltro_clasificado", "candidato", c.codigo,
-            {"ia": con_ia, "estado_ia": turno.estado, "score": c.score, "evidencia": c.evidencia},
+            db, "agente-ia", "prefiltro_clasificado", "postulacion", p.codigo,
+            {"ia": con_ia, "estado_ia": turno.estado, "score": p.score, "evidencia": p.evidencia},
         )
-
-        # Zero-Touch: clasificación final (cumple/no_cumple) — su mensaje es el único que ve
-        # el candidato en este turno.
-        resultado_cierre = await _auto_decision_zero_touch(db, c)
-        clasificacion = {"estado": c.estado, "score": c.score, "evidencia": c.evidencia}
+        resultado_cierre = await _auto_decision_zero_touch(db, p)
+        clasificacion = {"estado": p.estado, "score": p.score, "evidencia": p.evidencia}
         respuesta_final = resultado_cierre["respuesta"]
         envio = resultado_cierre["whatsapp"]
     else:
-        envio = {"enviado": False, "proveedor": "demo"}
-        if canal == "whatsapp" and c.telefono:
-            try:
-                envio = await enviar_mensaje(c.telefono, turno.respuesta)
-            except Exception as e:
-                # que WhatsApp falle no debe tumbar el prefiltro: queda registrado y RH lo ve
-                print(f"[whatsapp-send-error] Error enviando mensaje a {c.telefono}: {e}")
-                envio = {"enviado": False, "proveedor": "error", "detalle": str(e)}
-        db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=turno.respuesta, canal=canal,
-                       enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", "")))
+        envio = await _enviar_whatsapp(p, turno.respuesta, canal)
+        guardar_mensaje(db, p, "assistant", turno.respuesta, canal, envio)
         clasificacion = None
         respuesta_final = turno.respuesta
 
-    c.analisis = analisis_actual
-    # Fase C: cada turno del prefiltro (mensaje recibido) es actividad; si hubo clasificaci\u00f3n
-    # del agente, recalcular resultado_apto para reflejar cumple/no_cumple reci\u00e9n asignados.
-    # (El wrapper de Fase D nunca dispara "candidato_apto" aqu\u00ed: este resultado siempre viene
-    # de la regla de prefiltro, que est\u00e1 expl\u00edcitamente excluida de notificaciones.)
-    _actualizar_ultima_actividad(c)
+    p.analisis = analisis_actual
+    # Fase C: cada turno es actividad; si hubo clasificación, recalcular resultado_apto. (El
+    # wrapper de Fase D nunca dispara "candidato_apto" aquí: la regla de prefiltro está excluida.)
+    _actualizar_ultima_actividad(p)
     if cierra_prefiltro:
-        await _recalcular_resultado_apto_y_notificar(db, c, "agente-ia")
+        await _recalcular_resultado_apto_y_notificar(db, p, "agente-ia")
     db.commit()
     return {"respuesta": respuesta_final, "clasificacion": clasificacion, "ia": con_ia, "whatsapp": envio}
 
@@ -1126,10 +1189,10 @@ async def prefiltro(
     _: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    c = _por_codigo(db, codigo, cuenta.id)
+    p = _por_codigo(db, codigo, cuenta.id)
     if not datos.texto.strip():
         raise HTTPException(400, "El mensaje va vacío.")
-    return await procesar_prefiltro(db, c, datos.texto, datos.canal)
+    return await procesar_prefiltro(db, p, datos.texto, datos.canal)
 
 
 # ------------------------------------------------------------
@@ -1151,24 +1214,24 @@ def consentimiento(
     u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Deja constancia del consentimiento en la bitácora hash-encadenada."""
-    c = _por_codigo(db, codigo, cuenta.id)
+    """Deja constancia del consentimiento (por proceso de selección) en la bitácora hash-encadenada."""
+    p = _por_codigo(db, codigo, cuenta.id)
     if not datos.acepta:
-        c.consentimiento = False
-        c.consentimiento_fecha = None
-        registrar(db, u.nombre, "consentimiento_revocado", "candidato", c.codigo, {"medio": datos.medio})
+        p.consentimiento = False
+        p.consentimiento_fecha = None
+        registrar(db, u.nombre, "consentimiento_revocado", "postulacion", p.codigo, {"candidato": p.candidato.codigo, "medio": datos.medio})
         db.commit()
-        return candidato_dict(c, detalle=True)
+        return postulacion_dict(p, detalle=True)
 
-    c.consentimiento = True
-    c.consentimiento_fecha = datetime.now(timezone.utc)
-    _actualizar_ultima_actividad(c)
+    p.consentimiento = True
+    p.consentimiento_fecha = datetime.now(timezone.utc)
+    _actualizar_ultima_actividad(p)
     registrar(
-        db, u.nombre, "consentimiento_otorgado", "candidato", c.codigo,
-        {"medio": datos.medio, "evidencia": datos.evidencia[:500], "correo_rh": u.correo},
+        db, u.nombre, "consentimiento_otorgado", "postulacion", p.codigo,
+        {"candidato": p.candidato.codigo, "medio": datos.medio, "evidencia": datos.evidencia[:500], "correo_rh": u.correo},
     )
     db.commit()
-    return candidato_dict(c, detalle=True)
+    return postulacion_dict(p, detalle=True)
 
 
 # ------------------------------------------------------------
@@ -1176,8 +1239,8 @@ def consentimiento(
 # ------------------------------------------------------------
 #
 # El botón genérico "Avanzar etapa" se reemplazó por botones explícitos por destino
-# (ver PATCH /{codigo}/etapa más abajo) a pedido del cliente. "Descartar" sigue aquí
-# porque no es un movimiento de tarjeta: es una reclasificación (estado -> no_cumple).
+# (ver PATCH /{codigo}/etapa más abajo). "Descartar" sigue aquí porque no es un movimiento
+# de tarjeta: es cerrar la postulación (activa=False, motivo 'descartado').
 
 
 class DecisionIn(BaseModel):
@@ -1193,26 +1256,27 @@ async def decision(
     u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    c = _por_codigo(db, codigo, cuenta.id)
+    p = _por_codigo(db, codigo, cuenta.id)
     if datos.accion != "descartar":
         raise HTTPException(400, "Acción inválida. Para mover de etapa usa PATCH /candidatos/{codigo}/etapa.")
-    if c.expediente:
+    if p.expediente:
         raise HTTPException(
             409,
-            "El candidato ya tiene expediente de contratación abierto. Cancélalo desde el módulo de contratación antes de descartarlo.",
+            "La postulación ya tiene expediente de contratación abierto. Cancélalo desde el módulo de contratación antes de descartarla.",
         )
 
-    recomendacion_ia = {"estado": c.estado, "score": c.score}
-    c.etapa = "Prefiltro"
-    c.estado = "no_cumple"
-    _actualizar_ultima_actividad(c)
-    await _recalcular_resultado_apto_y_notificar(db, c, u.nombre)
+    recomendacion_ia = {"estado": p.estado, "score": p.score}
+    p.etapa = "Prefiltro"
+    p.estado = "no_cumple"
+    p.cerrar("descartado")  # queda como historial; si la persona reaplica se abre una nueva (decisión 2026-09-11)
+    _actualizar_ultima_actividad(p)
+    await _recalcular_resultado_apto_y_notificar(db, p, u.nombre)
     registrar(
-        db, u.nombre, "decision_descartar", "candidato", c.codigo,
-        {"recomendacion_ia": recomendacion_ia, "comentario": datos.comentario, "correo_rh": u.correo},
+        db, u.nombre, "decision_descartar", "postulacion", p.codigo,
+        {"candidato": p.candidato.codigo, "recomendacion_ia": recomendacion_ia, "comentario": datos.comentario, "correo_rh": u.correo},
     )
     db.commit()
-    return candidato_dict(c, detalle=True)
+    return postulacion_dict(p, detalle=True)
 
 
 class EtapaIn(BaseModel):
@@ -1220,24 +1284,23 @@ class EtapaIn(BaseModel):
     comentario: str = ""
 
 
-def _abrir_expediente(db: Session, c: Candidato, u: Usuario) -> Expediente:
-    """Crea el expediente con el checklist de 6 documentos al entrar a Contratación. Ya no
-    existe el botón «Seleccionar y crear expediente»: esto lo dispara automáticamente
-    PATCH /{codigo}/etapa cuando el destino es "Contratación"."""
+def _abrir_expediente(db: Session, p: Postulacion, u: Usuario) -> Expediente:
+    """Crea el expediente con el checklist de 6 documentos al entrar a Contratación. Pertenece a
+    ESTA postulación (decisión P5): otra contratación de la misma persona tendrá el suyo."""
     exp = Expediente(
-        puesto=c.vacante.titulo if c.vacante else "",
+        candidato_id=p.candidato_id,
+        puesto=p.vacante.titulo if p.vacante else "",
         seleccionado_por=u.nombre,
         token=secrets.token_urlsafe(24),
     )
-    # se asigna por la relación (no solo candidato_id=c.id): así c.expediente queda
-    # sincronizado en memoria de inmediato — si no, candidato_dict(c) seguía viendo None
-    # hasta el próximo refresh, aunque el registro ya existiera en la base.
-    c.expediente = exp
+    # se asigna por la relación (no solo postulacion_id=p.id): así p.expediente queda
+    # sincronizado en memoria de inmediato para postulacion_dict.
+    p.expediente = exp
     db.add(exp)
     db.flush()
     for tipo in DOCUMENTOS_BASE:
         db.add(Documento(expediente_id=exp.id, tipo=tipo, obligatorio=True))
-    registrar(db, u.nombre, "expediente_abierto", "candidato", c.codigo, {"expediente": exp.id, "puesto": exp.puesto})
+    registrar(db, u.nombre, "expediente_abierto", "postulacion", p.codigo, {"candidato": p.candidato.codigo, "expediente": exp.id, "puesto": exp.puesto})
     return exp
 
 
@@ -1249,61 +1312,61 @@ async def mover_etapa(
 ):
     """Avance manual explícito del Kanban — cada botón del panel manda su etapa destino exacta
     (ver ETAPAS_CANDIDATO). No reemplaza el flujo dedicado de Entrevista Humana
-    (POST /{codigo}/entrevista-humana, que captura entrevistador/fecha/modalidad además de
-    mover la tarjeta) — aquí se rechaza a propósito.
+    (POST /{codigo}/entrevista-humana) — aquí se rechaza a propósito.
 
     "Entrevista IA" desde Prefiltro es la única "fricción manual" a propósito: fuerza la
     clasificación como apto y dispara el mismo mensaje que usa Zero-Touch para invitar al
-    candidato a compartir disponibilidad, para RH pueda arrancar el proceso sin esperar a
-    que el agente termine el prefiltro por su cuenta.
+    candidato a compartir disponibilidad.
 
-    `forzar_prueba` (Lote 4): inerte salvo que Modo Prueba esté activo (ver
-    services.configuracion.puede_forzar_prueba) — deja saltar los bloqueos de secuencia de
-    abajo para poder probar el flujo completo rápido, sin esperar a que cada paso previo esté
-    realmente satisfecho."""
-    c = _por_codigo(db, codigo, cuenta.id)
+    Mover una postulación cerrada (descartada) la reabre: es una decisión humana explícita.
+
+    `forzar_prueba`: inerte salvo que Modo Prueba esté activo (ver
+    services.configuracion.puede_forzar_prueba) — deja saltar los bloqueos de secuencia."""
+    p = _por_codigo(db, codigo, cuenta.id)
     if datos.etapa not in ETAPAS_CANDIDATO:
         raise HTTPException(400, f"Etapa inválida. Usa una de: {', '.join(ETAPAS_CANDIDATO)}")
     if datos.etapa == "Entrevista Humana":
         raise HTTPException(409, "Para programar la Entrevista Humana usa POST /candidatos/{codigo}/entrevista-humana.")
     if datos.etapa == "Onboarding":
-        if c.etapa != "Contratación" and not puede_forzar_prueba(db, forzar_prueba):
+        if p.etapa != "Contratación" and not puede_forzar_prueba(db, forzar_prueba):
             raise HTTPException(409, "Solo se puede enviar a Onboarding desde la etapa de Contratación.")
-    elif c.etapa == "Onboarding" and not puede_forzar_prueba(db, forzar_prueba):
+    elif p.etapa == "Onboarding" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato ya está en Onboarding; gestiona su expediente desde ese módulo.")
 
     if datos.etapa == "Entrevista IA":
-        if c.etapa != "Prefiltro":
+        if p.etapa != "Prefiltro":
             raise HTTPException(409, "Solo se puede forzar Entrevista IA desde la etapa de Prefiltro.")
-        if not c.telefono and not puede_forzar_prueba(db, forzar_prueba):
+        if not p.telefono and not puede_forzar_prueba(db, forzar_prueba):
             raise HTTPException(409, "El candidato no tiene WhatsApp registrado; no se puede iniciar el agendamiento.")
-        c.estado = "cumple"
-        c.prefiltro_completo = True
-        envio = await _avisar_apto_e_iniciar_agenda(db, c)
-        registrar(
-            db, u.nombre, "entrevista_ia_forzada", "candidato", c.codigo,
-            {"whatsapp": envio, "correo_rh": u.correo},
-        )
+        p.estado = "cumple"
+        p.prefiltro_completo = True
+        envio = await _avisar_apto_e_iniciar_agenda(db, p)
+        registrar(db, u.nombre, "entrevista_ia_forzada", "postulacion", p.codigo, {"whatsapp": envio, "correo_rh": u.correo})
 
-    if datos.etapa == "Contratación" and not c.expediente:
-        if not c.consentimiento:
+    if datos.etapa == "Contratación" and not p.expediente:
+        if not p.consentimiento:
             raise HTTPException(
                 409,
                 "El candidato no tiene consentimiento registrado para el tratamiento de sus datos (LFPDPPP). "
                 "Regístralo antes de continuar.",
             )
-        _abrir_expediente(db, c, u)
+        _abrir_expediente(db, p, u)
 
-    anterior = c.etapa
-    c.etapa = datos.etapa
-    _actualizar_ultima_actividad(c)
-    await _recalcular_resultado_apto_y_notificar(db, c, u.nombre)
+    anterior = p.etapa
+    reabierta = not p.activa
+    if reabierta:
+        p.activa = True
+        p.motivo_cierre = ""
+        p.cerrada_en = None
+    p.etapa = datos.etapa
+    _actualizar_ultima_actividad(p)
+    await _recalcular_resultado_apto_y_notificar(db, p, u.nombre)
     registrar(
-        db, u.nombre, "etapa_movida", "candidato", c.codigo,
-        {"de": anterior, "a": datos.etapa, "comentario": datos.comentario, "correo_rh": u.correo},
+        db, u.nombre, "etapa_movida", "postulacion", p.codigo,
+        {"candidato": p.candidato.codigo, "de": anterior, "a": datos.etapa, "comentario": datos.comentario, "reabierta": reabierta, "correo_rh": u.correo},
     )
     db.commit()
-    return candidato_dict(c, detalle=True)
+    return postulacion_dict(p, detalle=True)
 
 
 # ------------------------------------------------------------
@@ -1313,11 +1376,8 @@ async def mover_etapa(
 MODALIDADES_ENTREVISTA_HUMANA = ("Presencial", "Videollamada", "Llamada")
 
 # RH captura fecha/hora pensando en hora de México — nunca vienen con offset. Igual que el fix
-# de _parsear_fecha_cita (Zero-Touch), hay que convertir a UTC explícitamente antes de guardar:
-# SQLite descarta el offset de un DateTime(timezone=True) y se queda con los números de reloj
-# tal cual, así que un "11:00" sin convertir se compara después como si ya fuera UTC.
-# (TZ_MEXICO y RE_CORREO viven en services/notificaciones.py — Fase D las reutiliza también
-# para armar el texto de las notificaciones de Entrevista Humana.)
+# de _parsear_fecha_cita (Zero-Touch), hay que convertir a UTC explícitamente antes de guardar.
+# (TZ_MEXICO y RE_CORREO viven en services/notificaciones.py.)
 
 TIPOS_ENTREVISTADOR = ("interno", "externo")
 
@@ -1342,12 +1402,10 @@ async def programar_entrevista_humana(
     codigo: str, datos: EntrevistaHumanaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Botón «Programar entrevista» del modal — agenda una ronda NUEVA (ver EntrevistaHumana:
-    cada llamada crea su propia fila, nunca sobreescribe una anterior — así "Agendar otra
-    Entrevista Humana" no borra el resultado de la ronda previa), mueve la tarjeta a Entrevista
-    Humana y dispara el evento "entrevista_agendada" (Fase D) — a quién y por qué canal ya no
-    está fijo aquí, lo decide la regla configurada de la Cuenta."""
-    c = _por_codigo(db, codigo, cuenta.id)
+    """Botón «Programar entrevista» del modal — agenda una ronda NUEVA (cada llamada crea su
+    propia fila, nunca sobreescribe una anterior), mueve la tarjeta a Entrevista Humana y
+    dispara el evento "entrevista_agendada" (Fase D)."""
+    p = _por_codigo(db, codigo, cuenta.id)
 
     if datos.tipo_entrevistador not in TIPOS_ENTREVISTADOR:
         raise HTTPException(400, f"Tipo de entrevistador inválido. Usa uno de: {', '.join(TIPOS_ENTREVISTADOR)}")
@@ -1391,11 +1449,11 @@ async def programar_entrevista_humana(
     except ValueError:
         raise HTTPException(400, "Fecha u hora inválida (fecha ISO: 2026-09-05, hora: 14:30).")
 
-    anterior = c.etapa
-    c.etapa = "Entrevista Humana"
+    anterior = p.etapa
+    p.etapa = "Entrevista Humana"
 
     eh = EntrevistaHumana(
-        candidato_id=c.id,
+        candidato_id=p.candidato_id,
         tipo=datos.tipo_entrevistador,
         usuario_id=entrevistador_usuario.id if entrevistador_usuario else None,
         correo_externo=correo_entrevistador if datos.tipo_entrevistador == "externo" else "",
@@ -1409,33 +1467,33 @@ async def programar_entrevista_humana(
         comentario=datos.comentario.strip(),
         token=secrets.token_urlsafe(24),
     )
-    db.add(eh)
+    p.entrevistas_humanas.append(eh)
     db.flush()
 
-    resultados = await notificaciones.disparar(db, "entrevista_agendada", c, u.nombre, eh=eh)
+    resultados = await notificaciones.disparar(db, "entrevista_agendada", p, u.nombre, eh=eh)
 
     registrar(
-        db, u.nombre, "entrevista_humana_programada", "candidato", c.codigo,
+        db, u.nombre, "entrevista_humana_programada", "postulacion", p.codigo,
         {
-            "de": anterior, "entrevistador": eh.entrevistador,
+            "candidato": p.candidato.codigo, "de": anterior, "entrevistador": eh.entrevistador,
             "tipo_entrevistador": datos.tipo_entrevistador,
             "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
             "notificaciones": resultados,
         },
     )
-    _actualizar_ultima_actividad(c)
+    _actualizar_ultima_actividad(p)
     db.commit()
-    return candidato_dict(c, detalle=True)
+    return postulacion_dict(p, detalle=True)
 
 
 RESULTADOS_ENTREVISTA_HUMANA = ("aprobado", "no_aprobado")
 RECOMENDACIONES_ENTREVISTA_HUMANA = ("avanzar", "no_avanzar", "segunda_entrevista")
 
 
-def _ultima_entrevista_humana(c: Candidato) -> EntrevistaHumana:
-    if not c.entrevistas_humanas:
-        raise HTTPException(409, "El candidato no tiene ninguna Entrevista Humana programada.")
-    return c.entrevistas_humanas[-1]
+def _ultima_entrevista_humana(p: Postulacion) -> EntrevistaHumana:
+    if not p.entrevistas_humanas:
+        raise HTTPException(409, "La postulación no tiene ninguna Entrevista Humana programada.")
+    return p.entrevistas_humanas[-1]
 
 
 class EntrevistaHumanaModificarIn(BaseModel):
@@ -1454,9 +1512,9 @@ async def modificar_entrevista_humana(
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón «Modificar» — edita fecha/modalidad/liga/ubicación de la ronda vigente y dispara el
-    evento "entrevista_modificada" (Fase D, punto 3 — no existía hasta ahora)."""
-    c = _por_codigo(db, codigo, cuenta.id)
-    eh = _ultima_entrevista_humana(c)
+    evento "entrevista_modificada" (Fase D)."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    eh = _ultima_entrevista_humana(p)
     if eh.cancelada:
         raise HTTPException(409, "Esta entrevista fue cancelada; agenda una nueva.")
     if eh.realizada:
@@ -1483,17 +1541,14 @@ async def modificar_entrevista_humana(
     eh.telefono_contacto = datos.telefono_contacto.strip() if datos.modalidad == "Llamada" else ""
     eh.comentario = datos.comentario.strip()
 
-    resultados = await notificaciones.disparar(db, "entrevista_modificada", c, u.nombre, eh=eh)
+    resultados = await notificaciones.disparar(db, "entrevista_modificada", p, u.nombre, eh=eh)
     registrar(
-        db, u.nombre, "entrevista_humana_modificada", "candidato", c.codigo,
-        {
-            "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
-            "notificaciones": resultados,
-        },
+        db, u.nombre, "entrevista_humana_modificada", "postulacion", p.codigo,
+        {"fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo, "notificaciones": resultados},
     )
-    _actualizar_ultima_actividad(c)
+    _actualizar_ultima_actividad(p)
     db.commit()
-    return candidato_dict(c, detalle=True)
+    return postulacion_dict(p, detalle=True)
 
 
 @router.post("/{codigo}/entrevista-humana/cancelar")
@@ -1501,25 +1556,24 @@ async def cancelar_entrevista_humana(
     codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Botón «Cancelar» — dispara el evento "entrevista_cancelada" (Fase D, punto 4 — no existía
-    hasta ahora). No mueve la etapa del candidato automáticamente: RH decide a mano el siguiente
-    paso (agendar otra ronda o mover la etapa), igual que en cualquier otro punto del pipeline."""
-    c = _por_codigo(db, codigo, cuenta.id)
-    eh = _ultima_entrevista_humana(c)
+    """Botón «Cancelar» — dispara el evento "entrevista_cancelada" (Fase D). No mueve la etapa
+    automáticamente: RH decide a mano el siguiente paso (agendar otra ronda o mover la etapa)."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    eh = _ultima_entrevista_humana(p)
     if eh.cancelada:
         raise HTTPException(409, "Esta entrevista ya estaba cancelada.")
     if eh.realizada:
         raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
     eh.cancelada = True
 
-    resultados = await notificaciones.disparar(db, "entrevista_cancelada", c, u.nombre, eh=eh)
+    resultados = await notificaciones.disparar(db, "entrevista_cancelada", p, u.nombre, eh=eh)
     registrar(
-        db, u.nombre, "entrevista_humana_cancelada", "candidato", c.codigo,
+        db, u.nombre, "entrevista_humana_cancelada", "postulacion", p.codigo,
         {"correo_rh": u.correo, "notificaciones": resultados},
     )
-    _actualizar_ultima_actividad(c)
+    _actualizar_ultima_actividad(p)
     db.commit()
-    return candidato_dict(c, detalle=True)
+    return postulacion_dict(p, detalle=True)
 
 
 @router.post("/{codigo}/entrevista-humana/realizada")
@@ -1527,25 +1581,24 @@ async def marcar_entrevista_humana_realizada(
     codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Botón «Marcar entrevista realizada» — ya no le pide el resultado a RH: marca que la
-    entrevista ocurrió y dispara el evento "entrevista_humana_terminada" (Fase D) — la liga de
-    evaluación al entrevistador es, ahora, simplemente el destinatario Entrevistador de ese
-    evento; RH conserva la opción de capturar/corregir el resultado a mano como respaldo — ver
-    POST .../entrevista-humana/resultado."""
-    c = _por_codigo(db, codigo, cuenta.id)
-    if c.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
+    """Botón «Marcar entrevista realizada» — marca que la entrevista ocurrió y dispara el evento
+    "entrevista_humana_terminada" (Fase D); la liga de evaluación al entrevistador es el
+    destinatario Entrevistador de ese evento. RH conserva la opción de capturar/corregir el
+    resultado a mano como respaldo — ver POST .../entrevista-humana/resultado."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    if p.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
-    eh = _ultima_entrevista_humana(c)
+    eh = _ultima_entrevista_humana(p)
 
     eh.realizada = True
-    resultados = await notificaciones.disparar(db, "entrevista_humana_terminada", c, u.nombre, eh=eh)
+    resultados = await notificaciones.disparar(db, "entrevista_humana_terminada", p, u.nombre, eh=eh)
 
     registrar(
-        db, u.nombre, "entrevista_humana_marcada_realizada", "candidato", c.codigo,
+        db, u.nombre, "entrevista_humana_marcada_realizada", "postulacion", p.codigo,
         {"notificaciones": resultados, "correo_rh": u.correo},
     )
     db.commit()
-    return {"resultados": resultados, "candidato": candidato_dict(c, detalle=True)}
+    return {"resultados": resultados, "candidato": postulacion_dict(p, detalle=True)}
 
 
 class EntrevistaHumanaResultadoIn(BaseModel):
@@ -1560,12 +1613,11 @@ async def registrar_resultado_entrevista_humana(
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Respaldo manual de RH junto a la liga del entrevistador (Eje 1 del Lote 3: gana quien
-    llegue primero, pero RH siempre puede usar este mismo endpoint después para corregir —
-    a diferencia de POST /entrevista-humana/publica/{token}, que si ya está capturada regresa
-    409 sin tocar nada)."""
-    c = _por_codigo(db, codigo, cuenta.id)
-    if c.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
+    """Respaldo manual de RH junto a la liga del entrevistador (gana quien llegue primero, pero
+    RH siempre puede usar este mismo endpoint después para corregir — a diferencia de
+    POST /entrevista-humana/publica/{token}, que si ya está capturada regresa 409)."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    if p.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
     if datos.resultado not in RESULTADOS_ENTREVISTA_HUMANA:
         raise HTTPException(400, f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_ENTREVISTA_HUMANA)}")
@@ -1579,25 +1631,25 @@ async def registrar_resultado_entrevista_humana(
             "recomendación es 'Segunda entrevista'.",
         )
 
-    eh = _ultima_entrevista_humana(c)
+    eh = _ultima_entrevista_humana(p)
     ya_capturada = bool(eh.resultado_capturado_por)
     eh.realizada = True
     eh.resultado = datos.resultado
     eh.recomendacion = datos.recomendacion
     eh.comentario = comentario
     eh.resultado_capturado_por = "rh"
-    _actualizar_ultima_actividad(c)
-    await _recalcular_resultado_apto_y_notificar(db, c, u.nombre)
-    resultados = await notificaciones.disparar(db, "recomendacion_final", c, u.nombre, eh=eh)
+    _actualizar_ultima_actividad(p)
+    await _recalcular_resultado_apto_y_notificar(db, p, u.nombre)
+    resultados = await notificaciones.disparar(db, "recomendacion_final", p, u.nombre, eh=eh)
     registrar(
-        db, u.nombre, "entrevista_humana_resultado_capturado_rh", "candidato", c.codigo,
+        db, u.nombre, "entrevista_humana_resultado_capturado_rh", "postulacion", p.codigo,
         {
             "resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario,
             "corrigio_captura_previa": ya_capturada, "correo_rh": u.correo, "notificaciones": resultados,
         },
     )
     db.commit()
-    return candidato_dict(c, detalle=True)
+    return postulacion_dict(p, detalle=True)
 
 
 @router.post("/{codigo}/entrevista-humana/recordatorio")
@@ -1605,24 +1657,22 @@ async def recordatorio_entrevista_humana(
     codigo: str, forzar_prueba: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Botón «Enviar recordatorio» — seguimiento manual junto a «Marcar entrevista realizada».
-    Dispara el evento "recordatorio_entrevista" (Fase D): la regla configurada de la Cuenta
-    decide el envío completo — si "Candidato · WhatsApp" está apagado, este botón no le manda
-    WhatsApp al candidato (puede seguir avisando a entrevistador/cliente si así se configuró)."""
-    c = _por_codigo(db, codigo, cuenta.id)
-    if c.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
+    """Botón «Enviar recordatorio» — dispara el evento "recordatorio_entrevista" (Fase D): la
+    regla configurada de la Cuenta decide el envío completo."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    if p.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
-    eh = _ultima_entrevista_humana(c)
+    eh = _ultima_entrevista_humana(p)
     if eh.realizada and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
 
-    resultados = await notificaciones.disparar(db, "recordatorio_entrevista", c, u.nombre, eh=eh)
+    resultados = await notificaciones.disparar(db, "recordatorio_entrevista", p, u.nombre, eh=eh)
     registrar(
-        db, u.nombre, "recordatorio_entrevista_humana_enviado", "candidato", c.codigo,
+        db, u.nombre, "recordatorio_entrevista_humana_enviado", "postulacion", p.codigo,
         {"notificaciones": resultados, "correo_rh": u.correo},
     )
     db.commit()
-    return {"resultados": resultados, "candidato": candidato_dict(c, detalle=True)}
+    return {"resultados": resultados, "candidato": postulacion_dict(p, detalle=True)}
 
 
 # ------------------------------------------------------------
@@ -1634,10 +1684,10 @@ async def recordatorio_entrevista_humana(
 def expediente(
     codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
 ):
-    c = _por_codigo(db, codigo, cuenta.id)
-    if not c.expediente:
-        raise HTTPException(404, "El candidato aún no tiene expediente de contratación.")
-    return expediente_dict(c.expediente)
+    p = _por_codigo(db, codigo, cuenta.id)
+    if not p.expediente:
+        raise HTTPException(404, "La postulación aún no tiene expediente de contratación.")
+    return expediente_dict(p.expediente)
 
 
 class CondicionesContratacionIn(BaseModel):
@@ -1657,11 +1707,11 @@ def guardar_condiciones_contratacion(
     """Formulario de la etapa Contratación (puesto precargado pero editable, sueldo, tipo de
     contratación, fecha de ingreso, ubicación y jefe directo). Requiere que el expediente ya
     exista — se abre solo al entrar a Contratación, ver mover_etapa/_abrir_expediente."""
-    c = _por_codigo(db, codigo, cuenta.id)
-    if not c.expediente:
-        raise HTTPException(404, "El candidato todavía no tiene expediente de contratación.")
+    p = _por_codigo(db, codigo, cuenta.id)
+    if not p.expediente:
+        raise HTTPException(404, "La postulación todavía no tiene expediente de contratación.")
 
-    exp = c.expediente
+    exp = p.expediente
     if datos.puesto.strip():
         exp.puesto = datos.puesto.strip()
     exp.sueldo = datos.sueldo.strip()
@@ -1675,11 +1725,12 @@ def guardar_condiciones_contratacion(
             raise HTTPException(400, "fecha_ingreso inválida (usa ISO: 2026-09-15)")
 
     registrar(
-        db, u.nombre, "condiciones_contratacion_guardadas", "candidato", c.codigo,
+        db, u.nombre, "condiciones_contratacion_guardadas", "postulacion", p.codigo,
         {"expediente": exp.id, "sueldo": exp.sueldo, "tipo_contratacion": exp.tipo_contratacion, "correo_rh": u.correo},
     )
+    _actualizar_ultima_actividad(p)
     db.commit()
-    return candidato_dict(c, detalle=True)
+    return postulacion_dict(p, detalle=True)
 
 
 # ------------------------------------------------------------
@@ -1688,28 +1739,28 @@ def guardar_condiciones_contratacion(
 #
 # El checklist real de documentos (qué falta, validación con IA, alta) sigue viviendo en
 # contratacion.py sobre el Expediente. Estos dos endpoints son el "romper el hielo" y el
-# "recordatorio" que pide RH desde la tarjeta del candidato — un mensaje simple que deja al
-# agente (ia.onboarding_turno, ver procesar_prefiltro) listo para dar seguimiento a lo que
-# el candidato conteste después.
+# "recordatorio" que pide RH desde la tarjeta — un mensaje simple que deja al agente
+# (ia.onboarding_turno, ver procesar_prefiltro) listo para dar seguimiento a lo que el
+# candidato conteste después.
 
-async def _disparar_mensaje_onboarding(db: Session, c: Candidato, evento: str, accion: str, liga: str, u: Usuario) -> dict:
-    if c.etapa != "Onboarding":
-        raise HTTPException(409, "Esta acción es solo para candidatos en la etapa de Onboarding.")
-    resultados = await notificaciones.disparar(db, evento, c, u.nombre, liga=liga)
-    registrar(db, u.nombre, accion, "candidato", c.codigo, {"notificaciones": resultados, "correo_rh": u.correo})
+async def _disparar_mensaje_onboarding(db: Session, p: Postulacion, evento: str, accion: str, liga: str, u: Usuario) -> dict:
+    if p.etapa != "Onboarding":
+        raise HTTPException(409, "Esta acción es solo para postulaciones en la etapa de Onboarding.")
+    resultados = await notificaciones.disparar(db, evento, p, u.nombre, liga=liga)
+    registrar(db, u.nombre, accion, "postulacion", p.codigo, {"notificaciones": resultados, "correo_rh": u.correo})
+    _actualizar_ultima_actividad(p)
     db.commit()
-    return {"resultados": resultados, "candidato": candidato_dict(c, detalle=True)}
+    return {"resultados": resultados, "candidato": postulacion_dict(p, detalle=True)}
 
 
-def _liga_documentos(c: Candidato) -> str:
-    """Liga pública para que el candidato suba sus documentos (Lote 4, ver
-    routers/expediente_publico.py) — genera el token del expediente perezosamente si es uno de
-    los que existían antes de este lote (Expediente.token es nullable, ver models.py)."""
-    if not c.expediente:
-        raise HTTPException(409, "El candidato no tiene expediente de contratación; no se puede generar la liga de documentos.")
-    if not c.expediente.token:
-        c.expediente.token = secrets.token_urlsafe(24)
-    return f"{settings.app_url}/expediente/{c.expediente.token}"
+def _liga_documentos(p: Postulacion) -> str:
+    """Liga pública para que el candidato suba sus documentos (ver routers/expediente_publico.py)
+    — genera el token del expediente perezosamente si es uno anterior (Expediente.token es nullable)."""
+    if not p.expediente:
+        raise HTTPException(409, "La postulación no tiene expediente de contratación; no se puede generar la liga de documentos.")
+    if not p.expediente.token:
+        p.expediente.token = secrets.token_urlsafe(24)
+    return f"{settings.app_url}/expediente/{p.expediente.token}"
 
 
 @router.post("/{codigo}/solicitar-documentos")
@@ -1718,9 +1769,9 @@ async def solicitar_documentos(
 ):
     """Botón 'Solicitar documentos' — rompe el hielo por WhatsApp al entrar a Onboarding, con
     la liga pública para que el candidato suba sus documentos él mismo."""
-    c = _por_codigo(db, codigo, cuenta.id)
-    liga = _liga_documentos(c)
-    return await _disparar_mensaje_onboarding(db, c, "solicitud_documentos", "documentos_solicitados", liga, u)
+    p = _por_codigo(db, codigo, cuenta.id)
+    liga = _liga_documentos(p)
+    return await _disparar_mensaje_onboarding(db, p, "solicitud_documentos", "documentos_solicitados", liga, u)
 
 
 @router.post("/{codigo}/recordatorio-documentos")
@@ -1728,6 +1779,6 @@ async def recordatorio_documentos(
     codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
 ):
     """Botón 'Enviar recordatorio' — seguimiento manual si el candidato no ha respondido."""
-    c = _por_codigo(db, codigo, cuenta.id)
-    liga = _liga_documentos(c)
-    return await _disparar_mensaje_onboarding(db, c, "recordatorio_documentos", "recordatorio_documentos_enviado", liga, u)
+    p = _por_codigo(db, codigo, cuenta.id)
+    liga = _liga_documentos(p)
+    return await _disparar_mensaje_onboarding(db, p, "recordatorio_documentos", "recordatorio_documentos_enviado", liga, u)

@@ -36,10 +36,10 @@ def _por_token(db: Session, token: str) -> EntrevistaHumana:
 @router.get("/publica/{token}")
 def publica(token: str, db: Session = Depends(get_db)):
     eh = _por_token(db, token)
-    c = eh.candidato
+    p = eh.postulacion
     return {
-        "candidato": c.nombre,
-        "puesto": c.vacante.titulo if c.vacante else "",
+        "candidato": eh.candidato.nombre if eh.candidato else "",
+        "puesto": p.vacante.titulo if p and p.vacante else "",
         "fecha": iso(eh.fecha),
     }
 
@@ -71,16 +71,18 @@ async def enviar_resultado(token: str, datos: ResultadoEntrevistaHumanaPublicaIn
     eh.recomendacion = datos.recomendacion
     eh.comentario = comentario
     eh.resultado_capturado_por = "entrevistador"
-    # Fase C: actualizar resultado_apto y ultima_actividad_en del candidato.
-    # Se importa aquí (no en el módulo) para evitar import circular entre routers.
+    # Fase C: actualizar resultado_apto y ultima_actividad_en de la POSTULACIÓN (Fase 2: el
+    # Kanban lee de ahí, no de la persona). Se importa aquí para evitar import circular.
     from .candidatos import _recalcular_resultado_apto_y_notificar, _actualizar_ultima_actividad
-    c = eh.candidato
-    _actualizar_ultima_actividad(c)
-    await _recalcular_resultado_apto_y_notificar(db, c, "entrevistador-externo")
-    resultados = await notificaciones.disparar(db, "recomendacion_final", c, "entrevistador-externo", eh=eh)
+    p = eh.postulacion
+    if not p:
+        raise HTTPException(409, "Esta entrevista no está ligada a ninguna postulación (corre scripts/migrar_postulaciones.py).")
+    _actualizar_ultima_actividad(p)
+    await _recalcular_resultado_apto_y_notificar(db, p, "entrevistador-externo")
+    resultados = await notificaciones.disparar(db, "recomendacion_final", p, "entrevistador-externo", eh=eh)
     registrar(
-        db, "entrevistador-externo", "entrevista_humana_evaluada_por_liga", "candidato", c.codigo,
-        {"resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario, "notificaciones": resultados},
+        db, "entrevistador-externo", "entrevista_humana_evaluada_por_liga", "postulacion", p.codigo,
+        {"candidato": p.candidato.codigo, "resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario, "notificaciones": resultados},
     )
     db.commit()
     return {"ok": True}

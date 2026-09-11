@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from .models import AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Vacante
+from .models import AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
 from .services.avatar import avatar_activo
 from .services.ia import texto_preguntas
 
@@ -162,14 +162,20 @@ def _dedupe_cap(items: List[Optional[str]], maximo: int) -> List[str]:
     return salida
 
 
-def _sintesis_global(c: Candidato) -> dict:
+def _sintesis_global(p: Postulacion) -> dict:
     """Puntos 3 (D/E/F/G) y 5: combina CV + Prefiltro + Entrevista IA + Entrevista Humana en
     una sola síntesis — determinista, SIN llamada a IA nueva (decisión confirmada). Se calcula
     al vuelo en cada lectura, nunca se persiste: así "recalcular cuando el CV se carga después"
-    se cumple gratis, sin enganchar este cálculo en cada punto de mutación."""
-    a = c.analisis or {}
-    ultima_eh = c.entrevistas_humanas[-1] if c.entrevistas_humanas else None
-    ultima_ent = c.entrevistas[-1] if c.entrevistas else None
+    se cumple gratis, sin enganchar este cálculo en cada punto de mutación.
+
+    Fase 2: todo sale de la Postulación — las entrevistas de OTRA postulación de la misma
+    persona no cuentan para esta (cada aplicación se evalúa por sí sola)."""
+    a = p.analisis or {}
+    score = p.score
+    resultado_apto = p.resultado_apto
+    ultima_eh = p.entrevistas_humanas[-1] if p.entrevistas_humanas else None
+    ultima_ent = p.entrevistas[-1] if p.entrevistas else None
+
     eval_ia = (ultima_ent.evaluacion or {}) if ultima_ent else {}
     match_ia = eval_ia.get("match_perfil")
     respuestas = a.get("respuestas_prefiltro") or []
@@ -186,9 +192,9 @@ def _sintesis_global(c: Candidato) -> dict:
     # una persona real ya evaluó). Cada fuente usada queda citada en `sintesisAfinidad`. ---
     afinidad: Optional[int] = None
     fuentes: List[str] = []
-    if c.score:
-        afinidad = c.score
-        fuentes.append(f"CV/Prefiltro: {c.score}/100 de ajuste")
+    if score:
+        afinidad = score
+        fuentes.append(f"CV/Prefiltro: {score}/100 de ajuste")
     if match_ia is not None:
         afinidad = round(((afinidad or 0) + match_ia) / 2) if afinidad is not None else match_ia
         fuentes.append(f"Entrevista IA: {match_ia}% de match")
@@ -221,16 +227,16 @@ def _sintesis_global(c: Candidato) -> dict:
     # (Fase C/D), nunca reinventa la lógica de negocio. ---
     recomendacion: Optional[str] = None
     motivo = ""
-    if c.resultado_apto is False:
+    if resultado_apto is False:
         recomendacion = "No avanzar"
         motivo = "El resultado más reciente del proceso marca al candidato como no apto."
     elif ultima_eh and ultima_eh.recomendacion == "no_avanzar":
         recomendacion = "No avanzar"
         motivo = "El entrevistador humano recomendó no avanzar."
-    elif c.resultado_apto is True and ultima_eh and ultima_eh.resultado == "aprobado" and ultima_eh.recomendacion == "avanzar":
+    elif resultado_apto is True and ultima_eh and ultima_eh.resultado == "aprobado" and ultima_eh.recomendacion == "avanzar":
         recomendacion = "Avanzar a contratación"
         motivo = "La Entrevista Humana confirmó al candidato como aprobado, con recomendación de avanzar."
-    elif c.resultado_apto is True:
+    elif resultado_apto is True:
         recomendacion = "Realizar entrevista humana"
         motivo = (
             "La Entrevista Humana sugiere una segunda ronda antes de decidir."
@@ -249,35 +255,94 @@ def _sintesis_global(c: Candidato) -> dict:
     }
 
 
-def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
-    exp = c.expediente
-    ultima = c.entrevistas[-1] if c.entrevistas else None
-    ultima_eh = c.entrevistas_humanas[-1] if c.entrevistas_humanas else None
-    base = {
+def _persona_dict(c: Candidato) -> dict:
+    """Ficha de la PERSONA (maestro de identidad) — va embebida en cada postulación como
+    `candidato` y es lo que regresa candidato_dict()."""
+    return {
         "id": c.codigo,
+        "codigo": c.codigo,
         "nombre": c.nombre,
-        "puesto": c.vacante.titulo if c.vacante else "",
-        "vacanteId": c.vacante.codigo if c.vacante else "",
+        "correo": c.correo,
+        "telefono": c.telefono,
+        "ubicacion": c.ubicacion or "",
+        "experiencia": c.experiencia or "",
         "fuente": c.fuente,
-        "estado": c.estado,
-        "etapa": c.etapa,
-        "score": c.score,
+        "esPrueba": c.es_prueba,
+        "totalPostulaciones": len(c.postulaciones),
+        "postulacionesActivas": len(c.postulaciones_activas),
+        "archivos": len(c.archivos),
+        "creadoEn": iso(c.creado_en),
+    }
+
+
+def _postulacion_resumen_dict(p: Postulacion) -> dict:
+    """Renglón del historial de postulaciones de una persona (pestaña Resumen)."""
+    return {
+        "id": p.codigo,
+        "puesto": p.vacante.titulo if p.vacante else "",
+        "vacanteId": p.vacante.codigo if p.vacante else "",
+        "etapa": p.etapa,
+        "estado": p.estado,
+        "score": p.score,
+        "activa": p.activa,
+        "motivoCierre": p.motivo_cierre,
+        "creado": hace(p.creado_en),
+        "creadoEn": iso(p.creado_en),
+        "cerradaEn": iso(p.cerrada_en),
+    }
+
+
+def postulacion_dict(p: Postulacion, detalle: bool = False) -> dict:
+    """La tarjeta del Kanban (decisión P4: una por Postulación). `id` es el código P-####
+    — es lo que el frontend manda a /candidatos/{codigo}/...; los datos de persona vienen
+    aplanados (nombre, teléfono…) por compatibilidad y también en `candidato`."""
+    c = p.candidato
+    v = p.vacante
+    exp = p.expediente
+    ultima = p.entrevistas[-1] if p.entrevistas else None
+    ultima_eh = p.entrevistas_humanas[-1] if p.entrevistas_humanas else None
+    total_postulaciones = len(c.postulaciones)
+
+    base = {
+        "id": p.codigo,
+        "codigo": p.codigo,
+        "postulacionId": p.id,
+        # Convención: `candidatoId` es SIEMPRE lo que se manda a /candidatos/{codigo} (la
+        # postulación) — igual que en entrevista_dict/expediente_dict; la persona va en
+        # `candidatoCodigo` y en `candidato`.
+        "candidatoId": p.codigo,
+        "candidatoCodigo": c.codigo,
+        "nombre": c.nombre,
+        "puesto": v.titulo if v else "",
+        "vacanteId": v.codigo if v else "",
+        "vacanteTitulo": v.titulo if v else "",
+        "fuente": c.fuente,
+        "origen": p.origen,
+        "estado": p.estado,
+        "etapa": p.etapa,
+        "score": p.score,
         "experiencia": c.experiencia or "",
         "ubicacion": c.ubicacion or "",
-        "aplicado": hace(c.creado_en),
+        "aplicado": hace(p.creado_en),
+        "creadoEn": iso(p.creado_en),
         "tono": (c.id or 0) % 4,
-        "evidencia": c.evidencia or "Prefiltro en curso.",
+        "evidencia": p.evidencia or "Prefiltro en curso.",
         "telefono": c.telefono,
         "correo": c.correo,
-        "consentimiento": c.consentimiento,
-        "prefiltroCompleto": c.prefiltro_completo,
-        "esPrueba": c.es_prueba,
+        "consentimiento": p.consentimiento,
+        "prefiltroCompleto": p.prefiltro_completo,
+        "activa": p.activa,
+        "motivoCierre": p.motivo_cierre,
+        "cerradaEn": iso(p.cerrada_en),
+        "esPrueba": c.es_prueba or p.es_prueba,
+        "totalPostulaciones": total_postulaciones,
+        "yaAplicoAntes": total_postulaciones > 1,
+        "enConversacion": c.postulacion_conversacion_id == p.id,
         # --- Entrevista Humana (flujo manual) — puede haber varias rondas, ver EntrevistaHumana.
-        # "entrevistaHumana" es la más reciente (compatibilidad con lo que ya lee el frontend);
-        # "entrevistasHumanas" es el historial completo, más reciente primero.
+        # "entrevistaHumana" es la más reciente; "entrevistasHumanas" el historial (más reciente primero).
         "entrevistaHumana": _entrevista_humana_dict(ultima_eh) if ultima_eh else None,
-        "entrevistasHumanas": [_entrevista_humana_dict(eh) for eh in reversed(c.entrevistas_humanas)],
-        # --- puentes entre módulos ---
+        "entrevistasHumanas": [_entrevista_humana_dict(eh) for eh in reversed(p.entrevistas_humanas)],
+        # --- Expediente (Contratación) — pertenece a ESTA postulación (decisión P5) ---
         "expedienteId": exp.id if exp else None,
         "expedienteProgreso": exp.progreso if exp else None,
         "expedienteEstado": exp.estado if exp else None,
@@ -291,39 +356,37 @@ def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
         }
         if exp
         else None,
+        # --- Entrevista IA ---
         "entrevistaId": ultima.codigo if ultima else None,
         "entrevistaEstado": ultima.estado if ultima else None,
         "entrevistaMatch": (ultima.evaluacion or {}).get("match_perfil") if ultima else None,
         "entrevistaRecomendacion": (ultima.evaluacion or {}).get("recomendacion") if ultima else None,
         "archivos": len(c.archivos),
-        "mensajes": len(c.mensajes),
-        # --- Fase C: actividad, resultado vigente y cliente de la vacante ---
-        # ultima_actividad_en: None para candidatos previos al deploy de Fase C hasta que se ejecute
-        # el script backfill_resultado_apto.py (o hasta su próximo evento de actividad).
-        "ultimaActividadEn": iso(c.ultima_actividad_en),
-        # resultado_apto: True=Apto, False=No apto, None=sin evaluación. La regla "el más reciente gana"
-        # se aplica en _recalcular_resultado_apto() dentro de routers/candidatos.py.
-        "resultadoApto": c.resultado_apto,
-        # clienteVacante: nombre del Cliente de la vacante del candidato, si aplica — permite mostrar
-        # la columna Cliente en la vista lista de candidatos sin JOIN extra desde el frontend.
-        "clienteVacante": c.vacante.cliente.nombre if c.vacante and c.vacante.cliente else None,
+        "mensajes": len(p.mensajes),
+        # --- Fase C ---
+        "ultimaActividadEn": iso(p.ultima_actividad_en),
+        "resultadoApto": p.resultado_apto,
+        "clienteVacante": v.cliente.nombre if v and v.cliente else None,
+        # --- Persona (maestro) ---
+        "candidato": _persona_dict(c),
     }
+
     if not detalle:
         return base
 
     return {
         **base,
-        **_sintesis_global(c),
+        **_sintesis_global(p),
         "cvDatos": c.cv_datos or {},
-        "analisis": c.analisis or {},
+        "analisis": p.analisis or {},
         "listaArchivos": [archivo_dict(a) for a in c.archivos],
         "vacante": {
-            "id": c.vacante.codigo,
-            "titulo": c.vacante.titulo,
-            "requisitos": c.vacante.requisitos,
-            "preguntas": texto_preguntas(c.vacante.preguntas_filtro),
+            "id": v.codigo,
+            "titulo": v.titulo,
+            "requisitos": v.requisitos,
+            "preguntas": texto_preguntas(v.preguntas_filtro),
         }
-        if c.vacante
+        if v
         else None,
         "entrevistas": [
             {
@@ -334,10 +397,23 @@ def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
                 "evaluacion": e.evaluacion or None,
                 "creada": hace(e.creada_en),
             }
-            for e in c.entrevistas
+            for e in p.entrevistas
         ],
-        "consentimientoFecha": iso(c.consentimiento_fecha),
+        "consentimientoFecha": iso(p.consentimiento_fecha),
+        # Otras postulaciones de la misma persona (más reciente primero) — pestaña Resumen.
+        "historialPostulaciones": [_postulacion_resumen_dict(hp) for hp in reversed(c.postulaciones) if hp.id != p.id],
     }
+
+
+def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
+    """Ficha de PERSONA. Fase 2: ya no es la tarjeta del Kanban (eso es postulacion_dict);
+    se usa donde se habla de la persona en sí (dedup, historial). `postulaciones` trae el
+    resumen de todas sus aplicaciones."""
+    base = _persona_dict(c)
+    base["postulaciones"] = [_postulacion_resumen_dict(p) for p in reversed(c.postulaciones)]
+    if not detalle:
+        return base
+    return {**base, "cvDatos": c.cv_datos or {}, "listaArchivos": [archivo_dict(a) for a in c.archivos]}
 
 
 # ------------------------------------------------------------
@@ -346,12 +422,17 @@ def candidato_dict(c: Candidato, detalle: bool = False) -> dict:
 
 
 def entrevista_dict(e: Entrevista) -> dict:
+    p = e.postulacion
     c = e.candidato
+    vac = p.vacante if p else None
     return {
         "id": e.codigo,
-        "candidatoId": c.codigo if c else "",
+        # `candidatoId` es lo que el frontend manda a /candidatos/{codigo}: la Postulación.
+        "candidatoId": p.codigo if p else (c.codigo if c else ""),
+        "postulacionId": p.codigo if p else None,
+        "candidatoCodigo": c.codigo if c else "",
         "nombre": c.nombre if c else "",
-        "puesto": c.vacante.titulo if c and c.vacante else "",
+        "puesto": vac.titulo if vac else "",
         "tipo": e.tipo,
         "estado": e.estado,
         "token": e.token,
@@ -473,9 +554,13 @@ def documento_dict(d: Documento) -> dict:
 
 
 def expediente_dict(e: Expediente) -> dict:
+    p = e.postulacion
     c = e.candidato
-    vac = c.vacante if c else None
-    ultima = c.entrevistas[-1] if c and c.entrevistas else None
+    vac = p.vacante if p else None
+    ultima = p.entrevistas[-1] if p and p.entrevistas else None
+    score = p.score if p else 0
+    analisis = (p.analisis if p else None) or {}
+    evidencia = p.evidencia if p else ""
     # 'alta' es el único estado que persiste; el resto se deriva del avance real de los documentos
     estado = "alta" if e.estado == "alta" else ("completo" if e.progreso == 100 else "integracion")
     # documentos que la IA aprobó pero que nadie de RH ha confirmado todavía (bloquean el alta)
@@ -483,6 +568,7 @@ def expediente_dict(e: Expediente) -> dict:
     return {
         "id": f"N-{500 + e.id}",
         "expedienteId": e.id,
+        "postulacionId": p.codigo if p else None,
         "nombre": c.nombre if c else "",
         "puesto": e.puesto,
         "ubicacion": (c.ubicacion if c else "") or "N/D",
@@ -505,21 +591,22 @@ def expediente_dict(e: Expediente) -> dict:
         "porRevisar": e.por_revisar,
         "sinConfirmar": sin_confirmar,
         "listoParaAlta": estado == "completo" and not sin_confirmar,
-        # --- puentes hacia el módulo 1 ---
-        "candidatoId": c.codigo if c else "",
+        # --- puentes hacia el módulo 1 (candidatoId = Postulación: es lo que /candidatos/{codigo} espera) ---
+        "candidatoId": p.codigo if p else (c.codigo if c else ""),
+        "candidatoCodigo": c.codigo if c else "",
         "telefono": c.telefono if c else "",
         "correo": c.correo if c else "",
         "vacanteId": vac.codigo if vac else "",
-        "score": c.score if c else 0,
+        "score": score,
         "entrevistaMatch": (ultima.evaluacion or {}).get("match_perfil") if ultima else None,
         "entrevistaRecomendacion": (ultima.evaluacion or {}).get("recomendacion") if ultima else None,
         # --- Bloque 2 (resumen de evaluación): lo que ya sabemos del candidato sin ir a buscarlo aparte ---
         "evaluacion": {
-            "score": c.score,
-            "requisitosCumplidos": (c.analisis or {}).get("requisitos_cumplidos", []),
-            "brechas": (c.analisis or {}).get("brechas", []),
-            "alertas": (c.analisis or {}).get("alertas", []),
-            "evidencia": c.evidencia or "",
+            "score": score,
+            "requisitosCumplidos": analisis.get("requisitos_cumplidos", []),
+            "brechas": analisis.get("brechas", []),
+            "alertas": analisis.get("alertas", []),
+            "evidencia": evidencia,
         }
         if c
         else None,

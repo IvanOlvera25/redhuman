@@ -16,13 +16,15 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import Candidato, Cuenta, Entrevista, Mensaje, Usuario, Vacante, registrar
+from ..models import Candidato, Cuenta, Entrevista, Usuario, Vacante, registrar
 from ..serial import entrevista_dict, nombre_empresa_candidato
 from ..services import ia
 from ..services.avatar import avatar_activo, crear_sesion_avatar
 from ..services.configuracion import modo_prueba_activo
 from ..services.entrevistas import crear_entrevista_para_candidato
 from ..services.whatsapp import enviar_mensaje
+from .candidatos import _crear_candidato, guardar_mensaje, postulacion_para_vacante
+from .candidatos import _por_codigo as _postulacion_por_codigo
 
 router = APIRouter(prefix="/entrevistas", tags=["entrevistas"])
 
@@ -84,7 +86,7 @@ def metricas(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)
 
 
 class AgendarIn(BaseModel):
-    candidato: str  # código C-####
+    candidato: str  # código de la Postulación (P-####); se acepta C-#### por compatibilidad
     programada_para: Optional[str] = None  # ISO
     avisar_whatsapp: bool = True
 
@@ -94,9 +96,7 @@ async def agendar(
     datos: AgendarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    c = db.query(Candidato).filter(Candidato.codigo == datos.candidato, Candidato.cuenta_id == cuenta.id).first()
-    if not c:
-        raise HTTPException(404, "Candidato no encontrado")
+    p = _postulacion_por_codigo(db, datos.candidato, cuenta.id)
 
     fecha = None
     if datos.programada_para:
@@ -105,17 +105,18 @@ async def agendar(
         except ValueError:
             raise HTTPException(400, "programada_para inválida (usa ISO: 2026-07-28T15:00)")
 
-    e, con_ia = crear_entrevista_para_candidato(db, c, u.nombre, programada_para=fecha)
+    e, con_ia = crear_entrevista_para_candidato(db, p, u.nombre, programada_para=fecha)
 
-    v = c.vacante
+    v = p.vacante
     liga = f"{settings.app_url}/entrevista/{e.token}"
     envio = {"enviado": False, "proveedor": "demo"}
-    if datos.avisar_whatsapp and c.telefono:
+    if datos.avisar_whatsapp and p.telefono:
         texto = (
-            f"¡Hola {c.nombre.split(' ')[0]}! 👋 Tu entrevista para {v.titulo if v else 'la vacante'} está lista. "
+            f"¡Hola {p.nombre.split(' ')[0]}! 👋 Tu entrevista para {v.titulo if v else 'la vacante'} está lista. "
             f"Entra cuando gustes desde tu celular o computadora: {liga} — dura unos 10 minutos."
         )
-        envio = await enviar_mensaje(c.telefono, texto)
+        envio = await enviar_mensaje(p.telefono, texto)
+        guardar_mensaje(db, p, "assistant", texto, "whatsapp", envio)
     db.commit()
     return {"liga": liga, "ia": con_ia, "whatsapp": envio, **entrevista_dict(e)}
 
@@ -155,30 +156,24 @@ async def inmediata(
                 Candidato.correo == datos.correo, Candidato.es_prueba.is_(False), Candidato.cuenta_id == cuenta.id
             ).first()
 
-    if not c:
-        vac = (
-            db.query(Vacante).filter(Vacante.codigo == datos.vacante, Vacante.cuenta_id == cuenta.id).first()
-            if datos.vacante
-            else None
-        )
-        c = Candidato(
-            codigo="TMP",
-            cuenta_id=cuenta.id,
-            nombre=datos.nombre.strip(),
-            telefono=datos.telefono,
-            correo=datos.correo,
-            fuente="RH",
-            etapa="Entrevista IA",
-            vacante_id=vac.id if vac else None,
-            es_prueba=prueba,
-        )
-        db.add(c)
-        db.flush()
-        c.codigo = f"C-{8800 + c.id}"
-        registrar(db, "sistema", "candidato_ingresado", "candidato", c.codigo, {"fuente": "RH", "via": "entrevista_inmediata"})
-        db.commit()
+    vac = (
+        db.query(Vacante).filter(Vacante.codigo == datos.vacante, Vacante.cuenta_id == cuenta.id).first()
+        if datos.vacante
+        else None
+    )
 
-    return await agendar(AgendarIn(candidato=c.codigo, avisar_whatsapp=datos.avisar_whatsapp), db, u, cuenta)
+    nuevo = c is None
+    if c is None:
+        c = _crear_candidato(db, cuenta.id, datos.nombre.strip(), "RH", prueba, telefono=datos.telefono, correo=datos.correo)
+    # La persona se reutiliza; la postulación es por vacante (activa para esa vacante → la misma).
+    p, nueva_p = postulacion_para_vacante(db, c, vac, cuenta.id, "rh_directo", es_prueba=prueba)
+    registrar(
+        db, "sistema", "candidato_ingresado", "postulacion", p.codigo,
+        {"candidato": c.codigo, "fuente": "RH", "via": "entrevista_inmediata", "persona_nueva": nuevo, "postulacion_nueva": nueva_p},
+    )
+    db.commit()
+
+    return await agendar(AgendarIn(candidato=p.codigo, avisar_whatsapp=datos.avisar_whatsapp), db, u, cuenta)
 
 
 # ------------------------------------------------------------
@@ -301,8 +296,8 @@ async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db
         ]
     e.estado = "completada"
 
-    c = e.candidato
-    v = c.vacante if c else None
+    p = e.postulacion
+    v = p.vacante if p else None
     ev, con_ia = ia.evaluar_entrevista(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",
@@ -319,31 +314,28 @@ async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db
         {"ia": con_ia, "recomendacion": ev.recomendacion, "match": ev.match_perfil},
     )
 
-    # Zero-Touch: mueve el Kanban a Evaluación — NO toca c.estado, la recomendación de la IA
+    # Zero-Touch: mueve el Kanban a Evaluación — NO toca p.estado, la recomendación de la IA
     # queda solo como dato para que RH decida a mano ahí, mismo patrón HITL que el resto del
     # sistema (ver _auto_decision_zero_touch en candidatos.py).
-    if c and c.etapa == "Entrevista IA":
-        c.etapa = "Evaluación"
+    if p and p.etapa == "Entrevista IA":
+        p.etapa = "Evaluación"
         registrar(
-            db, "agente-ia", "auto_evaluacion_zero_touch", "candidato", c.codigo,
-            {"entrevista": e.codigo, "recomendacion": ev.recomendacion, "match": ev.match_perfil},
+            db, "agente-ia", "auto_evaluacion_zero_touch", "postulacion", p.codigo,
+            {"candidato": p.candidato.codigo, "entrevista": e.codigo, "recomendacion": ev.recomendacion, "match": ev.match_perfil},
         )
 
-        primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
+        primer_nombre = p.nombre.split(" ")[0] if p.nombre else "candidato(a)"
         texto = (
             f"¡Gracias, {primer_nombre}! 🙌 Terminamos tu entrevista para {v.titulo if v else 'la vacante'}. "
             "El equipo de RH va a revisar tus resultados y te contactará pronto."
         )
-        if c.telefono:
+        if p.telefono:
             try:
-                envio = await enviar_mensaje(c.telefono, texto)
+                envio = await enviar_mensaje(p.telefono, texto)
             except Exception as ex:  # que WhatsApp falle no debe tumbar el cierre de la entrevista
                 print(f"[whatsapp-send-error] finalizar -> {e.codigo}: {ex}")
                 envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
-            db.add(Mensaje(
-                candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp",
-                enviado=envio.get("enviado", False), wa_id=envio.get("wa_id", ""),
-            ))
+            guardar_mensaje(db, p, "assistant", texto, "whatsapp", envio)
 
     db.commit()
     return entrevista_dict(e)

@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # para poder importar `app.*`
 
 from app.database import SessionLocal  # noqa: E402
-from app.models import Candidato, Entrevista, Expediente, Mensaje, registrar  # noqa: E402
+from app.models import Candidato, Entrevista, EntrevistaHumana, Expediente, Mensaje, Postulacion, registrar  # noqa: E402
 
 PREFIJO = "DEMO-"
 
@@ -32,7 +32,7 @@ def borrar_demo(db, forzar: bool) -> int:
 
     print(f"Se van a borrar {len(candidatos)} candidatos demo:")
     for c in candidatos:
-        print(f"  {c.codigo} — {c.nombre} ({c.etapa})")
+        print(f"  {c.codigo} — {c.nombre} ({len(c.postulaciones)} postulación(es))")
 
     if not forzar:
         resp = input("\n¿Confirmas? Esto no se puede deshacer (escribe 'si'): ").strip().lower()
@@ -52,6 +52,14 @@ def borrar_demo(db, forzar: bool) -> int:
     for e in expedientes:
         db.delete(e)
     db.flush()
+
+    # Fase 2: entrevistas humanas y postulaciones (el puntero de conversación va primero).
+    db.query(EntrevistaHumana).filter(EntrevistaHumana.candidato_id.in_(ids)).delete(synchronize_session=False)
+    for c in candidatos:
+        c.postulacion_conversacion_id = None
+    db.flush()
+    db.query(Postulacion).filter(Postulacion.candidato_id.in_(ids)).delete(synchronize_session=False)
+    db.expire_all()
 
     codigos = [c.codigo for c in candidatos]
     for c in candidatos:

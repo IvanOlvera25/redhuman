@@ -91,6 +91,50 @@ export interface Candidato {
   consentimiento?: boolean;
   prefiltroCompleto?: boolean;
   esPrueba?: boolean;
+  /* --- Fase 2: `id` es el código de la POSTULACIÓN (P-####), la tarjeta del Kanban; la
+   * persona (C-####) viene en candidatoCodigo/candidato. --- */
+  codigo?: string;
+  postulacionId?: number;
+  candidatoId?: string;
+  candidatoCodigo?: string;
+  vacanteTitulo?: string;
+  origen?: string;
+  totalPostulaciones?: number;
+  yaAplicoAntes?: boolean;
+  activa?: boolean;
+  motivoCierre?: string | null;
+  cerradaEn?: string | null;
+  /** true si el WhatsApp de esta persona está conversando sobre ESTA postulación. */
+  enConversacion?: boolean;
+  candidato?: {
+    id: string;
+    codigo: string;
+    nombre: string;
+    correo: string;
+    telefono: string;
+    ubicacion: string;
+    experiencia: string;
+    fuente: FuenteCandidato;
+    esPrueba: boolean;
+    totalPostulaciones: number;
+    postulacionesActivas: number;
+    archivos: number;
+    creadoEn?: string | null;
+  };
+  /** Solo en el detalle: las OTRAS postulaciones de la misma persona (más reciente primero). */
+  historialPostulaciones?: {
+    id: string;
+    puesto: string;
+    vacanteId: string;
+    etapa: EtapaCandidato;
+    estado: EstadoPrefiltro;
+    score: number;
+    activa: boolean;
+    motivoCierre: string;
+    creado: string;
+    creadoEn?: string | null;
+    cerradaEn?: string | null;
+  }[];
   /* --- Entrevista Humana (flujo manual) — puede haber varias rondas, ver EntrevistaHumana.
    * entrevistaHumana es la más reciente; entrevistasHumanas es el historial completo (más
    * reciente primero). Se mantienen ambas para no romper a quien ya lee "la actual". --- */

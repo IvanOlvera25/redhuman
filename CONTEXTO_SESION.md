@@ -60,9 +60,12 @@ transversal):
    hiciste y cuál es el siguiente paso.
 
 ## Lo último que se hizo
-Fase D (notificaciones configurables por evento/destinatario/canal, puntos 22-26)
-diseñada, implementada por completo y verificada — ver sección detallada abajo. Código
-listo, pendiente de revisión del usuario antes de commit/deploy.
+Fase 2 (Candidato persona / Postulación proceso) auditada, reescrita, verificada (56
+comprobaciones) y CERRADA el 2026-09-11 — ver la sección "Fase 2 — CERRADA" al final del
+archivo, con la lista completa de decisiones (A/B/C), la garantía de despliegue y el orden
+de despliegue. Código listo en el working tree, pendiente de revisión del diff por el usuario
+antes de commit/deploy. Antes de esto: Fase D, Puntos 2/27/28, Fase F y 6 correcciones de UI
+(ver secciones abajo).
 
 ## Lo que sigue
 
@@ -835,3 +838,105 @@ exactamente como se implementó, cero cambios derivados de esta conversación.
 3. Decidir si el hallazgo de CVs por WhatsApp entra a un backlog formal (ya documentado arriba
    con el diagnóstico completo, listo para investigar-planear cuando se priorice).
 
+
+
+## Fase 2 — Candidato (persona) / Postulación (proceso) — CERRADA 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+
+### Qué pasó
+Un agente anterior (Gemini 3.7 Flash) dejó la Fase 2 a medias y con 7 errores que rompían en
+runtime (columna `es_prueba` pisada por una `@property`, 8 endpoints serializando una
+`Postulacion` con `candidato_dict`, etapa `"Nuevo"` invisible en el Kanban, colisión de
+códigos `P-`, expedientes que perdían `candidato_id`, job de no-show y liga del entrevistador
+escribiendo en la persona en vez de la postulación) y una regla de WhatsApp inventada y no
+aplicada ("solo una activa, tomar la más reciente"). Se auditó, se reescribió la capa
+completa sobre `Postulacion` como única fuente de verdad y se verificó de punta a punta.
+
+### Estado final (todo en el working tree, 27 archivos, ver `git status`)
+- `models.py`: `Candidato` = persona (identidad + `postulacion_conversacion_id`); sus columnas
+  de proceso quedan como LEGADO solo para la migración. `Postulacion` = proceso (etapa, estado,
+  score, chat, entrevistas, expediente, consentimiento, videollamada) con `activa`,
+  `motivo_cierre`, `cerrada_en`, `origen`, `espera_respuesta`, `cerrar()`.
+- `routers/candidatos.py` reescrito: `_por_codigo` → siempre `Postulacion` (acepta `C-####`);
+  `crear_postulacion` / `postulacion_para_vacante` únicos puntos de creación; `guardar_mensaje`
+  único punto de escritura de mensajes; endpoint `/reiniciar` (Punto 8) reemplaza a
+  `/liberar-telefono`.
+- `routers/webhooks.py` reescrito con ruteo por contexto de conversación (docstring del módulo).
+- `serial.py`: `postulacion_dict` (tarjeta), `candidato_dict` (persona), `entrevista_dict` /
+  `expediente_dict` con `candidatoId` = código `P-` (lo que se manda a `/candidatos/{codigo}`).
+- `migraciones.py::migrar_postulaciones` + `scripts/migrar_postulaciones.py` (idempotente,
+  probado 2 veces contra copia de la base real: 11 postulaciones, 6 mensajes, 4 expedientes).
+- `main.py`: la API **se niega a arrancar** si hay candidatos sin postulación.
+- Frontend: `reiniciarPostulacionPrueba`, tipos, chips "Cerrada"/"En chat"/código de persona,
+  historial de postulaciones en la pestaña Resumen, toggle "Mostrar cerradas".
+- `scripts/verificar_fase2.py`: 56 comprobaciones en verde (modo demo, base desechable).
+- `CLAUDE.md`: sección "Fase 2" con las reglas para futuros agentes.
+
+### Decisiones de negocio — TODAS cerradas, ninguna pendiente de aprobación del usuario
+
+**A. Decididas por el usuario (no volver a preguntar):**
+- P4 Kanban: una tarjeta por Postulación.
+- P5 Expediente: pertenece a la Postulación (una persona puede tener varios en el tiempo).
+- P1 Ruteo WhatsApp: "contexto de conversación + preguntar" — sí hay postulaciones
+  simultáneas; el puntero `postulacion_conversacion_id` decide; con ambigüedad el agente
+  manda lista interactiva con SUS vacantes en curso y nunca adivina.
+- Reaplicar: activa para esa vacante → se reutiliza; cerrada (descartado / contratado /
+  reinicio_prueba) → postulación nueva, la vieja queda como historial.
+- Migración: los candidatos sin vacante también reciben postulación (sin vacante).
+- Consentimiento WhatsApp: elegir vacante del menú NUNCA es consentimiento; siempre aviso de
+  privacidad + "Sí"/"Acepto" explícito (palabra completa, `_es_aceptacion`) antes del prefiltro.
+  Excepción aceptada: si la postulación ya tenía consentimiento por otro medio (RH, `/aplicar`)
+  no se vuelve a pedir.
+- B1 (corregido a petición del usuario): el puntero de conversación lo mueve SOLO el candidato
+  (mensaje entrante enrutado o selección explícita en la lista); un mensaje saliente/proactivo
+  de RH o del sistema (plantilla de inicio, aviso de apto, recordatorio, notificación) NUNCA
+  lo mueve. `reiniciar` tampoco lo fija: el webhook enruta el siguiente mensaje a la nueva.
+- B4 (corregido a petición del usuario): `GET /candidatos` regresa solo activas por defecto;
+  toggle "Mostrar cerradas" (`mostrar_cerradas=true`) o filtro `activa=` explícito.
+
+**B. Decididas por el agente (Claude) y presentadas al usuario; aceptadas sin cambios:**
+- B2 `descartar` cierra la postulación (`motivo="descartado"`); el `no_cumple` de la IA NO la
+  cierra (LFPDPPP: solo RH cierra); mover de etapa una cerrada la reabre.
+- B3 Alta de colaborador cierra la postulación como `contratado`.
+- B5 Consentimiento es por postulación, no por persona.
+- B6 `asignar` (reasignar vacante) modifica la misma postulación; 409 si ya hay activa para la
+  vacante destino.
+- B7 Modo Prueba con conversación fría (60 min): se reutiliza la persona, se cierra la
+  postulación (`prueba_expirada`) y se abre una sin vacante; `reiniciar` exige Modo Prueba.
+
+**C. Decisiones de implementación (agente), aceptadas:**
+- C1 Archivos/CV son de la persona; el score del CV se calcula para la postulación procesada.
+- C2 `ingresar` y carga masiva de CV sin vacante crean postulación sin vacante.
+- C3 `id`/`candidatoId` en la API = `P-####`; `C-####` se acepta y resuelve a conversación →
+  última activa → última.
+- C4 Bitácora: eventos de proceso con `entidad="postulacion"`; persona en `detalle`.
+- C5 Migración manual (script con confirmación) — y la API se niega a arrancar sin ella.
+- C6 Migración liga huérfanos (mensajes/entrevistas/expediente) a la postulación inicial y fija
+  ahí el puntero de conversación.
+- C7 Métricas cuentan postulaciones; "por fuente" usa la fuente de la persona.
+- C8 Filtro "duplicados" = personas duplicadas (2 postulaciones de la misma persona NO lo son).
+- C9 Liga pública del entrevistador sin postulación → 409 "corre la migración".
+- C10 Lista "¿sobre cuál vacante?": máx. 10, solo las que esperan respuesta, ids `P-####`.
+- C11 Se eliminaron los fallbacks "si no hay postulaciones, lee candidatos" y el
+  `verificar_multi_postulacion.py` del agente anterior.
+- C12 Herramientas del agente "Pregunta a Red Human" piden `P-####`.
+- C13 `Postulacion.espera_respuesta`: Prefiltro sin terminar, Entrevista IA apta sin cita, u
+  Onboarding; Evaluación / Entrevista Humana / Contratación no esperan chat (RH tiene el control).
+
+### Garantía de despliegue (punto 3 del cierre)
+No existe camino por el que el código nuevo sirva peticiones sobre una base sin migrar:
+`main.py::lifespan` cuenta candidatos sin postulación y lanza `RuntimeError` → uvicorn aborta el
+arranque (probado: copia real sin migrar → "SE NEGÓ A ARRANCAR"; tras correr el script → 200 en
+`/salud`). Base nueva vacía → `seed.py` crea las postulaciones en la misma transacción. Único
+supuesto: uvicorn con lifespan (el default; `--lifespan off` no se usa en este proyecto).
+
+### Orden de despliegue
+1. `git commit` cuando el usuario apruebe el diff.
+2. En producción, ANTES de reiniciar la API: `python scripts/migrar_postulaciones.py --forzar`
+   (desde `red-human-api/`; crea la tabla/columnas y migra los datos; idempotente).
+3. Reiniciar la API. Si se olvida el paso 2, no arranca y el log dice exactamente qué correr.
+4. Frontend: `next build` normal.
+
+### Siguiente paso
+Nada pendiente de negocio para Fase 2. Deuda conocida fuera de alcance: CVs adjuntos por
+WhatsApp (ya documentada arriba) y ruteo de WhatsApp por Cuenta (`_cuenta_unica` sigue
+exigiendo exactamente 1 Cuenta activa).

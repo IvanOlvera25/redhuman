@@ -25,7 +25,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import Candidato, Cuenta, Usuario, UsuarioCuenta, UsoAgente, Vacante
+from ..models import Candidato, Cuenta, Postulacion, Usuario, UsuarioCuenta, UsoAgente, Vacante
 from ..routers import auth as r_auth
 from ..routers import candidatos as r_candidatos
 from ..routers import capacitacion as r_capacitacion
@@ -120,6 +120,11 @@ def _resolver_alcance(db: Session, u: Usuario, cuenta_actual: Cuenta, alcance: s
 
 
 def _nombre_candidato(db: Session, cuenta_id: int, codigo: str) -> str:
+    """Fase 2: el agente maneja códigos de POSTULACIÓN (P-####, lo que ve en el Kanban); por
+    compatibilidad también resuelve el de la persona (C-####)."""
+    if codigo.startswith("P-"):
+        p = db.query(Postulacion).filter(Postulacion.codigo == codigo, Postulacion.cuenta_id == cuenta_id).first()
+        return f"{p.nombre} ({p.vacante.titulo})" if p and p.vacante else (p.nombre if p else codigo)
     c = db.query(Candidato).filter(Candidato.codigo == codigo, Candidato.cuenta_id == cuenta_id).first()
     return c.nombre if c else codigo
 
@@ -384,13 +389,13 @@ TOOLS_LECTURA: Dict[str, dict] = {
             "resumen_candidato",
             "Ficha COMPLETA de un candidato por su código (ej. C-8801): CV, prefiltro, "
             "entrevistas, documentos, actividad reciente. Úsala para 'resúmeme todo lo que ha pasado con X'.",
-            {"codigo": _pr("string", "Código del candidato")},
+            {"codigo": _pr("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)")},
         ),
     },
     "mensajes_candidato": {
         "fn": _leer_mensajes_candidato, "admin": False,
         "schema": _tool_lectura("mensajes_candidato", "Historial de conversación de WhatsApp con un candidato.", {
-            "codigo": _pr("string", "Código del candidato"),
+            "codigo": _pr("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)"),
         }),
     },
     "pipeline_cuenta": {
@@ -677,7 +682,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
             "type": "function", "name": "mover_etapa_candidato",
             "description": "Mueve un candidato a otra etapa del pipeline (excepto a Entrevista Humana: usa programar_entrevista_humana).",
             "parameters": {"type": "object", "properties": {
-                "codigo": _p("string", "Código del candidato"),
+                "codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)"),
                 "etapa": _p("string", "Prefiltro | Entrevista IA | Evaluación | Contratación | Onboarding"),
                 "comentario": _p("string", "Comentario opcional"),
             }, "required": ["codigo", "etapa"], "additionalProperties": False},
@@ -691,7 +696,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
             "type": "function", "name": "descartar_candidato",
             "description": "Descarta a un candidato del proceso.",
             "parameters": {"type": "object", "properties": {
-                "codigo": _p("string", "Código del candidato"), "comentario": _p("string", "Motivo del descarte"),
+                "codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)"), "comentario": _p("string", "Motivo del descarte"),
             }, "required": ["codigo"], "additionalProperties": False},
         },
     },
@@ -705,7 +710,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
             "type": "function", "name": "asignar_vacante_candidato",
             "description": "Asigna (o reasigna) un candidato a una vacante.",
             "parameters": {"type": "object", "properties": {
-                "codigo": _p("string", "Código del candidato"), "vacante": _p("string", "Código de la vacante"),
+                "codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)"), "vacante": _p("string", "Código de la vacante"),
             }, "required": ["codigo", "vacante"], "additionalProperties": False},
         },
     },
@@ -719,7 +724,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
             "type": "function", "name": "programar_entrevista_humana",
             "description": "Agenda una ronda nueva de Entrevista Humana y mueve al candidato a esa etapa.",
             "parameters": {"type": "object", "properties": {
-                "codigo": _p("string", "Código del candidato"),
+                "codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)"),
                 "tipo_entrevistador": _p("string", "interno | externo", enum=["interno", "externo"]),
                 "entrevistador_usuario_id": _p("integer", "Id de Usuario si es interno"),
                 "entrevistador_nombre": _p("string", "Nombre si es externo"),
@@ -745,7 +750,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
             "type": "function", "name": "modificar_entrevista_humana",
             "description": "Cambia fecha/modalidad de la ronda de Entrevista Humana vigente (no aplica si ya fue cancelada o realizada).",
             "parameters": {"type": "object", "properties": {
-                "codigo": _p("string", "Código del candidato"),
+                "codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)"),
                 "fecha": _p("string", "Fecha ISO"), "hora": _p("string", "Hora HH:MM"),
                 "modalidad": _p("string", "Presencial | Videollamada | Llamada"),
                 "liga": _p("string", "Liga de videollamada, si aplica"),
@@ -761,7 +766,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
         "schema": {
             "type": "function", "name": "cancelar_entrevista_humana",
             "description": "Cancela la ronda de Entrevista Humana vigente. No mueve la etapa del candidato.",
-            "parameters": {"type": "object", "properties": {"codigo": _p("string", "Código del candidato")},
+            "parameters": {"type": "object", "properties": {"codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)")},
                             "required": ["codigo"], "additionalProperties": False},
         },
     },
@@ -771,7 +776,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
         "schema": {
             "type": "function", "name": "marcar_entrevista_humana_realizada",
             "description": "Confirma que la Entrevista Humana ya ocurrió.",
-            "parameters": {"type": "object", "properties": {"codigo": _p("string", "Código del candidato")},
+            "parameters": {"type": "object", "properties": {"codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)")},
                             "required": ["codigo"], "additionalProperties": False},
         },
     },
@@ -785,7 +790,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
             "type": "function", "name": "registrar_resultado_entrevista_humana",
             "description": "Captura o corrige el resultado de la Entrevista Humana (respaldo manual de RH).",
             "parameters": {"type": "object", "properties": {
-                "codigo": _p("string", "Código del candidato"),
+                "codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)"),
                 "resultado": _p("string", "aprobado | no_aprobado", enum=["aprobado", "no_aprobado"]),
                 "recomendacion": _p("string", "avanzar | no_avanzar | segunda_entrevista",
                                      enum=["avanzar", "no_avanzar", "segunda_entrevista"]),
@@ -807,7 +812,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
                 "la Cuenta, NO este tool. No existe forma de mandarlo solo a un destinatario "
                 "específico; si el usuario pide eso, explícaselo en vez de proponer esta acción."
             ),
-            "parameters": {"type": "object", "properties": {"codigo": _p("string", "Código del candidato")},
+            "parameters": {"type": "object", "properties": {"codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)")},
                             "required": ["codigo"], "additionalProperties": False},
         },
     },
@@ -817,7 +822,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
         "schema": {
             "type": "function", "name": "solicitar_documentos",
             "description": "Rompe el hielo de Onboarding pidiendo documentos (candidato debe estar en esa etapa).",
-            "parameters": {"type": "object", "properties": {"codigo": _p("string", "Código del candidato")},
+            "parameters": {"type": "object", "properties": {"codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)")},
                             "required": ["codigo"], "additionalProperties": False},
         },
     },
@@ -827,7 +832,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
         "schema": {
             "type": "function", "name": "recordatorio_documentos",
             "description": "Recordatorio de documentos de Onboarding pendientes.",
-            "parameters": {"type": "object", "properties": {"codigo": _p("string", "Código del candidato")},
+            "parameters": {"type": "object", "properties": {"codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)")},
                             "required": ["codigo"], "additionalProperties": False},
         },
     },
@@ -838,7 +843,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
             "type": "function", "name": "guardar_condiciones_contratacion",
             "description": "Actualiza puesto/sueldo/tipo de contratación/fecha de ingreso/ubicación/jefe directo.",
             "parameters": {"type": "object", "properties": {
-                "codigo": _p("string", "Código del candidato"), "puesto": _p("string", ""), "sueldo": _p("string", ""),
+                "codigo": _p("string", "Código de la postulación (P-####, el id de la tarjeta; se acepta C-#### de la persona)"), "puesto": _p("string", ""), "sueldo": _p("string", ""),
                 "tipo_contratacion": _p("string", ""), "fecha_ingreso": _p("string", "ISO, ej. 2026-09-15"),
                 "ubicacion": _p("string", ""), "jefe_directo": _p("string", ""),
             }, "required": ["codigo"], "additionalProperties": False},

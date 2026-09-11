@@ -32,3 +32,15 @@ Plataforma SaaS de agente de IA de RH para México. `red-human-app` (Next.js 15)
 - LFPDPPP 2025: la IA solo recomienda; avanzar/descartar/alta siempre lo decide una persona de RH con nombre registrado en bitácora (human-in-the-loop).
 - Consentimiento explícito del candidato antes de cualquier entrevista o tratamiento de datos; queda en la bitácora hash-encadenada.
 - No pedir ni inferir datos sensibles (salud, embarazo, religión, estado civil, orientación).
+
+## Fase 2 — Candidato (persona) vs Postulación (proceso)
+
+- `Candidato` = identidad (nombre, teléfono, correo, wa_id, CV, archivos). `Postulacion` = una aplicación a una vacante: etapa, estado, score, chat, entrevistas, expediente. **Ningún endpoint escribe estado de proceso en `Candidato`** (sus columnas de proceso son legado solo para `scripts/migrar_postulaciones.py`).
+- Kanban: una tarjeta por Postulación; `id`/`candidatoId` en la API es el código `P-####` (lo que se manda a `/candidatos/{codigo}/...`); la persona va en `candidatoCodigo`. Se acepta `C-####` por compatibilidad.
+- Expediente pertenece a la Postulación (una persona puede tener varios a lo largo del tiempo).
+- Reaplicar: si hay postulación ACTIVA para esa vacante se reutiliza; si está cerrada (`descartado`/`contratado`/`reinicio_prueba`) se crea una nueva y la vieja queda como historial. `descartar` cierra; mover de etapa reabre.
+- WhatsApp: elegir vacante del menú NUNCA es consentimiento — siempre aviso de privacidad + "Sí"/"Acepto" explícito (palabra completa, `_es_aceptacion`) antes de iniciar el prefiltro; solo se omite si la postulación ya tenía consentimiento registrado por otro medio (RH / `/aplicar`).
+- WhatsApp: `Candidato.postulacion_conversacion_id` es la postulación en chat. Lo mueve SOLO el candidato (mensaje entrante enrutado o selección explícita en lista); un mensaje saliente de RH/sistema NUNCA lo mueve (B1). Si el puntero no sirve y varias postulaciones esperan respuesta (`Postulacion.espera_respuesta`), el webhook manda lista interactiva (ids `P-####`) y NO adivina. Ver docstring de `routers/webhooks.py`.
+- Crear postulaciones SOLO con `candidatos.crear_postulacion` / `postulacion_para_vacante` (código `P-{8800+id}` de la propia postulación).
+- Kanban (B4): `GET /candidatos` regresa solo postulaciones activas salvo `mostrar_cerradas=true` (toggle "Mostrar cerradas") o `activa=` explícito.
+- Base existente: correr `scripts/migrar_postulaciones.py --forzar` una vez ANTES de arrancar la versión nueva; la API se niega a arrancar (RuntimeError en lifespan) si hay candidatos sin postulación — la migración de datos nunca corre sola. Prueba de regresión: `scripts/verificar_fase2.py` (modo demo, base desechable).

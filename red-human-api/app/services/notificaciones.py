@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import Candidato, ClienteContacto, EntrevistaHumana, Mensaje, NotificacionEnviada, ReglaNotificacion, Usuario
+from ..models import ClienteContacto, EntrevistaHumana, Mensaje, NotificacionEnviada, Postulacion, ReglaNotificacion, Usuario
 from .correo import enviar_correo
 from .whatsapp import enviar_mensaje
 
@@ -40,7 +40,7 @@ def _fecha_hora_legible_mx(dt: datetime) -> str:
     return f"{local.day} de {_MESES_LARGO[local.month - 1]} a las {local.strftime('%H:%M')}"
 
 
-def _detalle_modalidad(eh: EntrevistaHumana, c: Candidato) -> str:
+def _detalle_modalidad(eh: EntrevistaHumana, c: Postulacion) -> str:
     """Dato específico de la modalidad — se usa en el WhatsApp y en los correos."""
     if eh.modalidad == "Videollamada" and eh.liga:
         return f"Liga de la videollamada: {eh.liga}"
@@ -53,7 +53,7 @@ def _detalle_modalidad(eh: EntrevistaHumana, c: Candidato) -> str:
     return ""
 
 
-def _texto_cita_entrevista_humana(eh: EntrevistaHumana, c: Candidato) -> str:
+def _texto_cita_entrevista_humana(eh: EntrevistaHumana, c: Postulacion) -> str:
     """Fragmento reusado por agendada/recordatorio/modificada, candidato/entrevistador/cliente."""
     cuando = _fecha_hora_legible_mx(eh.fecha) if eh.fecha else "fecha por confirmar"
     texto = f"con {eh.entrevistador or 'nuestro equipo de RH'} el {cuando}, modalidad {eh.modalidad or 'por confirmar'}."
@@ -65,7 +65,7 @@ def _texto_cita_entrevista_humana(eh: EntrevistaHumana, c: Candidato) -> str:
     return texto
 
 
-def _html_correo_candidato(eh: EntrevistaHumana, c: Candidato) -> str:
+def _html_correo_candidato(eh: EntrevistaHumana, c: Postulacion) -> str:
     cuando = _fecha_hora_legible_mx(eh.fecha) if eh.fecha else "fecha por confirmar"
     detalle = _detalle_modalidad(eh, c)
     primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
@@ -79,7 +79,7 @@ def _html_correo_candidato(eh: EntrevistaHumana, c: Candidato) -> str:
     )
 
 
-def _html_correo_entrevistador(eh: EntrevistaHumana, c: Candidato) -> str:
+def _html_correo_entrevistador(eh: EntrevistaHumana, c: Postulacion) -> str:
     cuando = _fecha_hora_legible_mx(eh.fecha) if eh.fecha else "fecha por confirmar"
     detalle = _detalle_modalidad(eh, c)
     return (
@@ -93,7 +93,7 @@ def _html_correo_entrevistador(eh: EntrevistaHumana, c: Candidato) -> str:
     )
 
 
-def _html_correo_evaluacion_entrevistador(eh: EntrevistaHumana, c: Candidato, liga: str) -> str:
+def _html_correo_evaluacion_entrevistador(eh: EntrevistaHumana, c: Postulacion, liga: str) -> str:
     return (
         f"<p>Gracias por entrevistar a <strong>{c.nombre}</strong> "
         f"({c.vacante.titulo if c.vacante else 'vacante sin especificar'}).</p>"
@@ -144,7 +144,7 @@ def _whatsapp_entrevistador(db: Session, eh: EntrevistaHumana) -> str:
 # ------------------------------------------------------------
 
 
-def _mensaje(evento: str, audiencia: str, canal: str, c: Candidato, eh: Optional[EntrevistaHumana], liga: str, extra: dict):
+def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Optional[EntrevistaHumana], liga: str, extra: dict):
     v = c.vacante
     puesto = extra.get("puesto") or (v.titulo if v else "la vacante")
     primer_nombre = c.nombre.split(" ")[0] if c.nombre else "candidato(a)"
@@ -270,8 +270,9 @@ def _regla(db: Session, cuenta_id: int, evento: str) -> Optional[ReglaNotificaci
 
 
 async def _enviar_y_registrar(
-    db: Session, cuenta_id: int, candidato_id: int, evento: str, destinatario_tipo: str, canal: str, destino: str, contenido
+    db: Session, p: Postulacion, evento: str, destinatario_tipo: str, canal: str, destino: str, contenido,
 ) -> dict:
+    cuenta_id, candidato_id = p.cuenta_id, p.candidato_id
     if not destino or not contenido:
         db.add(NotificacionEnviada(
             cuenta_id=cuenta_id, candidato_id=candidato_id, evento=evento, destinatario_tipo=destinatario_tipo,
@@ -292,8 +293,10 @@ async def _enviar_y_registrar(
         canal=canal, destino=destino, enviado=bool(envio.get("enviado")), detalle=str(envio.get("detalle", "")),
     ))
     if destinatario_tipo == "candidato" and canal == "whatsapp":
+        # Mensaje saliente: queda en el historial de ESTA postulación pero NO mueve la
+        # conversación del candidato (B1, ver candidatos.fijar_conversacion).
         db.add(Mensaje(
-            candidato_id=candidato_id, rol="assistant", texto=contenido, canal="whatsapp",
+            candidato_id=candidato_id, postulacion_id=p.id, rol="assistant", texto=contenido, canal="whatsapp",
             enviado=bool(envio.get("enviado")), wa_id=envio.get("wa_id", ""),
         ))
     return envio
@@ -302,7 +305,7 @@ async def _enviar_y_registrar(
 async def disparar(
     db: Session,
     evento: str,
-    c: Candidato,
+    c: Postulacion,
     actor: str,
     *,
     eh: Optional[EntrevistaHumana] = None,
@@ -324,10 +327,10 @@ async def disparar(
     # --- Candidato: correo/teléfono ya en su ficha (punto 23) ---
     if regla.candidato_whatsapp:
         texto = _mensaje(evento, "candidato", "whatsapp", c, eh, liga, extra)
-        resultados.append(await _enviar_y_registrar(db, c.cuenta_id, c.id, evento, "candidato", "whatsapp", c.telefono, texto))
+        resultados.append(await _enviar_y_registrar(db, c, evento, "candidato", "whatsapp", c.telefono, texto))
     if regla.candidato_correo:
         contenido = _mensaje(evento, "candidato", "correo", c, eh, liga, extra)
-        resultados.append(await _enviar_y_registrar(db, c.cuenta_id, c.id, evento, "candidato", "correo", c.correo, contenido))
+        resultados.append(await _enviar_y_registrar(db, c, evento, "candidato", "correo", c.correo, contenido))
 
     # --- Entrevistador: Usuario si es interno, datos ya registrados en la EntrevistaHumana si
     # es externo (punto 23) — sin ronda vigente no hay a quién resolver, se omite. ---
@@ -335,12 +338,12 @@ async def disparar(
         if regla.entrevistador_whatsapp:
             texto = _mensaje(evento, "entrevistador", "whatsapp", c, eh, liga, extra)
             resultados.append(await _enviar_y_registrar(
-                db, c.cuenta_id, c.id, evento, "entrevistador", "whatsapp", _whatsapp_entrevistador(db, eh), texto
+                db, c, evento, "entrevistador", "whatsapp", _whatsapp_entrevistador(db, eh), texto
             ))
         if regla.entrevistador_correo:
             contenido = _mensaje(evento, "entrevistador", "correo", c, eh, liga, extra)
             resultados.append(await _enviar_y_registrar(
-                db, c.cuenta_id, c.id, evento, "entrevistador", "correo", _correo_entrevistador(db, eh), contenido
+                db, c, evento, "entrevistador", "correo", _correo_entrevistador(db, eh), contenido
             ))
 
     # --- Cliente: TODOS los contactos ya registrados en ClienteContacto (punto 23) — si la
@@ -352,12 +355,12 @@ async def disparar(
             if regla.cliente_whatsapp:
                 texto = _mensaje(evento, "cliente", "whatsapp", c, eh, liga, extra)
                 resultados.append(await _enviar_y_registrar(
-                    db, c.cuenta_id, c.id, evento, "cliente", "whatsapp", contacto.telefono, texto
+                    db, c, evento, "cliente", "whatsapp", contacto.telefono, texto
                 ))
             if regla.cliente_correo:
                 contenido = _mensaje(evento, "cliente", "correo", c, eh, liga, extra)
                 resultados.append(await _enviar_y_registrar(
-                    db, c.cuenta_id, c.id, evento, "cliente", "correo", contacto.correo, contenido
+                    db, c, evento, "cliente", "correo", contacto.correo, contenido
                 ))
 
     db.flush()

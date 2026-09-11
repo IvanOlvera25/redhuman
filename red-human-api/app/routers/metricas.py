@@ -12,31 +12,38 @@ from sqlalchemy.orm import Session
 
 from ..deps import cuenta_actual, usuario_actual
 from ..database import get_db
-from ..models import ETAPAS_CANDIDATO, Candidato, Cuenta, Entrevista, Expediente, Vacante
+from ..models import ETAPAS_CANDIDATO, Candidato, Cuenta, Entrevista, Expediente, Postulacion, Vacante
 
 router = APIRouter(prefix="/metricas", tags=["metricas"], dependencies=[Depends(usuario_actual)])
 
 
-def _candidatos(db: Session, cuenta_id: int):
-    """Base de todo conteo de Candidato en este módulo — nunca cuenta postulaciones de Modo Prueba."""
-    return db.query(Candidato).filter(Candidato.es_prueba.is_(False), Candidato.cuenta_id == cuenta_id)
+def _postulaciones(db: Session, cuenta_id: int):
+    """Base de todo conteo de este módulo (Fase 2: se cuentan POSTULACIONES, no personas) —
+    nunca cuenta postulaciones de Modo Prueba."""
+    return db.query(Postulacion).filter(Postulacion.es_prueba.is_(False), Postulacion.cuenta_id == cuenta_id)
 
 
 @router.get("/pipeline")
 def pipeline(db: Session = Depends(get_db), cuenta: Cuenta = Depends(cuenta_actual)):
     """Embudo de punta a punta: captación → prefiltro → entrevista → expediente → alta."""
-    total_candidatos = _candidatos(db, cuenta.id).count()
+    # Fase 2: el embudo cuenta POSTULACIONES (una persona con 2 vacantes son 2 en el embudo).
+    total_candidatos = _postulaciones(db, cuenta.id).count()
     por_etapa = dict(
-        _candidatos(db, cuenta.id).with_entities(Candidato.etapa, func.count(Candidato.id)).group_by(Candidato.etapa).all()
+        _postulaciones(db, cuenta.id).with_entities(Postulacion.etapa, func.count(Postulacion.id)).group_by(Postulacion.etapa).all()
     )
     por_estado = dict(
-        _candidatos(db, cuenta.id).with_entities(Candidato.estado, func.count(Candidato.id)).group_by(Candidato.estado).all()
+        _postulaciones(db, cuenta.id).with_entities(Postulacion.estado, func.count(Postulacion.id)).group_by(Postulacion.estado).all()
     )
+    # "por fuente" sigue siendo la fuente de la PERSONA (Formulario/WhatsApp/OCC/...), que es lo
+    # que el frontend grafica; se cuenta por postulación.
     por_fuente = dict(
-        _candidatos(db, cuenta.id).with_entities(Candidato.fuente, func.count(Candidato.id)).group_by(Candidato.fuente).all()
+        _postulaciones(db, cuenta.id)
+        .join(Candidato, Postulacion.candidato_id == Candidato.id)
+        .with_entities(Candidato.fuente, func.count(Postulacion.id))
+        .group_by(Candidato.fuente)
+        .all()
     )
-
-    prefiltrados = _candidatos(db, cuenta.id).filter(Candidato.prefiltro_completo.is_(True)).count()
+    prefiltrados = _postulaciones(db, cuenta.id).filter(Postulacion.prefiltro_completo.is_(True)).count()
     entrevistas_evaluadas = (
         db.query(Entrevista)
         .join(Candidato, Entrevista.candidato_id == Candidato.id)
@@ -71,11 +78,11 @@ def pipeline(db: Session = Depends(get_db), cuenta: Cuenta = Depends(cuenta_actu
         },
         "candidatos": {
             "total": total_candidatos,
-            "nuevos_7d": _candidatos(db, cuenta.id).filter(Candidato.creado_en >= hace_7d).count(),
+            "nuevos_7d": _postulaciones(db, cuenta.id).filter(Postulacion.creado_en >= hace_7d).count(),
             "por_etapa": {e: por_etapa.get(e, 0) for e in ETAPAS_CANDIDATO},
             "por_estado": por_estado,
             "por_fuente": por_fuente,
-            "sin_consentimiento": _candidatos(db, cuenta.id).filter(Candidato.consentimiento.is_(False)).count(),
+            "sin_consentimiento": _postulaciones(db, cuenta.id).filter(Postulacion.consentimiento.is_(False)).count(),
         },
         "contratacion": {
             "expedientes": len(expedientes),
@@ -94,8 +101,9 @@ def pipeline(db: Session = Depends(get_db), cuenta: Cuenta = Depends(cuenta_actu
 def _acciones(db: Session, expedientes, cuenta_id: int) -> list:
     salida = []
 
-    por_decidir = _candidatos(db, cuenta_id).filter(
-        Candidato.prefiltro_completo.is_(True), Candidato.etapa == "Prefiltro", Candidato.estado != "no_cumple"
+    por_decidir = _postulaciones(db, cuenta_id).filter(
+        Postulacion.activa.is_(True), Postulacion.prefiltro_completo.is_(True),
+        Postulacion.etapa == "Prefiltro", Postulacion.estado != "no_cumple",
     ).count()
     if por_decidir:
         salida.append({
@@ -106,8 +114,8 @@ def _acciones(db: Session, expedientes, cuenta_id: int) -> list:
             "ruta": "/dashboard/candidatos",
         })
 
-    sin_consentimiento = _candidatos(db, cuenta_id).filter(
-        Candidato.consentimiento.is_(False), Candidato.etapa != "Prefiltro"
+    sin_consentimiento = _postulaciones(db, cuenta_id).filter(
+        Postulacion.activa.is_(True), Postulacion.consentimiento.is_(False), Postulacion.etapa != "Prefiltro"
     ).count()
     if sin_consentimiento:
         salida.append({
