@@ -186,6 +186,9 @@ class EntrevistaHumana(Base):
     tipo: Mapped[str] = mapped_column(String(20), default="")  # interno | externo
     usuario_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
     correo_externo: Mapped[str] = mapped_column(String(200), default="")
+    # WhatsApp del entrevistador externo (Fase D, punto 23) — paralelo a correo_externo, se
+    # registra al asignarlo y se reutiliza para invitaciones/recordatorios de esa misma ronda.
+    whatsapp_externo: Mapped[str] = mapped_column(String(30), default="")
     fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     modalidad: Mapped[str] = mapped_column(String(20), default="")  # Presencial|Videollamada|Llamada
     liga: Mapped[str] = mapped_column(String(300), default="")  # obligatoria si modalidad=Videollamada
@@ -193,6 +196,9 @@ class EntrevistaHumana(Base):
     telefono_contacto: Mapped[str] = mapped_column(String(30), default="")  # opcional si modalidad=Llamada
     comentario: Mapped[str] = mapped_column(Text, default="")
     realizada: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Fase D, evento "Entrevista cancelada" — no mueve la etapa del candidato automáticamente,
+    # RH decide el siguiente paso a mano (agendar otra ronda o mover la etapa).
+    cancelada: Mapped[bool] = mapped_column(Boolean, default=False)
     resultado: Mapped[str] = mapped_column(String(20), default="")  # aprobado | no_aprobado
     recomendacion: Mapped[str] = mapped_column(String(30), default="")  # avanzar | no_avanzar | segunda_entrevista
     # --- evaluación del entrevistador por liga (Lote 3) ---
@@ -635,6 +641,9 @@ class Usuario(Base):
     correo: Mapped[str] = mapped_column(String(200), unique=True, index=True)
     nombre: Mapped[str] = mapped_column(String(150))
     puesto: Mapped[str] = mapped_column(String(120), default="")
+    # WhatsApp del usuario (Fase D, punto 23) — para notificarlo como Responsable o como
+    # entrevistador interno sin volver a capturar el dato en ningún lado.
+    telefono: Mapped[str] = mapped_column(String(30), default="")
     rol: Mapped[str] = mapped_column(String(20), default="Usuario")  # Administrador | Usuario
     hash_pass: Mapped[str] = mapped_column(String(255))
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -791,3 +800,59 @@ class AsignacionCurso(Base):
 
     curso: Mapped["Curso"] = relationship(back_populates="asignaciones")
     colaborador: Mapped["Colaborador"] = relationship()
+
+
+# ============================================================
+# Fase D — Notificaciones configurables por evento/destinatario/canal (puntos 22-26)
+# ============================================================
+
+EVENTOS_NOTIFICACION = [
+    "entrevista_agendada",
+    "recordatorio_entrevista",
+    "entrevista_modificada",
+    "entrevista_cancelada",
+    "candidato_apto",
+    "entrevista_humana_terminada",
+    "recomendacion_final",
+    "contratacion",
+    "solicitud_documentos",
+    "recordatorio_documentos",
+]
+
+
+class ReglaNotificacion(Base):
+    """Configuración por Cuenta: para este evento, ¿a quién y por qué canal? Una fila por
+    (cuenta_id, evento). El texto del mensaje sigue viviendo en código — esto solo decide
+    destinatario × canal (puntos 24-25)."""
+
+    __tablename__ = "reglas_notificacion"
+    __table_args__ = (UniqueConstraint("cuenta_id", "evento", name="uq_regla_cuenta_evento"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
+    evento: Mapped[str] = mapped_column(String(50), index=True)
+    candidato_correo: Mapped[bool] = mapped_column(Boolean, default=False)
+    candidato_whatsapp: Mapped[bool] = mapped_column(Boolean, default=False)
+    entrevistador_correo: Mapped[bool] = mapped_column(Boolean, default=False)
+    entrevistador_whatsapp: Mapped[bool] = mapped_column(Boolean, default=False)
+    cliente_correo: Mapped[bool] = mapped_column(Boolean, default=False)
+    cliente_whatsapp: Mapped[bool] = mapped_column(Boolean, default=False)
+    actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+
+class NotificacionEnviada(Base):
+    """Bitácora OPERATIVA de envíos (distinta de `Bitacora`, la cadena de auditoría LFPDPPP) —
+    para que RH pueda ver qué se mandó, a quién y si falló, sin bucear en logs del servidor."""
+
+    __tablename__ = "notificaciones_enviadas"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
+    candidato_id: Mapped[Optional[int]] = mapped_column(ForeignKey("candidatos.id"), nullable=True, index=True)
+    evento: Mapped[str] = mapped_column(String(50), index=True)
+    destinatario_tipo: Mapped[str] = mapped_column(String(20))  # candidato | entrevistador | cliente
+    destino: Mapped[str] = mapped_column(String(200), default="")  # correo o teléfono real usado
+    canal: Mapped[str] = mapped_column(String(20))  # correo | whatsapp
+    enviado: Mapped[bool] = mapped_column(Boolean, default=False)
+    detalle: Mapped[str] = mapped_column(Text, default="")
+    creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)

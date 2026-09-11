@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import EntrevistaHumana, registrar
 from ..serial import iso
+from ..services import notificaciones
 
 router = APIRouter(prefix="/entrevista-humana", tags=["entrevista-humana"])
 
@@ -50,7 +51,7 @@ class ResultadoEntrevistaHumanaPublicaIn(BaseModel):
 
 
 @router.post("/publica/{token}")
-def enviar_resultado(token: str, datos: ResultadoEntrevistaHumanaPublicaIn, db: Session = Depends(get_db)):
+async def enviar_resultado(token: str, datos: ResultadoEntrevistaHumanaPublicaIn, db: Session = Depends(get_db)):
     eh = _por_token(db, token)
 
     if datos.resultado not in RESULTADOS_ENTREVISTA_HUMANA:
@@ -72,13 +73,14 @@ def enviar_resultado(token: str, datos: ResultadoEntrevistaHumanaPublicaIn, db: 
     eh.resultado_capturado_por = "entrevistador"
     # Fase C: actualizar resultado_apto y ultima_actividad_en del candidato.
     # Se importa aquí (no en el módulo) para evitar import circular entre routers.
-    from .candidatos import _recalcular_resultado_apto, _actualizar_ultima_actividad
+    from .candidatos import _recalcular_resultado_apto_y_notificar, _actualizar_ultima_actividad
     c = eh.candidato
     _actualizar_ultima_actividad(c)
-    _recalcular_resultado_apto(c)
+    await _recalcular_resultado_apto_y_notificar(db, c, "entrevistador-externo")
+    resultados = await notificaciones.disparar(db, "recomendacion_final", c, "entrevistador-externo", eh=eh)
     registrar(
         db, "entrevistador-externo", "entrevista_humana_evaluada_por_liga", "candidato", c.codigo,
-        {"resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario},
+        {"resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario, "notificaciones": resultados},
     )
     db.commit()
     return {"ok": True}

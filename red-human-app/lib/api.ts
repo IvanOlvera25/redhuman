@@ -183,6 +183,65 @@ export function eliminarCandidatosPrueba() {
 }
 
 /* ============================================================
+   Fase D · Notificaciones configurables por evento/destinatario/canal (solo admin)
+   ============================================================ */
+
+/** Los 10 eventos configurables (puntos 22-26) — el orden importa para la grilla de
+ * Configuración → Notificaciones, mantenerlo igual al de `EVENTOS_NOTIFICACION` en models.py. */
+export const EVENTOS_NOTIFICACION = [
+  "entrevista_agendada",
+  "recordatorio_entrevista",
+  "entrevista_modificada",
+  "entrevista_cancelada",
+  "candidato_apto",
+  "entrevista_humana_terminada",
+  "recomendacion_final",
+  "contratacion",
+  "solicitud_documentos",
+  "recordatorio_documentos",
+] as const;
+
+export type EventoNotificacion = (typeof EVENTOS_NOTIFICACION)[number];
+
+export const NOMBRE_EVENTO_NOTIFICACION: Record<EventoNotificacion, string> = {
+  entrevista_agendada: "Entrevista agendada",
+  recordatorio_entrevista: "Recordatorio de entrevista",
+  entrevista_modificada: "Entrevista modificada",
+  entrevista_cancelada: "Entrevista cancelada",
+  candidato_apto: "Candidato apto",
+  entrevista_humana_terminada: "Entrevista humana terminada",
+  recomendacion_final: "Recomendación final disponible",
+  contratacion: "Contratación",
+  solicitud_documentos: "Solicitud de documentos",
+  recordatorio_documentos: "Recordatorio de documentos",
+};
+
+export interface ReglaNotificacion {
+  evento: EventoNotificacion;
+  candidatoCorreo: boolean;
+  candidatoWhatsapp: boolean;
+  entrevistadorCorreo: boolean;
+  entrevistadorWhatsapp: boolean;
+  clienteCorreo: boolean;
+  clienteWhatsapp: boolean;
+}
+
+export function fetchReglasNotificacion() {
+  return get<ReglaNotificacion[]>("/notificaciones/reglas");
+}
+
+export function actualizarReglaNotificacion(evento: EventoNotificacion, cambios: Omit<ReglaNotificacion, "evento">) {
+  return patch<ReglaNotificacion>(`/notificaciones/reglas/${evento}`, {
+    candidato_correo: cambios.candidatoCorreo,
+    candidato_whatsapp: cambios.candidatoWhatsapp,
+    entrevistador_correo: cambios.entrevistadorCorreo,
+    entrevistador_whatsapp: cambios.entrevistadorWhatsapp,
+    cliente_correo: cambios.clienteCorreo,
+    cliente_whatsapp: cambios.clienteWhatsapp,
+  });
+}
+
+/* ============================================================
    Módulo 1 · Vacantes
    ============================================================ */
 
@@ -528,13 +587,24 @@ export function moverEtapaCandidato(codigo: string, etapa: string, comentario = 
   return patch<Candidato>(`/candidatos/${codigo}/etapa${forzarPrueba ? "?forzar_prueba=true" : ""}`, { etapa, comentario });
 }
 
-/** Onboarding · Zero-Touch fase 2 — RH detona el mensaje, la IA da seguimiento por WhatsApp. */
+/** Un resultado de envío por destinatario/canal (Fase D) — ver `resultados` en las respuestas
+ * de abajo. `enviado: false` sin más no es un error: puede ser que ese destinatario/canal
+ * simplemente no esté configurado en Configuración → Notificaciones. */
+export interface ResultadoNotificacion {
+  enviado: boolean;
+  proveedor?: string;
+  detalle?: string;
+}
+
+/** Onboarding · Zero-Touch fase 2 — RH detona el mensaje, la IA da seguimiento por WhatsApp.
+ * Quién recibe qué (candidato/entrevistador/cliente, correo/WhatsApp) ya no es fijo: lo decide
+ * la regla configurada en Configuración → Notificaciones para este evento. */
 export function solicitarDocumentosCandidato(codigo: string) {
-  return post<{ enviado: boolean; candidato: Candidato }>(`/candidatos/${codigo}/solicitar-documentos`);
+  return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(`/candidatos/${codigo}/solicitar-documentos`);
 }
 
 export function recordatorioDocumentosCandidato(codigo: string) {
-  return post<{ enviado: boolean; candidato: Candidato }>(`/candidatos/${codigo}/recordatorio-documentos`);
+  return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(`/candidatos/${codigo}/recordatorio-documentos`);
 }
 
 export function asignarVacante(codigo: string, vacante: string) {
@@ -560,6 +630,7 @@ export function programarEntrevistaHumana(
     entrevistadorUsuarioId?: number | null;
     entrevistadorNombre?: string;
     entrevistadorCorreo?: string;
+    entrevistadorWhatsapp?: string;
     fecha: string;
     hora: string;
     modalidad: ModalidadEntrevistaHumana;
@@ -574,6 +645,7 @@ export function programarEntrevistaHumana(
     entrevistador_usuario_id: datos.entrevistadorUsuarioId ?? null,
     entrevistador_nombre: datos.entrevistadorNombre ?? "",
     entrevistador_correo: datos.entrevistadorCorreo ?? "",
+    entrevistador_whatsapp: datos.entrevistadorWhatsapp ?? "",
     fecha: datos.fecha,
     hora: datos.hora,
     modalidad: datos.modalidad,
@@ -584,11 +656,42 @@ export function programarEntrevistaHumana(
   });
 }
 
+/** Botón «Modificar» — edita fecha/modalidad/liga/ubicación de la ronda vigente (Fase D,
+ * evento "entrevista_modificada"). No aplica si la ronda ya fue cancelada o realizada. */
+export function modificarEntrevistaHumana(
+  codigo: string,
+  datos: {
+    fecha: string;
+    hora: string;
+    modalidad: ModalidadEntrevistaHumana;
+    liga?: string;
+    ubicacion?: string;
+    telefonoContacto?: string;
+    comentario?: string;
+  },
+) {
+  return patch<Candidato>(`/candidatos/${codigo}/entrevista-humana`, {
+    fecha: datos.fecha,
+    hora: datos.hora,
+    modalidad: datos.modalidad,
+    liga: datos.liga ?? "",
+    ubicacion: datos.ubicacion ?? "",
+    telefono_contacto: datos.telefonoContacto ?? "",
+    comentario: datos.comentario ?? "",
+  });
+}
+
+/** Botón «Cancelar» — Fase D, evento "entrevista_cancelada". No mueve la etapa del candidato:
+ * RH agenda otra ronda o mueve la tarjeta a mano según corresponda. */
+export function cancelarEntrevistaHumana(codigo: string) {
+  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/cancelar`);
+}
+
 /** Ya no pide resultado — solo confirma que la entrevista ocurrió y dispara el correo con la
  * liga pública al entrevistador (ver registrarResultadoEntrevistaHumana para la captura manual).
  * `forzarPrueba` (Lote 4): inerte salvo que Modo Prueba esté activo en el servidor. */
 export function marcarEntrevistaHumanaRealizada(codigo: string, forzarPrueba = false) {
-  return post<{ enviado: boolean; candidato: Candidato }>(
+  return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(
     `/candidatos/${codigo}/entrevista-humana/realizada${forzarPrueba ? "?forzar_prueba=true" : ""}`,
   );
 }
@@ -608,7 +711,7 @@ export function registrarResultadoEntrevistaHumana(
 }
 
 export function recordatorioEntrevistaHumana(codigo: string, forzarPrueba = false) {
-  return post<{ enviado: boolean; candidato: Candidato }>(
+  return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(
     `/candidatos/${codigo}/entrevista-humana/recordatorio${forzarPrueba ? "?forzar_prueba=true" : ""}`,
   );
 }
@@ -1047,7 +1150,7 @@ export function enviarRecordatorio(expedienteId: number) {
 export function autorizarAlta(expedienteId: number, fechaIngreso?: string, forzarPrueba = false) {
   return post<{ ok: boolean; expediente: NuevoIngreso }>(
     `/contratacion/expedientes/${expedienteId}/alta${forzarPrueba ? "?forzar_prueba=true" : ""}`,
-    { fecha_ingreso: fechaIngreso ?? null, avisar_whatsapp: true },
+    { fecha_ingreso: fechaIngreso ?? null },
   );
 }
 

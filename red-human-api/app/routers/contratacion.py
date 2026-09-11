@@ -15,12 +15,12 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import Candidato, Colaborador, Cuenta, Documento, Expediente, Mensaje, Usuario, registrar
+from ..models import Candidato, Colaborador, Cuenta, Documento, Expediente, Usuario, registrar
 from ..serial import colaborador_dict, expediente_dict, nombre_empresa_candidato
 from ..services import archivos as fs
 from ..services import ia
+from ..services import notificaciones
 from ..services.configuracion import puede_forzar_prueba
-from ..services.whatsapp import enviar_mensaje
 
 router = APIRouter(prefix="/contratacion", tags=["contratacion"])
 
@@ -341,19 +341,15 @@ async def recordatorio(
     c = e.candidato
     rechazados = [d for d in e.documentos if d.estado == "rechazado"]
     detalle_rechazos = "".join(f"\n• {d.tipo}: {d.notas_ia}" for d in rechazados if d.notas_ia)
-    texto = (
-        f"Hola {c.nombre.split(' ')[0]} 👋 Para completar tu expediente de {e.puesto or 'tu nuevo puesto'} "
-        f"me falta recibir: {', '.join(pendientes)}."
-        + (f"\n\nAlgunos necesitan volver a enviarse:{detalle_rechazos}" if detalle_rechazos else "")
-        + "\n\nMándalos por aquí cuando puedas. 🙌"
-    )
-    envio = {"enviado": False, "proveedor": "demo"}
-    if c.telefono:
-        envio = await enviar_mensaje(c.telefono, texto)
-        db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp", enviado=envio["enviado"]))
-    registrar(db, "agente-ia", "recordatorio_enviado", "expediente", str(e.id), {"pendientes": pendientes, "whatsapp": envio})
+    resultados: List[dict] = []
+    if c:
+        resultados = await notificaciones.disparar(
+            db, "recordatorio_documentos", c, "agente-ia",
+            extra={"pendientes": pendientes, "detalle_rechazos": detalle_rechazos, "puesto": e.puesto or "tu nuevo puesto"},
+        )
+    registrar(db, "agente-ia", "recordatorio_enviado", "expediente", str(e.id), {"pendientes": pendientes, "notificaciones": resultados})
     db.commit()
-    return {"enviado": True, "pendientes": pendientes, "whatsapp": envio, "expediente": expediente_dict(e)}
+    return {"enviado": True, "pendientes": pendientes, "notificaciones": resultados, "expediente": expediente_dict(e)}
 
 
 # ------------------------------------------------------------
@@ -401,7 +397,6 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
 
 class AltaIn(BaseModel):
     fecha_ingreso: Optional[str] = None
-    avisar_whatsapp: bool = True
 
 
 @router.post("/expedientes/{exp_id}/alta")
@@ -443,20 +438,14 @@ async def alta(
     colaborador = _crear_colaborador(db, e, u)
 
     c = e.candidato
-    envio = {"enviado": False, "proveedor": "demo"}
-    if datos.avisar_whatsapp and c and c.telefono:
-        ingreso = f" Te esperamos el {e.fecha_ingreso.day}." if e.fecha_ingreso else ""
-        texto = (
-            f"¡Bienvenido(a) {c.nombre.split(' ')[0]}! 🎊 Tu expediente quedó completo y tu alta fue autorizada."
-            f"{ingreso} En los próximos días te comparto tu plan de inducción."
-        )
-        envio = await enviar_mensaje(c.telefono, texto)
-        db.add(Mensaje(candidato_id=c.id, rol="assistant", texto=texto, canal="whatsapp", enviado=envio["enviado"]))
+    resultados: List[dict] = []
+    if c:
+        resultados = await notificaciones.disparar(db, "contratacion", c, u.nombre, extra={"fecha_ingreso": e.fecha_ingreso})
 
     db.commit()
     return {
         "ok": True,
-        "whatsapp": envio,
+        "notificaciones": resultados,
         "expediente": expediente_dict(e),
         "colaborador": colaborador_dict(colaborador) if colaborador else None,
     }

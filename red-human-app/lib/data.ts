@@ -39,6 +39,7 @@ export interface EntrevistaHumana {
   telefonoContacto: string;
   comentario: string;
   realizada: boolean;
+  cancelada: boolean;
   resultado: ResultadoEntrevistaHumana | null;
   recomendacion: RecomendacionEntrevistaHumana | null;
   resultadoCapturadoPor: CapturadoPor | null;
