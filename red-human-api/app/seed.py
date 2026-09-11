@@ -168,6 +168,11 @@ def sembrar(db: Session) -> None:
             )
     exp3.estado = "completo"
 
+    # Fase 2: la semilla se escribe en la forma legado (proceso en la persona) y aquí se
+    # convierte a Postulaciones — misma lógica que scripts/migrar_postulaciones.py.
+    from .migraciones import migrar_postulaciones
+    migrar_postulaciones(db)
+
     registrar(db, "sistema", "semilla_cargada", "sistema", "seed", {"vacantes": len(vacantes), "candidatos": len(candidatos)})
     db.commit()
 

@@ -585,6 +585,9 @@ export function fetchCandidatos(filtros?: {
   duplicados?: boolean;
   score_min?: number;
   score_max?: number;
+  /** Fase 2 (B4): por defecto la API solo regresa postulaciones activas. */
+  mostrar_cerradas?: boolean;
+  activa?: boolean;
 }) {
   const q = new URLSearchParams(
     Object.entries(filtros ?? {})
@@ -669,10 +672,11 @@ export function asignarVacante(codigo: string, vacante: string) {
   return post<Candidato>(`/candidatos/${codigo}/asignar`, { vacante, reevaluar: true });
 }
 
-/** SOLO PRUEBAS: limpia teléfono/wa_id para reutilizar el mismo número de WhatsApp en pruebas
- * repetidas sin que quede asociado a este candidato. No borra nada más de su registro. */
-export function liberarTelefonoCandidato(codigo: string) {
-  return post<Candidato>(`/candidatos/${codigo}/liberar-telefono`);
+/** SOLO PRUEBAS (Modo Prueba): cierra esta postulación y abre una nueva limpia para la misma
+ * persona y vacante, sin tocar teléfono/wa_id — el mismo número vuelve a empezar el flujo.
+ * Regresa la postulación NUEVA (más `anterior`/`nueva` con los códigos). */
+export function reiniciarPostulacionPrueba(codigo: string) {
+  return post<Candidato & { anterior: string; nueva: string }>(`/candidatos/${codigo}/reiniciar`);
 }
 
 /* ============================================================

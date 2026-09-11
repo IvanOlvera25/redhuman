@@ -364,19 +364,21 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
     c = e.candidato
     if not c:
         return None
+    # Fase 2: la vacante es la de la POSTULACIÓN de este expediente (decisión P5).
+    vac = e.postulacion.vacante if e.postulacion else None
 
     cv = next((a for a in reversed(c.archivos) if a.tipo == "cv"), None)
     col = Colaborador(
         codigo="TMP",
         cuenta_id=c.cuenta_id,
-        cliente_id=c.vacante.cliente_id if c.vacante else None,
+        cliente_id=vac.cliente_id if vac else None,
         nombre=c.nombre,
         correo=c.correo,
         telefono=c.telefono,
-        puesto=e.puesto or (c.vacante.titulo if c.vacante else ""),
-        salario=e.sueldo or (c.vacante.sueldo if c.vacante else ""),
-        empresa=c.vacante.empresa if c.vacante else "",
-        ubicacion=e.ubicacion or (c.vacante.ubicacion if c.vacante else ""),
+        puesto=e.puesto or (vac.titulo if vac else ""),
+        salario=e.sueldo or (vac.sueldo if vac else ""),
+        empresa=vac.empresa if vac else "",
+        ubicacion=e.ubicacion or (vac.ubicacion if vac else ""),
         jefe_directo=e.jefe_directo,
         cv_ruta=cv.ruta if cv else "",
         cv_nombre=cv.nombre if cv else "",
@@ -437,10 +439,12 @@ async def alta(
 
     colaborador = _crear_colaborador(db, e, u)
 
-    c = e.candidato
+    p = e.postulacion
     resultados: List[dict] = []
-    if c:
-        resultados = await notificaciones.disparar(db, "contratacion", c, u.nombre, extra={"fecha_ingreso": e.fecha_ingreso})
+    if p:
+        # La postulación cierra su ciclo: queda como historial "contratado" de la persona.
+        p.cerrar("contratado")
+        resultados = await notificaciones.disparar(db, "contratacion", p, u.nombre, extra={"fecha_ingreso": e.fecha_ingreso})
 
     db.commit()
     return {
@@ -582,11 +586,11 @@ def cancelar(
     if e.estado == "alta":
         raise HTTPException(409, "No se puede cancelar un expediente ya dado de alta.")
 
-    c = e.candidato
-    codigo = c.codigo if c else ""
-    if c:
-        c.etapa = "Entrevista Humana"
-    registrar(db, u.nombre, "expediente_cancelado", "expediente", str(e.id), {"motivo": datos.motivo, "candidato": codigo})
+    p = e.postulacion
+    codigo = p.codigo if p else (e.candidato.codigo if e.candidato else "")
+    if p:
+        p.etapa = "Entrevista Humana"
+    registrar(db, u.nombre, "expediente_cancelado", "expediente", str(e.id), {"motivo": datos.motivo, "postulacion": codigo})
     db.delete(e)
     db.commit()
     return {"ok": True, "candidato": codigo}

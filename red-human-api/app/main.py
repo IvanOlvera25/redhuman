@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import Base, SessionLocal, engine
-from .migraciones import sincronizar
+from .migraciones import candidatos_sin_postulacion, sincronizar
 from .routers import agente, auth, candidatos, capacitacion, clientes, colaboradores, configuracion, contratacion, cuentas, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks
 from .seed import sembrar, sembrar_admin
 from .services.agenda import revisar_videollamadas_noshow
@@ -37,6 +37,16 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         sembrar(db)
         sembrar_admin(db)
+        # Fase 2: la migración de DATOS es manual por convención del proyecto (script con
+        # confirmación, nunca automática). Garantía de despliegue: si hay candidatos sin
+        # postulación, la API NO arranca — el código nuevo jamás sirve peticiones sobre una base
+        # sin migrar (Kanban vacío, webhook creando postulaciones duplicadas, etc.).
+        pendientes = candidatos_sin_postulacion(db)
+        if pendientes:
+            raise RuntimeError(
+                f"[fase2] {pendientes} candidato(s) sin postulación: la base no está migrada a Fase 2. "
+                "Corre `python scripts/migrar_postulaciones.py --forzar` (desde red-human-api/) y vuelve a arrancar."
+            )
 
     scheduler.add_job(
         revisar_videollamadas_noshow, "interval", minutes=5,

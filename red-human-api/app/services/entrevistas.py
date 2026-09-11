@@ -16,38 +16,39 @@ from typing import Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from ..models import Candidato, Entrevista, registrar
+from ..models import Entrevista, Postulacion, registrar
 from . import ia
 from .avatar import avatar_activo
 
 
 def crear_entrevista_para_candidato(
     db: Session,
-    c: Candidato,
+    p: Postulacion,
     actor: str,
     programada_para: Optional[datetime] = None,
 ) -> Tuple[Entrevista, bool]:
-    """Genera el guion con IA y crea la `Entrevista` (con su token) para `c`, usando la vacante
-    que ya tenga asignada. `actor` firma la bitácora — el nombre de RH en el camino manual,
+    """Genera el guion con IA y crea la `Entrevista` (con su token) para la postulación `p`,
+    usando su vacante. `actor` firma la bitácora — el nombre de RH en el camino manual,
     "agente-ia" en Zero-Touch, igual que el resto de acciones automáticas del agente."""
-    v = c.vacante
+    v = p.vacante
     guion, con_ia = ia.guion_entrevista(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",
-        c.experiencia or "",
+        p.experiencia or "",
     )
     e = Entrevista(
         codigo="TMP",
-        candidato_id=c.id,
+        candidato_id=p.candidato_id,
         token=secrets.token_urlsafe(24),
         tipo="avatar" if avatar_activo() else "texto",
         guion=guion.model_dump(),
         programada_para=programada_para,
     )
+    p.entrevistas.append(e)
     db.add(e)
     db.flush()
     e.codigo = f"ENT-{300 + e.id}"
-    if c.etapa == "Prefiltro":
-        c.etapa = "Entrevista IA"  # ver ETAPAS_CANDIDATO — la entrevista con avatar también es "IA"
-    registrar(db, actor, "entrevista_agendada", "entrevista", e.codigo, {"candidato": c.codigo, "ia": con_ia})
+    if p.etapa == "Prefiltro":
+        p.etapa = "Entrevista IA"  # ver ETAPAS_CANDIDATO — la entrevista con avatar también es "IA"
+    registrar(db, actor, "entrevista_agendada", "entrevista", e.codigo, {"candidato": p.candidato.codigo, "postulacion": p.codigo, "ia": con_ia})
     return e, con_ia

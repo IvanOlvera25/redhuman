@@ -107,9 +107,14 @@ def crear(
 
     candidato = None
     if datos.candidato_origen_codigo:
-        candidato = db.query(Candidato).filter(
-            Candidato.codigo == datos.candidato_origen_codigo, Candidato.cuenta_id == cuenta.id
-        ).first()
+        # Fase 2: acepta el código de la persona (C-####) o de una postulación (P-####).
+        from .candidatos import _por_codigo as _postulacion_por_codigo
+        if datos.candidato_origen_codigo.startswith("P-"):
+            candidato = _postulacion_por_codigo(db, datos.candidato_origen_codigo, cuenta.id).candidato
+        else:
+            candidato = db.query(Candidato).filter(
+                Candidato.codigo == datos.candidato_origen_codigo, Candidato.cuenta_id == cuenta.id
+            ).first()
         if not candidato:
             raise HTTPException(404, f"Candidato '{datos.candidato_origen_codigo}' no encontrado")
 

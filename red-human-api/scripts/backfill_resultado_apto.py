@@ -19,10 +19,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.database import SessionLocal
-from app.models import Candidato, Cuenta
+from app.models import Cuenta, Postulacion
 
 
-def _calcular_resultado(c: "Candidato"):
+def _calcular_resultado(c: "Postulacion"):
     """Identica a _recalcular_resultado_apto en routers/candidatos.py -- mantener sincronizadas."""
     # Regla 1: etapas finales del pipeline
     if c.etapa in ("Contrataci\u00f3n", "Onboarding"):
@@ -52,9 +52,10 @@ def main() -> None:
 
     db = SessionLocal()
     try:
+        # Fase 2: resultado_apto vive en la POSTULACIÓN (la persona ya no tiene proceso).
         candidatos = (
-            db.query(Candidato)
-            .order_by(Candidato.cuenta_id, Candidato.id)
+            db.query(Postulacion)
+            .order_by(Postulacion.cuenta_id, Postulacion.id)
             .all()
         )
 
@@ -92,7 +93,7 @@ def main() -> None:
             print(f"    Apto=None (sin eval) : {stats['sin_eval']:>5}")
             print(f"    Sin cambio           : {stats['sin_cambio']:>5}")
             print()
-        print(f"  TOTAL candidatos a actualizar: {total_cambios}")
+        print(f"  TOTAL postulaciones a actualizar: {total_cambios}")
 
         if not forzar:
             print("\n  -> Modo dry-run (sin cambios). Usa --forzar para escribir.")
@@ -109,7 +110,7 @@ def main() -> None:
                 ch["c"].resultado_apto = ch["nuevo"]
 
         db.commit()
-        print(f"\n  OK. {total_cambios} candidatos actualizados.")
+        print(f"\n  OK. {total_cambios} postulaciones actualizadas.")
 
     finally:
         db.close()

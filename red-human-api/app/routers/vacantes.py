@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import PLATAFORMAS, Candidato, Cliente, Cuenta, Plantilla, Usuario, UsuarioCuenta, Vacante, registrar, slugificar
+from ..models import PLATAFORMAS, Cliente, Cuenta, Plantilla, Postulacion, Usuario, UsuarioCuenta, Vacante, registrar, slugificar
 from ..serial import nombre_empresa_candidato, vacante_dict
 from ..services import ia
 
@@ -45,9 +45,9 @@ def _slug_unico(db: Session, titulo: str, vacante_id: int) -> str:
 def _embudo(db: Session, vacante_id: int) -> dict:
     """Conteo por etapa y por clasificación del agente — alimenta la tarjeta de la vacante."""
     filas = (
-        db.query(Candidato.etapa, Candidato.estado, func.count(Candidato.id))
-        .filter(Candidato.vacante_id == vacante_id, Candidato.es_prueba.is_(False))
-        .group_by(Candidato.etapa, Candidato.estado)
+        db.query(Postulacion.etapa, Postulacion.estado, func.count(Postulacion.id))
+        .filter(Postulacion.vacante_id == vacante_id, Postulacion.es_prueba.is_(False))
+        .group_by(Postulacion.etapa, Postulacion.estado)
         .all()
     )
     etapas: Dict[str, int] = {}
@@ -59,10 +59,10 @@ def _embudo(db: Session, vacante_id: int) -> dict:
 
 
 def _conteos(db: Session, v: Vacante):
-    total = db.query(Candidato).filter(Candidato.vacante_id == v.id, Candidato.es_prueba.is_(False)).count()
+    total = db.query(Postulacion).filter(Postulacion.vacante_id == v.id, Postulacion.es_prueba.is_(False)).count()
     hace_24h = datetime.now(timezone.utc) - timedelta(days=1)
-    nuevos = db.query(Candidato).filter(
-        Candidato.vacante_id == v.id, Candidato.creado_en >= hace_24h, Candidato.es_prueba.is_(False)
+    nuevos = db.query(Postulacion).filter(
+        Postulacion.vacante_id == v.id, Postulacion.creado_en >= hace_24h, Postulacion.es_prueba.is_(False)
     ).count()
     return total, nuevos
 

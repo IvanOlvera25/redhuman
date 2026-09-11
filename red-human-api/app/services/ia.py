@@ -18,7 +18,7 @@ from ..config import settings
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
-    from ..models import Candidato
+    from ..models import Postulacion
 
 MODEL = settings.openai_model  # gpt-5.6-luna (configurable con OPENAI_MODEL en .env)
 
@@ -623,7 +623,7 @@ def agendar_videollamada_mock(
     fecha_hora: str,
     *,
     db: "Session",
-    candidato: "Candidato",
+    candidato: "Postulacion",
 ) -> dict:
     """Ejecuta la herramienta 'agendar_videollamada' (Zero-Touch, vía `agenda_turno`): crea una
     `Entrevista` real con avatar de Anam — reusa `services.entrevistas.crear_entrevista_para_candidato`,
@@ -657,7 +657,7 @@ def agenda_turno(
     historial: List[dict],
     *,
     db: "Session",
-    candidato: "Candidato",
+    candidato: "Postulacion",
 ) -> Tuple[TurnoPrefiltro, bool]:
     """Turno posterior a la clasificación para un candidato ya apto: pregunta disponibilidad y,
     en cuanto el candidato confirma fecha/hora, invoca agendar_videollamada (function calling),

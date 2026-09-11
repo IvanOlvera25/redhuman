@@ -70,7 +70,7 @@ import {
   fetchMensajes,
   fetchVacantes,
   guardarCondicionesContratacion,
-  liberarTelefonoCandidato,
+  reiniciarPostulacionPrueba,
   marcarEntrevistaHumanaRealizada,
   modificarEntrevistaHumana,
   moverEtapaCandidato,
@@ -231,6 +231,9 @@ function CandidatosContenido() {
   const [fScoreMin, setFScoreMin] = useState<number | "">("");
   const [fScoreMax, setFScoreMax] = useState<number | "">("");
   const [fDuplicados, setFDuplicados] = useState(false);
+  // Fase 2 (B4): las postulaciones cerradas (descartado/contratado/reinicio) no se cargan salvo
+  // que RH lo pida explícitamente — es un parámetro de la API, no un filtro local.
+  const [mostrarCerradas, setMostrarCerradas] = useState(false);
   const [orden, setOrden] = useState<"actividad" | "fecha" | "score" | "nombre">("actividad");
 
   // Inicialización desde URL params y localStorage
@@ -261,7 +264,10 @@ function CandidatosContenido() {
   };
 
   const recargar = useCallback(async (abrirCodigo?: string) => {
-    const c = await fetchCandidatos(filtroVacante ? { vacante: filtroVacante } : undefined);
+    const c = await fetchCandidatos({
+      ...(filtroVacante ? { vacante: filtroVacante } : {}),
+      ...(mostrarCerradas ? { mostrar_cerradas: true } : {}),
+    });
     if (c && c.length) {
       setDatos(c);
       setLive(true);
@@ -273,7 +279,7 @@ function CandidatosContenido() {
       setDatos([]);
       setLive(true);
     }
-  }, [filtroVacante]);
+  }, [filtroVacante, mostrarCerradas]);
 
   useEffect(() => {
     recargar();
@@ -708,6 +714,20 @@ function CandidatosContenido() {
                 <label htmlFor="f-duplicados" className="cursor-pointer text-xs font-medium text-ink-2">
                   Solo duplicados ({duplicadosSet.size})
                 </label>
+                <input
+                  type="checkbox"
+                  id="f-cerradas"
+                  checked={mostrarCerradas}
+                  onChange={(e) => setMostrarCerradas(e.target.checked)}
+                  className="ml-4 h-4 w-4 rounded border-border-soft text-brand focus:ring-brand"
+                />
+                <label
+                  htmlFor="f-cerradas"
+                  title="Incluye postulaciones descartadas, contratadas o reiniciadas (quedan como historial de la persona)"
+                  className="cursor-pointer text-xs font-medium text-ink-2"
+                >
+                  Mostrar cerradas
+                </label>
               </div>
               {totalFiltrosAvanzadosActivos > 0 && (
                 <button
@@ -793,11 +813,27 @@ function CandidatosContenido() {
                             <ScoreRing score={c.score} />
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
                               <p className="truncate text-sm font-semibold group-hover:text-brand">{c.nombre}</p>
                               {c.esPrueba && (
                                 <span className="shrink-0 rounded bg-brand-soft px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide text-brand">
                                   Prueba
+                                </span>
+                              )}
+                              {c.yaAplicoAntes && (
+                                <span
+                                  title={`Este candidato tiene ${c.totalPostulaciones} postulaciones`}
+                                  className="shrink-0 rounded bg-blue-500/10 px-1.5 py-0.5 font-mono text-[9px] font-bold text-blue-600"
+                                >
+                                  🔄 Ya aplicó antes
+                                </span>
+                              )}
+                              {c.activa === false && (
+                                <span
+                                  title={`Postulación cerrada (${c.motivoCierre || "sin motivo"}) — queda como historial de la persona`}
+                                  className="shrink-0 rounded bg-ink-3/10 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide text-ink-3"
+                                >
+                                  Cerrada
                                 </span>
                               )}
                               {esDup && (
@@ -930,11 +966,27 @@ function CandidatosContenido() {
                       <div className="flex items-center gap-2.5">
                         <Avatar name={c.nombre} tone={c.tono} />
                         <div>
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <p className="font-semibold text-ink">{c.nombre}</p>
                             {c.esPrueba && (
                               <span className="rounded bg-brand-soft px-1 text-[9px] font-bold text-brand">
                                 Prueba
+                              </span>
+                            )}
+                            {c.yaAplicoAntes && (
+                              <span
+                                title={`Este candidato tiene ${c.totalPostulaciones} postulaciones`}
+                                className="rounded bg-blue-500/10 px-1 text-[9px] font-bold text-blue-600"
+                              >
+                                🔄 Ya aplicó antes
+                              </span>
+                            )}
+                            {c.activa === false && (
+                              <span
+                                title={`Postulación cerrada (${c.motivoCierre || "sin motivo"})`}
+                                className="rounded bg-ink-3/10 px-1 text-[9px] font-bold uppercase text-ink-3"
+                              >
+                                Cerrada
                               </span>
                             )}
                             {esDup && (
@@ -1150,17 +1202,16 @@ function ModalCandidato({
     }
   }
 
-  /** SOLO PRUEBAS: libera teléfono/wa_id para reutilizar el mismo número de WhatsApp en
-   * pruebas repetidas sin que el webhook lo asocie a este candidato. No confundir con las
-   * acciones normales del flujo — no borra mensajes, CV ni expediente. */
-  async function liberarTelefono() {
+  /** MODO PRUEBA (Punto 8): cierra la postulación actual y crea una nueva limpia para la misma
+   * vacante, conservando teléfono y wa_id para volver a probar el flujo desde cero. */
+  async function reiniciarPrueba() {
     if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar la acción en la bitácora." });
-    if (!window.confirm(`Esto es solo para pruebas: se le va a quitar el teléfono y wa_id a ${c.nombre} (no se borra nada más). ¿Continuar?`)) {
+    if (!window.confirm(`¿Reiniciar postulación de prueba para ${c.nombre}? Se cerrará la postulación actual y se creará una limpia para volver a probar desde cero.`)) {
       return;
     }
-    setOcupado("liberar-telefono");
-    const r = await liberarTelefonoCandidato(c.id);
-    const data = resolver(r, "Teléfono liberado — este candidato ya no está asociado a ese número.");
+    setOcupado("reiniciar-prueba");
+    const r = await reiniciarPostulacionPrueba(c.id);
+    const data = resolver(r, "Postulación reiniciada — la anterior quedó cerrada como historial; esta es la nueva.");
     if (data) onCambio(data);
   }
 
@@ -1226,9 +1277,38 @@ function ModalCandidato({
           <div className="flex items-center gap-3.5 min-w-0">
             <Avatar name={c.nombre} tone={c.tono} />
             <div className="min-w-0">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="font-display truncate text-lg sm:text-xl font-bold text-ink">{c.nombre}</h2>
-                <span className="font-mono text-xs text-ink-3">{c.id}</span>
+                <span className="font-mono text-xs text-ink-3" title="Postulación">{c.id}</span>
+                {c.candidatoCodigo && (
+                  <span className="font-mono text-[10px] text-ink-3" title="Persona (maestro de identidad)">
+                    · {c.candidatoCodigo}
+                  </span>
+                )}
+                {c.yaAplicoAntes && (
+                  <span
+                    title={`Esta persona tiene ${c.totalPostulaciones} postulaciones en diferentes vacantes`}
+                    className="rounded bg-blue-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-blue-600"
+                  >
+                    🔄 {c.totalPostulaciones} postulaciones
+                  </span>
+                )}
+                {c.activa === false && (
+                  <span
+                    title={`Cerrada: ${c.motivoCierre || "sin motivo"}. Mover de etapa la reabre.`}
+                    className="rounded bg-ink-3/10 px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-ink-3"
+                  >
+                    Cerrada · {c.motivoCierre || "—"}
+                  </span>
+                )}
+                {c.enConversacion && c.yaAplicoAntes && (
+                  <span
+                    title="El WhatsApp de esta persona está conversando sobre ESTA postulación"
+                    className="rounded bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-emerald-700"
+                  >
+                    💬 En chat
+                  </span>
+                )}
               </div>
               <p className="truncate text-xs sm:text-sm text-ink-2">
                 {c.puesto || "Sin vacante asignada"} · <b className="text-ink font-semibold">{c.fuente}</b>
@@ -1325,19 +1405,19 @@ function ModalCandidato({
           )}
         </div>
 
-        {/* SOLO PRUEBAS: independiente de la etapa — no es parte del flujo normal del candidato. */}
+        {/* MODO PRUEBA (Punto 8): independiente de la etapa — reinicia la postulación sin borrar teléfono */}
         {puedeDecidir && (
           <div className="border-t border-border-soft bg-surface px-6 py-2">
             <div className="flex justify-end">
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={liberarTelefono}
+                onClick={reiniciarPrueba}
                 disabled={Boolean(ocupado)}
-                title="Solo para pruebas: quita el teléfono/wa_id de este candidato para reutilizar el número en otra prueba."
-                className="text-[11px] text-ink-3 opacity-70 hover:opacity-100"
+                title="Modo Prueba (Punto 8): cierra la postulación actual y crea una nueva limpia para volver a probar desde cero."
+                className="text-[11px] text-ink-3 hover:text-brand hover:bg-brand-soft/40 transition"
               >
-                <FlaskConical className="h-3.5 w-3.5" /> Liberar número (prueba)
+                <RotateCw className="h-3.5 w-3.5" /> Reiniciar prueba
               </Button>
             </div>
           </div>
@@ -1716,6 +1796,35 @@ function PestanaResumen({
             </div>
           </div>
         </Card>
+      )}
+
+      {/* H. Fase 2 — otras postulaciones de la misma persona (historial, más reciente primero) */}
+      {(c.historialPostulaciones?.length ?? 0) > 0 && (
+        <div>
+          <Eyebrow>Otras postulaciones de esta persona</Eyebrow>
+          <Card className="mt-2 divide-y divide-border-soft p-0">
+            {c.historialPostulaciones!.map((h) => (
+              <div key={h.id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-sm">
+                <div className="min-w-0">
+                  <p className="truncate font-semibold text-ink">{h.puesto || "Sin vacante asignada"}</p>
+                  <p className="font-mono text-[10px] text-ink-3">
+                    {h.id} · {h.creado}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="rounded bg-surface px-1.5 py-0.5 text-[10px] font-semibold text-ink-2">{h.etapa}</span>
+                  {h.activa ? (
+                    <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[9px] font-bold text-emerald-700">En curso</span>
+                  ) : (
+                    <span className="rounded bg-ink-3/10 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-ink-3">
+                      Cerrada · {h.motivoCierre || "—"}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </Card>
+        </div>
       )}
     </div>
   );
