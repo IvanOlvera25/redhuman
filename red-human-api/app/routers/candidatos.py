@@ -182,6 +182,19 @@ async def _enviar_whatsapp(p: Postulacion, texto: str, canal: str = "whatsapp") 
         return {"enviado": False, "proveedor": "error", "detalle": str(e)}
 
 
+def nombre_ficha(p: Postulacion) -> str:
+    """Fase 4 (Punto 2): el agente se dirige SIEMPRE por el nombre de la ficha de la persona de
+    esta postulación (primer nombre). El nombre del perfil de WhatsApp (`wa_nombre`) solo se usa
+    cuando la ficha todavía trae un placeholder ("Candidato WhatsApp", "TMP"). Nunca un nombre de
+    otra sesión, entrevista o candidato."""
+    c = p.candidato
+    nombre = (c.nombre if c else "") or ""
+    placeholder = not nombre or nombre.startswith("Candidato") or nombre == "TMP"
+    if placeholder and c and c.wa_nombre:
+        nombre = c.wa_nombre
+    return (nombre.split(" ")[0] if nombre else "") or "candidato(a)"
+
+
 def _vacante(db: Session, codigo: Optional[str], cuenta_id: int) -> Optional[Vacante]:
     if not codigo:
         return None
@@ -1048,7 +1061,7 @@ async def _procesar_turno_agenda(db: Session, p: Postulacion, historial: List[di
     agendar_videollamada (function calling) — ver ia.agenda_turno."""
     v = p.vacante
     turno, con_ia = ia.agenda_turno(
-        p.wa_nombre or p.nombre.split(" ")[0], v.titulo if v else "", historial, db=db, candidato=p
+        nombre_ficha(p), v.titulo if v else "", historial, db=db, candidato=p
     )
 
     respuesta_final = turno.respuesta
@@ -1082,7 +1095,7 @@ async def _procesar_turno_onboarding(db: Session, p: Postulacion, historial: Lis
     """Zero-Touch fase 2: la postulación ya está en Onboarding — el agente ya no evalúa ni
     agenda, solo acompaña la recolección de documentos (ver ia.onboarding_turno)."""
     v = p.vacante
-    turno, con_ia = ia.onboarding_turno(p.wa_nombre or p.nombre.split(" ")[0], v.titulo if v else "", historial)
+    turno, con_ia = ia.onboarding_turno(nombre_ficha(p), v.titulo if v else "", historial)
     envio = await _enviar_whatsapp(p, turno.respuesta, canal)
     guardar_mensaje(db, p, "assistant", turno.respuesta, canal, envio)
     _actualizar_ultima_actividad(p)
@@ -1148,7 +1161,7 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
         modalidad=v.modalidad if v else "",
         beneficios=(v.beneficios or []) if v else [],
         perfil_ideal=v.perfil_ideal if v else "",
-        nombre_candidato=p.wa_nombre or p.nombre.split(" ")[0],
+        nombre_candidato=nombre_ficha(p),
     )
 
     analisis_actual = dict(p.analisis or {})

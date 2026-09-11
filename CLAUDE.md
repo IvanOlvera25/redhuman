@@ -52,3 +52,12 @@ Plataforma SaaS de agente de IA de RH para México. `red-human-app` (Next.js 15)
 - Plantillas: el contenido compartido Vacante↔Plantilla es `models.CAMPOS_PLANTILLA` (única lista); el formulario de contenido es uno solo (`components/dashboard/vacantes/formulario-contenido.tsx`) para Nueva vacante y Configuración → Plantillas.
 - Modo Prueba: la ventana de nueva sesión se lee de `ConfiguracionSistema.modo_prueba_ventana_min` (nunca hardcodearla).
 - Al cambiar de Cuenta, `<PorCuenta>` (layout del dashboard) remonta todo el árbol: no cachear datos por Cuenta fuera de React.
+
+## Entrevista IA (Fase 4)
+
+- Toda identidad de empresa en contenido generado por IA (vacantes, WhatsApp, entrevista) sale de UNA regla: `serial.nombre_empresa(cuenta, cliente, mostrar)` / `nombre_empresa_candidato(v)` → Cliente visible si "mostrar cliente al candidato", si no el nombre comercial de la Cuenta. Nunca texto libre.
+- Nombre del candidato: siempre el de la ficha (`candidatos.nombre_ficha(p)`); el perfil de WhatsApp (`wa_nombre`) solo si la ficha trae placeholder. Contexto de la entrevista siempre desde `e.postulacion` (nunca desde la persona).
+- Alma se presenta "de Red Human" y entrevista "para el puesto de X en {empresa resuelta}". Saludo e inicio fijos (`ia.mensaje_inicial_entrevista`); sin numerar preguntas; una pregunta principal por turno; despedida fija `ia.DESPEDIDA_ENTREVISTA`.
+- Cierre verificable: el backend solo cierra una entrevista con `POST /finalizar` y verifica el `cierre` declarado contra el transcript (`_cierre_verificado`); sin señal verificable degrada a `manual`; desconexión con <2 turnos → `interrumpida` (RH reabre con `POST /entrevistas/{codigo}/reabrir`). Nunca cerrar por tiempo en el servidor sin señal.
+- Enfoque de entrevista por vacante: SOLO 2 niveles (`profesional` | `profesional_personal`, `models.ENFOQUES_ENTREVISTA`). No agregar más.
+- Datos sensibles (`ia.DATOS_SENSIBLES_PROHIBIDOS`): ni preguntar ni registrar aunque el candidato los mencione — aplica al entrevistador y al evaluador.

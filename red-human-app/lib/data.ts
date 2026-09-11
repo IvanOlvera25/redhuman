@@ -258,6 +258,8 @@ export interface Vacante {
   /* --- Fase B: Cliente/Responsable/Colaboradores/visibilidad --- */
   cliente?: string | null;
   clienteId?: number | null;
+  /** Fase 4 (Punto 6): enfoque de la Entrevista IA. */
+  enfoqueEntrevista?: "profesional" | "profesional_personal";
   responsable?: string | null;
   colaboradores?: string[];
   mostrarClienteCandidato?: boolean;

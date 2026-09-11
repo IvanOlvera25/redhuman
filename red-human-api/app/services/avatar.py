@@ -20,17 +20,14 @@ ANAM_SESSION_URL = "https://api.anam.ai/v1/auth/session-token"
 
 
 def avatar_activo() -> bool:
-    return bool(settings.anam_api_key and settings.anam_avatar_id)
+    # CLAUDE.md: todo personaConfig inline debe traer llmId o Anam rechaza el token como "legacy" —
+    # sin ANAM_LLM_ID no se intenta el avatar (antes se intentaba y caía a texto con error).
+    return bool(settings.anam_api_key and settings.anam_avatar_id and settings.anam_llm_id)
 
 
-async def crear_sesion_avatar(nombre_persona: str, system_prompt: str, mensaje_inicial: str) -> Optional[dict]:
-    """Crea una sesión de avatar en Anam y regresa el sessionToken para el navegador.
-
-    Regresa None en modo demo (sin clave) — el frontend cae a entrevista por texto.
-    """
-    if not avatar_activo():
-        return None
-
+def persona_config(nombre_persona: str, system_prompt: str, mensaje_inicial: str, extras: Optional[dict] = None) -> dict:
+    """personaConfig que se manda a Anam. `extras` (Fase 4, Punto 4 — tras el spike) permite
+    agregar `tools`/`voiceDetectionOptions` sin tocar este núcleo."""
     persona = {
         "name": nombre_persona,
         "avatarId": settings.anam_avatar_id,
@@ -43,6 +40,22 @@ async def crear_sesion_avatar(nombre_persona: str, system_prompt: str, mensaje_i
         persona["voiceId"] = settings.anam_voice_id
     if settings.anam_llm_id:
         persona["llmId"] = settings.anam_llm_id
+    if extras:
+        persona.update(extras)
+    return persona
+
+
+async def crear_sesion_avatar(
+    nombre_persona: str, system_prompt: str, mensaje_inicial: str, extras: Optional[dict] = None
+) -> Optional[dict]:
+    """Crea una sesión de avatar en Anam y regresa el sessionToken para el navegador.
+
+    Regresa None en modo demo (sin clave) — el frontend cae a entrevista por texto.
+    """
+    if not avatar_activo():
+        return None
+
+    persona = persona_config(nombre_persona, system_prompt, mensaje_inicial, extras)
 
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(

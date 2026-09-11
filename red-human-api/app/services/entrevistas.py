@@ -31,10 +31,15 @@ def crear_entrevista_para_candidato(
     usando su vacante. `actor` firma la bitácora — el nombre de RH en el camino manual,
     "agente-ia" en Zero-Touch, igual que el resto de acciones automáticas del agente."""
     v = p.vacante
+    # Fase 4: guion por temas según el enfoque configurado en la vacante (Punto 6) y con el
+    # contexto real del puesto (perfil ideal, responsabilidades).
     guion, con_ia = ia.guion_entrevista(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",
         p.experiencia or "",
+        enfoque_entrevista=(v.enfoque_entrevista if v else "profesional") or "profesional",
+        perfil_ideal=(v.perfil_ideal if v else "") or "",
+        responsabilidades=list(v.responsabilidades or []) if v else [],
     )
     e = Entrevista(
         codigo="TMP",

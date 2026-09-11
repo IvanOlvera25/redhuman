@@ -434,6 +434,8 @@ export interface CriterioFiltro {
 /** Salida cruda del generador (aún no persistida). */
 export interface VacanteGenerada {
   ia: boolean;
+  /** Nombre de empresa que usó el generador (resuelto por la regla Cliente/Cuenta). */
+  empresa?: string;
   resumen: string;
   descripcion: string;
   perfil_ideal: string;
@@ -458,7 +460,11 @@ export interface DatosVacante {
   ubicacion?: string;
   sueldo?: string;
   requisitos?: string;
+  /** Deprecado (Fase 4, Punto 1): el servidor ignora el texto libre y resuelve el nombre con la regla. */
   empresa?: string;
+  /** Fase 4: la empresa visible se resuelve en el servidor a partir del Cliente y de "mostrar cliente". */
+  cliente_id?: number | null;
+  mostrar_cliente_candidato?: boolean;
   modalidad?: string;
   notas?: string;
 }
@@ -518,10 +524,19 @@ export function crearVacante(
     colaboradores_ids?: number[];
     mostrar_cliente_candidato?: boolean;
     plantilla_id?: number | null;
+    enfoque_entrevista?: EnfoqueEntrevista;
+    texto_bolsa?: string;
   },
 ) {
   return post<Vacante>("/vacantes", datos);
 }
+
+/** Fase 4 (Punto 6): solo 2 niveles, nunca más. */
+export type EnfoqueEntrevista = "profesional" | "profesional_personal";
+export const ENFOQUES_ENTREVISTA: { valor: EnfoqueEntrevista; texto: string; detalle: string }[] = [
+  { valor: "profesional", texto: "Profesional", detalle: "Experiencia, conocimientos, responsabilidades, criterio, decisiones, comunicación, presión, motivadores laborales, estilo de trabajo, objetivos profesionales." },
+  { valor: "profesional_personal", texto: "Profesional + personal", detalle: "Lo anterior más objetivos personales no sensibles, prioridades, motivadores amplios, disciplina, valores y visión de futuro." },
+];
 
 export function actualizarVacante(codigo: string, cambios: Record<string, unknown>) {
   return patch<Vacante>(`/vacantes/${codigo}`, cambios);
@@ -646,6 +661,7 @@ export interface Plantilla {
   preguntasFiltro: CriterioFiltro[];
   textoWhatsapp: string;
   textoBolsa: string;
+  enfoqueEntrevista?: EnfoqueEntrevista;
   creadoPor: string;
   /** Última actualización (Punto 11); igual a `creada` si nunca se editó. */
   actualizada: string;
@@ -673,6 +689,7 @@ export interface DatosPlantilla {
   preguntas_filtro?: CriterioFiltro[];
   texto_whatsapp?: string;
   texto_bolsa?: string;
+  enfoque_entrevista?: EnfoqueEntrevista;
 }
 
 /** Sin `clienteId`: todas las plantillas activas de la Cuenta. Con `clienteId`: las de ese
@@ -1055,16 +1072,65 @@ export function enviarPrefiltro(codigo: string, texto: string, canal = "simulado
    Módulo 1 · Entrevistas con agente IA
    ============================================================ */
 
+/** Fase 4 (Punto 5): una dimensión del conocimiento profundo del candidato, con la evidencia
+ * (citas del candidato) que la sustenta. `evaluado=false` = la entrevista no la cubrió. */
+export interface DimensionPerfil {
+  evaluado: boolean;
+  conclusion: string;
+  evidencia: string[];
+}
+
+export const DIMENSIONES_PERFIL: { clave: keyof PerfilProfundo; etiqueta: string }[] = [
+  { clave: "motivadores", etiqueta: "Motivadores" },
+  { clave: "estilo_trabajo", etiqueta: "Estilo de trabajo" },
+  { clave: "valores", etiqueta: "Valores profesionales" },
+  { clave: "decisiones", etiqueta: "Criterio y decisiones" },
+  { clave: "aprendizaje", etiqueta: "Aprendizaje y errores" },
+  { clave: "resiliencia", etiqueta: "Presión y conflicto" },
+  { clave: "objetivos", etiqueta: "Objetivos y crecimiento" },
+  { clave: "riesgos", etiqueta: "Riesgos" },
+  { clave: "compatibilidad", etiqueta: "Compatibilidad con el puesto" },
+  { clave: "relacion_jefatura", etiqueta: "Relación con jefatura" },
+];
+
+export interface PerfilProfundo {
+  motivadores: DimensionPerfil;
+  estilo_trabajo: DimensionPerfil;
+  valores: DimensionPerfil;
+  decisiones: DimensionPerfil;
+  aprendizaje: DimensionPerfil;
+  resiliencia: DimensionPerfil;
+  objetivos: DimensionPerfil;
+  riesgos: DimensionPerfil;
+  compatibilidad: DimensionPerfil;
+  relacion_jefatura: DimensionPerfil;
+}
+
 export interface EvaluacionEntrevista {
   resumen: string;
   fortalezas: string[];
   riesgos: string[];
+  areas_desarrollo?: string[];
   calif_experiencia: number;
   calif_comunicacion: number;
   match_perfil: number;
   recomendacion: "avanzar" | "revision" | "no_avanzar";
   evidencia: string;
+  /** Fase 4: conocimiento profundo; null en evaluaciones previas a Fase 4. */
+  perfil?: PerfilProfundo | null;
 }
+
+export type CierreEntrevista = "" | "herramienta" | "marcador" | "texto" | "manual" | "desconexion" | "tiempo";
+
+export const NOMBRE_CIERRE: Record<CierreEntrevista, string> = {
+  "": "—",
+  herramienta: "Automático (avatar)",
+  marcador: "Automático (despedida)",
+  texto: "Automático (texto)",
+  manual: "Botón del candidato",
+  desconexion: "Desconexión",
+  tiempo: "Tiempo agotado",
+};
 
 export interface Entrevista {
   id: string;
@@ -1072,16 +1138,27 @@ export interface Entrevista {
   nombre: string;
   puesto: string;
   tipo: "avatar" | "texto";
-  estado: "programada" | "en_curso" | "completada" | "evaluada";
+  estado: "programada" | "en_curso" | "completada" | "evaluada" | "interrumpida";
   token: string;
   consentimiento: boolean;
   programada: string | null;
   creada: string;
-  guion: { enfoque?: string; preguntas?: string[] };
+  guion: { enfoque?: string; temas?: string[]; preguntas?: string[] };
   mensajes: number;
+  turnosCandidato?: number;
   evaluacion: EvaluacionEntrevista | null;
   tono: number;
   ligaMeet: string;
+  /* --- Fase 4: cierre verificable + reapertura --- */
+  cierre?: CierreEntrevista;
+  iniciadaEn?: string | null;
+  finalizadaEn?: string | null;
+  intentosPrevios?: number;
+}
+
+/** Reapertura explícita por RH (Fase 4): archiva el intento anterior y vuelve a `programada`. */
+export function reabrirEntrevista(codigo: string, motivo = "") {
+  return post<Entrevista>(`/entrevistas/${codigo}/reabrir`, { motivo });
 }
 
 export function fetchEntrevistas() {
@@ -1126,8 +1203,10 @@ export interface EntrevistaPublica {
   empresa: string;
   tipo: string;
   estado: string;
+  cierre?: CierreEntrevista;
   consentimiento: boolean;
   avatar_disponible: boolean;
+  duracion_max_seg?: number;
 }
 
 export function fetchEntrevistaPublica(token: string) {
@@ -1139,7 +1218,7 @@ export function consentirEntrevista(token: string) {
 }
 
 export function iniciarEntrevista(token: string) {
-  return post<{ modo: "avatar" | "texto"; session_token?: string; mensajes?: { rol: string; texto: string }[] }>(
+  return post<{ modo: "avatar" | "texto"; nombre?: string; session_token?: string; mensajes?: { rol: string; texto: string }[] }>(
     `/entrevistas/publica/${token}/sesion`,
   );
 }
@@ -1151,8 +1230,10 @@ export function turnoEntrevista(token: string, texto: string) {
   );
 }
 
-export function finalizarEntrevista(token: string, transcript?: { rol: string; texto: string }[]) {
-  return post<Entrevista>(`/entrevistas/publica/${token}/finalizar`, { transcript: transcript ?? null });
+/** `cierre` (Fase 4, Punto 4): cómo terminó según el navegador; el servidor lo VERIFICA contra el
+ * transcript (una despedida declarada sin la frase fija se degrada a `manual`). */
+export function finalizarEntrevista(token: string, transcript?: { rol: string; texto: string }[], cierre: CierreEntrevista = "manual") {
+  return post<Entrevista>(`/entrevistas/publica/${token}/finalizar`, { transcript: transcript ?? null, cierre });
 }
 
 /* ============================================================

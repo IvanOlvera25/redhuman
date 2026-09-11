@@ -1202,7 +1202,8 @@ function EditorPlantilla({
           <div className="flex items-end pb-2 text-[12px] text-ink-3">General de la Cuenta (no hay Clientes activos).</div>
         )}
       </div>
-      <FormularioContenidoVacante value={contenido} onChange={setContenido} />
+      {/* Fase 4 (Punto 1): el generador usa el Cliente del alcance para resolver el nombre de empresa. */}
+      <FormularioContenidoVacante value={contenido} onChange={setContenido} clienteId={clienteId ? Number(clienteId) : null} />
     </Modal>
   );
 }

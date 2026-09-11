@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import { Card, Badge, Button, Avatar, Eyebrow, Progress } from "@/components/ui";
 import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
+import { PerfilProfundoVista } from "@/components/dashboard/perfil-profundo";
 import { Aviso, Dropzone, pesoLegible } from "@/components/dashboard/subida";
 import {
   candidatos as candidatosDemo,
@@ -92,6 +93,7 @@ import {
   type Cliente,
   type MensajePrefiltro,
   type ModalidadEntrevistaHumana,
+  type PerfilProfundo,
 } from "@/lib/api";
 import { usePuedeDecidir, useModoPrueba } from "@/components/sesion";
 import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveedor";
@@ -1901,7 +1903,7 @@ function PestanaEvaluaciones({ c }: { c: Candidato }) {
   const a = c.analisis ?? {};
   const ultimaEntrevista = c.entrevistas?.[c.entrevistas.length - 1];
   const evalAvatar = ultimaEntrevista?.evaluacion as
-    | { resumen?: string; fortalezas?: string[]; riesgos?: string[] }
+    | { resumen?: string; fortalezas?: string[]; riesgos?: string[]; areas_desarrollo?: string[]; perfil?: PerfilProfundo | null }
     | null
     | undefined;
   const historialEh = c.entrevistasHumanas ?? [];
@@ -1956,6 +1958,24 @@ function PestanaEvaluaciones({ c }: { c: Candidato }) {
                   <li key={i} className="text-xs leading-relaxed text-ink-2">• {x}</li>
                 ))}
               </ul>
+            </div>
+          )}
+
+          {Boolean(evalAvatar.areas_desarrollo?.length) && (
+            <div className="mt-3">
+              <p className="font-mono text-[11px] uppercase tracking-wider text-brand font-bold">Áreas de desarrollo</p>
+              <ul className="mt-1.5 space-y-1">
+                {evalAvatar.areas_desarrollo!.map((x, i) => (
+                  <li key={i} className="text-xs leading-relaxed text-ink-2">• {x}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Fase 4 (Punto 5): conocimiento profundo con evidencia; solo existe en evaluaciones nuevas. */}
+          {evalAvatar.perfil && (
+            <div className="mt-4">
+              <PerfilProfundoVista perfil={evalAvatar.perfil} />
             </div>
           )}
         </Card>

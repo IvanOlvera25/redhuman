@@ -16,14 +16,14 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import Candidato, Cuenta, Entrevista, Usuario, Vacante, registrar
+from ..models import CIERRES_COMPLETOS, CIERRES_ENTREVISTA, Candidato, Cuenta, Entrevista, Usuario, Vacante, registrar
 from ..serial import entrevista_dict, nombre_empresa_candidato
 from ..services import ia
 from ..services.avatar import avatar_activo, crear_sesion_avatar
 from ..services.configuracion import modo_prueba_activo
 from ..services.entrevistas import crear_entrevista_para_candidato
 from ..services.whatsapp import enviar_mensaje
-from .candidatos import _crear_candidato, guardar_mensaje, postulacion_para_vacante
+from .candidatos import _crear_candidato, guardar_mensaje, nombre_ficha, postulacion_para_vacante
 from .candidatos import _por_codigo as _postulacion_por_codigo
 
 router = APIRouter(prefix="/entrevistas", tags=["entrevistas"])
@@ -181,18 +181,35 @@ async def inmediata(
 # ------------------------------------------------------------
 
 
+def _contexto(e: Entrevista):
+    """Fase 2/4: TODO sale de la Postulación de la entrevista (vacante, empresa visible) y de la
+    persona solo el nombre. Nunca de `Candidato.vacante` (ya no existe: bug corregido en Fase 4)."""
+    p = e.postulacion
+    v = p.vacante if p else None
+    empresa = nombre_empresa_candidato(v) if v else "la empresa"
+    return p, v, empresa
+
+
+def _nombre_entrevistado(e: Entrevista) -> str:
+    """Nombre de la FICHA de la persona de esta entrevista (Punto 2): nunca de otra sesión."""
+    c = e.candidato
+    return nombre_ficha(e.postulacion) if e.postulacion else ((c.nombre.split(" ")[0] if c and c.nombre else "candidato"))
+
+
 @router.get("/publica/{token}")
 def publica(token: str, db: Session = Depends(get_db)):
     e = _por_token(db, token)
-    c = e.candidato
+    p, v, empresa = _contexto(e)
     return {
-        "candidato": c.nombre if c else "",
-        "puesto": c.vacante.titulo if c and c.vacante else "",
-        "empresa": nombre_empresa_candidato(c.vacante) if c and c.vacante else "Red Human",
+        "candidato": _nombre_entrevistado(e),
+        "puesto": v.titulo if v else "",
+        "empresa": empresa,
         "tipo": e.tipo,
         "estado": e.estado,
+        "cierre": e.cierre or "",
         "consentimiento": e.consentimiento,
         "avatar_disponible": avatar_activo(),
+        "duracion_max_seg": settings.anam_max_sesion_seg,
     }
 
 
@@ -205,6 +222,8 @@ def consentir(token: str, datos: ConsentirIn, db: Session = Depends(get_db)):
     e = _por_token(db, token)
     if not datos.acepta:
         raise HTTPException(400, "La entrevista requiere consentimiento explícito del candidato.")
+    if e.estado in ("completada", "evaluada", "interrumpida"):
+        raise HTTPException(409, "Esta entrevista ya fue cerrada.")
     e.consentimiento = True
     e.consentimiento_fecha = datetime.now(timezone.utc)
     registrar(db, e.candidato.codigo if e.candidato else "candidato", "consentimiento_entrevista", "entrevista", e.codigo, {})
@@ -213,13 +232,22 @@ def consentir(token: str, datos: ConsentirIn, db: Session = Depends(get_db)):
 
 
 def _system_prompt(e: Entrevista) -> str:
-    c = e.candidato
-    v = c.vacante if c else None
+    p, v, empresa = _contexto(e)
+    guion = e.guion or {}
     return ia.prompt_entrevistador(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",
-        c.nombre if c else "candidato",
-        (e.guion or {}).get("preguntas", []),
+        _nombre_entrevistado(e),
+        list(guion.get("preguntas") or []),
+        empresa=empresa,
+        temas=ia.temas_de_guion(guion),
+        enfoque=guion.get("enfoque", ""),
+        enfoque_entrevista=(v.enfoque_entrevista if v else "profesional") or "profesional",
+        ubicacion=(v.ubicacion if v else "") or "",
+        modalidad=(v.modalidad if v else "") or "",
+        sueldo=(v.sueldo if v else "") or "",
+        beneficios=list(v.beneficios or []) if v else [],
+        area=(v.area if v else "") or "",
     )
 
 
@@ -229,20 +257,18 @@ async def sesion(token: str, db: Session = Depends(get_db)):
     e = _por_token(db, token)
     if not e.consentimiento:
         raise HTTPException(403, "Primero se requiere el consentimiento del candidato.")
-    if e.estado in ("completada", "evaluada"):
-        raise HTTPException(409, "Esta entrevista ya fue realizada.")
+    if e.estado in ("completada", "evaluada", "interrumpida"):
+        raise HTTPException(409, "Esta entrevista ya fue cerrada. RH puede reabrirla si hace falta.")
 
-    c = e.candidato
-    saludo = (
-        f"Hola {c.nombre.split(' ')[0] if c else ''}, soy Alma, la entrevistadora virtual de Red Human. "
-        "Gracias por tu tiempo. Cuando estés lista o listo, empezamos. 😊"
-    )
-    e.estado = "en_curso"
+    p, v, empresa = _contexto(e)
+    saludo = ia.mensaje_inicial_entrevista(_nombre_entrevistado(e), empresa)
+    if e.estado != "en_curso":
+        e.estado = "en_curso"
+        e.iniciada_en = datetime.now(timezone.utc)
 
     ses = None
     try:
         ses = await crear_sesion_avatar("Alma", _system_prompt(e), saludo)
-        print(f"[DEBUG] crear_sesion_avatar devolvió: {bool(ses)}", flush=True)
     except Exception as ex:  # el avatar nunca debe tumbar la entrevista: cae a texto
         print(f"[ERROR] crear_sesion_avatar falló: {str(ex)}", flush=True)
         registrar(db, "sistema", "avatar_error", "entrevista", e.codigo, {"error": str(ex)[:300]})
@@ -252,11 +278,11 @@ async def sesion(token: str, db: Session = Depends(get_db)):
         if not e.transcript:
             e.transcript = [{"rol": "assistant", "texto": saludo}]
         db.commit()
-        return {"modo": "texto", "mensajes": e.transcript}
+        return {"modo": "texto", "mensajes": e.transcript, "nombre": _nombre_entrevistado(e)}
 
     e.tipo = "avatar"
     db.commit()
-    return {"modo": "avatar", **ses}
+    return {"modo": "avatar", "nombre": _nombre_entrevistado(e), **ses}
 
 
 class TurnoIn(BaseModel):
@@ -267,7 +293,7 @@ class TurnoIn(BaseModel):
 def turno(token: str, datos: TurnoIn, db: Session = Depends(get_db)):
     """Un turno de la entrevista en modo texto (demo o fallback)."""
     e = _por_token(db, token)
-    if not e.consentimiento or e.estado not in ("en_curso",):
+    if not e.consentimiento or e.estado != "en_curso":
         raise HTTPException(403, "La entrevista no está en curso.")
 
     historial = list(e.transcript or []) + [{"rol": "user", "texto": datos.texto}]
@@ -279,39 +305,82 @@ def turno(token: str, datos: TurnoIn, db: Session = Depends(get_db)):
 
 class FinalizarIn(BaseModel):
     transcript: Optional[List[dict]] = None  # modo avatar: lo manda el navegador; modo texto: ya está guardado
+    # Fase 4 (Punto 4): cómo cerró, ver CIERRES_ENTREVISTA. El servidor lo VERIFICA, no lo confía.
+    cierre: str = "manual"
+
+
+# Mínimo de intervenciones del candidato para considerar que hubo entrevista que evaluar.
+MIN_TURNOS_CANDIDATO = 2
+
+
+def _cierre_verificado(e: Entrevista, cierre_declarado: str) -> str:
+    """El backend decide el cierre real con lo que puede comprobar (Punto 4):
+    - `texto`: solo si el último turno de Alma en el transcript guardado trae la despedida.
+    - `herramienta`/`marcador`: solo si la despedida fija (ia.DESPEDIDA_ENTREVISTA) aparece en el
+      último turno de Alma; si no, se degrada a `manual`.
+    - `manual`/`desconexion`/`tiempo`: se aceptan tal cual (no cambian nada que haya que verificar).
+    """
+    if cierre_declarado not in CIERRES_ENTREVISTA:
+        cierre_declarado = "manual"
+    ultimo_alma = next((m.get("texto", "") for m in reversed(e.transcript or []) if m.get("rol") == "assistant"), "")
+    hay_despedida = ia.DESPEDIDA_ENTREVISTA.lower() in (ultimo_alma or "").lower()
+    if cierre_declarado in ("texto", "herramienta", "marcador"):
+        return cierre_declarado if hay_despedida else "manual"
+    return cierre_declarado
 
 
 @router.post("/publica/{token}/finalizar")
 async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db)):
-    """Cierra la entrevista, corre la evaluación IA (recomendación para RH) y mueve al
-    candidato a la etapa Evaluación — Zero-Touch, sin intervención manual de RH."""
+    """Cierra la entrevista DE VERDAD (Punto 4): registra cómo cerró (verificado), guarda el
+    transcript, corre la evaluación IA (recomendación + perfil profundo) y mueve la postulación a
+    Evaluación — sin que el candidato presione nada. Una entrevista con cierre por desconexión o
+    tiempo y casi sin turnos del candidato queda `interrumpida` (sin evaluar) para que RH la reabra."""
     e = _por_token(db, token)
-    if e.estado == "evaluada":
+    if e.estado in ("evaluada", "interrumpida"):
         return entrevista_dict(e)
+    if e.estado != "en_curso":
+        raise HTTPException(409, "La entrevista no está en curso; no hay nada que cerrar.")
+    if not e.consentimiento:
+        raise HTTPException(403, "La entrevista no tiene consentimiento del candidato.")
 
     if datos.transcript:
         e.transcript = [
             {"rol": ("assistant" if m.get("rol") == "assistant" else "user"), "texto": str(m.get("texto", ""))[:2000]}
-            for m in datos.transcript
+            for m in datos.transcript[:400]
         ]
-    e.estado = "completada"
+    e.cierre = _cierre_verificado(e, datos.cierre)
+    e.finalizada_en = datetime.now(timezone.utc)
+    turnos_candidato = sum(1 for m in (e.transcript or []) if m.get("rol") == "user")
 
-    p = e.postulacion
-    v = p.vacante if p else None
+    p, v, empresa = _contexto(e)
+
+    if e.cierre not in CIERRES_COMPLETOS and turnos_candidato < MIN_TURNOS_CANDIDATO:
+        e.estado = "interrumpida"
+        registrar(
+            db, "sistema", "entrevista_interrumpida", "entrevista", e.codigo,
+            {"cierre": e.cierre, "turnos_candidato": turnos_candidato, "postulacion": p.codigo if p else None},
+        )
+        db.commit()
+        return entrevista_dict(e)
+
+    e.estado = "completada"
+    guion = e.guion or {}
     ev, con_ia = ia.evaluar_entrevista(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",
         e.transcript or [],
+        perfil_ideal=(v.perfil_ideal if v else "") or "",
+        temas=ia.temas_de_guion(guion),
+        enfoque_entrevista=(v.enfoque_entrevista if v else "profesional") or "profesional",
     )
     e.evaluacion = ev.model_dump()
     e.estado = "evaluada"
-    # c.score / c.evidencia son el resultado de Luna sobre el CV (ver ia.AjustePerfil,
+    # p.score / p.evidencia son el resultado de Luna sobre el CV (ver ia.AjustePerfil,
     # candidatos._aplicar_cv) — NUNCA se tocan aquí. El resultado del avatar vive completo y
-    # aparte en Entrevista.evaluacion (match_perfil, evidencia, recomendación, etc.); el
-    # frontend lo lee de ahí sin mezclarlo con lo de Luna.
+    # aparte en Entrevista.evaluacion (match_perfil, evidencia, recomendación, perfil profundo).
     registrar(
         db, "agente-ia", "entrevista_evaluada", "entrevista", e.codigo,
-        {"ia": con_ia, "recomendacion": ev.recomendacion, "match": ev.match_perfil},
+        {"ia": con_ia, "recomendacion": ev.recomendacion, "match": ev.match_perfil, "cierre": e.cierre, "turnos_candidato": turnos_candidato},
     )
 
     # Zero-Touch: mueve el Kanban a Evaluación — NO toca p.estado, la recomendación de la IA
@@ -324,9 +393,9 @@ async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db
             {"candidato": p.candidato.codigo, "entrevista": e.codigo, "recomendacion": ev.recomendacion, "match": ev.match_perfil},
         )
 
-        primer_nombre = p.nombre.split(" ")[0] if p.nombre else "candidato(a)"
+        primer_nombre = nombre_ficha(p)
         texto = (
-            f"¡Gracias, {primer_nombre}! 🙌 Terminamos tu entrevista para {v.titulo if v else 'la vacante'}. "
+            f"¡Gracias, {primer_nombre}! 🙌 Terminamos tu entrevista para {v.titulo if v else 'la vacante'} en {empresa}. "
             "El equipo de RH va a revisar tus resultados y te contactará pronto."
         )
         if p.telefono:
@@ -337,5 +406,50 @@ async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db
                 envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
             guardar_mensaje(db, p, "assistant", texto, "whatsapp", envio)
 
+    db.commit()
+    return entrevista_dict(e)
+
+
+# ------------------------------------------------------------
+# Reapertura explícita (RH) — Fase 4, Punto 4
+# ------------------------------------------------------------
+
+
+class ReabrirIn(BaseModel):
+    motivo: str = ""
+
+
+@router.post("/{codigo}/reabrir")
+def reabrir(
+    codigo: str, datos: ReabrirIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Única forma de volver a aceptar respuestas tras un cierre: una persona de RH la reabre. El
+    intento anterior (transcript, evaluación, cierre) se archiva en `intentos_previos`, nunca se
+    pisa. La liga (token) es la misma; la postulación vuelve a Entrevista IA si estaba en Evaluación."""
+    e = _por_codigo(db, codigo)
+    p = e.postulacion
+    if not p or p.cuenta_id != cuenta.id:
+        raise HTTPException(404, "Entrevista no encontrada")
+    if e.estado not in ("evaluada", "interrumpida", "completada", "en_curso"):
+        raise HTTPException(409, "La entrevista no está cerrada ni en curso.")
+    intento = {
+        "estado": e.estado, "cierre": e.cierre, "iniciada_en": e.iniciada_en.isoformat() if e.iniciada_en else None,
+        "finalizada_en": e.finalizada_en.isoformat() if e.finalizada_en else None,
+        "transcript": list(e.transcript or []), "evaluacion": dict(e.evaluacion or {}),
+    }
+    e.intentos_previos = list(e.intentos_previos or []) + [intento]
+    e.transcript = []
+    e.evaluacion = {}
+    e.cierre = ""
+    e.iniciada_en = None
+    e.finalizada_en = None
+    e.estado = "programada"
+    if p.etapa == "Evaluación":
+        p.etapa = "Entrevista IA"
+    registrar(
+        db, u.nombre, "entrevista_reabierta", "entrevista", e.codigo,
+        {"postulacion": p.codigo, "motivo": datos.motivo.strip()[:300], "intento_archivado": intento["estado"], "correo_rh": u.correo},
+    )
     db.commit()
     return entrevista_dict(e)

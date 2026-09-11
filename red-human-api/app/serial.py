@@ -40,6 +40,17 @@ def fecha_corta(dt: Optional[datetime]) -> str:
 # ------------------------------------------------------------
 
 
+def nombre_empresa(cuenta, cliente=None, mostrar_cliente: bool = True) -> str:
+    """Regla única de identidad de empresa (Fase 4, Punto 1) SIN necesitar una Vacante: el
+    Cliente (nombre visible) solo si existe y está marcado para mostrarse; si no, el nombre
+    comercial de la Cuenta. La usa el generador de vacantes antes de que la vacante exista."""
+    if cliente is not None and mostrar_cliente:
+        return cliente.nombre_visible
+    if cuenta is not None:
+        return cuenta.nombre_comercial
+    return ""
+
+
 def nombre_empresa_candidato(v: Vacante) -> str:
     """Nombre de empresa que debe ver el candidato (Fase B, punto 10): el Cliente real solo si
     hay uno asignado y `mostrar_cliente_candidato` está activo; si no, el nombre comercial de la
@@ -77,6 +88,7 @@ def vacante_dict(
         "modalidad": v.modalidad,
         "sueldo": v.sueldo,
         "estado": v.estado,
+        "enfoqueEntrevista": v.enfoque_entrevista or "profesional",
         "candidatos": n_candidatos,
         "nuevos": n_nuevos,
         "publicada": hace(v.creada_en) if v.estado == "Publicada" else "borrador",
@@ -442,7 +454,13 @@ def entrevista_dict(e: Entrevista) -> dict:
         "creada": hace(e.creada_en),
         "guion": e.guion or {},
         "mensajes": len(e.transcript or []),
+        "turnosCandidato": sum(1 for m in (e.transcript or []) if m.get("rol") == "user"),
         "evaluacion": e.evaluacion or None,
+        # Fase 4: cómo cerró y cuándo; intentos previos si RH la reabrió.
+        "cierre": e.cierre or "",
+        "iniciadaEn": iso(e.iniciada_en),
+        "finalizadaEn": iso(e.finalizada_en),
+        "intentosPrevios": len(e.intentos_previos or []),
         "tono": (c.id if c else 0) % 4,
         "ligaMeet": e.liga_meet or "",
     }

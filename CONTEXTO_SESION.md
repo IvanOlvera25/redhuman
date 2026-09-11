@@ -60,11 +60,12 @@ transversal):
    hiciste y cuál es el siguiente paso.
 
 ## Lo último que se hizo
-5 pantallas administrativas de Configuración (Puntos 9-13: Cuentas, Clientes y contactos,
-Plantillas, Notificaciones por acción, Modo Prueba) completadas el 2026-09-11 — ver la sección
-"5 pantallas administrativas" al final del archivo (decisiones, esquema, verificación, siguiente
-paso). Código listo en el working tree, SIN commit/deploy, pendiente de revisión del usuario.
-Antes de esto: Fase 2 (Candidato/Postulación) comiteada y desplegada (`24acfd7`).
+Fase 4 — comportamiento y evaluación de la Entrevista IA (avatar) — completada el 2026-09-11:
+ver la sección "Fase 4" al final del archivo (6 puntos, hotfix bloqueante de Fase 2, propuesta +
+spike del cierre automático, verificación, siguiente paso). Código listo en el working tree, SIN
+commit/deploy, pendiente de revisión del usuario y de que corra el spike de Anam con la clave real.
+Antes de esto: Fase 2 (`24acfd7`) y las 5 pantallas de Configuración (`47a4a8b`), ambas
+comiteadas y desplegadas.
 
 ## Lo que sigue
 
@@ -850,7 +851,7 @@ escribiendo en la persona en vez de la postulación) y una regla de WhatsApp inv
 aplicada ("solo una activa, tomar la más reciente"). Se auditó, se reescribió la capa
 completa sobre `Postulacion` como única fuente de verdad y se verificó de punta a punta.
 
-### Estado final (todo en el working tree, 27 archivos, ver `git status`)
+### Estado final (comiteado en `24acfd7`, 27 archivos)
 - `models.py`: `Candidato` = persona (identidad + `postulacion_conversacion_id`); sus columnas
   de proceso quedan como LEGADO solo para la migración. `Postulacion` = proceso (etapa, estado,
   score, chat, entrevistas, expediente, consentimiento, videollamada) con `activa`,
@@ -941,7 +942,7 @@ WhatsApp (ya documentada arriba) y ruteo de WhatsApp por Cuenta (`_cuenta_unica`
 exigiendo exactamente 1 Cuenta activa).
 
 
-## 5 pantallas administrativas de Configuración (Puntos 9-13) — completadas 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+## 5 pantallas administrativas de Configuración (Puntos 9-13) — CERRADAS 2026-09-11 (comiteadas `47a4a8b` y desplegadas)
 
 Investigación previa contra el código real (2 agentes de exploración: backend y frontend) con
 inventario "existe vs falta" por punto; plan completo aprobado en plan mode antes de escribir
@@ -1025,11 +1026,180 @@ nuevos `components/dashboard/{campos,linea-notificar,confirmacion-accion,por-cue
   (igual que en fases anteriores): sin navegador real, no se probó clic-a-clic (modales, línea
   "Notificar", toggle de Cuenta). Servidores y base de prueba detenidos/borrados.
 
+### Siguiente paso (histórico — comiteado en `47a4a8b` y desplegado; ver Fase 4 abajo)
+Pendiente conocido sin cambio: `sembrar_reglas_notificacion.py` de Fase D (verificar si ya corrió
+en producción).
+
+
+## Fase 4 — Comportamiento y evaluación de la Entrevista IA (avatar) — completada 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+
+Fuente: documento "Cambios integrados – Red Human" (no está en el repo); se trabajó con las 6
+reglas transcritas por el usuario. El guion de ejemplo del documento **todavía no se ha
+entregado**: cuando llegue se incorpora como referencia de TONO en `ia.prompt_entrevistador`
+(nunca literal). Plan completo aprobado en plan mode antes de escribir código.
+
+### Hotfix bloqueante encontrado (regresión de Fase 2, causada por este mismo agente)
+`routers/entrevistas.py` (`publica`, `_system_prompt`, `sesion`) y `routers/contratacion.py`
+(carta de intención) leían `c.vacante` sobre un `Candidato`, atributo que dejó de existir en
+`24acfd7`. Efecto real en producción: `GET /entrevistas/publica/{token}`, `POST …/sesion` y
+`POST …/turno` respondían **500** → la liga de entrevista estaba caída desde el deploy de Fase 2;
+la carta de intención también tronaba. Corregido: `_contexto(e)` → `(postulación, vacante,
+empresa)` desde `e.postulacion`; `_html_carta_intencion` usa `e.postulacion.vacante`. Cobertura
+nueva en `verificar_fase2.py` (agendar → liga pública → consentimiento → sesión → turnos → finalizar).
+
+### Decisiones tomadas por el usuario en esta sesión (no volver a preguntar)
+1. Alma se presenta como **"de Red Human"** y entrevista "para el puesto de X en {empresa
+   resuelta}". La empresa siempre sale de la regla Cliente-visible / nombre comercial de la Cuenta.
+2. El campo libre **"Empresa" de Nueva vacante se eliminó**: el generador resuelve el nombre en
+   el servidor (`POST /vacantes/generar` recibe `cliente_id` + `mostrar_cliente_candidato` y
+   devuelve `empresa`); `Vacante.empresa` se rellena siempre con el nombre resuelto.
+3. Punto 4 (cierre automático): en este lote va la **propuesta documentada + spike técnico** con
+   la clave real (sin tocar producción). Sí entraron las piezas independientes de la señal.
+4. Punto 3: prompt redactado con las reglas transcritas; el guion de ejemplo llega después.
+
+### Qué se implementó por punto
+- **P1 Identidad de la empresa.** `serial.nombre_empresa(cuenta, cliente, mostrar)` (misma regla
+  que `nombre_empresa_candidato`, sin necesitar una Vacante). `POST /vacantes/generar` ignora el
+  texto libre `empresa` (compatibilidad) y usa la regla; `crear`/`actualizar` fijan `v.empresa` con
+  la regla (en update: `flush + refresh` antes de recalcular, si no las relaciones no están
+  cargadas). Entrevista: saludo, `GET /publica.empresa` y system prompt usan la empresa resuelta.
+  Frontend: `FormularioContenidoVacante` recibe `clienteId`/`mostrarCliente` (Vacantes y
+  Configuración → Plantillas) y muestra "Contenido generado a nombre de X".
+- **P2 Identidad del candidato y datos concretos.** `candidatos.nombre_ficha(p)`: primer nombre
+  de la ficha; `wa_nombre` (perfil de WhatsApp) solo si la ficha trae placeholder
+  ("Candidato…"/"TMP"). Aplicado en prefiltro/agenda/onboarding y en la entrevista. El prompt
+  recibe ubicación/modalidad/sueldo/beneficios/área con la regla "usa estos datos, no hables en
+  genérico; lo que no esté aquí lo confirma RH". Tras B1 (Fase 2) + el hotfix, **no queda vector
+  de cruce entre candidatos**: el system prompt se arma por request y por token desde
+  `e.postulacion`, sin caches ni globales en `ia.py`/`avatar.py`/`entrevistas.py`.
+- **P3 Comportamiento y lenguaje.** `ia.mensaje_inicial_entrevista` = "Hola {N}, soy Alma, de Red
+  Human. {N}, cuando estés listo comenzamos. Dime, ¿estás listo?". `ia.prompt_entrevistador`
+  (nuevo, keyword-only): protocolo de inicio (afirmativo → primera pregunta de inmediato; negativo
+  → "Tómate tu tiempo, avísame cuando estés listo" y esperar; nunca re-preguntar tras afirmativo),
+  silencio ("{N}, no te escuché. ¿Estás listo?"), prohibido numerar ("Pregunta 1/2…"), frases
+  cortas, UNA pregunta principal por intervención, general → profundizar, no repetir lo
+  respondido, entrevistadora no lectora, guion = temas de referencia (no hay que agotarlo),
+  despedida fija `DESPEDIDA_ENTREVISTA` = "Con esto terminamos la entrevista" (debe abrir el
+  último mensaje: «{DESPEDIDA}, {N}.»). `guion_entrevista` ahora produce `temas` (5–7) +
+  `preguntas` de referencia + `enfoque`; `temas_de_guion()` da compatibilidad con guiones viejos.
+  Modo texto: mismo prompt, `TurnoEntrevista.terminada` se conserva; demo mode respeta el
+  protocolo (no → esperar; sí → pregunta). Silencio en avatar (cliente, `talk()` del SDK): tras
+  `SESSION_READY`, 12 s sin `USER_SPEECH_STARTED` y sin turno del candidato → "{N}, no te escuché.
+  ¿Estás listo?"; a media entrevista 25 s → "{N}, no te escuché. ¿Me repites tu respuesta?"; máximo
+  2 avisos por silencio; se pausa mientras habla. **Supuesto ajustable**: la regla solo define la
+  frase del inicio; la variante intermedia y los tiempos (12/25 s) son míos.
+- **P4 Cierre automático — implementado lo independiente de la señal + propuesta + spike.**
+  Ver subsección aparte abajo.
+- **P5 Conocimiento profundo.** `ia.EvaluacionEntrevista.perfil: PerfilProfundo` con 10
+  dimensiones (`motivadores, estilo_trabajo, valores, decisiones, aprendizaje, resiliencia,
+  objetivos, riesgos, compatibilidad, relacion_jefatura`), cada una `{evaluado, conclusion,
+  evidencia[]}` (citas), + `areas_desarrollo`. `evaluar_entrevista` recibe perfil ideal, temas y
+  enfoque. Regla dura en entrevistador Y evaluador (`DATOS_SENSIBLES_PROHIBIDOS`): estado civil,
+  hijos/familia, religión, salud/embarazo, orientación, con quién vive, edad → no preguntar; si
+  el candidato lo menciona, no registrarlo ni usarlo. Se guarda en `Entrevista.evaluacion` (JSON,
+  sin cambio de esquema); evaluaciones anteriores traen `perfil = null` y la UI lo tolera.
+  Frontend: `components/dashboard/perfil-profundo.tsx` (`PerfilProfundoVista`, colapsable con
+  evidencia) usado en Candidatos → Evaluaciones y en el tablero de Entrevistas (con riesgos,
+  evidencia, cierre y # de respuestas).
+- **P6 Enfoque de entrevista.** `Vacante.enfoque_entrevista` y `Plantilla.enfoque_entrevista`
+  (String 30, default `profesional`; valores `ENFOQUES_ENTREVISTA = profesional |
+  profesional_personal`, en `CAMPOS_PLANTILLA`). Cambia automáticamente guion, prompt y
+  evaluador (`ENFOQUE_ENTREVISTA_TEMAS`). Frontend: sección "Entrevista IA" con `Selector` en el
+  formulario compartido (Nueva vacante y Plantillas) y editable en el detalle de la vacante
+  (aplica a entrevistas que se agenden después — el guion se genera al agendar).
+
+### Punto 4 — cierre automático: lo que ya está, la propuesta y el spike
+**Principio (del usuario):** nunca ejecutar una transición de estado importante sin una señal
+explícita que el backend pueda verificar.
+
+Ya implementado (independiente de la señal):
+- `Entrevista.cierre` (String 20: `herramienta | marcador | texto | manual | desconexion |
+  tiempo`), `iniciada_en`, `finalizada_en`, `intentos_previos` (JSON). Estado nuevo `interrumpida`.
+- `POST /sesion` exige consentimiento (403) y rechaza entrevistas cerradas (409); fija `en_curso` +
+  `iniciada_en`. `POST /turno` 403 si no está `en_curso`.
+- `POST /finalizar` recibe `{transcript, cierre}`: idempotente si ya cerró (devuelve el registro,
+  NO pisa el cierre verificado); 409 si no está `en_curso`; 403 sin consentimiento; transcript
+  tope 400 mensajes. `_cierre_verificado`: `herramienta|marcador|texto` solo se aceptan si el
+  último mensaje de Alma contiene `DESPEDIDA_ENTREVISTA`, si no se degrada a `manual`. Con
+  `cierre` fuera de `CIERRES_COMPLETOS` (desconexión/tiempo) y `< MIN_TURNOS_CANDIDATO = 2` →
+  `interrumpida` sin evaluar (RH puede reabrir). En los demás casos evalúa (con perfil), mueve
+  la postulación a Evaluación y manda el WhatsApp de agradecimiento (mencionando la empresa).
+- `POST /entrevistas/{codigo}/reabrir` (decisor, misma Cuenta, 404 si otra): archiva
+  `{estado, cierre, iniciada_en, finalizada_en, transcript, evaluacion}` en `intentos_previos`,
+  resetea, vuelve a `programada`, postulación Evaluación → Entrevista IA, bitácora.
+- Cliente (`app/entrevista/[token]/page.tsx`): un solo `cerrar(cierre)`; manda `texto` (modo
+  texto, `terminada`), `marcador` (avatar: último mensaje de Alma contiene la despedida → espera
+  6 s y cierra), `manual` (botón), `desconexion` (`CONNECTION_CLOSED`). Pantalla "interrumpida".
+  El tablero muestra "Interrumpida" + botón "Reabrir" (solo decisores).
+
+Propuesta de señal primaria (pendiente del spike):
+- Client tool `terminar_entrevista` declarada inline en `personaConfig.tools` (`type: "client"`),
+  que el LLM invoca DESPUÉS de la despedida. El SDK la recibe con `registerToolCallHandler`; el
+  cliente llama `/finalizar` con `cierre: "herramienta"` y luego `stopStreaming()`. El servidor
+  verifica igual (despedida en el transcript). Si Anam NO reenvía tools a un LLM custom
+  (`ANAM_LLM_ID` = nuestro endpoint de OpenAI; no está documentado), la señal primaria queda el
+  **marcador** ya implementado, y `voiceDetectionOptions.silenceBeforeSessionEndSeconds` cubre el
+  abandono. En ambos casos el candidato no pulsa nada.
+
+Spike (lo corre el usuario, con la clave real, sin tocar producción):
+1. `cd red-human-api && .venv/Scripts/python.exe scripts/spike_anam_tools.py` → pide 3 session
+   tokens (control / tools + voiceDetectionOptions con llmId / tools sin llmId) y reporta qué
+   acepta la API. Copia el token del caso 2.
+2. Abre `scripts/spike_anam_tools.html` en el navegador (doble clic; usa el SDK desde esm.sh),
+   pega el token, "Conectar", di «sí, listo», contesta y espera la despedida.
+3. Resultado: si aparece `TOOL_CALL_STARTED` / `HANDLER terminar_entrevista` → implementar la
+   tool como señal primaria (lote corto: `persona_config(extras={"tools": [...]})` ya acepta
+   extras; cliente `registerToolCallHandler` → `cerrar("herramienta")`). Si solo llega la
+   despedida sin tool → se queda el marcador (ya funciona) y se ajustan `voiceDetectionOptions`.
+   Anotar aquí el resultado.
+
+### Esquema
+Columnas nuevas (las agrega `sincronizar()` al arrancar, verificado sobre copia de la base):
+`vacantes.enfoque_entrevista`, `plantillas.enfoque_entrevista`, `entrevistas.cierre`,
+`entrevistas.iniciada_en`, `entrevistas.finalizada_en`, `entrevistas.intentos_previos`. Sin
+migración de datos: las entrevistas viejas quedan con `cierre = ""` y evaluación sin `perfil`.
+
+### Archivos tocados (git status)
+Backend: `app/models.py`, `app/serial.py`, `app/services/ia.py`, `app/services/entrevistas.py`,
+`app/services/avatar.py` (`persona_config(extras)`, `avatar_activo` exige `ANAM_LLM_ID`),
+`app/routers/entrevistas.py`, `app/routers/vacantes.py`, `app/routers/plantillas.py`,
+`app/routers/candidatos.py` (`nombre_ficha`), `app/routers/contratacion.py` (hotfix),
+`scripts/verificar_fase2.py`, nuevos `scripts/verificar_entrevista_ia.py`,
+`scripts/spike_anam_tools.py`, `scripts/spike_anam_tools.html`.
+Frontend: `lib/api.ts`, `lib/data.ts`, `app/entrevista/[token]/page.tsx`,
+`app/dashboard/entrevistas/page.tsx`, `app/dashboard/vacantes/page.tsx`,
+`app/dashboard/candidatos/page.tsx`, `app/dashboard/configuracion/page.tsx`,
+`components/dashboard/vacantes/formulario-contenido.tsx`, nuevo `components/dashboard/perfil-profundo.tsx`.
+Docs: `CLAUDE.md`, este archivo.
+
+### Verificación realizada (2026-09-11)
+- `scripts/verificar_entrevista_ia.py` (nuevo, TestClient demo, base desechable): **49 OK** —
+  hotfix (5 endpoints públicos responden), empresa resuelta en `/publica` y en `/vacantes/generar`
+  (ignora texto libre), system prompt con empresa/nombre de ficha/datos concretos/temas sin
+  numerar/protocolo/sensibles, enfoque Vacante → Plantilla → guion → prompt → evaluador, guardas de
+  `finalizar` (409 programada, 403 sin consentimiento, degradación a `manual`, `interrumpida` con
+  desconexión y <2 turnos, idempotencia), `turno` 403 tras cierre, `reabrir` archiva y vuelve a
+  `programada`, perfil con 10 dimensiones, `nombre_ficha`.
+- Regresión: `verificar_fase2.py` **61 OK** (56 + liga pública), `verificar_config_admin.py` **52 OK**.
+- `pyflakes app`: solo 3 avisos preexistentes en HEAD (no míos). `tsc --noEmit` y `next build`
+  limpios (19 rutas).
+- `sincronizar()` sobre copia de `redhuman.db` (vía `import app.main`): agrega exactamente las 6
+  columnas de Fase 4 (más las de fases anteriores que la base local no tenía).
+- Smoke con API real (`uvicorn` demo, base nueva + `migrar_cuentas.py --forzar`): login →
+  `/vacantes/generar` con `empresa: "TEXTO LIBRE"` devuelve "Grupo Carbe" → vacante con
+  `profesional_personal` (temas incluyen "Objetivos personales y visión de futuro") → entrevista
+  inmediata → `/publica` (candidato "Laura", empresa resuelta) → `finalizar` antes de sesión 409 →
+  consentimiento → sesión (saludo exacto del documento, `nombre`) → "todavía no" → "Tómate tu
+  tiempo…" → "sí, lista" → primera pregunta → 8 turnos → despedida con `terminada` → `finalizar`
+  `cierre=texto` → `evaluada`, perfil 10 dims (5 evaluadas en demo) → `turno` 403 → `reabrir` →
+  `programada`, `intentosPrevios = 1`. **Limitación honesta:** sin navegador real no se probó el
+  avatar (silencio con `talk()`, marcador, desconexión) ni el clic-a-clic de las pantallas;
+  el modo avatar depende además del spike. Servidor y base de prueba detenidos/borrados.
+
 ### Siguiente paso
-1. El usuario revisa el diff (`git status`: ver lista de archivos arriba) y, si puede, prueba en
-   navegador: crear una segunda Cuenta y cambiar con el selector; ficha de cliente con contactos;
-   Configuración → Plantillas → Nueva plantilla; línea "Notificar · Editar" al programar una
-   entrevista; ventana de Modo Prueba.
-2. Commit y deploy cuando se apruebe. No hay script de datos que correr: las columnas nuevas las
-   agrega `sincronizar()` al arrancar. Pendiente conocido sin cambio: `sembrar_reglas_notificacion.py`
-   de Fase D (verificar si ya corrió en producción).
+1. El usuario revisa el diff y corre el spike de Anam (instrucciones arriba); anotar el resultado
+   aquí y decidir el lote corto de la tool `terminar_entrevista`.
+2. Entregar el guion de ejemplo del documento → ajustar el tono de `prompt_entrevistador`
+   (referencia, no literal) y validar los tiempos de silencio (12/25 s) con una entrevista real.
+3. Commit y deploy cuando se apruebe (**urgente por el hotfix**: la liga pública de entrevista
+   está caída en producción desde Fase 2). No hay script de datos que correr.
