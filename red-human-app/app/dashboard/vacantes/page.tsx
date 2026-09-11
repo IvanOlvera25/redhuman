@@ -54,6 +54,7 @@ import {
   type Plantilla,
 } from "@/lib/api";
 import { usePuedeDecidir } from "@/components/sesion";
+import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveedor";
 import { cn } from "@/lib/utils";
 
 const estadoTone: Record<Vacante["estado"], "good" | "neutral" | "warn" | "bad"> = {
@@ -79,6 +80,9 @@ export default function Vacantes() {
   const [filtro, setFiltro] = useState<(typeof filtros)[number]>("Todas");
   const [open, setOpen] = useState(false);
   const [sel, setSel] = useState<Vacante | null>(null);
+  useAnunciarContextoAgente(
+    sel ? { pantalla: "vacante", entidad: { tipo: "vacante", codigo: sel.id } } : { pantalla: "vacantes" },
+  );
   const [verPrevia, setVerPrevia] = useState<string | null>(null);
   const [gestionPlantillas, setGestionPlantillas] = useState(false);
   const [datos, setDatos] = useState<Vacante[]>(vacantesDemo);

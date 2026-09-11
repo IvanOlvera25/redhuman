@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-5.6-luna"
 
+    # Fase F — agente global "Pregunta a Red Human" (punto 29): tope diario de mensajes por
+    # usuario (Q7) — evita abuso/costo descontrolado, sin bloquear el uso normal.
+    agente_limite_mensajes_dia: int = 60
+
     # Avatar de entrevistas (Anam) — vacío = modo demo (entrevista por texto)
     anam_api_key: str = ""
     anam_avatar_id: str = ""

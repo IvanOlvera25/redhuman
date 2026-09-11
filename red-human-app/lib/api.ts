@@ -1469,3 +1469,61 @@ export function fetchColaboradores(activo?: boolean) {
   const q = activo === undefined ? "" : `?activo=${activo}`;
   return get<Colaborador[]>(`/colaboradores${q}`);
 }
+
+/* ============================================================
+   Fase F · Agente global "Pregunta a Red Human" (punto 29)
+
+   Sin persistencia de conversación en el backend (decisión de privacidad, Q6): el frontend
+   manda el historial completo en cada pregunta y lo guarda solo en memoria del navegador.
+   ============================================================ */
+
+export type PantallaAgente =
+  | "tablero" | "vacantes" | "vacante" | "candidatos" | "candidato"
+  | "entrevistas" | "onboarding" | "configuracion";
+
+export interface EntidadContextoAgente {
+  tipo: "candidato" | "vacante";
+  codigo: string;
+}
+
+export interface ContextoAgente {
+  pantalla: PantallaAgente | string;
+  entidad?: EntidadContextoAgente | null;
+}
+
+export interface TurnoAgente {
+  rol: "user" | "assistant";
+  texto: string;
+}
+
+export interface AccionPropuestaAgente {
+  tool: string;
+  argumentos: Record<string, unknown>;
+  resumen: string;
+}
+
+export interface RespuestaAgente {
+  texto: string;
+  navegacion: { ruta: string; etiqueta: string }[];
+  accionPropuesta: AccionPropuestaAgente | null;
+  uso: { mensajesHoy: number; limite: number };
+}
+
+export function preguntarAgente(
+  mensaje: string,
+  historial: TurnoAgente[],
+  contexto: ContextoAgente | null,
+  alcance: "cuenta" | "todas_mis_cuentas" = "cuenta",
+) {
+  return post<RespuestaAgente>("/agente/preguntar", { mensaje, historial, contexto, alcance });
+}
+
+/** Ejecuta una acción ya confirmada por la persona en el panel — nunca se llama sin que medie
+ * un clic explícito de "Confirmar" sobre la tarjeta de `accionPropuesta`. */
+export function ejecutarAccionAgente(tool: string, argumentos: Record<string, unknown>) {
+  return post<Record<string, unknown>>("/agente/ejecutar", { tool, argumentos });
+}
+
+export function fetchUsoAgente() {
+  return get<{ mensajesHoy: number; limite: number }>("/agente/uso");
+}

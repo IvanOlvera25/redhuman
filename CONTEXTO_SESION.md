@@ -561,11 +561,139 @@ de ninguna fase actualmente planeada.
 - Frontend: `next build` — exit code 0, 19 rutas generadas (mismas que antes + tamaño
   esperable: `configuracion` subió de ~3 kB a ~8.9 kB por las 2 secciones nuevas).
 
-### Siguiente paso
+### Siguiente paso (histórico — ver Fase F abajo)
 1. El usuario revisa los cambios de los Puntos 2 y 27 (especialmente probar el selector de
    Cuenta si existe más de una en el entorno de prueba).
 2. Commit y deploy cuando se apruebe.
 3. El único punto técnico pendiente de limpieza es conectar los badges de navegación
    (Vacantes/Candidatos/Entrevistas/Onboarding) a conteos reales de la API — anotado como
    deuda técnica, no es urgente para operación.
+
+## Fase F — Agente global "Pregunta a Red Human" completada — 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+
+Punto 29, la pieza más grande de la reestructuración. Investigación + arquitectura propuesta
+y aprobada primero (sin código), luego plan de implementación completo aprobado en plan mode,
+luego construida. Ver el hilo de la sesión para el reporte de investigación completo
+(inventario de funciones por módulo, hallazgo de que `Usuario.ve_equipo`/`reporta_a_id`
+existen como columnas pero no se aplican en ningún query real) y las 7 decisiones de negocio
+(Q1-Q7) confirmadas por el usuario antes de planear.
+
+**Decisiones de negocio confirmadas (no volver a preguntar):**
+1. Visibilidad: el agente hereda el alcance real de hoy (toda la Cuenta activa vía
+   `cuenta_actual`), SIN filtrar por responsable/equipo — ver deuda técnica abajo.
+2. "Consulta global" = sumar entre las Cuentas a las que el usuario YA tiene acceso, con
+   toggle explícito `alcance: "cuenta" | "todas_mis_cuentas"` — nunca cruza a una Cuenta ajena.
+3. Sin mecanismo de envío a un destinatario específico: el agente respeta el mecanismo de
+   Fase D tal cual (dispara el evento completo según la regla configurada; si el destinatario
+   pedido no está activado, se lo explica al usuario).
+4. Toda tool de búsqueda regresa conteo total + muestra de 10 (`MUESTRA_MAXIMA`) + navegación
+   "Ver todos", nunca vuelca una tabla completa al modelo.
+5. Desambiguación obligatoria si una búsqueda matchea 2+ entidades — nunca adivina.
+6. El texto de la conversación NO se persiste en el backend (privacidad) — vive solo en
+   memoria de React (`ProveedorAgente`), se pierde al recargar. Las ACCIONES ejecutadas sí
+   quedan en la bitácora de siempre (`registrar()`), igual que si se hubiera usado el botón.
+7. Tope diario de mensajes por usuario desde el arranque (`UsoAgente`, 60/día por defecto,
+   `config.py::agente_limite_mensajes_dia`).
+
+**Arquitectura implementada:**
+- `app/services/agente.py` (nuevo): catálogo de ~22 tools de LECTURA + ~30 de ESCRITURA, cada
+  una un wrapper delgado que llama EN PROCESO la misma función del router correspondiente
+  (`candidatos.listar`, `vacantes.crear`, `contratacion.alta`, etc. — los decoradores
+  `@router.get/post/patch` no envuelven la función, se pueden llamar directo pasando
+  `db`/`u`/`cuenta` ya resueltos). Cero base de datos ni lógica de negocio paralela.
+- Separación dura lectura/escritura: el modelo ejecuta tools de lectura directo, pero las de
+  escritura NUNCA se ejecutan dentro del loop — en cuanto el modelo pide una, se corta, se
+  arma `accionPropuesta` con un resumen determinista (Python, no texto libre del modelo) y se
+  regresa sin tocar la base. Solo `POST /agente/ejecutar` (un clic real de "Confirmar" en el
+  panel) ejecuta de verdad, revalidando el permiso del tool server-side.
+- Contexto "dónde está parado el usuario": como Vacantes/Candidatos manejan la selección con
+  estado de React local (no rutas `/vacantes/[codigo]`), se agregó el hook
+  `useAnunciarContextoAgente` que cada página llama cuando cambia su selección; el backend
+  prerresuelve esa ficha completa y la mete al system prompt antes de la primera ronda.
+- `models.py::UsoAgente` — única tabla nueva, un contador `(usuario_id, fecha) -> mensajes`,
+  nunca guarda texto.
+- `candidatos.py::listar()` ganó el filtro `nombre` (LIKE, mismo patrón que `busqueda` de
+  vacantes) — necesario para resolver nombres propios en lenguaje natural.
+- Router nuevo `app/routers/agente.py`: `POST /agente/preguntar`, `POST /agente/ejecutar`,
+  `GET /agente/uso`. Registrado en `main.py`.
+- Frontend: `components/dashboard/agente/` (nuevo) — `proveedor.tsx` (Context con la
+  conversación en memoria + `useAnunciarContextoAgente`), `barra.tsx` (botón "✨ Pregunta a
+  Red Human…" en el topbar, sustituye el buscador decorativo), `panel.tsx` (panel lateral con
+  mensajes, tarjetas de acción con Confirmar/Cancelar, navegación, chips contextuales por
+  pantalla). Montado en `app/dashboard/layout.tsx` (`ProveedorAgente`) y `shell.tsx`
+  (`BarraAgente`/`PanelAgente`) — NO es un módulo aparte, vive en todas las pantallas del
+  dashboard. `lib/api.ts`: tipos + `preguntarAgente`/`ejecutarAccionAgente`/`fetchUsoAgente`.
+
+**Bug real encontrado y corregido durante la verificación con el modelo real** (importante,
+documentado para no repetirlo en tools futuras): al principio, los parámetros opcionales de
+las tools de lectura usaban JSON `"type": "boolean"`/`"string"` simple. El modelo real
+(`gpt-5.6-luna`) rellenaba TODOS los parámetros opcionales con valores de relleno (`""`, `0`,
+`false`) en vez de omitirlos — y esos valores de relleno SÍ filtraban de verdad (ej.
+`consentimiento=false` enviado sin que el usuario preguntara nada de consentimiento escondía
+candidatos reales; `cliente_id=0` devolvía 0 resultados siempre). Solución aplicada: todas las
+tools de LECTURA ahora usan JSON Schema "strict" real de OpenAI — tipos nullable
+(`["string","null"]` etc.) + `required` listando TODAS las propiedades + `"strict": true` —
+así el modelo manda `null` explícito cuando un filtro no aplica, en vez de inventar un valor.
+Los 3 filtros tri-estado más riesgosos (`consentimiento`/`apto`/`duplicados` en
+`buscar_candidatos`, `activo` en `listar_colaboradores`) además se expusieron como enum
+`"si"/"no"` en vez de booleano puro, con un traductor `_si_no()` del lado del servidor. Las
+tools de ESCRITURA no se tocaron con este mismo rigor porque tienen la confirmación humana
+como red de seguridad (un argumento de relleno ahí como mucho ensucia el resumen visible antes
+de confirmar, nunca esconde resultados en silencio).
+
+**Verificación realizada:**
+- Backend: import-check completo, `configure_mappers()` OK. Suite determinista con
+  `TestClient` contra una base descartable (con `OPENAI_API_KEY` forzada a vacío para no
+  gastar llamadas reales en la regresión automática): las 22 tools de lectura ejecutan sin
+  excepción, el filtro `nombre` nuevo funciona, `pipeline_cuenta` coincide exactamente con
+  `GET /metricas/pipeline` (misma fuente, cero conteos paralelos), muestra representativa de
+  escrituras por módulo (candidatos, vacantes, clientes, requisiciones, notificaciones) vía
+  `POST /agente/ejecutar` real, permisos (`usuario_decisor` vs `usuario_admin`, revalidados
+  server-side, 403 si se intenta saltar), `/agente/preguntar` en modo demo NUNCA muta la base,
+  límite diario dispara 429 al superarse, `alcance=todas_mis_cuentas` nunca mezcla una Cuenta
+  ajena. Todo en verde.
+- **Pasada manual deliberada con el modelo real** (única vez que se gastaron llamadas reales
+  a OpenAI, a propósito, fuera de la suite automática): los 4 verbos del punto 29 probados
+  literalmente contra una base de prueba (despacho legal demo, vacante "Abogado Corporativo"
+  con candidatos aptos/no aptos, dos candidatos llamados "Jorge") — Consultar ("¿cuántos
+  candidatos aptos...?") contó correcto: 2; Encontrar ("vacantes sin candidatos") encontró la
+  única vacante vacía; Analizar ("¿por qué no avanzan?") dio una respuesta con evidencia real
+  citando score y motivo de descarte de cada candidato; Ejecutar ("agenda entrevista con
+  Jorge...") desambiguó correctamente entre los 2 Jorges y pidió los datos faltantes (modalidad,
+  entrevistador) antes de proponer nada — nunca adivinó. También se probó el comportamiento
+  contextual (pregunta "¿quién es el mejor candidato?" con el contexto de una vacante ya
+  prerresuelto, sin volver a preguntar) y el caso Q3 (pedir un recordatorio dirigido solo al
+  entrevistador: el agente explicó la limitación real del mecanismo en vez de inventar un
+  atajo). Esta pasada fue la que encontró y permitió corregir el bug de "strict mode" descrito
+  arriba.
+- Frontend: `tsc --noEmit` y `next build` limpios (19 rutas, mismas de antes). Prueba con
+  servidores reales (`uvicorn` + `next dev` contra una base nueva): login real, las 4 páginas
+  tocadas (`/dashboard`, `/vacantes`, `/candidatos`, `/configuracion`) responden 200 con
+  sesión y compilan sin error en el log del dev server, `GET /agente/uso` y
+  `POST /agente/preguntar` responden correctamente a través del servidor real. **Limitación
+  honesta** (igual que en fases anteriores): no hay navegador real disponible en este entorno
+  para probar clic-a-clic del panel (abrir/cerrar, mandar un mensaje desde la UI, confirmar
+  una tarjeta de acción) — esa capa se cubre con `tsc`/`build` limpios, el smoke test de
+  servidores reales, y la pasada manual del backend con el modelo real ya descrita arriba.
+  Servidores y bases de prueba ya detenidos/borrados.
+
+### Deuda técnica documentada — "Mío/Mi equipo" nunca implementado (decisión Q1)
+
+`Usuario.ve_equipo` y `Usuario.reporta_a_id` existen como columnas desde Fase A pero **no se
+leen en ningún query de ningún router** — hoy cualquier Usuario de una Cuenta ve todos los
+candidatos/vacantes de esa Cuenta, sin importar quién es el responsable o si "ve equipo" está
+activo. El agente de Fase F hereda ese mismo alcance real (decisión Q1: no construir una
+lógica de visibilidad nueva que nunca existió). Igual que los badges de nav del punto 28, esto
+queda anotado como un ticket aparte — implementar "Mío/Mi equipo" de verdad en los endpoints
+de lectura (mínimo candidatos/vacantes) es trabajo nuevo, no reparación de Fase F.
+
+### Siguiente paso
+1. El usuario revisa el código de Fase F (o pide una prueba manual en navegador de la barra
+   "Pregunta a Red Human" desde varias pantallas, incluyendo confirmar una acción propuesta).
+2. Commit y deploy cuando se apruebe — junto con TODO lo demás pendiente en esta rama (Fase D,
+   Puntos 2/27/28), nada se ha comiteado todavía.
+3. Correr `scripts/sembrar_reglas_notificacion.py` en producción tras el deploy (pendiente de
+   Fase D, sin relación con Fase F).
+4. Fase E (simplificación) es transversal y ya se viene verificando en cada fase — no queda
+   ningún entregable aparte pendiente salvo la deuda técnica anotada arriba.
 
