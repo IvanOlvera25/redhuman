@@ -96,6 +96,7 @@ import {
   type PerfilProfundo,
   nombreEtapa,
   fetchCliente,
+  fetchIntegracionTeams,
   lineasResultados,
   type ContactoCliente,
   type Entrevistador,
@@ -2731,7 +2732,7 @@ function PanelEntrevistaHumana({
 
   const detalleModalidad =
     eh.modalidad === "Videollamada"
-      ? eh.liga && `Liga: ${eh.liga}`
+      ? eh.liga && `${eh.porTeams ? "Reunión de Teams: " : "Liga: "}${eh.liga}`
       : eh.modalidad === "Presencial"
         ? eh.ubicacion && `Ubicación: ${eh.ubicacion}`
         : eh.modalidad === "Llamada"
@@ -3072,6 +3073,10 @@ function ModalProgramarEntrevista({
   const [comentario, setComentario] = useState("");
   const [error, setError] = useState("");
   const [enviando, setEnviando] = useState(false);
+  // Fase 7B: con Teams conectado en la Cuenta la videollamada se crea sola; «Usar otra liga» = excepción
+  const [teamsConectado, setTeamsConectado] = useState(false);
+  const [otraLiga, setOtraLiga] = useState(false);
+  const porTeams = modalidad === "Videollamada" && teamsConectado && !otraLiga;
 
   useEffect(() => {
     fetchEntrevistadores().then((d) => {
@@ -3080,6 +3085,7 @@ function ModalProgramarEntrevista({
         setEntrevistadorUsuarioId(d[0].id);
       }
     });
+    fetchIntegracionTeams().then((t) => setTeamsConectado(Boolean(t?.disponible && t?.conectado)));
   }, []);
 
   useEffect(() => {
@@ -3117,7 +3123,7 @@ function ModalProgramarEntrevista({
       setError("Indica nombre y correo del entrevistador.");
       return;
     }
-    if (modalidad === "Videollamada" && !liga.trim()) {
+    if (modalidad === "Videollamada" && !porTeams && !liga.trim()) {
       setError("Falta la liga de la videollamada.");
       return;
     }
@@ -3131,13 +3137,14 @@ function ModalProgramarEntrevista({
       tipoEntrevistador,
       entrevistadorUsuarioId: tipoEntrevistador === "interno" ? entrevistadorUsuarioId : null,
       entrevistadorContactoId: tipoEntrevistador === "externo" && typeof contactoSel === "number" ? contactoSel : null,
+      usarTeams: porTeams,
       entrevistadorNombre: tipoEntrevistador === "externo" && esOtro ? entrevistadorNombre : "",
       entrevistadorCorreo: tipoEntrevistador === "externo" && esOtro ? entrevistadorCorreo : "",
       entrevistadorWhatsapp: tipoEntrevistador === "externo" && esOtro ? entrevistadorWhatsapp : "",
       fecha,
       hora,
       modalidad,
-      liga,
+      liga: porTeams ? "" : liga,
       ubicacion,
       telefonoContacto,
       comentario,
@@ -3282,10 +3289,24 @@ function ModalProgramarEntrevista({
             </select>
           </label>
 
-          {modalidad === "Videollamada" && (
+          {modalidad === "Videollamada" && porTeams && (
+            <div className="rounded-xl border border-brand/25 bg-brand-soft/40 px-3.5 py-2.5 text-[13px] leading-relaxed text-ink-2">
+              <span className="font-semibold text-ink">Reunión de Microsoft Teams automática.</span> Al programar se crea la reunión, la liga va en el
+              correo y WhatsApp de confirmación y se manda la invitación de calendario a candidato y entrevistador.
+              <button type="button" onClick={() => setOtraLiga(true)} className="ml-1.5 font-medium text-brand hover:underline">
+                Usar otra liga
+              </button>
+            </div>
+          )}
+          {modalidad === "Videollamada" && !porTeams && (
             <label className="flex flex-col gap-1.5">
               <span className="text-sm font-medium text-ink-2">Liga de la videollamada</span>
               <input value={liga} onChange={(e) => setLiga(e.target.value)} placeholder="https://meet.google.com/…" className={inputCls} />
+              {teamsConectado && otraLiga && (
+                <button type="button" onClick={() => setOtraLiga(false)} className="self-start text-[12px] font-medium text-brand hover:underline">
+                  ← Volver a usar Teams
+                </button>
+              )}
             </label>
           )}
           {modalidad === "Presencial" && (
@@ -3370,7 +3391,7 @@ function ModalModificarEntrevista({
       setError("Completa fecha y hora.");
       return;
     }
-    if (modalidad === "Videollamada" && !liga.trim()) {
+    if (modalidad === "Videollamada" && !eh.porTeams && !liga.trim()) {
       setError("Falta la liga de la videollamada.");
       return;
     }
@@ -3434,7 +3455,12 @@ function ModalModificarEntrevista({
             </select>
           </label>
 
-          {modalidad === "Videollamada" && (
+          {modalidad === "Videollamada" && eh.porTeams && (
+            <p className="rounded-xl border border-brand/25 bg-brand-soft/40 px-3.5 py-2.5 text-[13px] leading-relaxed text-ink-2">
+              <span className="font-semibold text-ink">Reunión de Microsoft Teams.</span> La liga se conserva y la reunión de calendario se actualiza con la nueva fecha y hora.
+            </p>
+          )}
+          {modalidad === "Videollamada" && !eh.porTeams && (
             <label className="flex flex-col gap-1.5">
               <span className="text-sm font-medium text-ink-2">Liga de la videollamada</span>
               <input

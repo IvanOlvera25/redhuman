@@ -32,6 +32,9 @@ export interface EntrevistaHumana {
   tipo: TipoEntrevistador | "";
   usuarioId: number | null;
   correoExterno: string;
+  /** Fase 7B: la videollamada la creó Microsoft Teams (liga automática + invitación de calendario). */
+  porTeams?: boolean;
+  teamsEventoId?: string;
   fecha: string | null;
   modalidad: "Presencial" | "Videollamada" | "Llamada" | "";
   liga: string;

@@ -9,3 +9,4 @@ python-multipart>=0.0.12
 pypdf>=5.1
 apscheduler>=3.10
 weasyprint>=70.0
+cryptography>=43  # Fase 7B: tokens de Microsoft 365 cifrados en la base

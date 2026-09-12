@@ -100,6 +100,24 @@ LiveKit (entrevistas en vivo), Resend (correo).
 | GET | `/bitacora` | Auditoría con cadena de hashes |
 | GET | `/salud` | Estado de configuración |
 
+## Microsoft Teams / Microsoft 365 (Fase 7B)
+
+Con la cuenta conectada (Configuración → Integraciones), al programar una Entrevista Humana en
+Videollamada la API crea la reunión de Teams en el calendario del usuario conectado, guarda la liga,
+la incluye en el correo/WhatsApp y manda la invitación de calendario a candidato y entrevistador.
+
+1. Azure Portal → App registrations → nueva app (cuentas de tu organización).
+2. Authentication → Redirect URI (Web): la que muestra Configuración → Integraciones, normalmente
+   `https://api.tudominio.mx/integraciones/teams/callback`.
+3. API permissions → Microsoft Graph → **Delegated**: `Calendars.ReadWrite`, `User.Read`,
+   `offline_access` (concede consentimiento de administrador si tu tenant lo exige).
+4. Certificates & secrets → nuevo client secret.
+5. En el `.env` de la API (nombres exactos): `TEAMS_CLIENT_ID`, `TEAMS_TENANT_ID`, `TEAMS_CLIENT_SECRET`
+   (opcional `TEAMS_REDIRECT_URI` si la API corre detrás de un proxy que no manda el host público) y
+   `pip install -r requirements.txt` (agrega `cryptography`: los tokens se guardan cifrados).
+6. Configuración → Integraciones → «Conectar cuenta» con un usuario de Microsoft 365 (el organizador
+   de las reuniones) → «Probar conexión». Sin las variables la videollamada pide la liga a mano.
+
 ## Producción (VPS Hostinger)
 
 1. `DATABASE_URL=postgresql+psycopg://…` (instala Postgres en el VPS) — SQLite es solo para dev.

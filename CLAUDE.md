@@ -78,3 +78,10 @@ Plataforma SaaS de agente de IA de RH para México. `red-human-app` (Next.js 15)
 - Notificar al Cliente: `NotificarIn.cliente_contactos_ids` elige contactos ya registrados (None = todos, [] = ninguno); nunca se capturan datos nuevos del Cliente en una acción.
 - Correo: `services/correo.py` (Resend). Sin `RESEND_API_KEY` no sale y se registra «RESEND_API_KEY sin configurar»; el remitente sandbox `onboarding@resend.dev` solo entrega al dueño de la cuenta Resend — en producción `RESEND_FROM` debe ser un dominio verificado. Todo envío regresa `{destinatario, canal, destino, enviado, detalle}` y las acciones manuales lo muestran a RH (`lineasResultados`): un envío fallido nunca es silencioso.
 - Las reglas de notificación de una Cuenta NACEN con `models.REGLAS_NOTIFICACION_DEFAULT` (entrevista_agendada = correo+WhatsApp a candidato y entrevistador); las reglas ya guardadas nunca se tocan automáticamente.
+
+## Microsoft Teams (Fase 7B)
+
+- Variables EXACTAS: `TEAMS_CLIENT_ID`, `TEAMS_TENANT_ID`, `TEAMS_CLIENT_SECRET` (+ opcional `TEAMS_REDIRECT_URI`). Solo en el `.env` del servidor; sin ellas `teams.teams_configurado()` es False y todo cae a la liga manual (mismo patrón que Resend/Anam: nunca rompe el flujo).
+- OAuth con permisos DELEGADOS, conexión POR CUENTA (`IntegracionTeams`, una fila por Cuenta). Tokens SIEMPRE cifrados (Fernet con clave derivada de `TEAMS_CLIENT_SECRET`, `services/teams.py`); nunca se exponen por la API. Rotar el secret obliga a reconectar.
+- La reunión se crea con `POST /me/events` (`isOnlineMeeting` + `teamsForBusiness`, asistentes = correos de candidato y entrevistador): Graph manda las invitaciones de calendario. Se crea ANTES de guardar la entrevista; si falla → 502 y no se guarda nada (decisión del usuario). Modificar/cancelar sincronizan la reunión best-effort (nunca bloquean).
+- Con Teams conectado la UI NO pide la liga en Videollamada; «Usar otra liga» (`usar_teams=false`) es la excepción. No agregar modalidades ni pasos.

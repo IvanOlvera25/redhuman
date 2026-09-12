@@ -60,11 +60,12 @@ transversal):
    hiciste y cuál es el siguiente paso.
 
 ## Lo último que se hizo
-**Fase 7A — flujo de Entrevista Humana (entrevistador, cliente, correo) — 2026-09-12: CÓDIGO
-LISTO, sin commit/deploy** (ver sección al final). Antes, ya desplegados: Parte 3 formulario de
-vacante (`c1f3cd3`), Parte 2 introducción Red Human (`4dd3031`), Parte 1 hotfix WhatsApp (`785516f`),
-Fase 4 (`8b45d18`), Fase 2 (`24acfd7`), Configuración (`47a4a8b`). Pendientes: spike de Anam y guion
-de ejemplo (Fase 4); Fase 7B Microsoft Teams (credenciales de Azure).
+**Fase 7B — Microsoft Teams en Entrevista Humana — 2026-09-12: CÓDIGO LISTO, sin commit/deploy**
+(ver sección al final; la validación real con Microsoft Graph la hace el usuario tras desplegar, las
+credenciales solo existen en producción). Antes, ya desplegados: Fase 7A (`c67f2d6`), Parte 3
+(`c1f3cd3`), Parte 2 (`4dd3031`), Parte 1 (`785516f`), Fase 4 (`8b45d18`), Fase 2 (`24acfd7`),
+Configuración (`47a4a8b`). Pendientes: spike de Anam y guion de ejemplo (Fase 4); `RESEND_API_KEY`/
+`RESEND_FROM` en producción (7A).
 
 ## Lo que sigue
 
@@ -1362,7 +1363,7 @@ Cliente, CampoSueldo); esa capa se cubre con `tsc`/`build` y la revisión del c�
 ### Siguiente paso (histórico — desplegada en `c1f3cd3`; ver Fase 7A abajo)
 
 
-## Fase 7A — Flujo de Entrevista Humana: entrevistador, cliente y correo — 2026-09-12 (CÓDIGO LISTO, sin commit/deploy)
+## Fase 7A — Flujo de Entrevista Humana: entrevistador, cliente y correo — 2026-09-12 (comiteada `c67f2d6` y desplegada)
 
 Teams queda para 7B (credenciales de Azure). Investigación contra el código real y plan aprobado en
 plan mode.
@@ -1430,7 +1431,77 @@ correo en Configuración → Notificaciones (las reglas guardadas no se tocan so
   con `cliente_contactos_ids=[Marco]` → solo Marco; «+ Otro»; páginas 200. **Limitación honesta:** sin
   navegador ni claves reales no se probó el clic-a-clic del modal ni una entrega real de Resend/Meta.
 
-### Siguiente paso
-1. Revisar el diff; configurar `RESEND_API_KEY`/`RESEND_FROM` en producción y probar una entrevista real
-   (el aviso del modal dirá exactamente qué salió y qué no).
-2. Commit y deploy cuando se apruebe. Fase 7B (Teams) cuando haya credenciales de Azure.
+### Siguiente paso (histórico — desplegada en `c67f2d6`; ver Fase 7B abajo)
+Pendiente de producción: `RESEND_API_KEY`/`RESEND_FROM` con dominio verificado.
+
+
+## Fase 7B — Microsoft Teams en Entrevista Humana — 2026-09-12 (CÓDIGO LISTO, sin commit/deploy; validación real pendiente del usuario)
+
+**Contexto:** no existía ningún patrón OAuth en el sistema (todas las integraciones son claves de
+servidor). Las credenciales de Azure existen SOLO en producción por decisión del usuario: se construyó
+todo con modo seguro (sin `TEAMS_*` → liga manual, como siempre) y Microsoft simulado en la prueba
+automática; la conexión real con Graph se valida al desplegar.
+
+**Variables de entorno (nombres EXACTOS que lee el código, confirmados con el usuario):**
+`TEAMS_CLIENT_ID`, `TEAMS_TENANT_ID`, `TEAMS_CLIENT_SECRET` → `settings.teams_client_id/tenant_id/
+client_secret`. Opcional `TEAMS_REDIRECT_URI`; sin ella la Redirect URI es `{host real de la API}/
+integraciones/teams/callback` (Configuración → Integraciones la muestra para copiarla a Azure).
+
+**Decisiones del usuario (no volver a preguntar):**
+1. Redirect URI = callback en la API (`/integraciones/teams/callback`).
+2. Permisos DELEGADOS; scopes `offline_access User.Read Calendars.ReadWrite`; un usuario M365
+   conecta su cuenta por Cuenta de Red Human; reunión e invitaciones salen de su calendario.
+3. Teams conectado y la reunión no se puede crear → 502 con motivo, NO se guarda nada.
+4. Tokens cifrados con Fernet (clave SHA-256 de `TEAMS_CLIENT_SECRET`); dependencia nueva
+   `cryptography` (instalar al desplegar); rotar el secret → «reconectar».
+Supuestos propios (marcados): reunión de 60 min; modificar/cancelar sincronizan la reunión
+best-effort (`avisoTeams` en la respuesta, nunca bloquea); si al modificar deja de ser videollamada
+se cancela el evento.
+
+**Implementado:**
+- Esquema: tabla `integraciones_teams` (una fila por Cuenta: usuario/nombre M365, tokens cifrados,
+  `expira_en`, `scopes`, `conectado_por/en`, `ultimo_error`) y `entrevistas_humanas.teams_evento_id`.
+  `create_all` + `sincronizar()`; sin script de datos.
+- `app/services/teams.py` (nuevo): `teams_configurado`, `redirect_uri`, `url_autorizacion`, `state`
+  firmado HMAC (10 min), `intercambiar_codigo`/`refrescar`, `cifrar`/`descifrar`, `token_vigente`
+  (refresh automático con margen de 2 min, guarda tokens nuevos), `perfil` (/me), `crear_reunion`
+  (`POST /me/events` con `isOnlineMeeting` + `teamsForBusiness`, asistentes required = candidato con
+  correo + entrevistador, horas en UTC), `actualizar_reunion`, `cancelar_reunion`, `integracion_de`.
+- `app/routers/integraciones.py` (nuevo, en `main.py`): `GET /integraciones/teams` (admin, estado +
+  redirectUri, sin tokens), `POST /conectar` (URL de Microsoft; 409 sin credenciales),
+  `GET /callback` (público, valida state, guarda tokens cifrados, redirige a
+  `{APP_URL}/dashboard/configuracion?teams=ok|error`), `POST /probar` (/me), `DELETE`.
+- `routers/candidatos.py`: `EntrevistaHumanaIn.usar_teams` (default True); Videollamada → Teams
+  automático si la Cuenta está conectada y no se mandó liga (se crea ANTES de guardar; 502 si falla),
+  si no → liga manual obligatoria; `eh.teams_evento_id`; Modificar conserva la liga de Teams y
+  actualiza el evento; Cancelar borra el evento (Graph manda la cancelación); bitácora con `teams`.
+  `serial`: `teamsEventoId`, `porTeams`.
+- Frontend: `lib/api.ts` (`IntegracionTeams`, `fetchIntegracionTeams`, `conectarTeams`, `probarTeams`,
+  `desconectarTeams`, `usarTeams`), `configuracion/page.tsx` nueva `SeccionIntegraciones` (estado no
+  disponible / no conectada / conectada como…, «Conectar cuenta»/«Reconectar», «Probar conexión»,
+  «Desconectar», Redirect URI con «Copiar», aviso `?teams=ok|error`), `candidatos/page.tsx`: con Teams
+  conectado el modal muestra «Reunión de Microsoft Teams automática» + «Usar otra liga» (sin campo de
+  liga); sin Teams, el campo manual de siempre; Modificar no vuelve a pedir la liga de Teams; la ficha
+  muestra «Reunión de Teams: …». Presencial/Llamada sin cambios; ningún paso ni modalidad nueva.
+- Docs: `README.md` (pasos de Azure), `.env.example`, `requirements.txt` (`cryptography>=43`), `CLAUDE.md`.
+
+**Verificación:** nuevo `scripts/verificar_teams.py` **41 OK** (modo seguro sin credenciales;
+credenciales ficticias + Microsoft simulado: URL de autorización con tenant/client_id/scopes, state
+manipulado rechazado, callback guarda tokens NO legibles y descifrables, estado sin tokens, probar,
+programar Videollamada → liga de Teams + evento con invitación a candidato y entrevistador, 10:00
+CDMX → 16:00Z, liga en WhatsApp y correo, «Usar otra liga», Presencial no toca Graph, Graph caído →
+502 sin guardar nada ni notificar, refresh automático, refresh rechazado → «reconectar», modificar
+PATCH/best-effort, cancelar DELETE, desconectar, secret rotado). Regresión: 28 + 53 + 67 + 52 + 40
+OK; `pyflakes`; `tsc` + `next build` limpios; `sincronizar()`/`create_all` sobre copia crean la
+tabla y la columna; smoke con servidores reales en demo (estado no disponible, conectar 409, callback
+redirige con error, páginas 200). **Limitación honesta:** no se probó contra Microsoft real.
+
+### Validación real tras el deploy (la hace el usuario)
+1. `pip install -r requirements.txt` en el servidor (nuevo: `cryptography`).
+2. Configuración → Integraciones → copiar la Redirect URI y registrarla en el App Registration
+   (permisos delegados `Calendars.ReadWrite`, `User.Read`, `offline_access`).
+3. «Conectar cuenta» con el usuario M365 organizador → «Probar conexión».
+4. Programar una entrevista de prueba en Videollamada: revisar liga en la ficha, correo/WhatsApp, y el
+   evento con invitados en el calendario M365. Cualquier error de Graph aparece en el modal (502 con
+   motivo) y en Integraciones (`ultimoError`).
+5. Commit y deploy cuando se apruebe.

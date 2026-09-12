@@ -152,6 +152,8 @@ def _entrevista_humana_dict(eh) -> dict:
         "correoExterno": eh.correo_externo,
         "whatsappExterno": eh.whatsapp_externo or "",
         "contactoId": eh.contacto_id,  # Fase 7A
+        "teamsEventoId": eh.teams_evento_id or "",  # Fase 7B
+        "porTeams": bool(eh.teams_evento_id),
         "fecha": iso(eh.fecha),
         "modalidad": eh.modalidad,
         "liga": eh.liga,

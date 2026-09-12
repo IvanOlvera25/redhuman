@@ -51,6 +51,7 @@ from ..services import notificaciones
 from ..services.configuracion import modo_prueba_activo, puede_forzar_prueba
 from ..services.notificaciones import RE_CORREO, TZ_MEXICO, NotificarIn, override_de
 from ..services.whatsapp import enviar_mensaje, enviar_plantilla
+from ..services import teams as teams_srv
 
 router = APIRouter(prefix="/candidatos", tags=["candidatos"])
 
@@ -1416,11 +1417,55 @@ class EntrevistaHumanaIn(BaseModel):
     fecha: str  # ISO: 2026-09-05
     hora: str  # HH:MM, hora de México
     modalidad: str  # Presencial | Videollamada | Llamada
-    liga: str = ""  # obligatoria si modalidad == Videollamada
+    liga: str = ""  # Videollamada: obligatoria SOLO si no la crea Teams (Fase 7B)
     ubicacion: str = ""  # obligatoria si modalidad == Presencial
     telefono_contacto: str = ""  # opcional si modalidad == Llamada (si falta, se usa c.telefono)
     comentario: str = ""
     notificar: Optional[NotificarIn] = None  # Punto 12: ajuste solo para esta acción
+    # Fase 7B: con Teams conectado en la Cuenta, la videollamada se crea sola; False = «Usar otra liga».
+    usar_teams: bool = True
+
+
+def _asunto_teams(p: Postulacion) -> str:
+    v = p.vacante
+    return f"Entrevista — {v.titulo if v else 'Red Human'} — {p.nombre}"
+
+
+async def _reunion_teams_o_error(db: Session, p: Postulacion, inicio: datetime, entrevistador: dict) -> Optional[dict]:
+    """Fase 7B: si la Cuenta tiene Teams conectado, crea la reunión + invitaciones ANTES de guardar
+    nada. Si Graph falla → 502 con el motivo y no se guarda la entrevista (decisión del usuario: nunca
+    confirmar sin liga ni dejar una entrevista a medias). None = Teams no disponible en la Cuenta."""
+    integ = teams_srv.integracion_de(db, p.cuenta_id)
+    if not integ:
+        return None
+    asistentes = [{"correo": p.correo, "nombre": p.nombre}, entrevistador]
+    try:
+        return await teams_srv.crear_reunion(
+            db, integ, asunto=_asunto_teams(p), inicio=inicio, asistentes=asistentes,
+            cuerpo=f"Entrevista de {p.nombre} para {p.vacante.titulo if p.vacante else 'la vacante'}. Programada desde Red Human.",
+        )
+    except teams_srv.TeamsError as e:
+        integ.ultimo_error = str(e)[:300]
+        db.commit()
+        raise HTTPException(502, f"No se pudo crear la reunión de Teams: {e} Reintenta o usa «Usar otra liga».")
+
+
+async def _teams_best_effort(db: Session, p: Postulacion, eh: EntrevistaHumana, accion: str, **kw) -> Optional[str]:
+    """Modificar/cancelar la reunión de Teams sin bloquear la acción de RH (supuesto Fase 7B)."""
+    if not eh.teams_evento_id:
+        return None
+    integ = teams_srv.integracion_de(db, p.cuenta_id)
+    if not integ:
+        return "Teams ya no está conectado en la Cuenta; la reunión no se actualizó."
+    try:
+        if accion == "actualizar":
+            await teams_srv.actualizar_reunion(db, integ, eh.teams_evento_id, inicio=kw["inicio"])
+        else:
+            await teams_srv.cancelar_reunion(db, integ, eh.teams_evento_id)
+        return None
+    except teams_srv.TeamsError as e:
+        integ.ultimo_error = str(e)[:300]
+        return f"La reunión de Teams no se pudo {accion}: {e}"
 
 
 @router.post("/{codigo}/entrevista-humana", status_code=201)
@@ -1482,8 +1527,6 @@ async def programar_entrevista_humana(
         raise HTTPException(400, f"Modalidad inválida. Usa una de: {', '.join(MODALIDADES_ENTREVISTA_HUMANA)}")
     liga = datos.liga.strip()
     ubicacion = datos.ubicacion.strip()
-    if datos.modalidad == "Videollamada" and not liga:
-        raise HTTPException(400, "Falta la liga de la videollamada.")
     if datos.modalidad == "Presencial" and not ubicacion:
         raise HTTPException(400, "Falta la ubicación de la entrevista.")
 
@@ -1492,6 +1535,20 @@ async def programar_entrevista_humana(
         fecha_hora = datetime.fromisoformat(f"{datos.fecha}T{datos.hora}").replace(tzinfo=TZ_MEXICO).astimezone(timezone.utc)
     except ValueError:
         raise HTTPException(400, "Fecha u hora inválida (fecha ISO: 2026-09-05, hora: 14:30).")
+
+    # Fase 7B: Videollamada → Teams automático (si la Cuenta está conectada y RH no eligió otra liga)
+    # o liga manual. Nunca se pide la liga cuando Teams la genera.
+    teams_evento_id = ""
+    if datos.modalidad == "Videollamada":
+        reunion = None
+        if datos.usar_teams and not liga:
+            reunion = await _reunion_teams_o_error(
+                db, p, fecha_hora, {"correo": correo_entrevistador, "nombre": nombre_entrevistador}
+            )
+        if reunion:
+            liga, teams_evento_id = reunion["liga"], reunion["evento_id"]
+        elif not liga:
+            raise HTTPException(400, "Falta la liga de la videollamada.")
 
     anterior = p.etapa
     p.etapa = "Entrevista Humana"
@@ -1507,6 +1564,7 @@ async def programar_entrevista_humana(
         fecha=fecha_hora,
         modalidad=datos.modalidad,
         liga=liga if datos.modalidad == "Videollamada" else "",
+        teams_evento_id=teams_evento_id,
         ubicacion=ubicacion if datos.modalidad == "Presencial" else "",
         telefono_contacto=datos.telefono_contacto.strip() if datos.modalidad == "Llamada" else "",
         comentario=datos.comentario.strip(),
@@ -1525,6 +1583,7 @@ async def programar_entrevista_humana(
             "tipo_entrevistador": datos.tipo_entrevistador, "contacto_id": eh.contacto_id,
             "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
             "notificaciones": resultados, "notificar_override": override,
+            "teams_evento_id": teams_evento_id,
         },
     )
     _actualizar_ultima_actividad(p)
@@ -1573,6 +1632,9 @@ async def modificar_entrevista_humana(
         raise HTTPException(400, f"Modalidad inválida. Usa una de: {', '.join(MODALIDADES_ENTREVISTA_HUMANA)}")
     liga = datos.liga.strip()
     ubicacion = datos.ubicacion.strip()
+    # Fase 7B: si la videollamada la creó Teams, la liga se conserva (no se pide de nuevo)
+    if datos.modalidad == "Videollamada" and not liga and eh.teams_evento_id:
+        liga = eh.liga
     if datos.modalidad == "Videollamada" and not liga:
         raise HTTPException(400, "Falta la liga de la videollamada.")
     if datos.modalidad == "Presencial" and not ubicacion:
@@ -1582,6 +1644,13 @@ async def modificar_entrevista_humana(
         fecha_hora = datetime.fromisoformat(f"{datos.fecha}T{datos.hora}").replace(tzinfo=TZ_MEXICO).astimezone(timezone.utc)
     except ValueError:
         raise HTTPException(400, "Fecha u hora inválida (fecha ISO: 2026-09-05, hora: 14:30).")
+
+    aviso_teams = None
+    if datos.modalidad == "Videollamada" and eh.teams_evento_id:
+        aviso_teams = await _teams_best_effort(db, p, eh, "actualizar", inicio=fecha_hora)
+    elif eh.teams_evento_id:
+        aviso_teams = await _teams_best_effort(db, p, eh, "cancelar")  # dejó de ser videollamada
+        eh.teams_evento_id = ""
 
     eh.fecha = fecha_hora
     eh.modalidad = datos.modalidad
@@ -1594,11 +1663,12 @@ async def modificar_entrevista_humana(
     resultados = await notificaciones.disparar(db, "entrevista_modificada", p, u.nombre, eh=eh, override=override)
     registrar(
         db, u.nombre, "entrevista_humana_modificada", "postulacion", p.codigo,
-        {"fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo, "notificaciones": resultados, "notificar_override": override},
+        {"fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo, "notificaciones": resultados,
+         "notificar_override": override, "teams": aviso_teams or ("actualizada" if eh.teams_evento_id else None)},
     )
     _actualizar_ultima_actividad(p)
     db.commit()
-    return postulacion_dict(p, detalle=True)
+    return {**postulacion_dict(p, detalle=True), "avisoTeams": aviso_teams}
 
 
 @router.post("/{codigo}/entrevista-humana/cancelar")
@@ -1616,16 +1686,18 @@ async def cancelar_entrevista_humana(
     if eh.realizada:
         raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
     eh.cancelada = True
+    aviso_teams = await _teams_best_effort(db, p, eh, "cancelar")  # Fase 7B: Graph manda la cancelación del calendario
 
     override = override_de(notificar)
     resultados = await notificaciones.disparar(db, "entrevista_cancelada", p, u.nombre, eh=eh, override=override)
     registrar(
         db, u.nombre, "entrevista_humana_cancelada", "postulacion", p.codigo,
-        {"correo_rh": u.correo, "notificaciones": resultados, "notificar_override": override},
+        {"correo_rh": u.correo, "notificaciones": resultados, "notificar_override": override,
+         "teams": aviso_teams or ("cancelada" if eh.teams_evento_id else None)},
     )
     _actualizar_ultima_actividad(p)
     db.commit()
-    return postulacion_dict(p, detalle=True)
+    return {**postulacion_dict(p, detalle=True), "avisoTeams": aviso_teams}
 
 
 @router.post("/{codigo}/entrevista-humana/realizada")

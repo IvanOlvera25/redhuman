@@ -955,6 +955,8 @@ export function programarEntrevistaHumana(
     entrevistadorUsuarioId?: number | null;
     /** Fase 7A: contacto del Cliente de la vacante; si viene, nombre/correo/WhatsApp salen del contacto. */
     entrevistadorContactoId?: number | null;
+    /** Fase 7B: false = «Usar otra liga» aunque la Cuenta tenga Teams conectado. */
+    usarTeams?: boolean;
     entrevistadorNombre?: string;
     entrevistadorCorreo?: string;
     entrevistadorWhatsapp?: string;
@@ -972,6 +974,7 @@ export function programarEntrevistaHumana(
     tipo_entrevistador: datos.tipoEntrevistador,
     entrevistador_usuario_id: datos.entrevistadorUsuarioId ?? null,
     entrevistador_contacto_id: datos.entrevistadorContactoId ?? null,
+    usar_teams: datos.usarTeams ?? true,
     entrevistador_nombre: datos.entrevistadorNombre ?? "",
     entrevistador_correo: datos.entrevistadorCorreo ?? "",
     entrevistador_whatsapp: datos.entrevistadorWhatsapp ?? "",
@@ -1882,4 +1885,40 @@ export function ejecutarAccionAgente(tool: string, argumentos: Record<string, un
 
 export function fetchUsoAgente() {
   return get<{ mensajesHoy: number; limite: number }>("/agente/uso");
+}
+
+/* ============================================================
+   Fase 7B · Integraciones — Microsoft Teams / Microsoft 365 (por Cuenta)
+   ============================================================ */
+
+export interface IntegracionTeams {
+  /** false = el servidor no tiene TEAMS_CLIENT_ID/TENANT_ID/CLIENT_SECRET (modo seguro: liga manual). */
+  disponible: boolean;
+  conectado: boolean;
+  usuarioM365: string;
+  nombreM365: string;
+  conectadoPor: string;
+  conectadoEn: string | null;
+  expiraEn: string | null;
+  ultimoError: string;
+  /** Lo que hay que registrar como Redirect URI en el App Registration de Azure. */
+  redirectUri: string;
+  scopes: string;
+}
+
+export function fetchIntegracionTeams() {
+  return get<IntegracionTeams>("/integraciones/teams");
+}
+
+/** Regresa la URL de autorización de Microsoft; el llamador navega ahí (window.location). */
+export function conectarTeams() {
+  return post<{ url: string; redirectUri: string }>("/integraciones/teams/conectar");
+}
+
+export function probarTeams() {
+  return post<{ ok: boolean; usuarioM365: string; nombreM365: string }>("/integraciones/teams/probar");
+}
+
+export function desconectarTeams() {
+  return eliminar<{ ok: boolean }>("/integraciones/teams");
 }
