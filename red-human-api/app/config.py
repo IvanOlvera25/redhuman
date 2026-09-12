@@ -65,6 +65,15 @@ class Settings(BaseSettings):
     resend_api_key: str = ""
     resend_from: str = "Red Human AI <onboarding@resend.dev>"
 
+    # --- Microsoft Teams / Microsoft 365 (Fase 7B) ---
+    # Nombres EXACTOS de las variables: TEAMS_CLIENT_ID, TEAMS_TENANT_ID, TEAMS_CLIENT_SECRET.
+    # Vacías = integración no disponible (la videollamada pide la liga a mano, como siempre).
+    # TEAMS_REDIRECT_URI es opcional: sin ella se usa el host real de la API + /integraciones/teams/callback.
+    teams_client_id: str = ""
+    teams_tenant_id: str = ""
+    teams_client_secret: str = ""
+    teams_redirect_uri: str = ""
+
     cors_origins: str = "http://localhost:3000"
 
 

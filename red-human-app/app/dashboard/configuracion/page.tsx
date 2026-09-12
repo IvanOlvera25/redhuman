@@ -10,6 +10,7 @@ import {
   Copy,
   ExternalLink,
   FlaskConical,
+  Link2,
   Loader2,
   Pencil,
   Plus,
@@ -42,6 +43,7 @@ import {
   actualizarUsuario,
   agregarContactoCliente,
   agregarUsuarioCuenta,
+  conectarTeams,
   crearCliente,
   crearCuenta,
   crearPlantilla,
@@ -56,11 +58,14 @@ import {
   fetchConfiguracion,
   fetchCuenta,
   fetchCuentas,
+  fetchIntegracionTeams,
   fetchPlantillas,
   fetchReglasNotificacion,
   fetchUsuarios,
   guardarReglasNotificacion,
   quitarUsuarioCuenta,
+  probarTeams,
+  desconectarTeams,
   subirLogoCuentaPorId,
   EVENTOS_NOTIFICACION,
   NOMBRE_EVENTO_NOTIFICACION,
@@ -72,6 +77,7 @@ import {
   type ContactoCliente,
   type DatosCuenta,
   type FichaCuenta,
+  type IntegracionTeams,
   type Plantilla,
   type ReglaNotificacion,
   type ResumenBorradoPrueba,
@@ -111,8 +117,132 @@ export default function Configuracion() {
       <SeccionClientes />
       <SeccionPlantillas />
       <SeccionNotificaciones />
+      <SeccionIntegraciones />
       <SeccionModoPrueba />
     </div>
+  );
+}
+
+/* ================================================================== */
+/* Integraciones (Fase 7B) — Microsoft Teams / Microsoft 365           */
+/* ================================================================== */
+
+function SeccionIntegraciones() {
+  const [teams, setTeams] = useState<IntegracionTeams | null>(null);
+  const [ocupado, setOcupado] = useState("");
+  const [msg, setMsg] = useState<{ tono: "ok" | "error" | "info"; texto: string } | null>(null);
+  const [copiada, setCopiada] = useState(false);
+
+  const recargar = useCallback(() => fetchIntegracionTeams().then((t) => setTeams(t)), []);
+  useEffect(() => {
+    recargar();
+    // Retorno del flujo OAuth (GET /integraciones/teams/callback redirige aquí con ?teams=ok|error)
+    try {
+      const q = new URLSearchParams(window.location.search);
+      const r = q.get("teams");
+      if (r === "ok") setMsg({ tono: "ok", texto: `Microsoft 365 conectado${q.get("usuario") ? ` como ${q.get("usuario")}` : ""}.` });
+      if (r === "error") setMsg({ tono: "error", texto: `No se pudo conectar Microsoft 365: ${q.get("motivo") ?? "error desconocido"}.` });
+      if (r) window.history.replaceState({}, "", window.location.pathname);
+    } catch {}
+  }, [recargar]);
+
+  async function conectar() {
+    setOcupado("conectar");
+    setMsg(null);
+    const r = await conectarTeams();
+    if (!r.ok) {
+      setOcupado("");
+      return setMsg({ tono: "error", texto: r.error });
+    }
+    window.location.href = r.data.url; // Microsoft → callback de la API → de vuelta aquí con ?teams=…
+  }
+
+  async function probar() {
+    setOcupado("probar");
+    setMsg(null);
+    const r = await probarTeams();
+    setOcupado("");
+    setMsg(r.ok ? { tono: "ok", texto: `Conexión correcta: ${r.data.nombreM365 || r.data.usuarioM365}.` } : { tono: "error", texto: r.error });
+    recargar();
+  }
+
+  async function desconectar() {
+    if (!window.confirm("¿Desconectar Microsoft 365 de esta Cuenta? Las videollamadas volverán a pedir la liga a mano.")) return;
+    setOcupado("desconectar");
+    const r = await desconectarTeams();
+    setOcupado("");
+    setMsg(r.ok ? { tono: "info", texto: "Microsoft 365 desconectado." } : { tono: "error", texto: r.error });
+    recargar();
+  }
+
+  function copiar() {
+    if (!teams) return;
+    navigator.clipboard.writeText(teams.redirectUri).then(() => {
+      setCopiada(true);
+      setTimeout(() => setCopiada(false), 1600);
+    });
+  }
+
+  return (
+    <Card className="mb-6 p-5">
+      <CabSeccion icono={Link2} titulo="Integraciones" subtitulo="Conexiones externas de esta Cuenta. Cada Cuenta de Red Human conecta la suya." />
+      {msg && <div className="mb-3"><Aviso tono={msg.tono}>{msg.texto}</Aviso></div>}
+      <div className="rounded-xl border border-border-soft p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold">Microsoft Teams / Microsoft 365</p>
+            <p className="mt-0.5 text-[13px] leading-relaxed text-ink-2">
+              Con la cuenta conectada, al programar una Entrevista Humana en Videollamada Red Human crea la reunión de Teams,
+              guarda la liga, la incluye en el correo y WhatsApp de confirmación y manda la invitación de calendario a
+              candidato y entrevistador.
+            </p>
+            {!teams ? (
+              <p className="mt-2 text-[12px] text-ink-3">Cargando…</p>
+            ) : !teams.disponible ? (
+              <p className="mt-2 text-[12px] text-ink-3">
+                No disponible en este servidor: faltan <code className="font-mono">TEAMS_CLIENT_ID</code>, <code className="font-mono">TEAMS_TENANT_ID</code> y{" "}
+                <code className="font-mono">TEAMS_CLIENT_SECRET</code> en el <code className="font-mono">.env</code> de la API. Mientras tanto la videollamada pide la liga a mano.
+              </p>
+            ) : teams.conectado ? (
+              <p className="mt-2 text-[12px] text-ink-2">
+                <Badge tone="good" dot>Conectada</Badge> como <b>{teams.nombreM365 || teams.usuarioM365}</b> ({teams.usuarioM365})
+                {teams.conectadoEn ? ` · ${fechaCorta(teams.conectadoEn)}` : ""}{teams.conectadoPor ? ` · por ${teams.conectadoPor}` : ""}
+                {teams.ultimoError && <span className="mt-1 block text-bad">Último error: {teams.ultimoError}</span>}
+              </p>
+            ) : (
+              <p className="mt-2 text-[12px] text-ink-3"><Badge tone="neutral">No conectada</Badge> Conecta un usuario de Microsoft 365 de tu organización (la reunión sale de su calendario).</p>
+            )}
+          </div>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            {teams?.disponible && (
+              <Button size="sm" onClick={conectar} disabled={Boolean(ocupado)}>
+                {ocupado === "conectar" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                {teams.conectado ? "Reconectar" : "Conectar cuenta"}
+              </Button>
+            )}
+            {teams?.conectado && (
+              <>
+                <Button variant="outline" size="sm" onClick={probar} disabled={Boolean(ocupado)}>
+                  {ocupado === "probar" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Probar conexión
+                </Button>
+                <Button variant="outline" size="sm" onClick={desconectar} disabled={Boolean(ocupado)} className="border-bad/30 text-bad hover:bg-bad-soft">
+                  <X className="h-4 w-4" /> Desconectar
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+        {teams?.disponible && (
+          <div className="mt-3 rounded-lg bg-surface-2 px-3 py-2 text-[12px] text-ink-3">
+            Redirect URI a registrar en el App Registration de Azure (permisos delegados {teams.scopes}):{" "}
+            <code className="font-mono text-ink-2">{teams.redirectUri}</code>
+            <button type="button" onClick={copiar} className="ml-2 inline-flex items-center gap-1 text-brand hover:underline">
+              {copiada ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />} {copiada ? "Copiada" : "Copiar"}
+            </button>
+          </div>
+        )}
+      </div>
+    </Card>
   );
 }
 

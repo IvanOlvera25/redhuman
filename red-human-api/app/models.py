@@ -377,6 +377,9 @@ class EntrevistaHumana(Base):
     # Fase 7A: entrevistador externo elegido de los contactos del Cliente de la vacante (trazabilidad;
     # nombre/correo/WhatsApp se copian arriba con los datos con los que se notificó).
     contacto_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cliente_contactos.id"), nullable=True)
+    # Fase 7B: id del evento de calendario (Graph) cuando la videollamada la creó Teams — sirve para
+    # modificar/cancelar la reunión; "" = liga manual.
+    teams_evento_id: Mapped[str] = mapped_column(String(300), default="")
     fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     modalidad: Mapped[str] = mapped_column(String(20), default="")  # Presencial|Videollamada|Llamada
     liga: Mapped[str] = mapped_column(String(300), default="")  # obligatoria si modalidad=Videollamada
@@ -1168,3 +1171,23 @@ class NotificacionEnviada(Base):
     enviado: Mapped[bool] = mapped_column(Boolean, default=False)
     detalle: Mapped[str] = mapped_column(Text, default="")
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
+class IntegracionTeams(Base):
+    """Fase 7B — conexión de Microsoft 365 POR CUENTA (Configuración → Integraciones). Una fila por
+    Cuenta. Los tokens se guardan CIFRADOS (services/teams.py: Fernet con clave derivada de
+    TEAMS_CLIENT_SECRET); nunca se exponen por la API."""
+
+    __tablename__ = "integraciones_teams"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), unique=True, index=True)
+    usuario_m365: Mapped[str] = mapped_column(String(200), default="")  # UPN del usuario que conectó
+    nombre_m365: Mapped[str] = mapped_column(String(200), default="")
+    access_token_cifrado: Mapped[str] = mapped_column(Text, default="")
+    refresh_token_cifrado: Mapped[str] = mapped_column(Text, default="")
+    expira_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    scopes: Mapped[str] = mapped_column(String(300), default="")
+    conectado_por: Mapped[str] = mapped_column(String(150), default="")  # nombre de la persona de RH
+    conectado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    ultimo_error: Mapped[str] = mapped_column(Text, default="")
