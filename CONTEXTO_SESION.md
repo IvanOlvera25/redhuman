@@ -60,10 +60,11 @@ transversal):
    hiciste y cuál es el siguiente paso.
 
 ## Lo último que se hizo
-**Parte 3 — rediseño del formulario de creación de vacante — 2026-09-12: CÓDIGO LISTO, sin
-commit/deploy** (ver sección al final). Antes, ya desplegados: Parte 1 hotfix WhatsApp (`785516f`),
-Parte 2 introducción Red Human sin "Alma" (`4dd3031`), Fase 4 (`8b45d18`), Fase 2 (`24acfd7`),
-Configuración (`47a4a8b`). Pendientes de Fase 4: spike de Anam y guion de ejemplo (ver su sección).
+**Fase 7A — flujo de Entrevista Humana (entrevistador, cliente, correo) — 2026-09-12: CÓDIGO
+LISTO, sin commit/deploy** (ver sección al final). Antes, ya desplegados: Parte 3 formulario de
+vacante (`c1f3cd3`), Parte 2 introducción Red Human (`4dd3031`), Parte 1 hotfix WhatsApp (`785516f`),
+Fase 4 (`8b45d18`), Fase 2 (`24acfd7`), Configuración (`47a4a8b`). Pendientes: spike de Anam y guion
+de ejemplo (Fase 4); Fase 7B Microsoft Teams (credenciales de Azure).
 
 ## Lo que sigue
 
@@ -1291,7 +1292,7 @@ de esquema. **Limitación honesta:** el avatar (Anam) no se probó sin clave/nav
 ### Siguiente paso (histórico — desplegada en `4dd3031`; ver Parte 3 abajo)
 
 
-## Parte 3 — Rediseño del formulario de creación de vacante — 2026-09-12 (CÓDIGO LISTO, sin commit/deploy)
+## Parte 3 — Rediseño del formulario de creación de vacante — 2026-09-12 (comiteada `c1f3cd3` y desplegada)
 
 Investigación previa contra `formulario-contenido.tsx` / `CrearVacante` / `routers/vacantes.py` /
 `ia.generar_vacante`; plan completo aprobado en plan mode. Hallazgos que motivaron el diseño: el
@@ -1358,9 +1359,78 @@ Regresión: `verificar_config_admin.py` 52, `verificar_fase2.py` 67, `verificar_
 honesta:** sin navegador real no se probó el clic-a-clic del formulario (orden visual, selector de
 Cliente, CampoSueldo); esa capa se cubre con `tsc`/`build` y la revisión del código.
 
+### Siguiente paso (histórico — desplegada en `c1f3cd3`; ver Fase 7A abajo)
+
+
+## Fase 7A — Flujo de Entrevista Humana: entrevistador, cliente y correo — 2026-09-12 (CÓDIGO LISTO, sin commit/deploy)
+
+Teams queda para 7B (credenciales de Azure). Investigación contra el código real y plan aprobado en
+plan mode.
+
+### Punto 5 — el correo faltante (diagnóstico real)
+El envío de correo **SÍ estaba implementado** (`services/notificaciones.disparar` →
+`services/correo.enviar_correo` vía Resend, con plantillas HTML de candidato y entrevistador para
+`entrevista_agendada`) pero fallaba **en silencio**, con tres causas verificables que quedaban solo en
+`NotificacionEnviada.detalle`:
+1. `RESEND_API_KEY` no está en `.env` (ni estaba en `.env.example`) → «RESEND_API_KEY sin configurar».
+2. `RESEND_FROM` por defecto es el sandbox `onboarding@resend.dev`, que solo entrega al dueño de la
+   cuenta Resend (a cualquier otro destinatario Resend responde 403).
+3. La regla `entrevista_agendada` nacía APAGADA (correo incluido) en Cuentas donde nunca corrió
+   `scripts/sembrar_reglas_notificacion.py` (siembra perezosa todo en False).
+Además, para el entrevistador interno `Usuario.telefono` existía desde Fase D pero **nunca se
+capturaba ni se exponía** → el WhatsApp al interno siempre quedaba «sin dato de contacto».
+
+**Para producción (lo hace el usuario):** poner `RESEND_API_KEY` y `RESEND_FROM` con dominio verificado
+en el `.env` del servidor (ver `.env.example`); si alguna Cuenta ya tiene reglas apagadas, encender
+correo en Configuración → Notificaciones (las reglas guardadas no se tocan solas) o correr
+`sembrar_reglas_notificacion.py`.
+
+### Decisiones del usuario (no volver a preguntar)
+1. Correo: default ENCENDIDO (correo+WhatsApp a candidato y entrevistador) al nacer la regla —
+   `models.REGLAS_NOTIFICACION_DEFAULT`, única fuente para la siembra perezosa y el script — y
+   **errores visibles por canal** en la respuesta del modal. RH puede apagar por acción (Fase D se respeta).
+2. Interno: campo «WhatsApp» en el perfil del usuario (crear/editar y «+ Agregar usuario» de la Cuenta);
+   `/auth/entrevistadores` regresa nombre, correo y WhatsApp; el selector muestra «Se notificará a…».
+3. Cliente: al activar «Cliente», todos los contactos marcados por defecto; RH desmarca. Aplica a
+   todas las acciones con línea «Notificar» (`LineaNotificar`/`ConfirmacionAccion` reciben `clienteId`).
+4. Externo desde contactos: se guarda `EntrevistaHumana.contacto_id` además de copiar nombre/correo/WhatsApp.
+
+### Implementado
+- Esquema: `entrevistas_humanas.contacto_id` (FK nullable; `sincronizar()`). Sin script de datos.
+- Backend: `auth.py` (`telefono` en `usuario_dict`, `CrearUsuarioIn`, `ActualizarUsuarioIn`,
+  `crear_usuario_basico`; `/auth/entrevistadores` con correo+WhatsApp), `cuentas.py` (`AgregarUsuarioIn.telefono`),
+  `candidatos.py` (`EntrevistaHumanaIn.entrevistador_contacto_id` validado contra el Cliente de la
+  vacante de la postulación; interno toma correo y WhatsApp del perfil; respuesta
+  `{resultados, candidato}`), `services/notificaciones.py` (`NotificarIn.cliente_contactos_ids`,
+  `_ReglaEfectiva.cliente_contactos_ids`, `disparar` filtra contactos; `_enviar_y_registrar` regresa
+  `{destinatario, canal, destino, enviado, proveedor, detalle}`; texto al candidato sin "asistente de
+  IA"), `routers/notificaciones.py` (siembra perezosa con defaults), `serial.py` (`clienteIdVacante`,
+  `contactoId`, `whatsappExterno`), `.env.example` (Resend documentado).
+- Frontend: `lib/api.ts` (`Entrevistador`, `NotificarAccion.clienteContactosIds`, `ResultadoNotificacion`
+  con destinatario/canal/destino, `lineasResultados`, `telefono` en usuarios), `linea-notificar.tsx`
+  (contactos del Cliente seleccionables, resumen «Cliente ✓ (2/3 contactos)»), `confirmacion-accion.tsx`
+  (`clienteId`), `candidatos/page.tsx` (`ModalProgramarEntrevista` reescrito: «Entrevistador» Interno
+  con «Se notificará a correo · WhatsApp» / Externo con contactos del Cliente + «+ Otro entrevistador»;
+  aviso con el resultado por canal ✓/✗ y motivo; `clienteId` en todas las líneas Notificar),
+  `configuracion/page.tsx` (campo WhatsApp en usuarios). "Persona de RH" → «Entrevistador» (0 restos).
+
+### Verificación
+- Nuevo `scripts/verificar_entrevista_humana.py` **28 OK**: WhatsApp del perfil capturado/normalizado/
+  expuesto; regla nace encendida; programar interno → 4 envíos (correo y WhatsApp a candidato y
+  entrevistador) con destinos del perfil/ficha y detalle visible; externo por contacto (datos del
+  contacto + `contacto_id`); `cliente_contactos_ids` filtra / None = todos / [] = ninguno; 400 por
+  contacto ajeno, contacto sin correo, «Otro» sin correo, contacto con vacante sin Cliente; punto 26.
+- Regresión: `verificar_config_admin.py` **53** (ajustado: fija la regla explícitamente porque ya no
+  nace apagada), `verificar_fase2.py` 67, `verificar_entrevista_ia.py` 52, `verificar_formulario_vacante.py`
+  40; `pyflakes` sin avisos nuevos; `tsc --noEmit` y `next build` limpios (19 rutas); `sincronizar()`
+  sobre copia → agrega `contacto_id`.
+- Smoke con API real + `next start`: usuario con WhatsApp → `/auth/entrevistadores` lo trae; interno →
+  4 resultados con destino y motivo («RESEND_API_KEY sin configurar» / «WHATSAPP_PROVIDER sin
+  configurar» en demo); externo por contacto (Paola Ruiz, correo y WhatsApp del contacto, contactoId)
+  con `cliente_contactos_ids=[Marco]` → solo Marco; «+ Otro»; páginas 200. **Limitación honesta:** sin
+  navegador ni claves reales no se probó el clic-a-clic del modal ni una entrega real de Resend/Meta.
+
 ### Siguiente paso
-1. Revisar el diff y, si se puede, probar en navegador: Nueva vacante en el orden nuevo (Datos
-   principales → Guía → Generar → contenido editable → Prefiltro → Entrevista Red Human → Gestión →
-   Publicación), Configuración → Plantillas → Nueva plantilla, y que el Kanban muestre «Entrevista Red
-   Human».
-2. Commit y deploy cuando se apruebe. Sin script de datos: las 8 columnas las agrega `sincronizar()`.
+1. Revisar el diff; configurar `RESEND_API_KEY`/`RESEND_FROM` en producción y probar una entrevista real
+   (el aviso del modal dirá exactamente qué salió y qué no).
+2. Commit y deploy cuando se apruebe. Fase 7B (Teams) cuando haya credenciales de Azure.

@@ -18,6 +18,7 @@ export function ConfirmacionAccion({
   evento,
   hayEntrevistador = true,
   hayCliente = false,
+  clienteId,
   etiquetaConfirmar = "Confirmar",
   tono = "brand",
   onCancelar,
@@ -28,6 +29,8 @@ export function ConfirmacionAccion({
   evento: EventoNotificacion;
   hayEntrevistador?: boolean;
   hayCliente?: boolean;
+  /** Fase 7A: id del Cliente para elegir contactos a notificar. */
+  clienteId?: number | null;
   etiquetaConfirmar?: string;
   tono?: "brand" | "bad";
   onCancelar: () => void;
@@ -51,7 +54,7 @@ export function ConfirmacionAccion({
       <Card className="w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
         <h3 className="font-display text-lg font-bold">{titulo}</h3>
         {texto && <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2">{texto}</p>}
-        <LineaNotificar className="mt-3.5" value={value} onChange={setValue} hayEntrevistador={hayEntrevistador} hayCliente={hayCliente} />
+        <LineaNotificar className="mt-3.5" value={value} onChange={setValue} hayEntrevistador={hayEntrevistador} hayCliente={hayCliente} clienteId={clienteId} />
         <div className="mt-5 flex gap-3">
           <Button variant="outline" className="flex-1" onClick={onCancelar} disabled={ocupado}>
             Cancelar

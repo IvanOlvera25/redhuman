@@ -31,6 +31,7 @@ from ..models import (
     ETAPAS_CANDIDATO,
     Archivo,
     Candidato,
+    ClienteContacto,
     Cuenta,
     Documento,
     Entrevista,
@@ -1406,9 +1407,12 @@ TIPOS_ENTREVISTADOR = ("interno", "externo")
 class EntrevistaHumanaIn(BaseModel):
     tipo_entrevistador: str  # interno | externo
     entrevistador_usuario_id: Optional[int] = None  # requerido si tipo_entrevistador == interno
-    entrevistador_nombre: str = ""  # requerido si tipo_entrevistador == externo
-    entrevistador_correo: str = ""  # requerido si tipo_entrevistador == externo
-    entrevistador_whatsapp: str = ""  # opcional si tipo_entrevistador == externo (Fase D, punto 23)
+    # Fase 7A: externo elegido de los contactos del Cliente de la vacante — nombre/correo/WhatsApp se
+    # toman del contacto (nunca se vuelven a capturar). Sin id = «+ Otro entrevistador» (campos abajo).
+    entrevistador_contacto_id: Optional[int] = None
+    entrevistador_nombre: str = ""  # requerido si externo sin contacto
+    entrevistador_correo: str = ""  # requerido si externo sin contacto
+    entrevistador_whatsapp: str = ""  # opcional si externo sin contacto (Fase D, punto 23)
     fecha: str  # ISO: 2026-09-05
     hora: str  # HH:MM, hora de México
     modalidad: str  # Presencial | Videollamada | Llamada
@@ -1433,6 +1437,7 @@ async def programar_entrevista_humana(
         raise HTTPException(400, f"Tipo de entrevistador inválido. Usa uno de: {', '.join(TIPOS_ENTREVISTADOR)}")
 
     entrevistador_usuario: Optional[Usuario] = None
+    contacto: Optional[ClienteContacto] = None
     correo_entrevistador = ""
     whatsapp_entrevistador = ""
     if datos.tipo_entrevistador == "interno":
@@ -1447,6 +1452,23 @@ async def programar_entrevista_humana(
             raise HTTPException(400, "El usuario seleccionado no existe o no está activo.")
         nombre_entrevistador = entrevistador_usuario.nombre
         correo_entrevistador = entrevistador_usuario.correo
+        whatsapp_entrevistador = entrevistador_usuario.telefono or ""  # del perfil (Configuración → Usuarios)
+    elif datos.entrevistador_contacto_id:
+        # Fase 7A: contacto ya registrado del Cliente de la vacante de ESTA postulación (misma Cuenta).
+        cliente_id = p.vacante.cliente_id if p.vacante else None
+        contacto = (
+            db.query(ClienteContacto)
+            .filter(ClienteContacto.id == datos.entrevistador_contacto_id, ClienteContacto.cliente_id == cliente_id)
+            .first()
+            if cliente_id else None
+        )
+        if not contacto:
+            raise HTTPException(400, "El contacto elegido no pertenece al Cliente de la vacante de esta postulación.")
+        nombre_entrevistador = f"{contacto.nombre} {contacto.apellidos or ''}".strip()
+        correo_entrevistador = (contacto.correo or "").strip()
+        if not RE_CORREO.match(correo_entrevistador):
+            raise HTTPException(400, "El contacto elegido no tiene un correo válido registrado; captúralo en Configuración → Clientes o usa «+ Otro entrevistador».")
+        whatsapp_entrevistador = (contacto.telefono or "").strip()
     else:
         nombre_entrevistador = datos.entrevistador_nombre.strip()
         if not nombre_entrevistador:
@@ -1480,6 +1502,7 @@ async def programar_entrevista_humana(
         usuario_id=entrevistador_usuario.id if entrevistador_usuario else None,
         correo_externo=correo_entrevistador if datos.tipo_entrevistador == "externo" else "",
         whatsapp_externo=whatsapp_entrevistador if datos.tipo_entrevistador == "externo" else "",
+        contacto_id=contacto.id if contacto else None,
         entrevistador=nombre_entrevistador,
         fecha=fecha_hora,
         modalidad=datos.modalidad,
@@ -1499,14 +1522,16 @@ async def programar_entrevista_humana(
         db, u.nombre, "entrevista_humana_programada", "postulacion", p.codigo,
         {
             "candidato": p.candidato.codigo, "de": anterior, "entrevistador": eh.entrevistador,
-            "tipo_entrevistador": datos.tipo_entrevistador,
+            "tipo_entrevistador": datos.tipo_entrevistador, "contacto_id": eh.contacto_id,
             "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
             "notificaciones": resultados, "notificar_override": override,
         },
     )
     _actualizar_ultima_actividad(p)
     db.commit()
-    return postulacion_dict(p, detalle=True)
+    # Fase 7A: el resultado por canal viaja al modal (mismo shape que solicitar_documentos) — un correo
+    # que no salió (sin RESEND_API_KEY, sin correo, Meta rechazó…) deja de ser silencioso.
+    return {"resultados": resultados, "candidato": postulacion_dict(p, detalle=True)}
 
 
 RESULTADOS_ENTREVISTA_HUMANA = ("aprobado", "no_aprobado")

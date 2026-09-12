@@ -46,7 +46,7 @@ def _cuenta_dict(cu: Cuenta, actual_id: Optional[int] = None) -> dict:
 
 
 def _usuario_cuenta_dict(u: Usuario) -> dict:
-    return {"id": u.id, "nombre": u.nombre, "correo": u.correo, "puesto": u.puesto or "", "rol": u.rol, "activo": u.activo}
+    return {"id": u.id, "nombre": u.nombre, "correo": u.correo, "puesto": u.puesto or "", "telefono": u.telefono or "", "rol": u.rol, "activo": u.activo}
 
 
 def _ficha_dict(cu: Cuenta, actual_id: Optional[int]) -> dict:
@@ -259,6 +259,7 @@ class AgregarUsuarioIn(BaseModel):
     correo: str
     rol: str = "Usuario"
     puesto: str = ""
+    telefono: str = ""  # Fase 7A: WhatsApp del perfil (entrevistador interno)
     password: Optional[str] = None  # solo si el usuario es nuevo; si falta, se genera una temporal
 
 
@@ -289,7 +290,7 @@ def agregar_usuario(
         if len(datos.nombre.strip()) < 3:
             raise HTTPException(400, "El nombre debe tener al menos 3 caracteres.")
         password_temporal = datos.password or uuid.uuid4().hex[:10] + "Aa1!"
-        u = crear_usuario_basico(db, correo, datos.nombre, datos.puesto, datos.rol, password_temporal)
+        u = crear_usuario_basico(db, correo, datos.nombre, datos.puesto, datos.rol, password_temporal, datos.telefono)
         if datos.password:
             password_temporal = None  # la eligió el admin, no se reimprime
         accion = "usuario_creado"

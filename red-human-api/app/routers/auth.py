@@ -9,6 +9,8 @@ from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_admin
 from ..models import ROLES, Cuenta, Usuario, UsuarioCuenta, registrar
 from ..services import auth
+from ..services.whatsapp import clave_telefono
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 CORREO_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
@@ -19,6 +21,7 @@ def usuario_dict(u: Usuario) -> dict:
        "correo": u.correo,
        "nombre": u.nombre,
        "puesto": u.puesto or "",
+       "telefono": u.telefono or "",  # Fase 7A: WhatsApp del entrevistador interno
        "rol": u.rol,
        "activo": u.activo,
        "debeCambiarPass": u.debe_cambiar_pass,
@@ -34,7 +37,7 @@ def usuario_dict(u: Usuario) -> dict:
    }
 
 
-def crear_usuario_basico(db: Session, correo: str, nombre: str, puesto: str, rol: str, password: str) -> Usuario:
+def crear_usuario_basico(db: Session, correo: str, nombre: str, puesto: str, rol: str, password: str, telefono: str = "") -> Usuario:
    """Alta de un Usuario con las validaciones de siempre (correo, rol, unicidad, fortaleza) y
    `debe_cambiar_pass=True` (la contraseña la eligió el admin, no la persona). NO lo vincula a
    ninguna Cuenta ni hace commit: el llamador decide (POST /auth/usuarios → cuenta actual;
@@ -53,6 +56,7 @@ def crear_usuario_basico(db: Session, correo: str, nombre: str, puesto: str, rol
        correo=correo,
        nombre=nombre.strip(),
        puesto=(puesto or "").strip(),
+       telefono=clave_telefono(telefono or ""),
        rol=rol,
        hash_pass=auth.hashear(password),
        debe_cambiar_pass=True,
@@ -124,18 +128,17 @@ def yo(u: Usuario = Depends(usuario_actual)):
 
 @router.get("/entrevistadores")
 def entrevistadores(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
-   """Lista ligera de personas de RH activas de la Cuenta actual para el selector de
-   'Entrevistador interno' — a diferencia de /usuarios, cualquier persona con sesión la puede
-   pedir (no expone correo, rol ni otros datos; el id solo sirve para referenciar quién
-   entrevista)."""
+   """Usuarios activos de la Cuenta actual para el selector «Entrevistador» (Fase 7A): cualquier
+   persona con sesión la puede pedir. Regresa nombre, correo y WhatsApp del perfil (Configuración →
+   Usuarios) para que RH vea a dónde se notificará — nunca se vuelven a capturar en la entrevista."""
    filas = (
-       db.query(Usuario.id, Usuario.nombre)
+       db.query(Usuario.id, Usuario.nombre, Usuario.correo, Usuario.telefono)
        .join(UsuarioCuenta, UsuarioCuenta.usuario_id == Usuario.id)
        .filter(Usuario.activo.is_(True), UsuarioCuenta.cuenta_id == cuenta.id)
        .order_by(Usuario.nombre)
        .all()
    )
-   return [{"id": id_, "nombre": nombre} for (id_, nombre) in filas]
+   return [{"id": id_, "nombre": nombre, "correo": correo, "telefono": telefono or ""} for (id_, nombre, correo, telefono) in filas]
 
 class CambiarPassIn(BaseModel):
    actual: str
@@ -176,6 +179,7 @@ class CrearUsuarioIn(BaseModel):
    correo: str
    nombre: str = Field(min_length=3)
    puesto: str = ""
+   telefono: str = ""  # Fase 7A: WhatsApp (10 dígitos) — lo usa la notificación al entrevistador interno
    rol: str = "Usuario"
    password: str
 @router.post("/usuarios", status_code=201)
@@ -183,7 +187,7 @@ def crear(
    datos: CrearUsuarioIn, db: Session = Depends(get_db), admin: Usuario = Depends(usuario_admin),
    cuenta: Cuenta = Depends(cuenta_actual),
 ):
-   u = crear_usuario_basico(db, datos.correo, datos.nombre, datos.puesto, datos.rol, datos.password)
+   u = crear_usuario_basico(db, datos.correo, datos.nombre, datos.puesto, datos.rol, datos.password, datos.telefono)
    correo = u.correo
    # el usuario nuevo queda con acceso a la Cuenta desde la que lo creó el admin — sin esto,
    # cuenta_actual le daría 403 en su primer login por no tener ninguna Cuenta asignada.
@@ -195,6 +199,7 @@ def crear(
 class ActualizarUsuarioIn(BaseModel):
    nombre: Optional[str] = None
    puesto: Optional[str] = None
+   telefono: Optional[str] = None  # Fase 7A
    rol: Optional[str] = None
    activo: Optional[bool] = None
    password: Optional[str] = None
@@ -234,6 +239,9 @@ def actualizar(
        if valor is not None:
            setattr(u, campo, valor)
            cambios.append(campo)
+   if datos.telefono is not None:
+       u.telefono = clave_telefono(datos.telefono)
+       cambios.append("telefono")
    if datos.password:
        motivo = auth.validar_fortaleza(datos.password)
        if motivo:

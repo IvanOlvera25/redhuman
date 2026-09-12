@@ -168,7 +168,12 @@ with TestClient(app) as client:
     check(r.status_code == 403, "…pero no guardarla")
     usuario_activo["u"] = admin
     reglas = client.get("/notificaciones/reglas").json()
+    # Fase 7A: la siembra perezosa ya nace con defaults (entrevista_agendada encendida); este bloque
+    # prueba la semántica de override, así que fija la regla explícitamente: solo candidato WhatsApp.
+    check(next(x for x in reglas if x["evento"] == "entrevista_agendada")["candidatoCorreo"], "Fase 7A: la regla entrevista_agendada NACE con correo encendido")
     for x in reglas:
+        for k in ("candidatoCorreo", "candidatoWhatsapp", "entrevistadorCorreo", "entrevistadorWhatsapp", "clienteCorreo", "clienteWhatsapp"):
+            x[k] = False
         if x["evento"] == "entrevista_agendada":
             x["candidatoWhatsapp"] = True
     body = [{"evento": x["evento"], "candidato_correo": x["candidatoCorreo"], "candidato_whatsapp": x["candidatoWhatsapp"],
