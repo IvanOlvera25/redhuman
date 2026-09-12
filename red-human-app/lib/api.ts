@@ -127,6 +127,8 @@ export interface UsuarioRH {
   correo: string;
   nombre: string;
   puesto: string;
+  /** Fase 7A: WhatsApp del perfil (10 dígitos) — se usa al notificar al entrevistador interno. */
+  telefono?: string;
   rol: RolUsuario;
   activo: boolean;
   debeCambiarPass: boolean;
@@ -161,6 +163,7 @@ export function crearUsuario(datos: {
   correo: string;
   nombre: string;
   puesto?: string;
+  telefono?: string;
   rol?: RolUsuario;
   password: string;
 }) {
@@ -169,7 +172,7 @@ export function crearUsuario(datos: {
 
 export function actualizarUsuario(
   id: number,
-  cambios: { nombre?: string; puesto?: string; rol?: RolUsuario; activo?: boolean; password?: string },
+  cambios: { nombre?: string; puesto?: string; telefono?: string; rol?: RolUsuario; activo?: boolean; password?: string },
 ) {
   return patch<UsuarioRH>(`/auth/usuarios/${id}`, cambios);
 }
@@ -240,6 +243,7 @@ export interface UsuarioDeCuenta {
   nombre: string;
   correo: string;
   puesto: string;
+  telefono?: string;
   rol: RolUsuario;
   activo: boolean;
 }
@@ -300,7 +304,7 @@ export function subirLogoCuentaPorId(id: number, archivo: File) {
 
 /** «+ Agregar usuario» en la ficha: si el correo ya existe se vincula (nuevo=false); si no, se
  * crea y `passwordTemporal` viene UNA sola vez para que el admin se la comparta. */
-export function agregarUsuarioCuenta(cuentaId: number, datos: { nombre?: string; correo: string; rol?: RolUsuario; puesto?: string; password?: string }) {
+export function agregarUsuarioCuenta(cuentaId: number, datos: { nombre?: string; correo: string; rol?: RolUsuario; puesto?: string; telefono?: string; password?: string }) {
   return post<{ usuario: UsuarioDeCuenta; nuevo: boolean; passwordTemporal: string | null; cuenta: FichaCuenta }>(
     `/cuentas/${cuentaId}/usuarios`,
     datos,
@@ -368,6 +372,9 @@ export interface NotificarAccion {
   entrevistadorWhatsapp?: boolean;
   clienteCorreo?: boolean;
   clienteWhatsapp?: boolean;
+  /** Fase 7A: contactos del Cliente elegidos para esta acción (ids de ClienteContacto).
+   * undefined = todos los contactos del Cliente; [] = ninguno. */
+  clienteContactosIds?: number[];
 }
 
 export function notificarSnake(n?: NotificarAccion | null) {
@@ -379,6 +386,7 @@ export function notificarSnake(n?: NotificarAccion | null) {
     entrevistador_whatsapp: n.entrevistadorWhatsapp,
     cliente_correo: n.clienteCorreo,
     cliente_whatsapp: n.clienteWhatsapp,
+    cliente_contactos_ids: n.clienteContactosIds,
   };
 }
 
@@ -887,6 +895,25 @@ export interface ResultadoNotificacion {
   enviado: boolean;
   proveedor?: string;
   detalle?: string;
+  /* Fase 7A: quién y por dónde, para mostrar el resultado por canal en el modal */
+  destinatario?: "candidato" | "entrevistador" | "cliente";
+  canal?: "correo" | "whatsapp";
+  destino?: string;
+}
+
+const NOMBRE_DESTINATARIO: Record<string, string> = { candidato: "Candidato", entrevistador: "Entrevistador", cliente: "Cliente" };
+
+/** Fase 7A: una línea legible por envío («✓ Correo al candidato (cand@x.mx)» /
+ * «✗ WhatsApp al entrevistador — RESEND_API_KEY sin configurar»). Vacío si no hubo destinatarios. */
+export function lineasResultados(resultados: ResultadoNotificacion[] | undefined): { ok: boolean; texto: string }[] {
+  return (resultados ?? []).map((r) => {
+    const canal = r.canal === "correo" ? "Correo" : r.canal === "whatsapp" ? "WhatsApp" : "Aviso";
+    const a = r.destinatario ? ` al ${NOMBRE_DESTINATARIO[r.destinatario]?.toLowerCase() ?? r.destinatario}` : "";
+    const destino = r.destino ? ` (${r.destino})` : "";
+    return r.enviado
+      ? { ok: true, texto: `${canal}${a}${destino}: enviado` }
+      : { ok: false, texto: `${canal}${a}${destino}: no enviado${r.detalle ? ` — ${r.detalle}` : ""}` };
+  });
 }
 
 /** Onboarding · Zero-Touch fase 2 — RH detona el mensaje, la IA da seguimiento por WhatsApp.
@@ -926,6 +953,8 @@ export function programarEntrevistaHumana(
   datos: {
     tipoEntrevistador: TipoEntrevistador;
     entrevistadorUsuarioId?: number | null;
+    /** Fase 7A: contacto del Cliente de la vacante; si viene, nombre/correo/WhatsApp salen del contacto. */
+    entrevistadorContactoId?: number | null;
     entrevistadorNombre?: string;
     entrevistadorCorreo?: string;
     entrevistadorWhatsapp?: string;
@@ -939,9 +968,10 @@ export function programarEntrevistaHumana(
     notificar?: NotificarAccion;
   },
 ) {
-  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana`, {
+  return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana`, {
     tipo_entrevistador: datos.tipoEntrevistador,
     entrevistador_usuario_id: datos.entrevistadorUsuarioId ?? null,
+    entrevistador_contacto_id: datos.entrevistadorContactoId ?? null,
     entrevistador_nombre: datos.entrevistadorNombre ?? "",
     entrevistador_correo: datos.entrevistadorCorreo ?? "",
     entrevistador_whatsapp: datos.entrevistadorWhatsapp ?? "",
@@ -1063,8 +1093,16 @@ export function guardarCondicionesContratacion(
 }
 
 /** Personas de RH activas (id + nombre), para el select de "Entrevistador interno". */
+/** Fase 7A: usuarios activos de la Cuenta con correo y WhatsApp del perfil (Configuración → Usuarios). */
+export interface Entrevistador {
+  id: number;
+  nombre: string;
+  correo: string;
+  telefono: string;
+}
+
 export function fetchEntrevistadores() {
-  return get<{ id: number; nombre: string }[]>("/auth/entrevistadores");
+  return get<Entrevistador[]>("/auth/entrevistadores");
 }
 
 /** Postulación pública desde /aplicar/[slug]: alta + consentimiento + CV + prefiltro en un paso. */

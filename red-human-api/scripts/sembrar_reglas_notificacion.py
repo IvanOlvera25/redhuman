@@ -29,18 +29,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.database import SessionLocal
-from app.models import Cuenta, EVENTOS_NOTIFICACION, ReglaNotificacion
+from app.models import Cuenta, EVENTOS_NOTIFICACION, REGLAS_NOTIFICACION_DEFAULT, ReglaNotificacion
 
-# evento -> kwargs de ReglaNotificacion que van en True (el resto queda en False por default)
-SIEMBRA_HISTORICA = {
-    "entrevista_agendada": {"candidato_correo": True, "candidato_whatsapp": True, "entrevistador_correo": True},
-    "recordatorio_entrevista": {"candidato_whatsapp": True},
-    "entrevista_humana_terminada": {"entrevistador_correo": True},
-    "contratacion": {"candidato_whatsapp": True},
-    "solicitud_documentos": {"candidato_whatsapp": True},
-    "recordatorio_documentos": {"candidato_whatsapp": True},
-    # entrevista_modificada, entrevista_cancelada, recomendacion_final, candidato_apto: todo apagado.
-}
+# evento -> kwargs de ReglaNotificacion que van en True (el resto queda en False por default).
+# Fase 7A: única fuente en models.REGLAS_NOTIFICACION_DEFAULT (misma que la siembra perezosa).
+SIEMBRA_HISTORICA = REGLAS_NOTIFICACION_DEFAULT
 
 
 def main() -> None:

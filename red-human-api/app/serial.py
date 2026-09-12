@@ -150,6 +150,8 @@ def _entrevista_humana_dict(eh) -> dict:
         "tipo": eh.tipo,
         "usuarioId": eh.usuario_id,
         "correoExterno": eh.correo_externo,
+        "whatsappExterno": eh.whatsapp_externo or "",
+        "contactoId": eh.contacto_id,  # Fase 7A
         "fecha": iso(eh.fecha),
         "modalidad": eh.modalidad,
         "liga": eh.liga,
@@ -385,6 +387,7 @@ def postulacion_dict(p: Postulacion, detalle: bool = False) -> dict:
         "ultimaActividadEn": iso(p.ultima_actividad_en),
         "resultadoApto": p.resultado_apto,
         "clienteVacante": v.cliente.nombre if v and v.cliente else None,
+        "clienteIdVacante": v.cliente_id if v else None,  # Fase 7A: para elegir contactos/entrevistador externo
         # --- Persona (maestro) ---
         "candidato": _persona_dict(c),
     }

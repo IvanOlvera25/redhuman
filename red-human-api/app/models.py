@@ -374,6 +374,9 @@ class EntrevistaHumana(Base):
     # WhatsApp del entrevistador externo (Fase D, punto 23) — paralelo a correo_externo, se
     # registra al asignarlo y se reutiliza para invitaciones/recordatorios de esa misma ronda.
     whatsapp_externo: Mapped[str] = mapped_column(String(30), default="")
+    # Fase 7A: entrevistador externo elegido de los contactos del Cliente de la vacante (trazabilidad;
+    # nombre/correo/WhatsApp se copian arriba con los datos con los que se notificó).
+    contacto_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cliente_contactos.id"), nullable=True)
     fecha: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     modalidad: Mapped[str] = mapped_column(String(20), default="")  # Presencial|Videollamada|Llamada
     liga: Mapped[str] = mapped_column(String(300), default="")  # obligatoria si modalidad=Videollamada
@@ -1112,6 +1115,21 @@ EVENTOS_NOTIFICACION = [
     "solicitud_documentos",
     "recordatorio_documentos",
 ]
+
+# Fase 7A (2026-09-12): valores con los que NACE la regla de cada evento cuando una Cuenta no la
+# tiene todavía (siembra perezosa de GET /notificaciones/reglas y scripts/sembrar_reglas_notificacion.py).
+# Decisión del usuario: al programar una Entrevista Humana la confirmación sale por correo Y WhatsApp
+# a candidato y entrevistador cuando existan ambos datos; RH puede apagarlo por acción. Las reglas
+# ya guardadas de una Cuenta NUNCA se tocan desde aquí.
+REGLAS_NOTIFICACION_DEFAULT = {
+    "entrevista_agendada": {"candidato_correo": True, "candidato_whatsapp": True, "entrevistador_correo": True, "entrevistador_whatsapp": True},
+    "recordatorio_entrevista": {"candidato_whatsapp": True},
+    "entrevista_humana_terminada": {"entrevistador_correo": True},
+    "contratacion": {"candidato_whatsapp": True},
+    "solicitud_documentos": {"candidato_whatsapp": True},
+    "recordatorio_documentos": {"candidato_whatsapp": True},
+    # entrevista_modificada, entrevista_cancelada, recomendacion_final, candidato_apto: todo apagado.
+}
 
 
 class ReglaNotificacion(Base):

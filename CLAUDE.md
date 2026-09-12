@@ -70,3 +70,11 @@ Plataforma SaaS de agente de IA de RH para México. `red-human-app` (Next.js 15)
 - Sueldo: se captura ESTRUCTURADO (`sueldo_desde/hasta/moneda/periodicidad`, `PERIODICIDADES_SUELDO`); `Vacante.sueldo` (texto) es DERIVADO por `models.texto_sueldo` y es lo que leen WhatsApp, prefiltro, entrevista, portal, publicaciones y el agente. Nunca capturar ni editar el texto por separado. Seniority = uno de `ia.SENIORITY`.
 - `Vacante.requisitos` sigue siendo texto (indispensables unidos por « · »); usa `routers.vacantes.requisitos_lista` / `requisitosLista` para tratarlo como lista.
 - "Entrevista IA" es el valor interno de la etapa (base y API); en la interfaz siempre se muestra con `nombreEtapa()` → «Entrevista Red Human». No renombrar el valor almacenado.
+
+## Entrevista Humana (Fase 7A)
+
+- Entrevistador interno = `Usuario` de la Cuenta: nombre, correo y WhatsApp salen SIEMPRE del perfil (`Usuario.telefono`, capturado en Configuración → Usuarios); nunca se recapturan en la entrevista. `/auth/entrevistadores` los expone a cualquier sesión de la Cuenta.
+- Entrevistador externo = `ClienteContacto` del Cliente de la vacante (`EntrevistaHumanaIn.entrevistador_contacto_id`, se guarda `EntrevistaHumana.contacto_id` y se copian nombre/correo/WhatsApp) o «+ Otro entrevistador» (captura manual). Nunca limitar a contactos registrados.
+- Notificar al Cliente: `NotificarIn.cliente_contactos_ids` elige contactos ya registrados (None = todos, [] = ninguno); nunca se capturan datos nuevos del Cliente en una acción.
+- Correo: `services/correo.py` (Resend). Sin `RESEND_API_KEY` no sale y se registra «RESEND_API_KEY sin configurar»; el remitente sandbox `onboarding@resend.dev` solo entrega al dueño de la cuenta Resend — en producción `RESEND_FROM` debe ser un dominio verificado. Todo envío regresa `{destinatario, canal, destino, enviado, detalle}` y las acciones manuales lo muestran a RH (`lineasResultados`): un envío fallido nunca es silencioso.
+- Las reglas de notificación de una Cuenta NACEN con `models.REGLAS_NOTIFICACION_DEFAULT` (entrevista_agendada = correo+WhatsApp a candidato y entrevistador); las reglas ya guardadas nunca se tocan automáticamente.

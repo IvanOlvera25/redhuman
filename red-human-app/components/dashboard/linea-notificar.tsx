@@ -11,7 +11,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pencil } from "lucide-react";
 import {
+  fetchCliente,
   fetchReglasNotificacion,
+  type ContactoCliente,
   type EventoNotificacion,
   type NotificarAccion,
   type ReglaNotificacion,
@@ -86,6 +88,7 @@ export function LineaNotificar({
   onChange,
   hayEntrevistador = true,
   hayCliente = false,
+  clienteId,
   className,
 }: {
   value: NotificarAccion;
@@ -94,14 +97,36 @@ export function LineaNotificar({
   hayEntrevistador?: boolean;
   /** false = la vacante no tiene Cliente: se oculta (Fase D, punto 26). */
   hayCliente?: boolean;
+  /** Fase 7A: id del Cliente de la vacante — con «Cliente» activo se listan sus contactos ya
+   * registrados para elegir a quién notificar (todos marcados por defecto; nunca se capturan datos). */
+  clienteId?: number | null;
   className?: string;
 }) {
   const [editando, setEditando] = useState(false);
+  const [contactos, setContactos] = useState<ContactoCliente[] | null>(null);
   const visibles = useMemo(
     () => DESTINATARIOS.filter((d) => (d.clave === "entrevistador" ? hayEntrevistador : d.clave === "cliente" ? hayCliente : true)),
     [hayEntrevistador, hayCliente],
   );
   const activo = (d: Destinatario) => Boolean(value[d.correo] || value[d.whatsapp]);
+  const clienteActivo = hayCliente && Boolean(value.clienteCorreo || value.clienteWhatsapp);
+
+  useEffect(() => {
+    if (!hayCliente || !clienteId) return;
+    let vivo = true;
+    fetchCliente(clienteId).then((c) => vivo && setContactos(c?.listaContactos ?? []));
+    return () => {
+      vivo = false;
+    };
+  }, [hayCliente, clienteId]);
+
+  // ids elegidos: undefined = todos (default Fase D). Se materializa solo cuando RH desmarca alguno.
+  const elegidos = value.clienteContactosIds ?? (contactos ?? []).map((k) => k.id);
+  const alternarContacto = (id: number, marcado: boolean) => {
+    const base = value.clienteContactosIds ?? (contactos ?? []).map((k) => k.id);
+    onChange({ ...value, clienteContactosIds: marcado ? Array.from(new Set([...base, id])) : base.filter((x) => x !== id) });
+  };
+  const resumenCliente = clienteActivo && contactos ? ` (${elegidos.length}/${contactos.length} contactos)` : "";
 
   return (
     <div className={cn("rounded-xl border border-border-soft bg-surface-2/60 px-3.5 py-2.5 text-[13px]", className)}>
@@ -111,6 +136,7 @@ export function LineaNotificar({
           <span key={d.clave} className="flex items-center gap-1.5">
             <span className={cn(activo(d) ? "text-ink" : "text-ink-3")}>
               {d.etiqueta} {activo(d) ? "✓" : "☐"}
+              {d.clave === "cliente" ? resumenCliente : ""}
             </span>
             {i < visibles.length - 1 && <span className="text-ink-3">·</span>}
           </span>
@@ -149,6 +175,31 @@ export function LineaNotificar({
               </label>
             </div>
           ))}
+          {clienteActivo && contactos && (
+            <div className="rounded-lg bg-surface px-2.5 py-2 sm:col-span-3">
+              <p className="text-xs font-semibold text-ink-2">Contactos del Cliente a notificar</p>
+              {contactos.length === 0 ? (
+                <p className="mt-1 text-[11px] text-ink-3">Este Cliente no tiene contactos registrados (Configuración → Clientes y contactos).</p>
+              ) : (
+                <div className="mt-1 grid gap-1 sm:grid-cols-2">
+                  {contactos.map((k) => (
+                    <label key={k.id} className="flex items-center gap-2 text-xs text-ink-2">
+                      <input
+                        type="checkbox"
+                        checked={elegidos.includes(k.id)}
+                        onChange={(e) => alternarContacto(k.id, e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-border-soft text-brand focus:ring-brand"
+                      />
+                      <span className="truncate">
+                        {k.nombre} {k.apellidos ?? ""}
+                        <span className="text-ink-3"> · {[k.correo, k.telefono].filter(Boolean).join(" · ") || "sin datos de contacto"}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <p className="text-[11px] leading-relaxed text-ink-3 sm:col-span-3">
             Solo para esta acción. La configuración general se cambia en Configuración → Notificaciones.
           </p>

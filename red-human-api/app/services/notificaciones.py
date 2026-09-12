@@ -153,7 +153,7 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
 
     if evento == "entrevista_agendada" and eh:
         if audiencia == "candidato":
-            texto = f"¡Hola {primer_nombre}! 📅 En base a tu entrevista con nuestro asistente de IA, te programamos una entrevista {cita}"
+            texto = f"¡Hola {primer_nombre}! 📅 Con base en tu entrevista con Red Human, te programamos una entrevista {cita}"
             return texto if canal == "whatsapp" else ("Tu entrevista con Red Human AI", _html_correo_candidato(eh, c))
         if audiencia == "entrevistador":
             texto = f"Tienes una entrevista programada con {c.nombre} ({puesto}) {cita}"
@@ -273,14 +273,18 @@ def _regla(db: Session, cuenta_id: int, evento: str) -> Optional[ReglaNotificaci
 async def _enviar_y_registrar(
     db: Session, p: Postulacion, evento: str, destinatario_tipo: str, canal: str, destino: str, contenido,
 ) -> dict:
+    """Regresa {destinatario, canal, destino, enviado, proveedor, detalle} — Fase 7A: el detalle de
+    por qué NO salió un envío (sin correo, RESEND_API_KEY sin configurar, Meta rechazó…) ya no se
+    queda solo en NotificacionEnviada: llega hasta la respuesta para que RH lo vea."""
     cuenta_id, candidato_id = p.cuenta_id, p.candidato_id
+    base = {"destinatario": destinatario_tipo, "canal": canal, "destino": destino or ""}
     if not destino or not contenido:
+        detalle = "sin dato de contacto" if not destino else "sin contenido definido para esta combinación"
         db.add(NotificacionEnviada(
             cuenta_id=cuenta_id, candidato_id=candidato_id, evento=evento, destinatario_tipo=destinatario_tipo,
-            canal=canal, destino=destino or "", enviado=False,
-            detalle="sin dato de contacto" if not destino else "sin contenido definido para esta combinación",
+            canal=canal, destino=destino or "", enviado=False, detalle=detalle,
         ))
-        return {"enviado": False}
+        return {**base, "enviado": False, "detalle": detalle}
     try:
         if canal == "whatsapp":
             envio = await enviar_mensaje(destino, contenido)
@@ -300,7 +304,7 @@ async def _enviar_y_registrar(
             candidato_id=candidato_id, postulacion_id=p.id, rol="assistant", texto=contenido, canal="whatsapp",
             enviado=bool(envio.get("enviado")), wa_id=envio.get("wa_id", ""),
         ))
-    return envio
+    return {**base, **envio, "detalle": str(envio.get("detalle", ""))}
 
 
 FLAGS_NOTIFICACION = (
@@ -319,6 +323,9 @@ class NotificarIn(BaseModel):
     entrevistador_whatsapp: Optional[bool] = None
     cliente_correo: Optional[bool] = None
     cliente_whatsapp: Optional[bool] = None
+    # Fase 7A: contactos del Cliente elegidos por RH para ESTA acción (ids de ClienteContacto).
+    # None = todos los contactos del Cliente (comportamiento de Fase D).
+    cliente_contactos_ids: Optional[List[int]] = None
 
 
 def override_de(datos: Optional[NotificarIn]) -> Optional[dict]:
@@ -340,6 +347,8 @@ class _ReglaEfectiva:
             if valor is None:
                 valor = bool(getattr(regla, flag)) if regla else False
             setattr(self, flag, bool(valor))
+        ids = (override or {}).get("cliente_contactos_ids")
+        self.cliente_contactos_ids: Optional[List[int]] = [int(x) for x in ids] if ids is not None else None
 
     def alguno(self) -> bool:
         return any(getattr(self, f) for f in FLAGS_NOTIFICACION)
@@ -401,7 +410,11 @@ async def disparar(
     # vacante no tiene Cliente, se ignora en silencio sin importar la regla (punto 26). ---
     cliente_id = c.vacante.cliente_id if c.vacante else None
     if cliente_id and (regla.cliente_whatsapp or regla.cliente_correo):
-        contactos = db.query(ClienteContacto).filter(ClienteContacto.cliente_id == cliente_id).all()
+        q = db.query(ClienteContacto).filter(ClienteContacto.cliente_id == cliente_id)
+        if regla.cliente_contactos_ids is not None:
+            # Fase 7A: solo los contactos que RH marcó para esta acción (nunca se capturan datos nuevos)
+            q = q.filter(ClienteContacto.id.in_(regla.cliente_contactos_ids))
+        contactos = q.all()
         for contacto in contactos:
             if regla.cliente_whatsapp:
                 texto = _mensaje(evento, "cliente", "whatsapp", c, eh, liga, extra)

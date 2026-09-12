@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_admin
-from ..models import Cuenta, EVENTOS_NOTIFICACION, NotificacionEnviada, ReglaNotificacion, Usuario, registrar
+from ..models import REGLAS_NOTIFICACION_DEFAULT, Cuenta, EVENTOS_NOTIFICACION, NotificacionEnviada, ReglaNotificacion, Usuario, registrar
 from ..serial import iso
 
 router = APIRouter(prefix="/notificaciones", tags=["notificaciones"])
@@ -40,7 +40,9 @@ def _reglas_cuenta(db: Session, cuenta_id: int) -> list:
     existentes = {r.evento: r for r in db.query(ReglaNotificacion).filter(ReglaNotificacion.cuenta_id == cuenta_id).all()}
     faltantes = [e for e in EVENTOS_NOTIFICACION if e not in existentes]
     for evento in faltantes:
-        r = ReglaNotificacion(cuenta_id=cuenta_id, evento=evento)
+        # Fase 7A: nace con los defaults del proyecto (antes todo apagado → el correo de la entrevista
+        # agendada nunca salía en Cuentas donde no corrió el script de siembra).
+        r = ReglaNotificacion(cuenta_id=cuenta_id, evento=evento, **REGLAS_NOTIFICACION_DEFAULT.get(evento, {}))
         db.add(r)
         existentes[evento] = r
     if faltantes:

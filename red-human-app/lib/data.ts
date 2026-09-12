@@ -168,6 +168,8 @@ export interface Candidato {
   /** Nombre del Cliente de la vacante del candidato, si aplica. Null si no tiene vacante o
    * la vacante no tiene Cliente. Permite la columna "Cliente" en la vista lista sin JOIN extra. */
   clienteVacante?: string | null;
+  /** Fase 7A: id del Cliente de la vacante (contactos para entrevistador externo / notificar). */
+  clienteIdVacante?: number | null;
   /* --- Puntos 3/5: síntesis global (CV + Prefiltro + Entrevista IA + Entrevista Humana),
    * calculada al vuelo en cada lectura del detalle — nunca se persiste, siempre está al día. --- */
   prefiltroResumen?: { cumple: number; total: number; incumplidos: string[] } | null;

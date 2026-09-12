@@ -513,7 +513,7 @@ function TabPortalCuenta({ ficha, onCambio }: { ficha: FichaCuenta; onCambio: (f
 function TabUsuariosCuenta({ ficha, onCambio }: { ficha: FichaCuenta; onCambio: (f: FichaCuenta) => void }) {
   const { usuario } = useSesion();
   const [mostrarForm, setMostrarForm] = useState(false);
-  const [f, setF] = useState({ nombre: "", correo: "", rol: "Usuario" as RolUsuario, puesto: "" });
+  const [f, setF] = useState({ nombre: "", correo: "", rol: "Usuario" as RolUsuario, puesto: "", telefono: "" });
   const [guardando, setGuardando] = useState(false);
   const [msg, setMsg] = useState<{ tono: "ok" | "error" | "info"; texto: string } | null>(null);
   const [passTemporal, setPassTemporal] = useState<string | null>(null);
@@ -528,7 +528,7 @@ function TabUsuariosCuenta({ ficha, onCambio }: { ficha: FichaCuenta; onCambio: 
     if (!r.ok) return setMsg({ tono: "error", texto: r.error });
     onCambio(r.data.cuenta);
     setMostrarForm(false);
-    setF({ nombre: "", correo: "", rol: "Usuario", puesto: "" });
+    setF({ nombre: "", correo: "", rol: "Usuario", puesto: "", telefono: "" });
     if (r.data.nuevo) {
       setPassTemporal(r.data.passwordTemporal);
       setMsg({ tono: "ok", texto: `Usuario ${r.data.usuario.nombre} creado y vinculado a esta Cuenta.` });
@@ -573,6 +573,7 @@ function TabUsuariosCuenta({ ficha, onCambio }: { ficha: FichaCuenta; onCambio: 
             <Entrada label="Correo" value={f.correo} onChange={(v) => setF((p) => ({ ...p, correo: v }))} placeholder="correo@empresa.com" type="email" />
             <Selector label="Rol" value={f.rol} onChange={(v) => setF((p) => ({ ...p, rol: v as RolUsuario }))} opciones={["Usuario", "Administrador"]} />
             <Entrada label="Puesto (opcional)" value={f.puesto} onChange={(v) => setF((p) => ({ ...p, puesto: v }))} placeholder="Ej. Reclutadora" />
+            <Entrada label="WhatsApp (opcional)" value={f.telefono} onChange={(v) => setF((p) => ({ ...p, telefono: v }))} placeholder="10 dígitos — para avisos como entrevistador" />
           </div>
           <p className="mt-2 text-[12px] text-ink-3">Si el correo ya pertenece a un usuario del sistema, solo se le dará acceso a esta Cuenta.</p>
           <div className="mt-3 flex justify-end gap-2">
@@ -588,7 +589,7 @@ function TabUsuariosCuenta({ ficha, onCambio }: { ficha: FichaCuenta; onCambio: 
           <li key={u.id} className="flex items-center gap-3 py-2.5">
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">{u.nombre}{u.id === usuario?.id && <span className="ml-1.5 text-[11px] text-ink-3">(tú)</span>}</p>
-              <p className="truncate text-[12px] text-ink-3">{u.correo}{u.puesto ? ` · ${u.puesto}` : ""}</p>
+              <p className="truncate text-[12px] text-ink-3">{u.correo}{u.puesto ? ` · ${u.puesto}` : ""}{u.telefono ? ` · WhatsApp ${u.telefono}` : ""}</p>
             </div>
             <Badge tone={u.rol === "Administrador" ? "brand" : "neutral"}>{u.rol}</Badge>
             <Badge tone={u.activo ? "good" : "neutral"} dot>{u.activo ? "Activo" : "Inactivo"}</Badge>
@@ -660,7 +661,7 @@ function SeccionUsuarios() {
             <li key={u.id} className="flex items-center gap-3 py-2.5">
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">{u.nombre}</p>
-                <p className="truncate text-[12px] text-ink-3">{u.correo}{u.puesto ? ` · ${u.puesto}` : ""}</p>
+                <p className="truncate text-[12px] text-ink-3">{u.correo}{u.puesto ? ` · ${u.puesto}` : ""}{u.telefono ? ` · WhatsApp ${u.telefono}` : ""}</p>
               </div>
               <Badge tone={u.rol === "Administrador" ? "brand" : "neutral"}>{u.rol}</Badge>
               <Badge tone={u.activo ? "good" : "neutral"} dot>{u.activo ? "Activo" : "Inactivo"}</Badge>
@@ -693,6 +694,7 @@ function FormUsuario({
   const [nombre, setNombre] = useState(usuario?.nombre ?? "");
   const [correo, setCorreo] = useState(usuario?.correo ?? "");
   const [puesto, setPuesto] = useState(usuario?.puesto ?? "");
+  const [telefono, setTelefono] = useState(usuario?.telefono ?? "");
   const [rol, setRol] = useState<RolUsuario>(usuario?.rol ?? "Usuario");
   const [activo, setActivo] = useState(usuario?.activo ?? true);
   const [password, setPassword] = useState("");
@@ -703,12 +705,12 @@ function FormUsuario({
     onError("");
     let r;
     if (usuario) {
-      const cambios: Parameters<typeof actualizarUsuario>[1] = { nombre, puesto, rol, activo };
+      const cambios: Parameters<typeof actualizarUsuario>[1] = { nombre, puesto, telefono, rol, activo };
       if (password) cambios.password = password;
       r = await actualizarUsuario(usuario.id, cambios);
     } else {
       if (!password) { onError("La contraseña es obligatoria al crear un usuario."); setGuardando(false); return; }
-      r = await crearUsuario({ correo, nombre, puesto, rol, password });
+      r = await crearUsuario({ correo, nombre, puesto, telefono, rol, password });
     }
     setGuardando(false);
     if (!r.ok) { onError(r.error); return; }
@@ -722,6 +724,8 @@ function FormUsuario({
         <Entrada label="Nombre completo" value={nombre} onChange={setNombre} placeholder="Ej. María López" />
         {!usuario && <Entrada label="Correo" value={correo} onChange={setCorreo} placeholder="correo@empresa.com" type="email" />}
         <Entrada label="Puesto" value={puesto} onChange={setPuesto} placeholder="Ej. Reclutadora" />
+        {/* Fase 7A: WhatsApp del perfil — lo usa la notificación cuando esta persona es Entrevistador */}
+        <Entrada label="WhatsApp (opcional)" value={telefono} onChange={setTelefono} placeholder="10 dígitos — para avisos como entrevistador" />
         <Selector label="Rol" value={rol} onChange={(v) => setRol(v as RolUsuario)} opciones={["Usuario", "Administrador"]} />
         <Entrada label={usuario ? "Nueva contraseña (opcional)" : "Contraseña"} value={password} onChange={setPassword} type="password" placeholder="Mínimo 8 caracteres" />
         {usuario && (
