@@ -245,3 +245,82 @@ export function BotonEliminar({ onClick, title }: { onClick: () => void; title?:
     </button>
   );
 }
+
+
+/* ------------------------------------------------------------------ */
+/* Parte 3 (2026-09-12): sueldo estructurado — Desde / Hasta / Moneda / Periodicidad. El texto
+   visible («$10,000 – $12,000 MXN mensuales» o «A convenir») lo deriva el servidor: aquí nunca se
+   captura texto libre ni se sugiere un monto. */
+
+export interface ValorSueldo {
+  desde: string;
+  hasta: string;
+  moneda: string;
+  periodicidad: string;
+}
+
+export function CampoSueldo({
+  value,
+  onChange,
+  periodicidades,
+  monedas,
+  ayuda,
+}: {
+  value: ValorSueldo;
+  onChange: (v: ValorSueldo) => void;
+  periodicidades: { valor: string; texto: string }[];
+  monedas: string[];
+  ayuda?: string;
+}) {
+  const aConvenir = value.periodicidad === "a_convenir";
+  const set = (k: keyof ValorSueldo) => (v: string) => onChange({ ...value, [k]: v });
+  const soloDigitos = (v: string) => v.replace(/[^\d]/g, "");
+  return (
+    <div className="sm:col-span-2">
+      <span className="text-sm font-medium text-ink-2">Sueldo</span>
+      <div className="mt-1.5 grid gap-2 sm:grid-cols-4">
+        <input
+          inputMode="numeric"
+          value={value.desde}
+          disabled={aConvenir}
+          onChange={(e) => set("desde")(soloDigitos(e.target.value))}
+          placeholder="Desde"
+          className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20 disabled:opacity-50"
+        />
+        <input
+          inputMode="numeric"
+          value={value.hasta}
+          disabled={aConvenir}
+          onChange={(e) => set("hasta")(soloDigitos(e.target.value))}
+          placeholder="Hasta (opcional)"
+          className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20 disabled:opacity-50"
+        />
+        <select
+          value={value.moneda}
+          disabled={aConvenir}
+          onChange={(e) => set("moneda")(e.target.value)}
+          className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand disabled:opacity-50"
+        >
+          {monedas.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+        <select
+          value={value.periodicidad}
+          onChange={(e) => set("periodicidad")(e.target.value)}
+          className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand"
+        >
+          <option value="">Periodicidad…</option>
+          {periodicidades.map((p) => (
+            <option key={p.valor} value={p.valor}>
+              {p.texto}
+            </option>
+          ))}
+        </select>
+      </div>
+      {ayuda && <span className="mt-1 block text-xs leading-relaxed text-ink-3">{ayuda}</span>}
+    </div>
+  );
+}

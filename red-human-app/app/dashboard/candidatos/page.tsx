@@ -94,6 +94,7 @@ import {
   type MensajePrefiltro,
   type ModalidadEntrevistaHumana,
   type PerfilProfundo,
+  nombreEtapa,
 } from "@/lib/api";
 import { usePuedeDecidir, useModoPrueba } from "@/components/sesion";
 import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveedor";
@@ -792,7 +793,7 @@ function CandidatosContenido() {
                 <div className="mb-3 flex items-center justify-between px-1">
                   <div className="flex items-center gap-2">
                     <span className="h-2.5 w-2.5 rounded-full" style={{ background: etapaColor[etapa] }} />
-                    <span className={cn("text-sm font-semibold", esResaltada && "text-brand")}>{etapa}</span>
+                    <span className={cn("text-sm font-semibold", esResaltada && "text-brand")}>{nombreEtapa(etapa)}</span>
                   </div>
                   <span
                     className={cn(
@@ -1023,7 +1024,7 @@ function CandidatosContenido() {
                         }}
                       >
                         <span className="h-1.5 w-1.5 rounded-full" style={{ background: etapaColor[c.etapa] }} />
-                        {c.etapa}
+                        {nombreEtapa(c.etapa)}
                       </span>
                     </td>
                     <td className="px-4 py-3">
@@ -1207,7 +1208,7 @@ function ModalCandidato({
     setOcupado(etapa);
     const r = await moverEtapaCandidato(c.id, etapa, comentario, forzarPrueba);
     const data = resolver(
-      r, `Enviado a ${etapa}.`,
+      r, `Enviado a ${nombreEtapa(etapa)}.`,
       modoPrueba && !forzarPrueba ? () => enviarAEtapa(etapa, true) : undefined,
     );
     if (data) {
@@ -1500,7 +1501,7 @@ function ModalCandidato({
                     onClick={() => (etapa === "Entrevista Humana" ? setModalEntrevista(true) : enviarAEtapa(etapa))}
                     disabled={Boolean(ocupado)}
                   >
-                    <ThumbsUp className="h-4 w-4" /> Enviar a {etapa}
+                    <ThumbsUp className="h-4 w-4" /> Enviar a {nombreEtapa(etapa)}
                   </Button>
                 ))}
 
@@ -1935,7 +1936,7 @@ function PestanaEvaluaciones({ c }: { c: Candidato }) {
       {evalAvatar?.resumen && (
         <Card className="border-human/30 bg-human-soft/20 p-5">
           <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-human">
-            Evaluación de Entrevista de IA (Avatar)
+            Evaluación de la Entrevista Red Human
           </span>
           <p className="mt-2 text-sm leading-relaxed text-ink">{evalAvatar.resumen}</p>
 

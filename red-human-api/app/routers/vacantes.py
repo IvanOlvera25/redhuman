@@ -16,7 +16,10 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import ENFOQUES_ENTREVISTA, PLATAFORMAS, Cliente, Cuenta, Plantilla, Postulacion, Usuario, UsuarioCuenta, Vacante, registrar, slugificar
+from ..models import (
+    ENFOQUES_ENTREVISTA, MONEDAS_SUELDO, PERIODICIDADES_SUELDO, PLATAFORMAS, Cliente, Cuenta, Plantilla, Postulacion,
+    Usuario, UsuarioCuenta, Vacante, registrar, slugificar, texto_sueldo,
+)
 from ..serial import nombre_empresa, nombre_empresa_candidato, vacante_dict
 from ..services import ia
 
@@ -154,20 +157,77 @@ def listar(
 # ------------------------------------------------------------
 
 
+SEPARADOR_REQUISITOS = " · "
+
+
+def requisitos_lista(texto: str) -> List[str]:
+    """`Vacante.requisitos` es texto (legado); la Parte 3 lo trata como lista de indispensables.
+    Acepta « · », saltos de línea y punto y coma como separadores."""
+    partes: List[str] = []
+    for linea in (texto or "").replace(";", "\n").replace(SEPARADOR_REQUISITOS, "\n").splitlines():
+        if linea.strip(" .-•"):
+            partes.append(linea.strip(" .-•"))
+    return partes
+
+
 class GenerarIn(BaseModel):
+    """Ficha capturada por RH ANTES de generar (Parte 3, 2026-09-12). Las condiciones reales
+    (sueldo, ubicación, modalidad, prestaciones) SOLO salen de aquí: la IA nunca las inventa."""
     titulo: str
     area: str = ""
+    seniority: str = ""
     ubicacion: str = ""
-    sueldo: str = "A convenir"
-    requisitos: str = ""
+    modalidad: str = "Presencial"
+    # sueldo estructurado; `sueldo` (texto) se acepta por compatibilidad (agente, vacantes viejas)
+    sueldo: str = ""
+    sueldo_desde: Optional[int] = None
+    sueldo_hasta: Optional[int] = None
+    sueldo_moneda: str = "MXN"
+    sueldo_periodicidad: str = ""
+    # guía opcional para Red Human (reemplaza a las "notas para la IA")
+    descripcion: str = ""  # descripción breve → la IA la expande
+    requisitos: str = ""  # legado: indispensables en texto separados por « · »
+    requisitos_indispensables: List[str] = []
+    requisitos_deseables: List[str] = []
+    beneficios: List[str] = []
     # Fase 4 (Punto 1): el nombre de empresa que ve el candidato NUNCA es texto libre — lo resuelve
     # el servidor con la misma regla que nombre_empresa_candidato: Cliente (si está marcado para
     # mostrarse) o nombre comercial de la Cuenta. `empresa` se acepta por compatibilidad y se ignora.
     empresa: str = ""
     cliente_id: Optional[int] = None
     mostrar_cliente_candidato: bool = True
-    modalidad: str = "Presencial"
-    notas: str = ""
+
+    def indispensables(self) -> List[str]:
+        vistos = set()
+        salida = []
+        for r in [*self.requisitos_indispensables, *requisitos_lista(self.requisitos)]:
+            k = r.strip().lower()
+            if k and k not in vistos:
+                vistos.add(k)
+                salida.append(r.strip())
+        return salida
+
+    def sueldo_estructurado(self) -> bool:
+        return bool(self.sueldo_periodicidad or self.sueldo_desde or self.sueldo_hasta)
+
+    def sueldo_texto(self) -> str:
+        """Derivado del estructurado; si no llegó estructurado, el texto legado tal cual."""
+        if self.sueldo_estructurado():
+            return texto_sueldo(self.sueldo_desde, self.sueldo_hasta, self.sueldo_moneda, self.sueldo_periodicidad)
+        return (self.sueldo or "").strip()
+
+
+def _validar_sueldo(datos: GenerarIn) -> None:
+    if datos.sueldo_periodicidad and datos.sueldo_periodicidad not in PERIODICIDADES_SUELDO:
+        raise HTTPException(400, f"Periodicidad de sueldo inválida. Usa una de: {', '.join(PERIODICIDADES_SUELDO)}")
+    if datos.sueldo_moneda and datos.sueldo_moneda.upper() not in MONEDAS_SUELDO:
+        raise HTTPException(400, f"Moneda inválida. Usa una de: {', '.join(MONEDAS_SUELDO)}")
+    if (datos.sueldo_desde or 0) < 0 or (datos.sueldo_hasta or 0) < 0:
+        raise HTTPException(400, "El sueldo no puede ser negativo.")
+    if datos.sueldo_desde and datos.sueldo_hasta and datos.sueldo_hasta < datos.sueldo_desde:
+        raise HTTPException(400, "El sueldo «hasta» no puede ser menor que el «desde».")
+    if datos.seniority and datos.seniority not in ia.SENIORITY.__args__:
+        raise HTTPException(400, f"Seniority inválido. Usa uno de: {', '.join(ia.SENIORITY.__args__)}")
 
 
 def _empresa_resuelta(db: Session, cuenta: Cuenta, cliente_id: Optional[int], mostrar_cliente: bool) -> str:
@@ -179,48 +239,58 @@ def _empresa_resuelta(db: Session, cuenta: Cuenta, cliente_id: Optional[int], mo
     return nombre_empresa(cuenta, cliente, mostrar_cliente)
 
 
+def _ficha(datos: GenerarIn, empresa: str) -> ia.FichaVacante:
+    return ia.FichaVacante(
+        titulo=datos.titulo.strip(), area=datos.area, seniority=datos.seniority, ubicacion=datos.ubicacion,
+        modalidad=datos.modalidad, sueldo_texto=datos.sueldo_texto(), empresa=empresa,
+        descripcion_breve=datos.descripcion, requisitos_indispensables=datos.indispensables(),
+        requisitos_deseables=[x for x in datos.requisitos_deseables if x.strip()],
+        beneficios=[x for x in datos.beneficios if x.strip()],
+    )
+
+
 def _generar(datos: GenerarIn, empresa: str):
     if not datos.titulo.strip():
         raise HTTPException(400, "El título del puesto es obligatorio para generar la publicación.")
-    return ia.generar_vacante(
-        datos.titulo, datos.area, datos.ubicacion, datos.sueldo,
-        datos.requisitos, empresa, datos.modalidad, datos.notas,
-    )
+    _validar_sueldo(datos)
+    return ia.generar_vacante(_ficha(datos, empresa))
 
 
 @router.post("/generar")
 def generar(
     datos: GenerarIn, db: Session = Depends(get_db), _: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
 ):
-    """Genera contenido base + publicación por plataforma + criterios de prefiltro. Todo lo generado
-    nombra a la empresa con la regla Cliente-visible / Cuenta (Punto 1)."""
+    """Genera/completa la vacante a partir de la ficha capturada (Parte 3): nunca inventa condiciones y
+    respeta literal lo capturado (ia._asegurar_capturado). Todo lo generado nombra a la empresa con la
+    regla Cliente-visible / Cuenta (Punto 1)."""
     empresa = _empresa_resuelta(db, cuenta, datos.cliente_id, datos.mostrar_cliente_candidato)
     resultado, con_ia = _generar(datos, empresa)
-    return {"ia": con_ia, "empresa": empresa, **resultado.model_dump(by_alias=True)}
+    return {"ia": con_ia, "empresa": empresa, "sueldo_texto": datos.sueldo_texto() or "A convenir", **resultado.model_dump(by_alias=True)}
 
 
 def _aplicar_generado(v: Vacante, g: ia.VacanteGenerada) -> None:
-    """Vuelca la salida del generador sobre la vacante."""
-    v.resumen = g.resumen
-    v.descripcion = g.descripcion
-    v.perfil_ideal = g.perfil_ideal
-    v.responsabilidades = g.responsabilidades
+    """Vuelca la salida del generador sobre la vacante RESPETANDO lo capturado (Parte 3): solo rellena
+    lo vacío y une listas con lo capturado primero; nunca toca sueldo ni beneficios (ya vienen
+    garantizados por ia._asegurar_capturado) ni el seniority elegido."""
+    v.resumen = v.resumen or g.resumen
+    v.descripcion = g.descripcion  # la breve capturada fue la guía; la completa la sustituye (decisión 3)
+    v.perfil_ideal = v.perfil_ideal or g.perfil_ideal
+    v.responsabilidades = v.responsabilidades or g.responsabilidades
+    v.requisitos = SEPARADOR_REQUISITOS.join(g.requisitos_indispensables) or v.requisitos
     v.requisitos_deseables = g.requisitos_deseables
     v.beneficios = g.beneficios
-    v.palabras_clave = g.palabras_clave
-    v.seniority = g.seniority
+    v.palabras_clave = v.palabras_clave or g.palabras_clave
+    v.seniority = v.seniority or g.seniority
     v.avisos_cumplimiento = g.avisos_cumplimiento
-    v.texto_whatsapp = g.texto_whatsapp
-    v.texto_bolsa = g.occ.page  # compatibilidad con la forma anterior
-    v.preguntas_filtro = [p.model_dump() for p in g.preguntas_filtro]
+    v.texto_whatsapp = v.texto_whatsapp or g.texto_whatsapp
+    v.texto_bolsa = v.texto_bolsa or g.occ.page  # compatibilidad con la forma anterior
+    v.preguntas_filtro = v.preguntas_filtro or [p.model_dump() for p in g.preguntas_filtro]
     v.publicaciones = {
-        "whatsapp": {"titulo": v.titulo, "copy": g.texto_whatsapp, "page": g.texto_whatsapp, "etiquetas": []},
+        "whatsapp": {"titulo": v.titulo, "copy": v.texto_whatsapp, "page": v.texto_whatsapp, "etiquetas": []},
         "occ": g.occ.bloque(),
         "linkedin": g.linkedin.bloque(),
         "portal": g.portal.bloque(),
     }
-    if not v.requisitos and g.requisitos_indispensables:
-        v.requisitos = " · ".join(g.requisitos_indispensables)
 
 
 # ------------------------------------------------------------
@@ -273,6 +343,7 @@ def crear(
         plataformas = ["WhatsApp", "Portal"]
     if datos.enfoque_entrevista not in ENFOQUES_ENTREVISTA:
         raise HTTPException(400, f"Enfoque de entrevista inválido. Usa uno de: {', '.join(ENFOQUES_ENTREVISTA)}")
+    _validar_sueldo(datos)
 
     v = Vacante(
         codigo="TMP",
@@ -288,9 +359,14 @@ def crear(
         enfoque_entrevista=datos.enfoque_entrevista,
         ubicacion=datos.ubicacion,
         modalidad=datos.modalidad,
-        sueldo=datos.sueldo,
+        # Parte 3: el texto del sueldo es DERIVADO del estructurado (o el legado; nunca inventado)
+        sueldo=datos.sueldo_texto() or "A convenir",
+        sueldo_desde=datos.sueldo_desde,
+        sueldo_hasta=datos.sueldo_hasta,
+        sueldo_moneda=(datos.sueldo_moneda or "MXN").upper(),
+        sueldo_periodicidad=datos.sueldo_periodicidad,
         estado="Publicada" if datos.publicar else "Borrador",
-        requisitos=datos.requisitos,
+        requisitos=SEPARADOR_REQUISITOS.join(datos.indispensables()),
         descripcion=datos.descripcion,
         texto_whatsapp=datos.texto_whatsapp,
         texto_bolsa=datos.texto_bolsa,
@@ -314,7 +390,7 @@ def crear(
     v.empresa = nombre_empresa(cuenta, cliente_obj, datos.mostrar_cliente_candidato)
 
     con_ia = None
-    if datos.generar_si_falta and not datos.publicaciones and not datos.descripcion:
+    if datos.generar_si_falta and not datos.publicaciones and not datos.responsabilidades:
         entrada_generador = GenerarIn(**datos.model_dump(include=set(GenerarIn.model_fields)))
         generado, con_ia = _generar(entrada_generador, v.empresa)
         _aplicar_generado(v, generado)
@@ -382,6 +458,10 @@ class ActualizarIn(BaseModel):
     ubicacion: Optional[str] = None
     modalidad: Optional[str] = None
     sueldo: Optional[str] = None
+    sueldo_desde: Optional[int] = None  # Parte 3
+    sueldo_hasta: Optional[int] = None
+    sueldo_moneda: Optional[str] = None
+    sueldo_periodicidad: Optional[str] = None
     requisitos: Optional[str] = None
     descripcion: Optional[str] = None
     resumen: Optional[str] = None
@@ -421,9 +501,16 @@ def actualizar(
     if datos.enfoque_entrevista is not None and datos.enfoque_entrevista not in ENFOQUES_ENTREVISTA:
         raise HTTPException(400, f"Enfoque de entrevista inválido. Usa uno de: {', '.join(ENFOQUES_ENTREVISTA)}")
     cambios.pop("empresa", None)  # Punto 1: nunca texto libre; se recalcula abajo
+    if datos.sueldo_periodicidad is not None and datos.sueldo_periodicidad not in PERIODICIDADES_SUELDO:
+        raise HTTPException(400, f"Periodicidad de sueldo inválida. Usa una de: {', '.join(PERIODICIDADES_SUELDO)}")
+    if datos.seniority is not None and datos.seniority and datos.seniority not in ia.SENIORITY.__args__:
+        raise HTTPException(400, f"Seniority inválido. Usa uno de: {', '.join(ia.SENIORITY.__args__)}")
 
     for campo, valor in cambios.items():
         setattr(v, campo, valor)
+    # Parte 3: si tocó el sueldo estructurado, el texto se deriva (nunca se edita por separado)
+    if any(k in cambios for k in ("sueldo_desde", "sueldo_hasta", "sueldo_moneda", "sueldo_periodicidad")):
+        v.sueldo = texto_sueldo(v.sueldo_desde, v.sueldo_hasta, v.sueldo_moneda, v.sueldo_periodicidad)
     db.flush()
     db.refresh(v)  # recarga cliente/cuenta si cambió cliente_id
     v.empresa = nombre_empresa_candidato(v)
@@ -448,9 +535,17 @@ def regenerar(
 ):
     """Vuelve a generar todo el contenido de una vacante existente con los datos ya capturados."""
     v = _por_codigo(db, codigo, cuenta.id)
-    generado, con_ia = ia.generar_vacante(
-        v.titulo, v.area, v.ubicacion, v.sueldo, v.requisitos, v.empresa or nombre_empresa_candidato(v), v.modalidad, datos.notas
+    ficha = ia.FichaVacante(
+        titulo=v.titulo, area=v.area, seniority=v.seniority or "", ubicacion=v.ubicacion, modalidad=v.modalidad,
+        sueldo_texto=v.sueldo or "", empresa=v.empresa or nombre_empresa_candidato(v),
+        descripcion_breve=(datos.notas or "").strip(), requisitos_indispensables=requisitos_lista(v.requisitos),
+        requisitos_deseables=list(v.requisitos_deseables or []), beneficios=list(v.beneficios or []),
     )
+    generado, con_ia = ia.generar_vacante(ficha)
+    # regenerar = volver a redactar: se limpian los textos generados para que _aplicar_generado los
+    # rellene, pero lo capturado (requisitos, beneficios, sueldo, seniority) se respeta igual.
+    v.resumen = v.perfil_ideal = v.texto_whatsapp = v.texto_bolsa = ""
+    v.responsabilidades, v.palabras_clave, v.preguntas_filtro = [], [], []
     _aplicar_generado(v, generado)
     registrar(db, u.nombre, "vacante_regenerada", "vacante", v.codigo, {"ia": con_ia, "notas": datos.notas})
     db.commit()

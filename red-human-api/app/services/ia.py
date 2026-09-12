@@ -122,22 +122,31 @@ _PLANTILLAS = (
 )
 
 _REGLAS = (
-    "Eres el redactor de vacantes de Red Human AI, plataforma de RH en México. Escribes en español mexicano, "
+    "Eres el redactor de vacantes de Red Human, plataforma de RH en México. Escribes en español mexicano, "
     "claro, inclusivo y concreto.\n"
-    "REGLAS:\n"
-    "1. Nunca inventes prestaciones, sueldos, horarios ni condiciones que no se deriven de los datos recibidos. "
-    "Si falta un dato relevante, NO lo inventes: anótalo en avisos_cumplimiento para que RH lo confirme.\n"
-    "2. Cumplimiento LFT (art. 3 y 133): prohibido pedir o insinuar edad, sexo, estado civil, embarazo, religión, "
+    "REGLAS NO NEGOCIABLES:\n"
+    "1. NUNCA inventes condiciones reales: sueldo, periodicidad de pago, ubicación, modalidad, horario ni "
+    "prestaciones/beneficios. Usa EXCLUSIVAMENTE lo que trae la ficha. Si un dato no viene, no lo asumas ni lo "
+    "rellenes con un valor típico: omítelo del texto público y anótalo en avisos_cumplimiento como pendiente "
+    "de confirmar por RH. `beneficios` de salida = EXACTAMENTE las prestaciones capturadas por RH (lista vacía "
+    "si no capturó ninguna; no agregues 'prestaciones de ley' ni nada parecido por tu cuenta).\n"
+    "2. RESPETA lo capturado por RH: los requisitos indispensables capturados salen literal y como "
+    "indispensables; los deseables capturados salen literal y como deseables. Puedes AGREGAR requisitos que "
+    "falten, pero nunca reclasificar, reescribir ni quitar los capturados. La descripción breve capturada es "
+    "la guía obligatoria de la descripción completa (mismo sentido, sin contradecirla). El seniority es el "
+    "capturado: úsalo tal cual en todos los títulos.\n"
+    "3. Cumplimiento LFT (art. 3 y 133): prohibido pedir o insinuar edad, sexo, estado civil, embarazo, religión, "
     "apariencia, origen étnico, condición de salud u orientación. Si el usuario los incluyó en los requisitos, "
     "reescríbelos en términos de competencias y regístralo en avisos_cumplimiento.\n"
-    "3. Usa lenguaje incluyente con la forma «(a)» del español mexicano (Cajero(a), Repartidor(a)).\n"
-    "4. Las preguntas de prefiltro deben responderse en una línea y marcar descarta=true SOLO cuando el requisito "
-    "sea realmente indispensable.\n"
-    "5. Cada plataforma tiene su propio tono y formato: no repitas el mismo texto en las tres.\n"
-    "6. Todo lo que escribas en `copy` y `page` lo lee el candidato. Nunca uses etiquetas internas como "
-    "«indicado por RH», «según RH» o «no especificado»: escribe el sueldo directo («$10,500 mensuales») y, si "
-    "un dato falta, simplemente omítelo del texto público y anótalo en avisos_cumplimiento.\n"
-    "7. El seniority que elijas debe ser el mismo en los títulos de todas las plataformas; no lo contradigas."
+    "4. Usa lenguaje incluyente con la forma «(a)» del español mexicano (Cajero(a), Repartidor(a)).\n"
+    "5. Las preguntas de prefiltro salen PRINCIPALMENTE de los requisitos indispensables (primero los capturados "
+    "por RH); deben responderse en una línea y marcar descarta=true SOLO cuando el requisito sea realmente "
+    "indispensable.\n"
+    "6. Cada plataforma tiene su propio tono y formato: no repitas el mismo texto en las tres.\n"
+    "7. Todo lo que escribas en `copy` y `page` lo lee el candidato. Nunca uses etiquetas internas como "
+    "«indicado por RH», «según RH» o «no especificado»: escribe el sueldo directo («$10,500 mensuales») solo "
+    "si viene en la ficha; si es «A convenir» o no viene, simplemente no menciones cifras.\n"
+    "8. `rango_salarial_sugerido` es solo una referencia informativa para RH: nunca lo uses en los textos."
 )
 
 
@@ -146,12 +155,76 @@ _REGLAS = (
 _RANGO_ANOS_GENERICO = ["Menos de 1 año", "1-2 años", "2-3 años", "Más de 3 años"]
 
 
-def _demo_vacante(titulo: str, area: str, ubicacion: str, sueldo: str, requisitos: str, empresa: str) -> VacanteGenerada:
-    """Plantilla determinista para modo demo (sin OPENAI_API_KEY) — misma estructura que la salida de IA."""
-    reqs = [r.strip(" .") for r in requisitos.replace(";", ",").split(",") if r.strip()] or [
-        "Disponibilidad de horario",
-        "Documentación en regla (INE, CURP, RFC)",
-    ]
+class FichaVacante(BaseModel):
+    """Lo que RH capturó ANTES de generar (Parte 3). Es la única fuente de condiciones reales."""
+
+    titulo: str
+    area: str = ""
+    seniority: str = ""
+    ubicacion: str = ""
+    modalidad: str = ""
+    sueldo_texto: str = ""  # texto derivado (models.texto_sueldo) o «A convenir»; "" = no capturado
+    empresa: str = ""
+    descripcion_breve: str = ""
+    requisitos_indispensables: List[str] = Field(default_factory=list)
+    requisitos_deseables: List[str] = Field(default_factory=list)
+    beneficios: List[str] = Field(default_factory=list)
+
+
+def _clave_texto(t: str) -> str:
+    import unicodedata
+    return " ".join(unicodedata.normalize("NFKD", t or "").encode("ascii", "ignore").decode().lower().split())
+
+
+def _unir_capturado(capturados: List[str], generados: List[str], excluir: Optional[List[str]] = None) -> List[str]:
+    """Capturados primero y literal; después lo generado que no repita ni pertenezca a `excluir`."""
+    vistos = {_clave_texto(x) for x in capturados if x.strip()}
+    prohibidos = {_clave_texto(x) for x in (excluir or []) if x.strip()}
+    salida = [x.strip() for x in capturados if x.strip()]
+    for g in generados or []:
+        k = _clave_texto(g)
+        if not k or k in vistos or k in prohibidos:
+            continue
+        vistos.add(k)
+        salida.append(g.strip())
+    return salida
+
+
+def _asegurar_capturado(salida: VacanteGenerada, ficha: FichaVacante) -> VacanteGenerada:
+    """Garantía en Python (no depende del modelo) de las dos reglas no negociables de la Parte 3:
+    (a) no inventar condiciones — beneficios = capturados; (b) respetar lo capturado — indispensables y
+    deseables literal, en su categoría y primero; seniority = el elegido."""
+    salida.requisitos_indispensables = _unir_capturado(
+        ficha.requisitos_indispensables, salida.requisitos_indispensables, excluir=ficha.requisitos_deseables
+    )
+    salida.requisitos_deseables = _unir_capturado(
+        ficha.requisitos_deseables, salida.requisitos_deseables, excluir=ficha.requisitos_indispensables
+    )
+    salida.beneficios = [b.strip() for b in ficha.beneficios if b.strip()]
+    if ficha.seniority:
+        salida.seniority = ficha.seniority  # type: ignore[assignment]
+    avisos = list(salida.avisos_cumplimiento)
+    if not ficha.beneficios:
+        avisos.append("Prestaciones no capturadas: RH debe confirmarlas antes de publicar (no se inventaron).")
+    if not ficha.sueldo_texto or ficha.sueldo_texto == "A convenir":
+        avisos.append("Sueldo no capturado («A convenir»): RH debe confirmarlo antes de publicar (no se inventó).")
+    if not ficha.ubicacion:
+        avisos.append("Ubicación no capturada: RH debe confirmarla antes de publicar.")
+    salida.avisos_cumplimiento = avisos
+    for p in salida.preguntas_filtro:
+        if p.tipo == "numero" and not p.opciones:
+            p.opciones = _RANGO_ANOS_GENERICO
+    return salida
+
+
+def _demo_vacante(f: FichaVacante) -> VacanteGenerada:
+    """Plantilla determinista para modo demo (sin OPENAI_API_KEY) — misma estructura que la salida de IA
+    y las mismas reglas: nada de sueldo, horario ni prestaciones que RH no haya capturado."""
+    titulo, area, empresa = f.titulo, f.area, f.empresa or "la empresa"
+    lugar = f.ubicacion or ""
+    en_lugar = f" en {lugar}" if lugar else ""
+    reqs = list(f.requisitos_indispensables) or ["Experiencia comprobable en un puesto similar", "Documentación en regla (INE, CURP, RFC)"]
+    deseables = list(f.requisitos_deseables) or ["Experiencia previa en un puesto similar"]
     actividades = [
         f"Ejecutar las actividades diarias del puesto de {titulo}.",
         f"Coordinarte con el equipo de {area or 'la operación'} para cumplir los objetivos.",
@@ -159,131 +232,119 @@ def _demo_vacante(titulo: str, area: str, ubicacion: str, sueldo: str, requisito
         "Cuidar el orden, la seguridad y la calidad en tu área de trabajo.",
         "Dar seguimiento a los indicadores del puesto.",
     ]
-    beneficios = ["Sueldo " + sueldo, "Prestaciones de ley (IMSS, aguinaldo, vacaciones)", "Capacitación pagada", "Oportunidad de crecimiento"]
-    viñetas = "\n".join(f"• {r}" for r in reqs)
+    con_sueldo = bool(f.sueldo_texto) and f.sueldo_texto != "A convenir"
+    linea_sueldo = f" Sueldo {f.sueldo_texto}." if con_sueldo else ""
+    ofrecemos = list(f.beneficios) + ([f"Sueldo {f.sueldo_texto}"] if con_sueldo else [])
     lista_act = "\n".join(f"• {a}" for a in actividades)
-    lista_ben = "\n".join(f"• {b}" for b in beneficios)
+    viñetas = "\n".join(f"• {r}" for r in reqs)
+    lista_ben = "\n".join(f"• {b}" for b in ofrecemos) or "• Condiciones a confirmar con RH"
+    base_desc = (f.descripcion_breve.strip() + "\n\n") if f.descripcion_breve.strip() else ""
+    modalidad = f" Modalidad {f.modalidad.lower()}." if f.modalidad else ""
 
     return VacanteGenerada(
-        resumen=f"Buscamos {titulo} para {empresa} en {ubicacion}. Sueldo {sueldo} y prestaciones de ley.",
+        resumen=f"Buscamos {titulo} para {empresa}{en_lugar}.{linea_sueldo}",
         descripcion=(
-            f"{empresa} busca {titulo} para su equipo de {area or 'operación'} en {ubicacion}.\n\n"
-            f"Es una posición {('clave' if area else 'operativa')} en la que tendrás actividades claras, "
-            "capacitación desde el primer día y un equipo que te acompaña.\n\n"
-            f"Ofrecemos sueldo de {sueldo}, prestaciones de ley y crecimiento real dentro de la empresa."
+            f"{base_desc}{empresa} busca {titulo} para su equipo de {area or 'operación'}{en_lugar}.{modalidad}\n\n"
+            "Es una posición con actividades claras, acompañamiento desde el primer día y un equipo que te respalda."
         ),
         perfil_ideal=(
-            "Personas responsables, con actitud de servicio y disponibilidad para cumplir el horario del puesto. "
-            "Se valora experiencia previa en actividades similares."
+            f"Personas con perfil {f.seniority.lower() if f.seniority else 'operativo'}, responsables y con actitud de "
+            "servicio. Se valora experiencia previa en actividades similares."
         ),
         responsabilidades=actividades,
         requisitos_indispensables=reqs,
-        requisitos_deseables=["Experiencia previa en un puesto similar", "Vivir cerca de la zona de trabajo"],
-        beneficios=beneficios,
-        palabras_clave=[titulo.lower(), (area or "empleo").lower(), ubicacion.lower(), "vacante", "empleo", "contratación inmediata"],
-        seniority="Junior",
-        rango_salarial_sugerido=sueldo,
+        requisitos_deseables=deseables,
+        beneficios=list(f.beneficios),
+        palabras_clave=[x for x in [titulo.lower(), (area or "empleo").lower(), lugar.lower(), "vacante", "empleo"] if x],
+        seniority=(f.seniority or "Junior"),  # type: ignore[arg-type]
+        rango_salarial_sugerido=f.sueldo_texto or "Sin referencia (modo demo)",
         avisos_cumplimiento=["Modo demo: agrega OPENAI_API_KEY en la API para generar el contenido con IA."],
         texto_whatsapp=(
-            f"📢 *{titulo}* — {ubicacion}\n💰 {sueldo}\n✅ Prestaciones de ley\n\n"
-            "Contéstame por aquí y en 2 minutos hacemos tu registro. ¡Va! 🙌"
+            f"📢 *{titulo}*{(' — ' + lugar) if lugar else ''}\n" + (f"💰 {f.sueldo_texto}\n" if con_sueldo else "")
+            + "\nContéstame por aquí y en 2 minutos hacemos tu registro. ¡Va! 🙌"
         ),
         occ=BloquePlataforma(
-            titulo=f"{titulo} - {ubicacion}"[:70],
-            copy=f"{empresa} solicita {titulo} en {ubicacion}. Sueldo {sueldo} más prestaciones de ley. Postúlate hoy."[:300],
+            titulo=f"{titulo}{(' - ' + lugar) if lugar else ''}"[:70],
+            copy=f"{empresa} solicita {titulo}{en_lugar}.{linea_sueldo} Postúlate hoy."[:300],
             page=(
-                f"SOBRE LA VACANTE\n{empresa} busca {titulo} para su equipo en {ubicacion}.\n\n"
+                f"SOBRE LA VACANTE\n{empresa} busca {titulo} para su equipo{en_lugar}.\n\n"
                 f"ACTIVIDADES PRINCIPALES\n{lista_act}\n\nREQUISITOS\n{viñetas}\n\nOFRECEMOS\n{lista_ben}\n\n"
                 "CÓMO POSTULARTE\n• Envía tu CV por este medio y el equipo de RH te contactará."
             ),
-            etiquetas=[titulo.lower(), area.lower() or "empleo", ubicacion.lower(), "vacante", "tiempo completo"],
+            etiquetas=[x for x in [titulo.lower(), area.lower() or "empleo", lugar.lower(), "vacante"] if x],
         ),
         linkedin=BloquePlataforma(
-            titulo=f"{titulo} | {empresa} | {ubicacion}"[:100],
+            titulo=f"{titulo} | {empresa}{(' | ' + lugar) if lugar else ''}"[:100],
             copy=(
-                f"Estamos contratando: {titulo} en {ubicacion}.\n\n"
-                f"En {empresa} buscamos a alguien que quiera crecer con nosotros.\n"
-                f"Sueldo: {sueldo} + prestaciones de ley.\n\n"
+                f"Estamos contratando: {titulo}{en_lugar}.\n\n"
+                f"En {empresa} buscamos a alguien que quiera crecer con nosotros.{linea_sueldo}\n\n"
                 "¿Te interesa o conoces a alguien? Postúlate desde la liga de esta publicación.\n\n"
                 "#Empleo #Vacantes #México"
             ),
             page=(
-                f"**Sobre el rol**\n{titulo} en {ubicacion} para el equipo de {area or 'operación'} de {empresa}.\n\n"
+                f"**Sobre el rol**\n{titulo}{en_lugar} para el equipo de {area or 'operación'} de {empresa}.\n\n"
                 "**Lo que harás**\n" + "\n".join(f"- {a}" for a in actividades) + "\n\n"
-                "**Lo que buscamos**\n" + "\n".join(f"- {r}" for r in reqs) + "\n\n"
-                "**Lo que ofrecemos**\n" + "\n".join(f"- {b}" for b in beneficios)
+                "**Lo que buscamos**\n" + "\n".join(f"- {r}" for r in reqs)
+                + ("\n\n**Lo que ofrecemos**\n" + "\n".join(f"- {b}" for b in ofrecemos) if ofrecemos else "")
             ),
-            etiquetas=[titulo, area or "Operaciones", "Trabajo en equipo", "Atención al cliente"],
+            etiquetas=[titulo, area or "Operaciones", "Trabajo en equipo"],
         ),
         portal=BloquePlataforma(
             titulo=titulo,
-            copy=f"{titulo} en {ubicacion}. Sueldo {sueldo}, prestaciones de ley y crecimiento. Postúlate en 2 minutos."[:160],
+            copy=f"{titulo}{en_lugar}.{linea_sueldo} Postúlate en 2 minutos."[:160],
             page=(
-                f"## {titulo}\n\n¿Buscas trabajo en {ubicacion}? En {empresa} estamos contratando.\n\n"
+                f"## {titulo}\n\n{'¿Buscas trabajo en ' + lugar + '? ' if lugar else ''}En {empresa} estamos contratando.\n\n"
                 "**Lo que harás**\n" + "\n".join(f"- {a}" for a in actividades) + "\n\n"
-                "**Lo que necesitas**\n" + "\n".join(f"- {r}" for r in reqs) + "\n\n"
-                "**Lo que te damos**\n" + "\n".join(f"- {b}" for b in beneficios) + "\n\n"
+                "**Lo que necesitas**\n" + "\n".join(f"- {r}" for r in reqs)
+                + ("\n\n**Lo que te damos**\n" + "\n".join(f"- {b}" for b in ofrecemos) if ofrecemos else "") + "\n\n"
                 "Postúlate en 2 minutos: solo necesitas tu CV o responder unas preguntas rápidas."
             ),
-            etiquetas=[titulo.lower(), f"empleo {ubicacion.lower()}", "vacante"],
+            etiquetas=[x for x in [titulo.lower(), f"empleo {lugar.lower()}" if lugar else "", "vacante"] if x],
         ),
         preguntas_filtro=[
             PreguntaFiltro(
-                pregunta="¿Cuentas con disponibilidad de horario para el puesto?",
-                tipo="si_no", valida="Disponibilidad de horario", respuesta_esperada="Sí", descarta=True,
-            ),
+                pregunta=f"¿Cumples con: {r}?" if len(r) < 70 else f"¿Cumples con el requisito «{r[:60]}…»?",
+                tipo="si_no", valida=r, respuesta_esperada="Sí", descarta=True,
+            )
+            for r in reqs[:4]
+        ] + [
             PreguntaFiltro(
                 pregunta="¿Cuántos años de experiencia tienes en un puesto similar?",
                 tipo="numero", valida="Experiencia previa", respuesta_esperada=">= 1 año", descarta=False,
                 opciones=_RANGO_ANOS_GENERICO,
             ),
-            PreguntaFiltro(
-                pregunta=f"¿Vives en {ubicacion} o puedes trasladarte diariamente?",
-                tipo="si_no", valida="Ubicación", respuesta_esperada="Sí", descarta=True,
-            ),
-            PreguntaFiltro(
-                pregunta="¿Tienes tu documentación en regla (INE, CURP, RFC)?",
-                tipo="si_no", valida="Documentación", respuesta_esperada="Sí", descarta=False,
-            ),
         ],
     )
 
 
-def generar_vacante(
-    titulo: str,
-    area: str,
-    ubicacion: str,
-    sueldo: str,
-    requisitos: str,
-    empresa: str = "Grupo Carbe",
-    modalidad: str = "Presencial",
-    notas: str = "",
-) -> Tuple[VacanteGenerada, bool]:
+def generar_vacante(ficha: FichaVacante) -> Tuple[VacanteGenerada, bool]:
+    """Parte 3: genera/completa la vacante a partir de la ficha capturada por RH. Las dos reglas no
+    negociables (no inventar condiciones; respetar lo capturado) se piden en el prompt Y se garantizan
+    en Python con _asegurar_capturado, en modo IA y en modo demo."""
     client = _client()
     if client is None:
-        return _demo_vacante(titulo, area, ubicacion, sueldo, requisitos, empresa), False
+        return _asegurar_capturado(_demo_vacante(ficha), ficha), False
+
+    def lista(xs: List[str]) -> str:
+        return ("\n" + "\n".join(f"  - {x}" for x in xs)) if xs else " (sin dato — no inventes)"
 
     resp = client.responses.parse(
         model=MODEL,
         instructions=f"{_REGLAS}\n\n{_PLANTILLAS}",
         input=(
             "Ficha capturada por RH (insumo interno, no la cites literalmente):\n"
-            f"- Puesto: {titulo}\n- Área: {area or '(sin dato)'}\n- Empresa: {empresa}\n"
-            f"- Ubicación: {ubicacion}\n- Modalidad: {modalidad}\n- Sueldo: {sueldo}\n"
-            f"- Requisitos indispensables: {requisitos or '(sin dato)'}\n"
-            f"- Notas adicionales: {notas or '(ninguna)'}\n\n"
-            "Genera la publicación completa a partir de esta ficha."
+            f"- Puesto: {ficha.titulo}\n- Área: {ficha.area or '(sin dato)'}\n- Seniority: {ficha.seniority or '(sin dato)'}\n"
+            f"- Empresa: {ficha.empresa or '(sin dato)'}\n- Ubicación: {ficha.ubicacion or '(sin dato — no inventes)'}\n"
+            f"- Modalidad: {ficha.modalidad or '(sin dato — no inventes)'}\n- Sueldo: {ficha.sueldo_texto or '(sin dato — no inventes cifras)'}\n"
+            f"- Descripción breve (guía obligatoria a expandir): {ficha.descripcion_breve or '(sin dato)'}\n"
+            f"- Requisitos indispensables capturados (conservar literal, como indispensables):{lista(ficha.requisitos_indispensables)}\n"
+            f"- Requisitos deseables capturados (conservar literal, como deseables):{lista(ficha.requisitos_deseables)}\n"
+            f"- Prestaciones capturadas (las únicas que puedes mencionar):{lista(ficha.beneficios)}\n\n"
+            "Genera la publicación completa a partir de esta ficha, complementando SOLO lo que falte."
         ),
         text_format=VacanteGenerada,
     )
-    salida = resp.output_parsed
-    # Respaldo: si la IA marcó tipo='numero' pero no llenó `opciones`, no dejamos la pregunta
-    # sin rangos seleccionables — usamos el patrón genérico en vez de que el frontend caiga a
-    # Sí/No/Parcial para una pregunta numérica.
-    for p in salida.preguntas_filtro:
-        if p.tipo == "numero" and not p.opciones:
-            p.opciones = _RANGO_ANOS_GENERICO
-    return salida, True
+    return _asegurar_capturado(resp.output_parsed, ficha), True
 
 
 def texto_preguntas(preguntas: Optional[list]) -> List[str]:

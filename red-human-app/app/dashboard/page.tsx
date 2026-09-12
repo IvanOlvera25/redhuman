@@ -4,6 +4,7 @@ import { Button, Card, Eyebrow, Avatar } from "@/components/ui";
 import { PageHeader, KpiCard, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
 import { ActividadChart, FuentesDonut, TiempoChart } from "@/components/dashboard/charts";
 import { kpis, actividadData, fuentesData, tiempoContratacion, funnelData, candidatos } from "@/lib/data";
+import { nombreEtapa } from "@/lib/api";
 
 export default function Tablero() {
   const recientes = candidatos.slice(0, 5);
@@ -63,7 +64,7 @@ export default function Tablero() {
             {funnelData.map((f) => (
               <div key={f.etapa}>
                 <div className="flex items-center justify-between text-sm">
-                  <span className="text-ink-2">{f.etapa}</span>
+                  <span className="text-ink-2">{nombreEtapa(f.etapa)}</span>
                   <span className="font-mono font-semibold tabular">{f.valor.toLocaleString("es-MX")}</span>
                 </div>
                 <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-surface-2">

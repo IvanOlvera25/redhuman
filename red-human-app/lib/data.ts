@@ -220,6 +220,11 @@ export interface Vacante {
   ubicacion: string;
   modalidad: "Presencial" | "Híbrido" | "Remoto";
   sueldo: string;
+  /** Parte 3: sueldo estructurado (el texto de arriba es el derivado que se muestra). */
+  sueldoDesde?: number | null;
+  sueldoHasta?: number | null;
+  sueldoMoneda?: string;
+  sueldoPeriodicidad?: string;
   estado: "Publicada" | "Borrador" | "En revisión" | "Cerrada";
   candidatos: number;
   nuevos: number;

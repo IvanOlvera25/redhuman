@@ -28,6 +28,7 @@ from ..models import (
     registrar,
 )
 from ..routers.vacantes import GenerarIn, _aplicar_generado, _generar, _slug_unico
+from ..serial import nombre_empresa_candidato
 
 router = APIRouter(prefix="/requisiciones", tags=["requisiciones"])
 
@@ -395,14 +396,19 @@ def convertir_vacante(
 
     con_ia = None
     if datos.generar_contenido:
+        # Regresión corregida (Parte 3): `_generar` exige la empresa resuelta desde Fase 4 y aquí se
+        # llamaba con un solo argumento (TypeError al convertir con generar_contenido=True).
+        db.refresh(v)
+        v.empresa = nombre_empresa_candidato(v)
         generado, con_ia = _generar(GenerarIn(
             titulo=r.puesto, area=r.area, ubicacion=r.ubicacion, sueldo=r.sueldo_propuesto,
-            requisitos=r.requisitos, modalidad=r.modalidad, notas=datos.notas,
-        ))
+            requisitos=r.requisitos, modalidad=r.modalidad, descripcion=datos.notas,
+        ), v.empresa)
         _aplicar_generado(v, generado)
 
     r.estado = "convertida_vacante"
     registrar(db, u.nombre, "requisicion_convertida", "requisicion", r.codigo, {"vacante": v.codigo, "ia": con_ia})
     registrar(db, u.nombre, "vacante_creada", "vacante", v.codigo, {"origen": "requisicion", "requisicion": r.codigo, "ia": con_ia})
     db.commit()
-    return {"vacante": v.codigo, "ia": con_ia, **_salida(db, r)}
+    db.refresh(r)  # que `_salida` ya vea la vacante recién ligada (antes regresaba "vacante": null)
+    return {**_salida(db, r), "vacante": v.codigo, "ia": con_ia}

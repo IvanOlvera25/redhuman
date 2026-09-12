@@ -60,12 +60,10 @@ transversal):
    hiciste y cuál es el siguiente paso.
 
 ## Lo último que se hizo
-Sesión 2026-09-11 (3 partes en orden estricto): **Parte 1** hotfix urgente de WhatsApp (botón "Sí,
-empezar ahora" sin respuesta) — desplegado por el usuario. **Parte 2** introducción de la Entrevista
-Red Human sin "Alma" — CÓDIGO LISTO, sin commit/deploy (ver sección al final). **Parte 3** (rediseño
-del formulario de creación de vacante) — pendiente, empieza con investigación + plan mode. Antes:
-Fase 4 desplegada en `8b45d18`; Fase 2 (`24acfd7`) y Configuración (`47a4a8b`) en producción.
-Pendientes de Fase 4: spike de Anam y guion de ejemplo (ver su sección).
+**Parte 3 — rediseño del formulario de creación de vacante — 2026-09-12: CÓDIGO LISTO, sin
+commit/deploy** (ver sección al final). Antes, ya desplegados: Parte 1 hotfix WhatsApp (`785516f`),
+Parte 2 introducción Red Human sin "Alma" (`4dd3031`), Fase 4 (`8b45d18`), Fase 2 (`24acfd7`),
+Configuración (`47a4a8b`). Pendientes de Fase 4: spike de Anam y guion de ejemplo (ver su sección).
 
 ## Lo que sigue
 
@@ -1250,7 +1248,7 @@ exacto. Archivos: `app/routers/webhooks.py`, `app/services/whatsapp.py`, `script
 Sin cambio de esquema ni script de datos.
 
 
-## Parte 2 — Introducción de la Entrevista Red Human (sin "Alma") — 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+## Parte 2 — Introducción de la Entrevista Red Human (sin "Alma") — 2026-09-11 (comiteada `4dd3031` y desplegada)
 
 Plan aprobado en plan mode. Texto EXACTO definido por el usuario (fuente única
 `ia.mensaje_inicial_entrevista(titulo_vacante)`, initialMessage del avatar y primer mensaje del modo
@@ -1290,7 +1288,79 @@ cuando quieras comenzar.» → "sí, lista" → primera pregunta directa → des
 de esquema. **Limitación honesta:** el avatar (Anam) no se probó sin clave/navegador; el texto de
 `initialMessage` es el mismo que el del modo texto.
 
-### Siguiente paso
-1. Revisar el diff de la Parte 2 y decidir si se despliega junto con la Parte 3 o antes.
-2. Parte 3: rediseño del formulario de creación de vacante (investigar primero, plan mode).
+### Siguiente paso (histórico — desplegada en `4dd3031`; ver Parte 3 abajo)
 
+
+## Parte 3 — Rediseño del formulario de creación de vacante — 2026-09-12 (CÓDIGO LISTO, sin commit/deploy)
+
+Investigación previa contra `formulario-contenido.tsx` / `CrearVacante` / `routers/vacantes.py` /
+`ia.generar_vacante`; plan completo aprobado en plan mode. Hallazgos que motivaron el diseño: el
+generador SÍ inventaba condiciones (`contenidoDesdeGenerado` volcaba `rango_salarial_sugerido` en
+`sueldo`; demo e IA agregaban "prestaciones de ley") y NO respetaba lo capturado (reemplazaba
+deseables/beneficios); sueldo y seniority eran texto libre; el botón de generar estaba arriba.
+
+**Decisiones del usuario en esta sesión (no volver a preguntar):**
+1. Cliente: elección explícita obligatoria cuando la Cuenta tiene Clientes (un Cliente o «La Cuenta
+   recluta directo», opción `0`, sin default silencioso); sin Clientes el campo no aparece.
+2. Seniority: selector obligatorio de 6 niveles = `ia.SENIORITY`.
+3. Descripción breve: la IA la EXPANDE (guía obligatoria); el resultado la sustituye y queda editable.
+4. Prestaciones: campo «Prestaciones (opcional)» en la Guía; vacío → la IA no inventa ninguna + aviso.
+5. "Entrevista IA" → «Entrevista Red Human» en TODA la interfaz, solo visual (`nombreEtapa()` en
+   `lib/api.ts`); el valor interno/base sigue siendo `"Entrevista IA"` (sin migración).
+6. Plantillas adoptan la misma estructura (sin Gestión ni Publicación); sueldo estructurado en `Plantilla`.
+Supuesto propio (marcado en el plan): «Guardar borrador» solo exige Puesto; «Publicar vacante» y
+«Generar» exigen los Datos principales completos.
+
+**Esquema (aditivo, `sincronizar()`; sin script de datos):** `vacantes` y `plantillas` ganan
+`sueldo_desde`, `sueldo_hasta` (int, null), `sueldo_moneda` (MXN/USD), `sueldo_periodicidad`
+(`PERIODICIDADES_SUELDO`: semanal | quincenal | mensual | anual | a_convenir). `sueldo` (texto) se
+conserva como DERIVADO (`models.texto_sueldo`: «$10,000 – $12,000 MXN mensuales», «Desde $3,000 MXN
+semanales», «A convenir») — WhatsApp, prefiltro, entrevista, portal, publicaciones y el agente no
+cambian. Vacantes viejas: estructurado vacío, texto intacto. `CAMPOS_PLANTILLA` 19 → 23. Verificado
+sobre copia de la base: solo se agregan las 8 columnas.
+
+**Backend:** `ia.py` — `FichaVacante` (única fuente de condiciones), `generar_vacante(ficha)`,
+`_REGLAS` reescritas (no inventar / respetar / prefiltro desde indispensables / rango salarial solo
+informativo), `_asegurar_capturado` + `_unir_capturado` (garantía en Python: capturados literal,
+primero y en su categoría; beneficios = capturados; seniority = elegido; avisos de sueldo/
+prestaciones/ubicación no capturados), `_demo_vacante` con las mismas reglas. `routers/vacantes.py` —
+`GenerarIn` = ficha completa (sin `notas`), `requisitos_lista`, `_validar_sueldo`, `/generar` regresa
+`sueldo_texto`, `crear`/`actualizar` derivan `sueldo`, `_aplicar_generado` solo rellena vacíos,
+`regenerar` con la ficha de la vacante. `plantillas.py` y `serial.py` exponen `sueldoDesde/Hasta/
+Moneda/Periodicidad`. `agente.py`: `notas` → descripción breve. **Regresión corregida:**
+`requisiciones.convertir_vacante` llamaba `_generar` con 1 argumento (TypeError desde Fase 4) y
+respondía `"vacante": null`.
+
+**Frontend:** `formulario-contenido.tsx` reescrito en el orden final (Datos principales con
+`CampoSueldo` nuevo en `campos.tsx` y `Selector` de seniority; Guía opcional que tras generar se vuelve
+«Contenido generado por Red Human (editable)» con los mismos campos siempre visibles; botón único
+«Generar vacante con Red Human» abajo; Prefiltro con «Eliminatoria»; «Entrevista Red Human»);
+`ContenidoVacante.requisitos` es lista (payload lo une por « · » y manda `requisitos_indispensables`);
+`contenidoDesdeGenerado` aplica las dos reglas del lado del cliente; `faltantesDatosPrincipales`.
+`vacantes/page.tsx`: Cliente + Mostrar cliente inyectados en Datos principales (`slotDatosPrincipales`),
+sin `notas`, Gestión (Responsable → Colaboradores) después de la entrevista, «Publicación · Canales» +
+«Guardar borrador» / «Publicar vacante» al final, etiqueta «Enfoque de la Entrevista Red Human».
+`nombreEtapa()` aplicado en Kanban, chips, «Enviar a», embudos de Vacantes y Tablero y select de
+Entrevistas; «Evaluación de la Entrevista Red Human» en Candidatos. `configuracion/page.tsx` (Plantillas)
+hereda la estructura sin cambios.
+
+**Verificación:** nuevo `scripts/verificar_formulario_vacante.py` **40 OK** (texto_sueldo; `/generar`
+respeta indispensables/deseables literal, primero y sin reclasificar; beneficios = capturados; sin
+sueldo/prestaciones → vacíos + avisos y textos públicos sin cifras/prestaciones/horario; seniority;
+descripción breve expandida; prefiltro desde indispensables con eliminatorias; 400 por periodicidad/
+rango/seniority inválidos; `POST /vacantes` publicar → `Publicada` + `publicadaEn`; sueldo derivado en
+dict y en `/vacantes/slug`; `generar_si_falta` respeta capturados; PATCH recalcula el texto; regenerar
+no toca capturados; plantillas con sueldo estructurado y `desde-vacante`; requisición → vacante 201).
+Regresión: `verificar_config_admin.py` 52, `verificar_fase2.py` 67, `verificar_entrevista_ia.py` 52;
+`pyflakes` sin avisos nuevos; `tsc --noEmit` y `next build` limpios (19 rutas). Smoke con API real +
+`next start`: generar → publicar → `GET /vacantes/{codigo}` = Publicada; `/vacantes/publicas`,
+`/portal` y `/aplicar/[slug]` muestran el sueldo derivado; 4 páginas del dashboard 200. **Limitación
+honesta:** sin navegador real no se probó el clic-a-clic del formulario (orden visual, selector de
+Cliente, CampoSueldo); esa capa se cubre con `tsc`/`build` y la revisión del código.
+
+### Siguiente paso
+1. Revisar el diff y, si se puede, probar en navegador: Nueva vacante en el orden nuevo (Datos
+   principales → Guía → Generar → contenido editable → Prefiltro → Entrevista Red Human → Gestión →
+   Publicación), Configuración → Plantillas → Nueva plantilla, y que el Kanban muestre «Entrevista Red
+   Human».
+2. Commit y deploy cuando se apruebe. Sin script de datos: las 8 columnas las agrega `sincronizar()`.

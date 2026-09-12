@@ -87,6 +87,11 @@ def vacante_dict(
         "ubicacion": v.ubicacion,
         "modalidad": v.modalidad,
         "sueldo": v.sueldo,
+        # Parte 3: sueldo estructurado (el texto de arriba es el derivado que se muestra)
+        "sueldoDesde": v.sueldo_desde,
+        "sueldoHasta": v.sueldo_hasta,
+        "sueldoMoneda": v.sueldo_moneda or "MXN",
+        "sueldoPeriodicidad": v.sueldo_periodicidad or "",
         "estado": v.estado,
         "enfoqueEntrevista": v.enfoque_entrevista or "profesional",
         "candidatos": n_candidatos,
