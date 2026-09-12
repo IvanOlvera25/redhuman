@@ -60,12 +60,12 @@ transversal):
    hiciste y cuál es el siguiente paso.
 
 ## Lo último que se hizo
-Fase 4 — comportamiento y evaluación de la Entrevista IA (avatar) — completada el 2026-09-11:
-ver la sección "Fase 4" al final del archivo (6 puntos, hotfix bloqueante de Fase 2, propuesta +
-spike del cierre automático, verificación, siguiente paso). Código listo en el working tree, SIN
-commit/deploy, pendiente de revisión del usuario y de que corra el spike de Anam con la clave real.
-Antes de esto: Fase 2 (`24acfd7`) y las 5 pantallas de Configuración (`47a4a8b`), ambas
-comiteadas y desplegadas.
+Hotfix urgente de WhatsApp (2026-09-11, ver sección "Bug urgente WhatsApp" al final): el agente no
+respondía al botón "Sí, empezar ahora" de la plantilla de inicio. Código listo, pendiente de
+commit/deploy inmediato. Antes: Fase 4 (Entrevista IA) comiteada y desplegada en `8b45d18`
+(incluye el hotfix de `entrevistas.py`/`contratacion.py`); Fase 2 (`24acfd7`) y las 5 pantallas de
+Configuración (`47a4a8b`) también en producción. Pendientes de Fase 4: spike de Anam y guion de
+ejemplo (ver su sección).
 
 ## Lo que sigue
 
@@ -1031,7 +1031,7 @@ Pendiente conocido sin cambio: `sembrar_reglas_notificacion.py` de Fase D (verif
 en producción).
 
 
-## Fase 4 — Comportamiento y evaluación de la Entrevista IA (avatar) — completada 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+## Fase 4 — Comportamiento y evaluación de la Entrevista IA (avatar) — CERRADA 2026-09-11 (comiteada `8b45d18` y desplegada)
 
 Fuente: documento "Cambios integrados – Red Human" (no está en el repo); se trabajó con las 6
 reglas transcritas por el usuario. El guion de ejemplo del documento **todavía no se ha
@@ -1196,10 +1196,55 @@ Docs: `CLAUDE.md`, este archivo.
   avatar (silencio con `talk()`, marcador, desconexión) ni el clic-a-clic de las pantallas;
   el modo avatar depende además del spike. Servidor y base de prueba detenidos/borrados.
 
-### Siguiente paso
-1. El usuario revisa el diff y corre el spike de Anam (instrucciones arriba); anotar el resultado
-   aquí y decidir el lote corto de la tool `terminar_entrevista`.
+### Siguiente paso (Fase 4 ya desplegada en `8b45d18`)
+1. Correr el spike de Anam (instrucciones arriba); anotar el resultado aquí y decidir el lote corto
+   de la tool `terminar_entrevista`.
 2. Entregar el guion de ejemplo del documento → ajustar el tono de `prompt_entrevistador`
    (referencia, no literal) y validar los tiempos de silencio (12/25 s) con una entrevista real.
-3. Commit y deploy cuando se apruebe (**urgente por el hotfix**: la liga pública de entrevista
-   está caída en producción desde Fase 2). No hay script de datos que correr.
+
+
+## Bug urgente WhatsApp — "Sí, empezar ahora" sin respuesta — corregido 2026-09-11 (CÓDIGO LISTO, pendiente de commit/deploy inmediato)
+
+**Síntoma:** el candidato recibe la plantilla de inicio (`inicio_entrevista_rh`, se manda tras
+postular por web), presiona el botón "Sí, empezar ahora" y el agente no contesta nada.
+
+**Investigación (sin asumir la causa), contra el código real + reproducción con la API real en
+demo:**
+1. Texto del botón en Meta: no se pudo leer — Graph respondió **error 190, token caducado el
+   25-Ago-2026** para el `META_WHATSAPP_TOKEN` del `.env` LOCAL (no es de System User; el README
+   pide uno sin caducidad). Como la plantilla sí llega en producción, el token de producción debe
+   ser otro; **revisar igual** (`/salud` + log `[whatsapp] Meta rechazó ... 190`). Para el flujo web
+   el texto del botón es irrelevante: la postulación ya trae `consentimiento=True` + vacante y el
+   webhook manda cualquier respuesta directo al prefiltro.
+2. `_es_aceptacion` (fix de Fase 2, palabra completa) solo se consulta cuando
+   `p.consentimiento` es False (flujo iniciado por WhatsApp); el botón llega como `type: "button"`
+   y `_texto_de_meta` saca `button.text`; "sí" es palabra completa. **No rompió nada.**
+3. Fase 4 solo cambió `nombre_ficha(p)` en la ruta del prefiltro. **No interfiere** (reproducido).
+4. Reproducción (`/postular` → plantilla → payload `button` de Meta → webhook): para una persona
+   nueva **funciona** (200, `turno_prefiltro`, primera pregunta). Fallas reales encontradas:
+
+**Causa A (reproducida — encaja con "no responde nada" y "dejó de funcionar recientemente"):**
+`webhooks._cuenta_unica` respondía **HTTP 500 a TODO mensaje entrante si había ≠ 1 Cuenta activa**.
+Desde `47a4a8b` (Punto 9) crear una 2ª Cuenta es un clic en Configuración → Cuentas. Meta reintenta
+el 500 y luego lo descarta: el candidato no recibe nada y su mensaje ni siquiera queda en el
+tablero. **Fix (decisión del usuario, opción a):** `_cuenta_whatsapp(db, numero_receptor)` —
+enruta por número (`metadata.display_phone_number` de Meta ↔ `Cuenta.whatsapp_comunicacion`); si
+nadie coincide y hay 1 activa → esa; si hay varias → la más antigua con aviso `[webhook] ⚠️` en el
+log. Nunca 500, nunca candidato sin respuesta. `parsear_webhook` expone `numero_receptor`.
+
+**Causa B (reproducida, Modo Prueba):** cada postulación web de prueba crea una persona nueva sin
+`wa_id`; `_buscar_o_crear_candidato` buscaba primero por `wa_id` → encontraba la persona de la
+prueba ANTERIOR → la respuesta al botón caía en la postulación vieja y el proceso nuevo nunca
+arrancaba (pregunta fuera de contexto o menú de vacantes). **Fix:** una sola consulta
+`wa_id OR teléfono`, la persona más reciente gana.
+
+**Cobertura:** `verificar_fase2.py` sección 12 (`meta_boton_plantilla`, formato `button` real de
+Meta): botón tras postular por web arranca el prefiltro; Causa B (2ª postulación de prueba mismo
+teléfono → va a la nueva); Causa A (2 Cuentas activas → 200 y responde; ruteo por número a la
+Cuenta B). **67 OK**; `verificar_entrevista_ia.py` 49 OK, `verificar_config_admin.py` 52 OK.
+
+**Para confirmar en producción tras el deploy:** Configuración → Cuentas (¿más de una Activa?);
+log del servidor `grep "webhooks/whatsapp\|\[webhook\] ⚠️\|Meta rechazó"`; capturar el número de
+WhatsApp Business en `whatsapp_comunicacion` de la Cuenta que opera el WABA para que el ruteo sea
+exacto. Archivos: `app/routers/webhooks.py`, `app/services/whatsapp.py`, `scripts/verificar_fase2.py`.
+Sin cambio de esquema ni script de datos.

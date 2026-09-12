@@ -55,6 +55,17 @@ def meta_texto(tel: str, texto: str, nombre: str = "Prueba Fase Dos") -> dict:
     }}]}]}
 
 
+def meta_boton_plantilla(tel: str, texto: str, receptor: str = "5215550000000", nombre: str = "Prueba Fase Dos") -> dict:
+    """Respuesta a un botón de respuesta rápida de una PLANTILLA (Meta la manda como type 'button',
+    no 'interactive'); `receptor` = número de WhatsApp Business que recibió el mensaje."""
+    return {"object": "whatsapp_business_account", "entry": [{"changes": [{"field": "messages", "value": {
+        "metadata": {"display_phone_number": receptor, "phone_number_id": "1"},
+        "contacts": [{"profile": {"name": nombre}, "wa_id": tel}],
+        "messages": [{"from": tel, "id": f"wamid.btn.{texto[:8]}", "type": "button",
+                      "button": {"payload": texto, "text": texto}, "context": {"from": receptor, "id": "wamid.tpl"}}],
+    }}]}]}
+
+
 def meta_lista(tel: str, id_opcion: str, titulo: str = "") -> dict:
     return {"object": "whatsapp_business_account", "entry": [{"changes": [{"field": "messages", "value": {
         "contacts": [{"profile": {"name": "Prueba Fase Dos"}, "wa_id": tel}],
@@ -274,6 +285,44 @@ with TestClient(app) as client:
             break
     r = client.post(f"/entrevistas/publica/{tok}/finalizar", json={"cierre": "texto"})
     check(r.status_code == 200 and r.json()["estado"] == "evaluada" and r.json()["cierre"] == "texto", "POST /finalizar evalúa y registra el cierre")
+
+    # ---------- 12. Bug urgente (2026-09-11): botón "Sí, empezar ahora" de la plantilla tras postular por web ----------
+    # Causa A: con 2 Cuentas activas el webhook respondía 500 a Meta y el candidato no recibía nada.
+    # Causa B: en Modo Prueba, la respuesta caía en la persona de la prueba anterior (búsqueda por wa_id primero).
+    cfg = db.get(ConfiguracionSistema, 1)
+    cfg.modo_prueba = True
+    db.commit()
+    WA3 = "5213399887766"
+    TEL3 = "3399887766"
+    r = client.post("/candidatos/postular", data={"vacante": v1.slug, "nombre": "Botón Plantilla", "telefono": TEL3, "consentimiento": "true"})
+    check(r.status_code == 201 and r.json()["postulacionNueva"], "web: postulación nueva (Modo Prueba) → se manda la plantilla de inicio")
+    PB1 = r.json()["postulacion"]
+    r = client.post("/webhooks/whatsapp", json=meta_boton_plantilla(WA3, "Sí, empezar ahora"))
+    check(r.status_code == 200 and r.json().get("accion") == "turno_prefiltro" and r.json().get("postulacion") == PB1 and r.json().get("respuesta"),
+          f"botón de plantilla (type 'button') → arranca el prefiltro en {PB1} y responde")
+
+    # Causa B: segunda postulación web de prueba con el MISMO teléfono → persona nueva sin wa_id
+    r = client.post("/candidatos/postular", data={"vacante": v1.slug, "nombre": "Botón Plantilla", "telefono": TEL3, "consentimiento": "true"})
+    check(r.status_code == 201 and r.json()["postulacion"] != PB1, "web (Modo Prueba): segunda postulación con el mismo teléfono → persona/postulación nuevas")
+    PB2 = r.json()["postulacion"]
+    r = client.post("/webhooks/whatsapp", json=meta_boton_plantilla(WA3, "Sí, empezar ahora"))
+    check(r.status_code == 200 and r.json().get("postulacion") == PB2,
+          f"Causa B corregida: la respuesta al botón va a la postulación NUEVA {PB2}, no a la vieja {PB1}")
+    cfg.modo_prueba = False
+    db.commit()
+
+    # Causa A: segunda Cuenta activa (Configuración → Cuentas) — antes: 500 en todo mensaje entrante
+    cuenta_b = Cuenta(nombre="Cuenta B", nombre_comercial="Empresa B", estado="Activa", whatsapp_comunicacion="5511112222")
+    db.add(cuenta_b)
+    db.commit()
+    r = client.post("/webhooks/whatsapp", json=meta_boton_plantilla(WA3, "Sí, empezar ahora"))
+    check(r.status_code == 200 and r.json().get("postulacion") == PB2,
+          "Causa A corregida: con 2 Cuentas activas y sin número coincidente → Cuenta más antigua, 200 y responde (antes 500)")
+    r = client.post("/webhooks/whatsapp", json=meta_boton_plantilla("5215511223344", "Hola", receptor="5511112222", nombre="Persona B"))
+    check(r.status_code == 200 and db.query(Candidato).filter_by(wa_id="5215511223344").one().cuenta_id == cuenta_b.id,
+          "ruteo por número: el mensaje que recibió el WhatsApp de la Cuenta B se asigna a la Cuenta B")
+    cuenta_b.estado = "Inactiva"
+    db.commit()
 
     db.close()
 

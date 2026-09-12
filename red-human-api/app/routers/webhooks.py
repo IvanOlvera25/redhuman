@@ -27,7 +27,7 @@ from typing import Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -159,23 +159,22 @@ def _vacante_explicita(db: Session, cuenta_id: int, texto: str, id_seleccionado:
 
 
 def _buscar_o_crear_candidato(db: Session, wa_id: str, nombre: str, cuenta_id: int, prueba: bool) -> Candidato:
-    """Resuelve a la PERSONA por wa_id (exacto) o por teléfono normalizado; la crea si no existe.
-    order_by id desc: con Modo Prueba puede haber más de una persona con el mismo número (cada
-    postulación web de prueba crea una persona nueva) — nos quedamos con la más reciente."""
+    """Resuelve a la PERSONA por wa_id (exacto) O por teléfono normalizado, en UNA sola consulta,
+    y se queda con la más reciente; la crea si no existe. Con Modo Prueba puede haber más de una
+    persona con el mismo número (cada postulación web de prueba crea una persona nueva): la nueva
+    todavía no tiene wa_id (solo teléfono) y la vieja sí — si se buscara primero por wa_id, la
+    respuesta al botón de la plantilla caería en la persona/postulación VIEJA y el proceso nuevo
+    nunca arrancaría."""
+    tel = _normalizar_telefono(wa_id)
+    condiciones = [Candidato.wa_id == wa_id]
+    if tel:
+        condiciones.append(Candidato.telefono == tel)
     existente = (
         db.query(Candidato)
-        .filter(Candidato.wa_id == wa_id, Candidato.cuenta_id == cuenta_id)
+        .filter(or_(*condiciones), Candidato.cuenta_id == cuenta_id)
         .order_by(Candidato.id.desc())
         .first()
     )
-    tel = _normalizar_telefono(wa_id)
-    if not existente and tel:
-        existente = (
-            db.query(Candidato)
-            .filter(Candidato.telefono == tel, Candidato.cuenta_id == cuenta_id)
-            .order_by(Candidato.id.desc())
-            .first()
-        )
     if existente:
         if not existente.wa_id:
             existente.wa_id = wa_id
@@ -271,19 +270,31 @@ async def _resolver_postulacion(
     return p, "postulacion_nueva"
 
 
-def _cuenta_unica(db: Session) -> Cuenta:
-    """El webhook de WhatsApp no tiene sesión ni Cuenta que resolver: hoy solo existe un WABA
-    para toda la plataforma, así que el candidato entrante se asigna a la única Cuenta activa.
-    TEMPORAL — cuando exista ruteo de WhatsApp por Cuenta, esto debe resolverse por el número
-    que recibió el mensaje, no adivinando una sola Cuenta."""
-    cuentas = db.query(Cuenta).filter(Cuenta.estado == "Activa").order_by(Cuenta.id).all()
-    if len(cuentas) != 1:
-        raise HTTPException(
-            500,
-            f"El webhook de WhatsApp requiere exactamente 1 Cuenta activa; hay {len(cuentas)}. "
-            "Configura el ruteo por Cuenta antes de operar con varias.",
+def _cuenta_whatsapp(db: Session, numero_receptor: str) -> Cuenta:
+    """Cuenta a la que pertenece un mensaje entrante (el webhook no tiene sesión).
+
+    1. Ruteo por número: la Cuenta cuyo `whatsapp_comunicacion` coincide con el número de
+       WhatsApp Business que RECIBIÓ el mensaje (`metadata.display_phone_number` de Meta).
+    2. Si ninguna coincide y hay exactamente una Cuenta activa, es esa (comportamiento de siempre).
+    3. Si hay varias activas y ninguna coincide, se usa la más antigua (la Cuenta original de la
+       plataforma) y se deja rastro en el log: hoy existe UN solo WABA, y crear una segunda Cuenta
+       desde Configuración → Cuentas no puede dejar mudo al agente de WhatsApp (antes: 500 a Meta
+       en TODOS los mensajes entrantes, el candidato no recibía nada)."""
+    activas = db.query(Cuenta).filter(Cuenta.estado == "Activa").order_by(Cuenta.id).all()
+    if not activas:
+        raise HTTPException(500, "El webhook de WhatsApp no tiene ninguna Cuenta activa a la que asignar el mensaje.")
+    receptor = _normalizar_telefono(numero_receptor) if numero_receptor else ""
+    if receptor:
+        por_numero = [c for c in activas if _normalizar_telefono(c.whatsapp_comunicacion or "") == receptor]
+        if len(por_numero) == 1:
+            return por_numero[0]
+    if len(activas) > 1:
+        print(
+            f"[webhook] ⚠️ {len(activas)} Cuentas activas y ninguna con whatsapp_comunicacion = {receptor or '?'}; "
+            f"el mensaje se asigna a la Cuenta {activas[0].id} «{activas[0].nombre or activas[0].nombre_comercial}». Captura el número de WhatsApp "
+            "en cada Cuenta (Configuración → Cuentas) para enrutar por número."
         )
-    return cuentas[0]
+    return activas[0]
 
 
 def _texto_aviso_privacidad(nombre: str, vacante: Optional[Vacante]) -> str:
@@ -349,7 +360,7 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
 
     print(f"[agente] Procesando mensaje de {nombre_wa} ({telefono}): '{texto}' (id_sel='{id_seleccionado}')")
 
-    cuenta = _cuenta_unica(db)
+    cuenta = _cuenta_whatsapp(db, msg.get("numero_receptor", ""))
     prueba = modo_prueba_activo(db)
 
     # ── 1. Persona y postulación en conversación ──────────────────────────────
