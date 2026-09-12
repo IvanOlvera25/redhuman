@@ -61,3 +61,12 @@ Plataforma SaaS de agente de IA de RH para México. `red-human-app` (Next.js 15)
 - Cierre verificable: el backend solo cierra una entrevista con `POST /finalizar` y verifica el `cierre` declarado contra el transcript (`_cierre_verificado`); sin señal verificable degrada a `manual`; desconexión con <2 turnos → `interrumpida` (RH reabre con `POST /entrevistas/{codigo}/reabrir`). Nunca cerrar por tiempo en el servidor sin señal.
 - Enfoque de entrevista por vacante: SOLO 2 niveles (`profesional` | `profesional_personal`, `models.ENFOQUES_ENTREVISTA`). No agregar más.
 - Datos sensibles (`ia.DATOS_SENSIBLES_PROHIBIDOS`): ni preguntar ni registrar aunque el candidato los mencione — aplica al entrevistador y al evaluador.
+
+## Formulario de vacante (Parte 3)
+
+- Orden fijo del formulario compartido (`components/dashboard/vacantes/formulario-contenido.tsx`, Nueva vacante Y Plantillas): Datos principales → Guía opcional → [Generar vacante con Red Human] → Contenido generado y editable → Selección (Prefiltro → Entrevista Red Human) → Gestión → Publicación. El botón de generar va ABAJO de la captura, nunca arriba. No existe "Notas para la IA".
+- Regla no negociable 1: Red Human NUNCA inventa condiciones reales (sueldo, periodicidad, ubicación, modalidad, horario, prestaciones). Lo que RH no capturó queda vacío/pendiente con aviso; `beneficios` = exactamente los capturados; `rango_salarial_sugerido` es solo informativo. Garantizado en `ia._asegurar_capturado` (IA y demo) — no depende del prompt.
+- Regla no negociable 2: lo capturado se respeta literal — indispensable sigue indispensable, deseable sigue deseable, seniority el elegido; la IA solo AGREGA/complementa lo vacío (`_unir_capturado`, `contenidoDesdeGenerado`). La descripción breve es guía y se expande.
+- Sueldo: se captura ESTRUCTURADO (`sueldo_desde/hasta/moneda/periodicidad`, `PERIODICIDADES_SUELDO`); `Vacante.sueldo` (texto) es DERIVADO por `models.texto_sueldo` y es lo que leen WhatsApp, prefiltro, entrevista, portal, publicaciones y el agente. Nunca capturar ni editar el texto por separado. Seniority = uno de `ia.SENIORITY`.
+- `Vacante.requisitos` sigue siendo texto (indispensables unidos por « · »); usa `routers.vacantes.requisitos_lista` / `requisitosLista` para tratarlo como lista.
+- "Entrevista IA" es el valor interno de la etapa (base y API); en la interfaz siempre se muestra con `nombreEtapa()` → «Entrevista Red Human». No renombrar el valor almacenado.

@@ -9,7 +9,10 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import CAMPOS_PLANTILLA, ENFOQUES_ENTREVISTA, Cliente, Cuenta, Plantilla, Usuario, Vacante, registrar
+from ..models import (
+    CAMPOS_PLANTILLA, ENFOQUES_ENTREVISTA, PERIODICIDADES_SUELDO, Cliente, Cuenta, Plantilla, Usuario, Vacante, registrar,
+    texto_sueldo,
+)
 
 router = APIRouter(prefix="/plantillas", tags=["plantillas"])
 
@@ -26,6 +29,10 @@ def _plantilla_dict(p: Plantilla) -> dict:
         "ubicacion": p.ubicacion,
         "modalidad": p.modalidad,
         "sueldo": p.sueldo,
+        "sueldoDesde": p.sueldo_desde,  # Parte 3
+        "sueldoHasta": p.sueldo_hasta,
+        "sueldoMoneda": p.sueldo_moneda or "MXN",
+        "sueldoPeriodicidad": p.sueldo_periodicidad or "",
         "requisitos": p.requisitos,
         "descripcion": p.descripcion,
         "resumen": p.resumen,
@@ -94,6 +101,10 @@ class PlantillaIn(BaseModel):
     ubicacion: str = ""
     modalidad: str = "Presencial"
     sueldo: str = "A convenir"
+    sueldo_desde: Optional[int] = None  # Parte 3
+    sueldo_hasta: Optional[int] = None
+    sueldo_moneda: str = "MXN"
+    sueldo_periodicidad: str = ""
     requisitos: str = ""
     descripcion: str = ""
     resumen: str = ""
@@ -123,8 +134,12 @@ def crear(
     if datos.enfoque_entrevista not in ENFOQUES_ENTREVISTA:
         raise HTTPException(400, f"Enfoque de entrevista inválido. Usa uno de: {', '.join(ENFOQUES_ENTREVISTA)}")
 
+    if datos.sueldo_periodicidad and datos.sueldo_periodicidad not in PERIODICIDADES_SUELDO:
+        raise HTTPException(400, f"Periodicidad de sueldo inválida. Usa una de: {', '.join(PERIODICIDADES_SUELDO)}")
     campos = datos.model_dump()
     campos["nombre"] = campos["nombre"].strip()
+    if datos.sueldo_periodicidad or datos.sueldo_desde or datos.sueldo_hasta:
+        campos["sueldo"] = texto_sueldo(datos.sueldo_desde, datos.sueldo_hasta, datos.sueldo_moneda, datos.sueldo_periodicidad)
     p = Plantilla(cuenta_id=cuenta.id, creado_por=u.nombre, **campos)
     db.add(p)
     db.flush()
@@ -145,6 +160,10 @@ class ActualizarIn(BaseModel):
     ubicacion: Optional[str] = None
     modalidad: Optional[str] = None
     sueldo: Optional[str] = None
+    sueldo_desde: Optional[int] = None  # Parte 3
+    sueldo_hasta: Optional[int] = None
+    sueldo_moneda: Optional[str] = None
+    sueldo_periodicidad: Optional[str] = None
     requisitos: Optional[str] = None
     descripcion: Optional[str] = None
     resumen: Optional[str] = None
@@ -175,9 +194,13 @@ def actualizar(
     if datos.enfoque_entrevista is not None and datos.enfoque_entrevista not in ENFOQUES_ENTREVISTA:
         raise HTTPException(400, f"Enfoque de entrevista inválido. Usa uno de: {', '.join(ENFOQUES_ENTREVISTA)}")
 
+    if datos.sueldo_periodicidad is not None and datos.sueldo_periodicidad not in PERIODICIDADES_SUELDO:
+        raise HTTPException(400, f"Periodicidad de sueldo inválida. Usa una de: {', '.join(PERIODICIDADES_SUELDO)}")
     cambios = datos.model_dump(exclude_none=True)
     for campo, valor in cambios.items():
         setattr(p, campo, valor.strip() if campo == "nombre" and isinstance(valor, str) else valor)
+    if any(k in cambios for k in ("sueldo_desde", "sueldo_hasta", "sueldo_moneda", "sueldo_periodicidad")):
+        p.sueldo = texto_sueldo(p.sueldo_desde, p.sueldo_hasta, p.sueldo_moneda, p.sueldo_periodicidad)
 
     if cambios:
         registrar(db, u.nombre, "plantilla_editada", "plantilla", str(p.id), {"campos": sorted(cambios)})

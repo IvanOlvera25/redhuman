@@ -34,6 +34,7 @@ import {
   FormularioContenidoVacante,
   contenidoComoPayload,
   contenidoDesdePlantilla,
+  faltantesDatosPrincipales,
   tieneContenidoManual,
   type ContenidoVacante,
 } from "@/components/dashboard/vacantes/formulario-contenido";
@@ -55,6 +56,7 @@ import {
   fetchPlantillas,
   guardarVacanteComoPlantilla,
   ENFOQUES_ENTREVISTA,
+  nombreEtapa,
   type BloquePlataforma,
   type CriterioFiltro,
   type VacanteGenerada,
@@ -451,7 +453,7 @@ export default function Vacantes() {
                         className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-ink-3 transition hover:bg-brand-soft hover:text-brand"
                       >
                         <span className="h-1.5 w-1.5 rounded-full bg-brand" />
-                        {etapa} <span className="font-semibold tabular">{n}</span>
+                        {nombreEtapa(etapa)} <span className="font-semibold tabular">{n}</span>
                       </button>
                     ))}
                 </div>
@@ -542,7 +544,7 @@ export default function Vacantes() {
                               onClick={(e) => { e.stopPropagation(); navegarAEtapa(v.id, etapa); }}
                               className="rounded-md bg-brand-soft px-1.5 py-0.5 text-[10px] font-medium text-brand hover:bg-brand hover:text-white"
                             >
-                              {etapa} {n}
+                              {nombreEtapa(etapa)} {n}
                             </button>
                           ))}
                       </div>
@@ -633,7 +635,6 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
 
   // Punto 11: UN solo formulario de contenido, compartido con Configuración → Plantillas.
   const [contenido, setContenido] = useState<ContenidoVacante>(CONTENIDO_VACIO);
-  const [notas, setNotas] = useState("");
 
   function elegirPlantilla(p: Plantilla) {
     setPlantillaBase(p);
@@ -642,6 +643,8 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
     setPaso("formulario");
   }
 
+  // Parte 3 (decisión 1): con Clientes en la Cuenta, RH debe ELEGIR (un Cliente o «recluta directo»);
+  // "" = todavía no eligió, 0 = la Cuenta recluta directo (sin Cliente).
   const [clienteId, setClienteId] = useState<number | "">("");
   const [responsableId, setResponsableId] = useState<number | "">("");
   const [colaboradoresIds, setColaboradoresIds] = useState<number[]>([]);
@@ -654,17 +657,27 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
   const [error, setError] = useState("");
   const [destinos, setDestinos] = useState<string[]>(["WhatsApp", "Portal"]);
 
+  const faltaCliente = clientes.length > 0 && clienteId === "";
+
   async function guardar(publicar: boolean) {
     if (!contenido.titulo.trim()) {
       setError("El nombre del puesto es obligatorio.");
       return;
+    }
+    // Publicar exige los datos principales completos; un borrador puede quedar incompleto.
+    if (publicar) {
+      const faltan = faltantesDatosPrincipales(contenido);
+      if (faltaCliente) faltan.splice(3, 0, "Cliente (o «La Cuenta recluta directo»)");
+      if (faltan.length) {
+        setError(`Para publicar, completa los datos principales: ${faltan.join(", ")}.`);
+        return;
+      }
     }
     setGuardando(true);
     setError("");
     const manual = tieneContenidoManual(contenido);
     const r = await crearVacante({
       ...contenidoComoPayload(contenido),
-      notas,
       publicaciones: gen
         ? {
             whatsapp: { titulo: contenido.titulo, copy: contenido.texto_whatsapp, page: contenido.texto_whatsapp, etiquetas: [] },
@@ -790,37 +803,53 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
           </Aviso>
         )}
 
+        {/* Parte 3: Datos principales → Guía → Generar → Contenido → Selección viven en el formulario
+            compartido; el Cliente (Fase B, punto 8) se inyecta dentro de Datos principales. Fase 4
+            (Punto 1): sin "Empresa" en texto libre — el nombre lo resuelve el servidor. */}
         <FormularioContenidoVacante
           value={contenido}
           onChange={setContenido}
           onGenerado={setGen}
-          notasIA={notas}
-          onNotasIA={setNotas}
           clienteId={clienteId || null}
           mostrarCliente={mostrarCliente}
+          faltaCliente={faltaCliente}
+          slotDatosPrincipales={
+            clientes.length > 0 ? (
+              <>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-sm font-medium text-ink-2">Cliente *</span>
+                  <select
+                    value={clienteId}
+                    onChange={(e) => setClienteId(e.target.value === "" ? "" : Number(e.target.value))}
+                    className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+                  >
+                    <option value="">Elige…</option>
+                    <option value="0">La Cuenta recluta directo (sin Cliente)</option>
+                    {clientes.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.nombre}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {clienteId !== "" && clienteId !== 0 && (
+                  <ToggleSiNo
+                    label="Mostrar cliente al candidato"
+                    ayuda="Si está en 'No', el candidato ve el nombre de tu Cuenta en vez del Cliente — internamente el equipo siempre ve la relación real."
+                    valor={mostrarCliente}
+                    onChange={setMostrarCliente}
+                  />
+                )}
+              </>
+            ) : null
+          }
         />
 
-        {/* Cuenta (automática) / Cliente / Responsable / Colaboradores — Fase B, punto 8.
-            Fase 4 (Punto 1): ya no hay "Empresa" en texto libre — el nombre lo resuelve el servidor
-            con la regla Cliente visible / nombre comercial de la Cuenta. */}
-        <div className="grid gap-4 border-t border-border-faint pt-5 sm:grid-cols-2">
-          {clientes.length > 0 && (
-            <label className="flex flex-col gap-1.5">
-              <span className="text-sm font-medium text-ink-2">Cliente (opcional)</span>
-              <select
-                value={clienteId}
-                onChange={(e) => setClienteId(e.target.value ? Number(e.target.value) : "")}
-                className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
-              >
-                <option value="">Sin Cliente — la Cuenta recluta directo</option>
-                {clientes.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.nombre}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
+        {/* Gestión — DESPUÉS de la Entrevista Red Human (Parte 3, punto 9) */}
+        <div className="border-t border-border-faint pt-5">
+          <Eyebrow>Gestión</Eyebrow>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
           <label className="flex flex-col gap-1.5">
             <span className="text-sm font-medium text-ink-2">Responsable (opcional)</span>
             <select
@@ -863,21 +892,13 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
           </div>
         )}
 
-        {clienteId !== "" && (
-          <ToggleSiNo
-            label="Mostrar cliente al candidato"
-            ayuda="Si está en 'No', el candidato ve el nombre de tu Cuenta en vez del Cliente — internamente el equipo siempre ve la relación real."
-            valor={mostrarCliente}
-            onChange={setMostrarCliente}
-          />
-        )}
-
         {error && <Aviso tono="error">{error}</Aviso>}
 
         {gen && <ResultadoGeneracion gen={gen} />}
 
-        <div>
-          <Eyebrow>Publicar en</Eyebrow>
+        {/* Publicación — al final del flujo (Parte 3, punto 10) */}
+        <div className="border-t border-border-faint pt-5">
+          <Eyebrow>Publicación · Canales</Eyebrow>
           <div className="mt-3 grid gap-2.5 sm:grid-cols-2">
             {PLATAFORMAS.map((p) => {
               const activo = destinos.includes(p.api);
@@ -913,7 +934,7 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
             Guardar borrador
           </Button>
           <Button className="flex-1" onClick={() => guardar(true)} disabled={guardando || destinos.length === 0}>
-            {guardando ? "Publicando…" : `Publicar en ${destinos.length || 0} plataforma(s)`}
+            {guardando ? "Publicando…" : "Publicar vacante"}
           </Button>
         </div>
       </div>
@@ -1223,7 +1244,7 @@ function RelacionesVacante({ v, onCambio }: { v: Vacante; onCambio: () => void }
           agenden después (el guion se genera al agendar). */}
       <div className="grid gap-4 border-t border-border-faint pt-4 sm:grid-cols-2">
         <Selector
-          label="Enfoque de la Entrevista IA"
+          label="Enfoque de la Entrevista Red Human"
           value={v.enfoqueEntrevista ?? "profesional"}
           onChange={(valor) => guardar({ enfoque_entrevista: valor })}
           opciones={ENFOQUES_ENTREVISTA.map((e) => ({ valor: e.valor, texto: e.texto }))}

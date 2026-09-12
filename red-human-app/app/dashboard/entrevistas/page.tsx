@@ -33,6 +33,7 @@ import {
   fetchMetricasEntrevistas,
   reabrirEntrevista,
   NOMBRE_CIERRE,
+  nombreEtapa,
   type Entrevista,
   type EvaluacionEntrevista,
   type MetricasEntrevistas,
@@ -584,7 +585,7 @@ function NuevaEntrevistaModal({ onClose, onCreada }: { onClose: () => void; onCr
                   >
                     {candidatos.map((c) => (
                       <option key={c.id} value={c.id}>
-                        {c.nombre} — {c.puesto || "sin vacante"} ({c.etapa})
+                        {c.nombre} — {c.puesto || "sin vacante"} ({nombreEtapa(c.etapa)})
                       </option>
                     ))}
                   </select>

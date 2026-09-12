@@ -594,7 +594,7 @@ def _ejecutar_crear_vacante(db, u, cuenta, a):
     datos = r_vacantes.CrearIn(
         titulo=a["titulo"], area=a.get("area", ""), ubicacion=a.get("ubicacion", ""),
         sueldo=a.get("sueldo", "A convenir"), requisitos=a.get("requisitos", ""),
-        modalidad=a.get("modalidad", "Presencial"), notas=a.get("notas", ""),
+        modalidad=a.get("modalidad", "Presencial"), descripcion=a.get("notas", ""),  # Parte 3: notas → descripción breve (guía)
         cliente_id=a.get("cliente_id"), responsable_id=a.get("responsable_id"),
         generar_si_falta=True, publicar=False,
     )

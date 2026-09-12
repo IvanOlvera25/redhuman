@@ -436,6 +436,8 @@ export interface VacanteGenerada {
   ia: boolean;
   /** Nombre de empresa que usó el generador (resuelto por la regla Cliente/Cuenta). */
   empresa?: string;
+  /** Parte 3: texto del sueldo derivado del estructurado capturado (o «A convenir»). */
+  sueldo_texto?: string;
   resumen: string;
   descripcion: string;
   perfil_ideal: string;
@@ -454,19 +456,49 @@ export interface VacanteGenerada {
   preguntas_filtro: CriterioFiltro[];
 }
 
-export interface DatosVacante {
+/** Parte 3 (2026-09-12): sueldo estructurado. "a_convenir" = sin montos. El texto que se muestra
+ * (`Vacante.sueldo`) lo DERIVA el servidor; nunca se captura ni se inventa. */
+export type PeriodicidadSueldo = "semanal" | "quincenal" | "mensual" | "anual" | "a_convenir";
+export const PERIODICIDADES_SUELDO: { valor: PeriodicidadSueldo; texto: string }[] = [
+  { valor: "mensual", texto: "Mensual" },
+  { valor: "quincenal", texto: "Quincenal" },
+  { valor: "semanal", texto: "Semanal" },
+  { valor: "anual", texto: "Anual" },
+  { valor: "a_convenir", texto: "A convenir" },
+];
+export const MONEDAS_SUELDO = ["MXN", "USD"];
+/** Los 6 niveles que usa el generador (ia.SENIORITY); se capturan ANTES de generar. */
+export const SENIORITIES = ["Sin experiencia", "Junior", "Semi-senior", "Senior", "Jefatura", "Dirección"];
+
+export interface SueldoEstructurado {
+  sueldo_desde?: number | null;
+  sueldo_hasta?: number | null;
+  sueldo_moneda?: string;
+  sueldo_periodicidad?: PeriodicidadSueldo | "";
+}
+
+/** Ficha capturada por RH ANTES de generar (Parte 3). Es la ÚNICA fuente de condiciones reales:
+ * el servidor nunca inventa sueldo/ubicación/modalidad/prestaciones y respeta literal lo capturado. */
+export interface DatosVacante extends SueldoEstructurado {
   titulo: string;
   area?: string;
+  seniority?: string;
   ubicacion?: string;
+  modalidad?: string;
+  /** Legado: sueldo en texto (agente / vacantes viejas). */
   sueldo?: string;
+  /** Guía opcional para Red Human. */
+  descripcion?: string;
+  requisitos_indispensables?: string[];
+  requisitos_deseables?: string[];
+  beneficios?: string[];
+  /** Legado: indispensables en texto separados por « · ». */
   requisitos?: string;
   /** Deprecado (Fase 4, Punto 1): el servidor ignora el texto libre y resuelve el nombre con la regla. */
   empresa?: string;
   /** Fase 4: la empresa visible se resuelve en el servidor a partir del Cliente y de "mostrar cliente". */
   cliente_id?: number | null;
   mostrar_cliente_candidato?: boolean;
-  modalidad?: string;
-  notas?: string;
 }
 
 export function fetchVacantes(filtros?: {
@@ -529,6 +561,13 @@ export function crearVacante(
   },
 ) {
   return post<Vacante>("/vacantes", datos);
+}
+
+/** "Entrevista IA" es el valor interno/base de la etapa; en la interfaz se muestra como
+ * «Entrevista Red Human» (Parte 3, decisión visual — sin migración de datos). */
+export const ETIQUETA_ETAPA: Record<string, string> = { "Entrevista IA": "Entrevista Red Human" };
+export function nombreEtapa(etapa: string): string {
+  return ETIQUETA_ETAPA[etapa] ?? etapa;
 }
 
 /** Fase 4 (Punto 6): solo 2 niveles, nunca más. */
@@ -648,6 +687,10 @@ export interface Plantilla {
   ubicacion: string;
   modalidad: string;
   sueldo: string;
+  sueldoDesde?: number | null;
+  sueldoHasta?: number | null;
+  sueldoMoneda?: string;
+  sueldoPeriodicidad?: PeriodicidadSueldo | "";
   requisitos: string;
   descripcion: string;
   resumen: string;
@@ -690,6 +733,10 @@ export interface DatosPlantilla {
   texto_whatsapp?: string;
   texto_bolsa?: string;
   enfoque_entrevista?: EnfoqueEntrevista;
+  sueldo_desde?: number | null;
+  sueldo_hasta?: number | null;
+  sueldo_moneda?: string;
+  sueldo_periodicidad?: PeriodicidadSueldo | "";
 }
 
 /** Sin `clienteId`: todas las plantillas activas de la Cuenta. Con `clienteId`: las de ese

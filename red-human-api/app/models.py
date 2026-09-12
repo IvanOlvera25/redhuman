@@ -44,7 +44,14 @@ class Vacante(Base):
     empresa: Mapped[str] = mapped_column(String(150), default="Grupo Carbe")
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
     modalidad: Mapped[str] = mapped_column(String(30), default="Presencial")
+    # Parte 3 (2026-09-12): sueldo ESTRUCTURADO capturado por RH. `sueldo` (texto) se conserva como
+    # valor DERIVADO para mostrar (WhatsApp, prefiltro, entrevista, portal, publicaciones, agente lo
+    # siguen leyendo) — ver texto_sueldo(). Vacantes viejas: estructurado vacío y texto intacto.
     sueldo: Mapped[str] = mapped_column(String(80), default="A convenir")
+    sueldo_desde: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sueldo_hasta: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sueldo_moneda: Mapped[str] = mapped_column(String(5), default="MXN")
+    sueldo_periodicidad: Mapped[str] = mapped_column(String(15), default="")  # ver PERIODICIDADES_SUELDO
     estado: Mapped[str] = mapped_column(String(30), default="Borrador")  # Publicada | Borrador | En revisión | Cerrada
     requisitos: Mapped[str] = mapped_column(Text, default="")
     descripcion: Mapped[str] = mapped_column(Text, default="")
@@ -812,6 +819,10 @@ class Plantilla(Base):
     ubicacion: Mapped[str] = mapped_column(String(150), default="")  # Punto 11 ("condiciones")
     modalidad: Mapped[str] = mapped_column(String(30), default="Presencial")
     sueldo: Mapped[str] = mapped_column(String(80), default="A convenir")
+    sueldo_desde: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # Parte 3: igual que Vacante
+    sueldo_hasta: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sueldo_moneda: Mapped[str] = mapped_column(String(5), default="MXN")
+    sueldo_periodicidad: Mapped[str] = mapped_column(String(15), default="")
     requisitos: Mapped[str] = mapped_column(Text, default="")
     descripcion: Mapped[str] = mapped_column(Text, default="")
     resumen: Mapped[str] = mapped_column(Text, default="")
@@ -843,7 +854,29 @@ CAMPOS_PLANTILLA = [
     "perfil_ideal", "responsabilidades", "requisitos_deseables", "beneficios", "palabras_clave",
     "seniority", "avisos_cumplimiento", "preguntas_filtro", "texto_whatsapp", "texto_bolsa",
     "enfoque_entrevista",
+    "sueldo_desde", "sueldo_hasta", "sueldo_moneda", "sueldo_periodicidad",  # Parte 3
 ]
+
+# Parte 3 (2026-09-12): sueldo estructurado. "a_convenir" = sin montos.
+PERIODICIDADES_SUELDO = ["semanal", "quincenal", "mensual", "anual", "a_convenir"]
+NOMBRE_PERIODICIDAD = {"semanal": "semanales", "quincenal": "quincenales", "mensual": "mensuales", "anual": "anuales"}
+MONEDAS_SUELDO = ["MXN", "USD"]
+
+
+def texto_sueldo(desde: Optional[int], hasta: Optional[int], moneda: str = "MXN", periodicidad: str = "") -> str:
+    """Texto DERIVADO del sueldo estructurado, para todo lo que muestra `Vacante.sueldo` (WhatsApp,
+    prefiltro, entrevista, portal, publicaciones). Nunca inventa: sin montos → «A convenir»."""
+    if periodicidad == "a_convenir" or (not desde and not hasta):
+        return "A convenir"
+    mon = (moneda or "MXN").upper()
+    per = NOMBRE_PERIODICIDAD.get(periodicidad, "")
+    cola = f" {mon}" + (f" {per}" if per else "")
+    if desde and hasta and hasta != desde:
+        return f"${desde:,} – ${hasta:,}{cola}"
+    if desde and not hasta:
+        return f"Desde ${desde:,}{cola}"
+    monto = hasta if not desde else desde
+    return f"${monto:,}{cola}"
 
 # Fase 4 (Punto 6): enfoque de la Entrevista IA por vacante. Solo estos 2 niveles — nunca más.
 ENFOQUES_ENTREVISTA = ["profesional", "profesional_personal"]
