@@ -48,7 +48,7 @@ VOZ = {
 }
 
 PROMPT = (
-    "Eres Alma, entrevistadora de prueba. Haz UNA pregunta corta al usuario; cuando responda, despídete "
+    "Eres Red Human, entrevistadora de prueba. Haz UNA pregunta corta al usuario; cuando responda, despídete "
     f"con la frase exacta «{DESPEDIDA_ENTREVISTA}, gracias.» y de inmediato llama a la herramienta "
     "terminar_entrevista con motivo='temas_cubiertos'."
 )
@@ -67,10 +67,10 @@ def main() -> int:
     print(f"llmId configurado: {'sí' if settings.anam_llm_id else 'NO'} · avatar: {settings.anam_avatar_id[:8]}…\n")
 
     casos = [
-        ("1) control sin tools", persona_config("Alma", PROMPT, "Hola, soy Alma. ¿Estás listo?")),
-        ("2) con tool client + voiceDetectionOptions (llmId custom)", persona_config("Alma", PROMPT, "Hola, soy Alma. ¿Estás listo?", {"tools": [TOOL_TERMINAR], **VOZ})),
+        ("1) control sin tools", persona_config("Red Human", PROMPT, "Hola, soy Red Human. ¿Comenzamos?")),
+        ("2) con tool client + voiceDetectionOptions (llmId custom)", persona_config("Red Human", PROMPT, "Hola, soy Red Human. ¿Comenzamos?", {"tools": [TOOL_TERMINAR], **VOZ})),
     ]
-    sin_llm = persona_config("Alma", PROMPT, "Hola, soy Alma. ¿Estás listo?", {"tools": [TOOL_TERMINAR]})
+    sin_llm = persona_config("Red Human", PROMPT, "Hola, soy Red Human. ¿Comenzamos?", {"tools": [TOOL_TERMINAR]})
     sin_llm.pop("llmId", None)
     casos.append(("3) con tool, SIN llmId (referencia)", sin_llm))
 

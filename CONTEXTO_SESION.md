@@ -60,12 +60,12 @@ transversal):
    hiciste y cuál es el siguiente paso.
 
 ## Lo último que se hizo
-Hotfix urgente de WhatsApp (2026-09-11, ver sección "Bug urgente WhatsApp" al final): el agente no
-respondía al botón "Sí, empezar ahora" de la plantilla de inicio. Código listo, pendiente de
-commit/deploy inmediato. Antes: Fase 4 (Entrevista IA) comiteada y desplegada en `8b45d18`
-(incluye el hotfix de `entrevistas.py`/`contratacion.py`); Fase 2 (`24acfd7`) y las 5 pantallas de
-Configuración (`47a4a8b`) también en producción. Pendientes de Fase 4: spike de Anam y guion de
-ejemplo (ver su sección).
+Sesión 2026-09-11 (3 partes en orden estricto): **Parte 1** hotfix urgente de WhatsApp (botón "Sí,
+empezar ahora" sin respuesta) — desplegado por el usuario. **Parte 2** introducción de la Entrevista
+Red Human sin "Alma" — CÓDIGO LISTO, sin commit/deploy (ver sección al final). **Parte 3** (rediseño
+del formulario de creación de vacante) — pendiente, empieza con investigación + plan mode. Antes:
+Fase 4 desplegada en `8b45d18`; Fase 2 (`24acfd7`) y Configuración (`47a4a8b`) en producción.
+Pendientes de Fase 4: spike de Anam y guion de ejemplo (ver su sección).
 
 ## Lo que sigue
 
@@ -1203,7 +1203,7 @@ Docs: `CLAUDE.md`, este archivo.
    (referencia, no literal) y validar los tiempos de silencio (12/25 s) con una entrevista real.
 
 
-## Bug urgente WhatsApp — "Sí, empezar ahora" sin respuesta — corregido 2026-09-11 (CÓDIGO LISTO, pendiente de commit/deploy inmediato)
+## Bug urgente WhatsApp — "Sí, empezar ahora" sin respuesta — corregido 2026-09-11 (DESPLEGADO por el usuario)
 
 **Síntoma:** el candidato recibe la plantilla de inicio (`inicio_entrevista_rh`, se manda tras
 postular por web), presiona el botón "Sí, empezar ahora" y el agente no contesta nada.
@@ -1248,3 +1248,49 @@ log del servidor `grep "webhooks/whatsapp\|\[webhook\] ⚠️\|Meta rechazó"`; 
 WhatsApp Business en `whatsapp_comunicacion` de la Cuenta que opera el WABA para que el ruteo sea
 exacto. Archivos: `app/routers/webhooks.py`, `app/services/whatsapp.py`, `scripts/verificar_fase2.py`.
 Sin cambio de esquema ni script de datos.
+
+
+## Parte 2 — Introducción de la Entrevista Red Human (sin "Alma") — 2026-09-11 (CÓDIGO LISTO, sin commit/deploy)
+
+Plan aprobado en plan mode. Texto EXACTO definido por el usuario (fuente única
+`ia.mensaje_inicial_entrevista(titulo_vacante)`, initialMessage del avatar y primer mensaje del modo
+texto): «Hola, soy Red Human. Gracias por participar en el proceso para {vacante}. Vamos a conversar
+sobre tu experiencia, tus intereses y algunos aspectos relevantes para el puesto. ¿Comenzamos?»
+(sin vacante → "el puesto").
+
+**Decisiones del usuario en esta sesión (no volver a preguntar):**
+1. Pantalla de consentimiento conserva el aviso de IA (LFPDPPP) pero sin "Alma": «Conversarás con
+   Red Human, nuestra entrevistadora en video/por chat» y «La entrevista la conduce una inteligencia
+   artificial de Red Human, no una persona». Solo ahí; nunca en la introducción hablada.
+2. Aviso de silencio: «{Nombre}, no te escuché. ¿Comenzamos?» (`ia.AVISO_SILENCIO`; misma regla de
+   Fase 4: máx. 2 avisos; a media entrevista sigue «¿Me repites tu respuesta?»).
+3. Nombre «Red Human» en todo: persona de Anam (`crear_sesion_avatar("Red Human", …)`), tablero
+   («Red Human · entrevistadora en video»), sala («Red Human:», «RED HUMAN», «Red Human está
+   escribiendo…»). La imagen `/avatar-alma.png` se conserva (solo cambió el alt).
+
+**Cambios:** `ia.py` (`mensaje_inicial_entrevista`, `AVISO_SILENCIO`, `ESPERA_INICIO` = «Tómate tu
+tiempo, avísame cuando quieras comenzar.», `prompt_entrevistador`: «Eres Red Human, la entrevistadora
+de Red Human… te presentas SOLO como "Red Human": nunca como 'asistente virtual', 'agente de
+inteligencia artificial', 'asistente de reclutamiento' ni con un nombre de persona; si te preguntan
+si eres IA lo dices con naturalidad»; PROTOCOLO DE INICIO: afirmativo → primera pregunta DE INMEDIATO
+sin frases de transición ni volver a presentarse; demo `entrevista_turno` acepta "comencemos");
+`routers/entrevistas.py` (saludo con el título real, persona "Red Human"); `scripts/seed_demo_candidatos.py`,
+`scripts/spike_anam_tools.py`; frontend `app/entrevista/[token]/page.tsx`, `app/dashboard/entrevistas/page.tsx`,
+`components/dashboard/vacantes/formulario-contenido.tsx` (ayuda del enfoque); `CLAUDE.md` (regla
+actualizada). `grep -rni alma` en app/scripts/frontend/CLAUDE.md → 0 (salvo el nombre del archivo de
+imagen y el assert negativo del test). El título de la sección «Entrevista IA» → «Entrevista Red
+Human» queda para la Parte 3.
+
+**Verificación:** `verificar_entrevista_ia.py` **52 OK** (49 + introducción exacta con el título de la
+vacante, «el puesto» sin vacante, prompt sin Alma y con la prohibición); `verificar_fase2.py` 67 OK;
+`verificar_config_admin.py` 52 OK; `pyflakes` sin avisos nuevos; `tsc --noEmit` y `next build` limpios
+(19 rutas — un fallo de prerender en `/login` fue caché vieja de `.next`, desapareció al limpiarla);
+smoke con API real en demo (modo texto): saludo exacto → "todavía no" → «Tómate tu tiempo, avísame
+cuando quieras comenzar.» → "sí, lista" → primera pregunta directa → despedida → evaluada. Sin cambio
+de esquema. **Limitación honesta:** el avatar (Anam) no se probó sin clave/navegador; el texto de
+`initialMessage` es el mismo que el del modo texto.
+
+### Siguiente paso
+1. Revisar el diff de la Parte 2 y decidir si se despliega junto con la Parte 3 o antes.
+2. Parte 3: rediseño del formulario de creación de vacante (investigar primero, plan mode).
+

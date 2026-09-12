@@ -103,9 +103,8 @@ def _transcript_demo(nombre: str, vacante_titulo: str) -> list:
     primer_nombre = nombre.split(" ")[0]
     return [
         {"rol": "assistant", "texto": (
-            f"Hola {primer_nombre}, soy Alma, la entrevistadora virtual de Red Human. Gracias por tu "
-            f"tiempo — vamos a platicar sobre tu experiencia para {vacante_titulo}. Cuéntame de tu "
-            "experiencia más reciente relacionada con este puesto."
+            f"Hola, soy Red Human. Gracias por participar en el proceso para {vacante_titulo}. "
+            f"{primer_nombre}, cuéntame de tu experiencia más reciente relacionada con este puesto."
         )},
         {"rol": "user", "texto": (
             "Claro. Estuve poco más de dos años en un puesto muy similar, donde me tocaba atender "
