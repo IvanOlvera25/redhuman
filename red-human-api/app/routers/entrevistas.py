@@ -261,14 +261,14 @@ async def sesion(token: str, db: Session = Depends(get_db)):
         raise HTTPException(409, "Esta entrevista ya fue cerrada. RH puede reabrirla si hace falta.")
 
     p, v, empresa = _contexto(e)
-    saludo = ia.mensaje_inicial_entrevista(_nombre_entrevistado(e), empresa)
+    saludo = ia.mensaje_inicial_entrevista(v.titulo if v else "")
     if e.estado != "en_curso":
         e.estado = "en_curso"
         e.iniciada_en = datetime.now(timezone.utc)
 
     ses = None
     try:
-        ses = await crear_sesion_avatar("Alma", _system_prompt(e), saludo)
+        ses = await crear_sesion_avatar("Red Human", _system_prompt(e), saludo)
     except Exception as ex:  # el avatar nunca debe tumbar la entrevista: cae a texto
         print(f"[ERROR] crear_sesion_avatar falló: {str(ex)}", flush=True)
         registrar(db, "sistema", "avatar_error", "entrevista", e.codigo, {"error": str(ex)[:300]})
@@ -315,15 +315,15 @@ MIN_TURNOS_CANDIDATO = 2
 
 def _cierre_verificado(e: Entrevista, cierre_declarado: str) -> str:
     """El backend decide el cierre real con lo que puede comprobar (Punto 4):
-    - `texto`: solo si el último turno de Alma en el transcript guardado trae la despedida.
+    - `texto`: solo si el último turno de la entrevistadora en el transcript guardado trae la despedida.
     - `herramienta`/`marcador`: solo si la despedida fija (ia.DESPEDIDA_ENTREVISTA) aparece en el
-      último turno de Alma; si no, se degrada a `manual`.
+      último turno de la entrevistadora; si no, se degrada a `manual`.
     - `manual`/`desconexion`/`tiempo`: se aceptan tal cual (no cambian nada que haya que verificar).
     """
     if cierre_declarado not in CIERRES_ENTREVISTA:
         cierre_declarado = "manual"
-    ultimo_alma = next((m.get("texto", "") for m in reversed(e.transcript or []) if m.get("rol") == "assistant"), "")
-    hay_despedida = ia.DESPEDIDA_ENTREVISTA.lower() in (ultimo_alma or "").lower()
+    ultimo_asistente = next((m.get("texto", "") for m in reversed(e.transcript or []) if m.get("rol") == "assistant"), "")
+    hay_despedida = ia.DESPEDIDA_ENTREVISTA.lower() in (ultimo_asistente or "").lower()
     if cierre_declarado in ("texto", "herramienta", "marcador"):
         return cierre_declarado if hay_despedida else "manual"
     return cierre_declarado

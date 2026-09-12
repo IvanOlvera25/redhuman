@@ -152,7 +152,7 @@ export default function Entrevistas() {
           <div className="relative aspect-[723/295] overflow-hidden bg-[#151517]">
             {metricas?.avatar_activo !== false ? (
               /* eslint-disable-next-line @next/next/no-img-element */
-              <img src="/avatar-alma.png" alt="Alma, entrevistadora virtual" className="h-full w-full object-cover" />
+              <img src="/avatar-alma.png" alt="Red Human, entrevistadora en video" className="h-full w-full object-cover" />
             ) : (
               <div className="grid h-full place-items-center">
                 <div className="grid h-24 w-24 place-items-center rounded-full bg-gradient-to-br from-brand to-brand-2">
@@ -162,7 +162,7 @@ export default function Entrevistas() {
             )}
             <div className="absolute left-4 top-4 flex items-center gap-2">
               <span className="flex items-center gap-1.5 rounded-full bg-black/50 px-2.5 py-1 font-mono text-[11px] text-white/90 backdrop-blur">
-                <Sparkles className="h-3 w-3" /> Alma · tu entrevistadora IA
+                <Sparkles className="h-3 w-3" /> Red Human · entrevistadora en video
               </span>
               {metricas && (
                 <span
@@ -609,7 +609,7 @@ function NuevaEntrevistaModal({ onClose, onCreada }: { onClose: () => void; onCr
 
               <p className="text-xs leading-relaxed text-ink-3">
                 La IA genera un guion de entrevista a la medida de la vacante y del perfil, y una liga que puedes
-                compartir por cualquier medio. El candidato entra, da su consentimiento y conversa con Alma.
+                compartir por cualquier medio. El candidato entra, da su consentimiento y conversa con Red Human.
               </p>
 
               <Button className="w-full" onClick={crear} disabled={!puedeCrear || state === "loading"}>

@@ -103,8 +103,10 @@ with TestClient(app) as client:
     check(r.status_code == 200 and r.json()["puesto"] == "Cajero Sol" and r.json()["empresa"] == "Sol Retail" and r.json()["candidato"] == "Lucía",
           "HOTFIX: GET /publica responde (puesto y empresa desde la POSTULACIÓN, nombre de ficha)")
     prompt = _system_prompt(e)
-    for k in ("Lucía", "Sol Retail", "Cajero Sol", "no te escuché", "hijos", "con quién vive", ia.DESPEDIDA_ENTREVISTA, "profesional_personal"):
+    for k in ("Lucía", "Sol Retail", "Cajero Sol", "Lucía, no te escuché. ¿Comenzamos?", "hijos", "con quién vive", ia.DESPEDIDA_ENTREVISTA, "profesional_personal", "sin frases de transición"):
         check(k in prompt, f"prompt contiene «{k}»")
+    check("Alma" not in prompt and "Eres Red Human" in prompt and "nunca como 'asistente virtual', 'agente de inteligencia artificial'" in prompt,
+          "PARTE 2: el prompt se identifica como Red Human y prohíbe 'asistente virtual' / 'agente de inteligencia artificial'")
     check("Pregunta 1" in prompt and "1. " not in prompt.split("Temas a cubrir")[1].split("PROTOCOLO")[0], "prompt: prohíbe numerar y los temas no van numerados")
     check(prompt.count("Lucía") >= 2 and "Candidato WhatsApp" not in prompt, "prompt: nombre validado desde la ficha, sin placeholders")
 
@@ -115,14 +117,17 @@ with TestClient(app) as client:
     r = client.post(f"/entrevistas/publica/{TOKEN}/consentimiento", json={"acepta": True})
     check(r.status_code == 200, "consentimiento")
     r = client.post(f"/entrevistas/publica/{TOKEN}/sesion")
-    check(r.status_code == 200 and r.json()["modo"] == "texto" and r.json()["mensajes"][0]["texto"].startswith("Hola Lucía, soy Alma, de Red Human. Lucía, cuando estés listo"),
-          "HOTFIX: POST /sesion responde; saludo con el protocolo exacto de inicio")
+    INTRO = ("Hola, soy Red Human. Gracias por participar en el proceso para Cajero Sol. Vamos a conversar sobre tu "
+             "experiencia, tus intereses y algunos aspectos relevantes para el puesto. ¿Comenzamos?")
+    check(r.status_code == 200 and r.json()["modo"] == "texto" and r.json()["mensajes"][0]["texto"] == INTRO,
+          "PARTE 2: POST /sesion responde con la introducción EXACTA (Red Human + nombre real de la vacante)")
+    check(ia.mensaje_inicial_entrevista("") == INTRO.replace("para Cajero Sol", "para el puesto"), "introducción sin vacante → «el puesto»")
     db.expire_all()
     check(e.estado == "en_curso" and e.iniciada_en is not None, "sesión: estado en_curso e iniciada_en")
 
     # Protocolo de inicio en modo texto (demo): 'no' espera, 'sí' arranca
     r = client.post(f"/entrevistas/publica/{TOKEN}/turno", json={"texto": "un momento por favor"})
-    check(r.status_code == 200 and "Tómate tu tiempo" in r.json()["respuesta"], "HOTFIX+P3: /turno responde; respuesta negativa → espera sin repreguntar")
+    check(r.status_code == 200 and r.json()["respuesta"] == ia.ESPERA_INICIO, "P3: /turno responde; respuesta negativa → espera sin repreguntar")
     r = client.post(f"/entrevistas/publica/{TOKEN}/turno", json={"texto": "sí, listo"})
     check(r.status_code == 200 and not r.json()["terminada"] and "Pregunta" not in r.json()["respuesta"], "afirmativo → primera pregunta de inmediato, sin numerar")
     terminada = False

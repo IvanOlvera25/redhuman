@@ -344,7 +344,7 @@ export function FormularioContenidoVacante({
         <CriteriosEditor items={value.preguntas_filtro} onChange={set("preguntas_filtro")} />
       </Seccion>
 
-      <Seccion titulo="Entrevista IA" ayuda="Define qué tan a fondo conversa Alma con el candidato; cambia el guion, la entrevista y la evaluación.">
+      <Seccion titulo="Entrevista IA" ayuda="Define qué tan a fondo conversa Red Human con el candidato; cambia el guion, la entrevista y la evaluación.">
         <div className="grid gap-4 sm:grid-cols-2">
           <Selector
             label="Enfoque de entrevista"

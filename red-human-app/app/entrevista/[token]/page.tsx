@@ -38,7 +38,7 @@ type Msg = { rol: "assistant" | "user"; texto: string };
 const SILENCIO_INICIO_SEG = 12;
 const SILENCIO_ENTREVISTA_SEG = 25;
 const MAX_AVISOS_SILENCIO = 2;
-/* Despedida fija de Alma — debe coincidir con ia.DESPEDIDA_ENTREVISTA en el backend (fallback
+/* Despedida fija de la entrevistadora — debe coincidir con ia.DESPEDIDA_ENTREVISTA en el backend (fallback
    "marcador" del cierre automático; el servidor la verifica de todos modos). */
 const DESPEDIDA = "con esto terminamos la entrevista";
 
@@ -93,8 +93,8 @@ export default function SalaEntrevista() {
     [token],
   );
 
-  /** Silencio (avatar): si la persona no habla, Alma repite la frase del documento; máximo 2 veces.
-   * Antes del primer turno del candidato pregunta si está listo; después, pide repetir la respuesta. */
+  /** Silencio (avatar): si la persona no habla, Red Human repite el aviso (ia.AVISO_SILENCIO); máximo 2 veces.
+   * Antes del primer turno del candidato vuelve a preguntar «¿Comenzamos?»; después, pide repetir la respuesta. */
   const programarAvisoSilencio = useCallback(() => {
     const st = silencioRef.current;
     if (st.timer) clearTimeout(st.timer);
@@ -105,7 +105,7 @@ export default function SalaEntrevista() {
       st.avisos += 1;
       const nombre = nombreRef.current || "";
       const frase = sinTurnoCandidato
-        ? `${nombre}, no te escuché. ¿Estás listo?`
+        ? `${nombre}, no te escuché. ¿Comenzamos?`
         : `${nombre}, no te escuché. ¿Me repites tu respuesta?`;
       try {
         await anamRef.current?.talk?.(frase);
@@ -143,7 +143,7 @@ export default function SalaEntrevista() {
             texto: m.content,
           }));
           setMensajes(transcriptRef.current.slice(-4));
-          // Cierre automático (Fase 4, Punto 4 — fallback "marcador"): Alma se despide con una frase
+          // Cierre automático (Fase 4, Punto 4 — fallback "marcador"): la entrevistadora se despide con una frase
           // fija; el servidor verifica que esté en el transcript antes de aceptar el cierre.
           const ultimo = transcriptRef.current[transcriptRef.current.length - 1];
           if (ultimo?.rol === "assistant" && ultimo.texto.toLowerCase().includes(DESPEDIDA)) {
@@ -241,7 +241,7 @@ export default function SalaEntrevista() {
                 Hola {info.candidato.split(" ")[0]}, tu entrevista para {info.puesto}
               </h1>
               <p className="mx-auto mt-2 max-w-xl text-sm leading-relaxed text-ink-2">
-                Conversarás con <b className="text-ink">Alma</b>, nuestra entrevistadora virtual
+                Conversarás con <b className="text-ink">Red Human</b>, nuestra entrevistadora
                 {info.avatar_disponible ? " en video" : " por chat"}. Dura alrededor de 10 minutos y puedes hacerla
                 desde tu celular o computadora.
               </p>
@@ -253,7 +253,7 @@ export default function SalaEntrevista() {
                 <div className="text-sm leading-relaxed text-ink-2">
                   <p className="font-semibold text-ink">Antes de empezar, es importante que sepas:</p>
                   <ul className="mt-2 list-disc space-y-1.5 pl-4">
-                    <li>Alma es una <b>inteligencia artificial</b>, no una persona.</li>
+                    <li>La entrevista la conduce una <b>inteligencia artificial</b> de Red Human, no una persona.</li>
                     <li>La conversación se <b>graba y transcribe</b> para que el equipo de RH la revise.</li>
                     <li>
                       La IA solo genera una recomendación: <b>la decisión final siempre la toma una persona</b> del
@@ -298,12 +298,12 @@ export default function SalaEntrevista() {
               <div className="relative aspect-video bg-[#151517]">
                 <video id="avatar-video" autoPlay playsInline className="h-full w-full object-cover" />
                 <span className="absolute left-3 top-3 flex items-center gap-1.5 rounded-full bg-black/50 px-2.5 py-1 font-mono text-[11px] text-white/90 backdrop-blur">
-                  <Sparkles className="h-3 w-3" /> Alma · IA en video
+                  <Sparkles className="h-3 w-3" /> Red Human · en video
                 </span>
                 <div className="absolute inset-x-0 bottom-0 space-y-1 bg-gradient-to-t from-black/70 to-transparent p-4 pt-10">
                   {mensajes.slice(-2).map((m, i) => (
                     <p key={i} className="text-[13px] leading-snug text-white/90">
-                      <b>{m.rol === "assistant" ? "Alma: " : "Tú: "}</b>
+                      <b>{m.rol === "assistant" ? "Red Human: " : "Tú: "}</b>
                       {m.texto}
                     </p>
                   ))}
@@ -321,7 +321,7 @@ export default function SalaEntrevista() {
                     >
                       {m.rol === "assistant" && (
                         <span className="mb-0.5 flex items-center gap-1 font-mono text-[10px] font-semibold text-brand">
-                          <Sparkles className="h-3 w-3" /> ALMA
+                          <Sparkles className="h-3 w-3" /> RED HUMAN
                         </span>
                       )}
                       {m.texto}
@@ -331,7 +331,7 @@ export default function SalaEntrevista() {
                 {pensando && (
                   <div className="flex items-center gap-2 text-ink-3">
                     <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
-                    <span className="text-xs italic">Alma está escribiendo…</span>
+                    <span className="text-xs italic">Red Human está escribiendo…</span>
                   </div>
                 )}
               </div>

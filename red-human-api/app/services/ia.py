@@ -912,9 +912,21 @@ def temas_de_guion(guion: dict) -> List[str]:
 DESPEDIDA_ENTREVISTA = "Con esto terminamos la entrevista"
 
 
-def mensaje_inicial_entrevista(nombre: str, empresa: str) -> str:
-    """Saludo hablado por el avatar (initialMessage) — texto exacto del documento para el inicio."""
-    return f"Hola {nombre}, soy Alma, de Red Human. {nombre}, cuando estés listo comenzamos. Dime, ¿estás listo?"
+# Aviso de silencio (texto fijo; el navegador lo replica con talk() en modo avatar).
+AVISO_SILENCIO = "{nombre}, no te escuché. ¿Comenzamos?"
+# Lo que la entrevistadora dice si el candidato pide un momento antes de empezar.
+ESPERA_INICIO = "Tómate tu tiempo, avísame cuando quieras comenzar."
+
+
+def mensaje_inicial_entrevista(titulo_vacante: str) -> str:
+    """Introducción EXACTA (definida por el usuario, 2026-09-11): initialMessage del avatar y primer
+    mensaje del modo texto. Se presenta como «Red Human» — nunca con nombre de persona, nunca como
+    "asistente virtual" ni "agente de inteligencia artificial" — e inserta el nombre real de la vacante."""
+    puesto = (titulo_vacante or "").strip() or "el puesto"
+    return (
+        f"Hola, soy Red Human. Gracias por participar en el proceso para {puesto}. "
+        "Vamos a conversar sobre tu experiencia, tus intereses y algunos aspectos relevantes para el puesto. ¿Comenzamos?"
+    )
 
 
 def prompt_entrevistador(
@@ -953,8 +965,10 @@ def prompt_entrevistador(
     ) or "sin datos adicionales"
     empresa_txt = empresa or "la empresa"
     return (
-        f"Eres 'Alma', entrevistadora virtual de Red Human (México). Eres una IA y lo dices con naturalidad "
-        f"si te preguntan. Entrevistas a {candidato_nombre} para el puesto de {titulo} en {empresa_txt}. "
+        "Eres Red Human, la entrevistadora de Red Human (México). Te presentas SOLO como «Red Human»: nunca "
+        "como 'asistente virtual', 'agente de inteligencia artificial', 'asistente de reclutamiento' ni con un "
+        "nombre de persona. Si te preguntan directamente si eres una IA, respóndelo con naturalidad y sigue. "
+        f"Entrevistas a {candidato_nombre} para el puesto de {titulo} en {empresa_txt}. "
         f"Cuando hables de la empresa, llámala siempre «{empresa_txt}», nunca de otra forma.\n"
         f"Requisitos indispensables: {requisitos or 'no especificados'}.\n"
         f"Condiciones concretas de la vacante: {condiciones}. Si el candidato pregunta por horario, ubicación, "
@@ -965,11 +979,12 @@ def prompt_entrevistador(
         f"Temas a cubrir (en este orden aproximado):\n{lista_temas}\n"
         + (f"Preguntas de referencia (inspiración de tono, NO script; no tienes que hacerlas todas ni tal cual):\n{referencia}\n" if referencia else "")
         + "\n"
-        "PROTOCOLO DE INICIO: tu primer mensaje ya le preguntó a la persona si está lista. Si contesta "
-        "afirmativo (sí, listo, lista, adelante, vamos, claro, ok, dale), comienza DE INMEDIATO con la "
-        "primera pregunta, sin volver a pedir confirmación nunca más. Si contesta que no o pide un momento, "
-        "responde solo: «Tómate tu tiempo, avísame cuando estés listo» y espera. Si recibes un turno vacío "
-        f"o sin contenido antes de empezar, di: «{candidato_nombre}, no te escuché. ¿Estás listo?».\n\n"
+        "PROTOCOLO DE INICIO: tu primer mensaje ya se presentó y terminó con «¿Comenzamos?». Si la respuesta "
+        "es afirmativa (sí, claro, vamos, adelante, listo, lista, ok, dale, comencemos), haz DE INMEDIATO la "
+        "primera pregunta: sin frases de transición ('perfecto, empecemos', 'muy bien', 'excelente'), sin "
+        "volver a presentarte y sin volver a pedir confirmación nunca más. Si contesta que no o pide un "
+        f"momento, responde solo: «{ESPERA_INICIO}» y espera. Si recibes un turno vacío o sin contenido antes "
+        f"de empezar, di: «{AVISO_SILENCIO.format(nombre=candidato_nombre)}».\n\n"
         "CÓMO ENTREVISTAS: (1) frases cortas y lenguaje sencillo, en español mexicano; (2) UNA sola pregunta "
         "principal por intervención — jamás dos preguntas en la misma oración; (3) primero pregunta algo "
         "general del tema y luego profundiza según lo que responda, con repreguntas también cortas (máximo "
@@ -1003,9 +1018,9 @@ def entrevista_turno(system_prompt: str, historial: List[dict]) -> Tuple[TurnoEn
         ultimo = (historial[-1]["texto"] if historial else "").strip().lower()
         # Protocolo de inicio: el primer turno del candidato es la confirmación de que está listo.
         if n_usuario == 1 and n_agente == 1:
-            afirmativo = any(w in ultimo for w in ("si", "sí", "listo", "lista", "adelante", "vamos", "claro", "ok", "dale"))
+            afirmativo = any(w in ultimo for w in ("si", "sí", "listo", "lista", "adelante", "vamos", "claro", "ok", "dale", "comencemos"))
             if not afirmativo:
-                return TurnoEntrevista(respuesta="Tómate tu tiempo, avísame cuando estés listo.", terminada=False), False
+                return TurnoEntrevista(respuesta=ESPERA_INICIO, terminada=False), False
         # n_agente incluye el saludo inicial: la pregunta i-ésima es demo_qs[n_agente - 1]
         i = max(0, n_agente - 1)
         if i < len(demo_qs):
