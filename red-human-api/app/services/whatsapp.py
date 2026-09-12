@@ -295,6 +295,9 @@ def parsear_webhook(payload: dict) -> Optional[dict]:
                     "wa_id": m.get("id", ""),
                     "tipo": m.get("type", "text"),
                     "id_seleccionado": elegido,
+                    # número de WhatsApp Business que RECIBIÓ el mensaje: con él se resuelve la
+                    # Cuenta (ruteo por número) cuando hay más de una activa.
+                    "numero_receptor": str((valor.get("metadata") or {}).get("display_phone_number", "")),
                 }
         return None
 
