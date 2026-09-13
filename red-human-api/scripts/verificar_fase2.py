@@ -280,7 +280,7 @@ with TestClient(app) as client:
     r = client.post(f"/entrevistas/publica/{tok}/turno", json={"texto": "sí, listo"})
     check(r.status_code == 200 and r.json()["respuesta"], "POST /turno responde")
     for _ in range(10):
-        r = client.post(f"/entrevistas/publica/{tok}/turno", json={"texto": "respuesta"})
+        r = client.post(f"/entrevistas/publica/{tok}/turno", json={"texto": "Trabajé tres años en caja y atención al cliente, resolviendo devoluciones y arqueos diarios."})
         if r.json()["terminada"]:
             break
     r = client.post(f"/entrevistas/publica/{tok}/finalizar", json={"cierre": "texto"})

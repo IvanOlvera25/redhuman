@@ -175,12 +175,27 @@ export interface Candidato {
   clienteIdVacante?: number | null;
   /* --- Puntos 3/5: síntesis global (CV + Prefiltro + Entrevista IA + Entrevista Humana),
    * calculada al vuelo en cada lectura del detalle — nunca se persiste, siempre está al día. --- */
-  prefiltroResumen?: { cumple: number; total: number; incumplidos: string[] } | null;
+  /** Prefiltro = SOLO status de entrada (cumple / no_cumple); no participa en la evaluación integral. */
+  prefiltroResumen?: { cumple: number; total: number; incumplidos: string[]; resultado?: "cumple" | "no_cumple" | null } | null;
+  /** 2026-09-13: status de la Entrevista Red Human (bloque propio). */
+  entrevistaStatus?: {
+    codigo: string;
+    estado: string;
+    cierre: string;
+    motivo: string;
+    turnosCandidato: number;
+    faltante: string[];
+    motivoIa: string;
+    intentosPrevios: number;
+    accionSiguiente: "reintentar" | null;
+  } | null;
+  /** true solo cuando la Evaluación Integral (CV + Entrevista Red Human válida) existe. */
+  evaluacionIntegral?: boolean;
   afinidadGlobal?: number | null;
   sintesisAfinidad?: string;
   fortalezasPrincipales?: string[];
   puntosPorValidar?: string[];
-  recomendacionRedHuman?: "No avanzar" | "Realizar entrevista humana" | "Avanzar a contratación" | null;
+  recomendacionRedHuman?: "No avanzar" | "Realizar entrevista humana" | "Realizar Entrevista Red Human" | "Reintentar Entrevista Red Human" | "Avanzar a contratación" | null;
   recomendacionMotivo?: string;
   /* solo en el detalle (GET /candidatos/{codigo}) */
   cvDatos?: CvDatos;
@@ -189,6 +204,12 @@ export interface Candidato {
     ia?: boolean;
     requisitos_cumplidos?: string[];
     brechas?: string[];
+    /* 2026-09-13: bloque «Análisis de CV» */
+    fortalezas_cv?: string[];
+    compatibilidad_cv?: string;
+    experiencia_relevante_cv?: string;
+    prefiltro_resultado?: "cumple" | "no_cumple";
+    prefiltro_evidencia?: string;
     alertas?: string[];
     datos_faltantes?: string[];
     respuestas_prefiltro?: RespuestaPrefiltro[];

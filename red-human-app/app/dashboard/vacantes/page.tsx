@@ -131,6 +131,17 @@ export default function Vacantes() {
     // Cargar listas para los selectores de filtros avanzados
     fetchClientes("Activo").then((c) => setClientes(c ?? []));
     fetchEntrevistadores().then((u) => setUsuarios(u ?? []));
+    // 2026-09-13: los contadores del embudo (postulaciones ACTIVAS por etapa) deben reflejar los
+    // movimientos hechos en Candidatos: se recargan al volver a la pestaña/ventana y cada 30 s.
+    const alVolver = () => document.visibilityState === "visible" && recargar();
+    document.addEventListener("visibilitychange", alVolver);
+    window.addEventListener("focus", alVolver);
+    const timer = setInterval(() => document.visibilityState === "visible" && recargar(), 30000);
+    return () => {
+      document.removeEventListener("visibilitychange", alVolver);
+      window.removeEventListener("focus", alVolver);
+      clearInterval(timer);
+    };
   }, [recargar]);
 
   // Cerrar menú flotante al hacer click fuera

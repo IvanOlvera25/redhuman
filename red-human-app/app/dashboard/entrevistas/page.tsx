@@ -53,6 +53,7 @@ const estadoEntrevista: Record<Entrevista["estado"], { label: string; tone: "goo
   evaluada: { label: "Evaluada", tone: "good" },
   // Fase 4: cerró por desconexión/tiempo sin turnos suficientes; RH puede reabrir la misma liga.
   interrumpida: { label: "Interrumpida", tone: "bad" },
+  parcial: { label: "Parcial", tone: "warn" },
 };
 
 const recomendacionUI: Record<EvaluacionEntrevista["recomendacion"], { label: string; clase: string }> = {
@@ -312,7 +313,7 @@ export default function Entrevistas() {
                     e={e}
                     activa={evaluada?.id === e.id}
                     onVer={() => setSeleccionada(e.id)}
-                    onReabrir={puedeDecidir && e.estado === "interrumpida" ? () => reabrir(e) : undefined}
+                    onReabrir={puedeDecidir && (e.estado === "interrumpida" || e.estado === "parcial") ? () => reabrir(e) : undefined}
                     reabriendo={reabriendo === e.id}
                   />
                 ))
@@ -397,17 +398,17 @@ function FilaEntrevista({
         </p>
       </div>
       <Badge tone={est.tone}>{est.label}</Badge>
-      {e.estado === "interrumpida" && onReabrir ? (
+      {(e.estado === "interrumpida" || e.estado === "parcial") && onReabrir ? (
         <button
           onClick={(ev) => {
             ev.stopPropagation();
             onReabrir();
           }}
           disabled={reabriendo}
-          title={`Reabrir (cierre: ${NOMBRE_CIERRE[e.cierre ?? ""]})`}
+          title={`Reintentar Entrevista Red Human (${e.motivo === "sin_respuestas" ? "sin respuestas" : e.motivo === "parcial" ? "parcial" : NOMBRE_CIERRE[e.cierre ?? ""]})`}
           className="flex h-8 shrink-0 items-center gap-1 rounded-lg px-2 text-xs font-medium text-brand transition hover:bg-brand-soft disabled:opacity-50"
         >
-          <RotateCcw className={cn("h-3.5 w-3.5", reabriendo && "animate-spin")} /> Reabrir
+          <RotateCcw className={cn("h-3.5 w-3.5", reabriendo && "animate-spin")} /> Reintentar
         </button>
       ) : e.estado === "programada" || e.estado === "en_curso" ? (
         <button

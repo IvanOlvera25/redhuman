@@ -383,6 +383,9 @@ class AjustePerfil(BaseModel):
     requisitos_cumplidos: List[str] = Field(description="Requisitos que el CV sí acredita, citando dónde.")
     brechas: List[str] = Field(description="Requisitos indispensables que el CV NO acredita o deja en duda.")
     evidencia: str = Field(description="1-2 frases objetivas que sustentan el score, citando el CV.")
+    # 2026-09-13 — bloque «Análisis de CV» que ve RH desde el inicio (independiente del prefiltro):
+    fortalezas: List[str] = Field(default_factory=list, description="2 a 4 fortalezas del CV para ESTA vacante, con evidencia del CV.")
+    compatibilidad: str = Field(default="", description="1-2 frases: qué tan compatible es el perfil con el puesto y por qué.")
 
 
 class CVExtraido(BaseModel):
@@ -457,6 +460,8 @@ def extraer_cv(
                 requisitos_cumplidos=[],
                 brechas=["Sin evaluación real (modo demo)"],
                 evidencia="Modo demo: el expediente queda marcado para revisión humana.",
+                fortalezas=["Modo demo: fortalezas del CV pendientes de OPENAI_API_KEY"],
+                compatibilidad="Modo demo: compatibilidad no evaluada.",
             )
             if vacante_titulo
             else None,
@@ -466,7 +471,8 @@ def extraer_cv(
     contexto = (
         f"\n\nVACANTE DE REFERENCIA\n- Puesto: {vacante_titulo}\n- Requisitos indispensables: {vacante_requisitos or 'no especificados'}\n"
         "Llena `ajuste` comparando el CV contra estos requisitos. Sé conservador: si un requisito no se puede "
-        "acreditar con el CV, va en brechas y el estado no puede ser 'cumple'. Llena también "
+        "acreditar con el CV, va en brechas y el estado no puede ser 'cumple'. En `ajuste.fortalezas` pon 2-4 "
+        "fortalezas del CV para esta vacante y en `ajuste.compatibilidad` 1-2 frases de compatibilidad. Llena también "
         "`experiencia_relevante` (qué de su trayectoria aplica a ESTA vacante) y `conocimientos_relevantes` "
         "(el subconjunto de sus habilidades que aplica a ESTA vacante, no la lista completa)."
         if vacante_titulo
@@ -541,8 +547,9 @@ class RespuestaCriterio(BaseModel):
 class TurnoPrefiltro(BaseModel):
     respuesta: str = Field(description="Siguiente mensaje del agente al candidato, breve y cálido, español mexicano.")
     clasificacion_lista: bool = Field(description="true solo cuando ya hay información suficiente para clasificar.")
-    estado: Optional[Literal["cumple", "revision", "no_cumple"]] = Field(default=None)
-    score: Optional[int] = Field(default=None, description="0-100, qué tanto empata con el perfil.")
+    # 2026-09-13: el prefiltro es SOLO un filtro básico de entrada — su único resultado es cumple o
+    # no_cumple. No genera score ni participa en la evaluación integral (CV + Entrevista Red Human).
+    estado: Optional[Literal["cumple", "no_cumple"]] = Field(default=None)
     evidencia: Optional[str] = Field(default=None, description="Evidencia objetiva que sustenta la clasificación.")
     respuestas_extraidas: List[RespuestaCriterio] = Field(
         default_factory=list,
@@ -585,8 +592,7 @@ def prefiltro_turno(
                     "Te contactamos muy pronto por este medio. 😊"
                 ),
                 clasificacion_lista=True,
-                estado="revision",
-                score=65,
+                estado="cumple",
                 evidencia="Modo demo: clasificación simulada. Agrega OPENAI_API_KEY para el prefiltro real.",
                 respuestas_extraidas=[
                     RespuestaCriterio(criterio=q, pregunta=q, respuesta="Respuesta registrada en modo demo", cumple=True)
@@ -629,9 +635,11 @@ def prefiltro_turno(
             "sobre sueldo, ubicación, beneficios o el puesto, contesta con los datos de la vacante que "
             "tienes arriba; (4) en `respuestas_extraidas` mantén una lista estructurada y acumulada de "
             "los criterios evaluados, la pregunta, la respuesta del candidato y si cumple (true/false/"
-            "null); (5) cuando tengas suficiente información marca clasificacion_lista=true con estado, "
-            "score y evidencia OBJETIVA citando lo que dijo la persona; (6) si falla un criterio marcado "
-            "como DESCARTA, el estado es 'no_cumple'; si solo quedan dudas, 'revision'; (7) NUNCA le "
+            "null); (5) cuando tengas suficiente información marca clasificacion_lista=true con estado y "
+            "evidencia OBJETIVA citando lo que dijo la persona — el prefiltro es SOLO un filtro básico de "
+            "entrada: su único resultado es 'cumple' o 'no_cumple', sin calificaciones ni puntajes; "
+            "(6) si falla un criterio marcado como DESCARTA, el estado es 'no_cumple'; con dudas menores, "
+            "'cumple' (RH lo valida después con el CV y la Entrevista Red Human); (7) NUNCA le "
             "comuniques un rechazo al candidato: si no cumple, agradece y di que RH revisará su caso — "
             "la decisión final siempre la toma una persona de RH; (8) no pidas datos sensibles (salud, "
             "embarazo, religión, estado civil, edad); (9) si el candidato dice que ya no le interesa, "
@@ -1135,18 +1143,74 @@ class PerfilProfundo(BaseModel):
 
 
 class EvaluacionEntrevista(BaseModel):
-    resumen: str = Field(description="Resumen ejecutivo de la entrevista en 2-3 frases para RH.")
-    fortalezas: List[str] = Field(description="2 a 4 fortalezas observadas, con evidencia de lo que dijo la persona.")
-    riesgos: List[str] = Field(default_factory=list, description="0 a 3 focos de atención o brechas contra los requisitos.")
+    resumen: str = Field(description="Resumen ejecutivo de la evaluación integral (CV + entrevista) en 2-3 frases para RH.")
+    fortalezas: List[str] = Field(description="2 a 4 fortalezas, con evidencia del CV o de lo que dijo la persona.")
+    riesgos: List[str] = Field(default_factory=list, description="PUNTOS POR VALIDAR: 0 a 4 brechas o dudas contra los requisitos que RH debe validar.")
     areas_desarrollo: List[str] = Field(default_factory=list, description="0 a 3 áreas de desarrollo, con evidencia.")
     calif_experiencia: float = Field(description="0 a 10 — solidez de la experiencia contra los requisitos.")
     calif_comunicacion: float = Field(description="0 a 10 — claridad y estructura al comunicar.")
-    match_perfil: int = Field(description="0 a 100 — empate global con el perfil del puesto.")
+    match_perfil: int = Field(description="AFINIDAD 0 a 100 — empate global con el perfil del puesto, integrando CV y entrevista.")
     recomendacion: Literal["avanzar", "revision", "no_avanzar"] = Field(
         description="Recomendación PRELIMINAR para RH; la decisión final siempre es humana."
     )
     evidencia: str = Field(description="Citas o paráfrasis concretas de la entrevista que sustentan la recomendación.")
     perfil: Optional[PerfilProfundo] = Field(default=None, description="Conocimiento profundo del candidato con evidencia por dimensión.")
+    # 2026-09-13: lo que la entrevista NO alcanzó a cubrir (entrevista suficiente pero corta) — RH lo
+    # valida en la Entrevista Humana. Vacío cuando la entrevista fue completa.
+    faltante: List[str] = Field(default_factory=list, description="Temas que la entrevista no cubrió y que RH debe validar después.")
+
+
+class SuficienciaEntrevista(BaseModel):
+    """Antes de evaluar una entrevista corta (2026-09-13): ¿alcanza para una evaluación integral?"""
+
+    suficiente: bool = Field(description="true solo si el candidato aportó información real y verificable sobre la mayoría de los temas.")
+    temas_cubiertos: List[str] = Field(default_factory=list, description="Temas del guion que sí quedaron respondidos con contenido.")
+    temas_faltantes: List[str] = Field(default_factory=list, description="Temas del guion sin respuesta o con respuesta vacía/evasiva.")
+    motivo: str = Field(description="1-2 frases para RH explicando por qué es o no suficiente.")
+
+
+def texto_util_candidato(transcript: List[dict]) -> Tuple[int, int]:
+    """(turnos con contenido real, caracteres útiles) del candidato — un «sí», «ok» o un turno
+    vacío no cuentan como respuesta de entrevista."""
+    turnos, chars = 0, 0
+    for m in transcript or []:
+        if m.get("rol") != "user":
+            continue
+        t = " ".join(str(m.get("texto", "")).split())
+        if len(t) >= 12:
+            turnos += 1
+            chars += len(t)
+    return turnos, chars
+
+
+def suficiencia_entrevista(titulo: str, temas: List[str], transcript: List[dict]) -> Tuple[SuficienciaEntrevista, bool]:
+    """Juicio de suficiencia para una entrevista corta. Demo: heurística por turnos útiles."""
+    client = _client()
+    turnos, _chars = texto_util_candidato(transcript)
+    if client is None:
+        suficiente = turnos >= 3
+        return (
+            SuficienciaEntrevista(
+                suficiente=suficiente,
+                temas_cubiertos=list(temas or [])[:turnos],
+                temas_faltantes=list(temas or [])[turnos:],
+                motivo=("Modo demo: hubo respuestas suficientes para evaluar." if suficiente
+                        else "Modo demo: el candidato contestó muy poco; no alcanza para una evaluación integral."),
+            ),
+            False,
+        )
+    dialogo = "\n".join(f"{'Entrevistadora' if m['rol'] == 'assistant' else 'Candidato'}: {m['texto']}" for m in transcript)
+    resp = client.responses.parse(
+        model=MODEL,
+        instructions=(
+            "Decides si una entrevista laboral CORTA aporta información suficiente para evaluar al candidato. "
+            "Sé estricto: respuestas de una palabra, evasivas o sin contenido verificable NO cuentan. "
+            "Es suficiente solo si la mayoría de los temas tiene una respuesta con contenido real."
+        ),
+        input=f"Puesto: {titulo}\nTemas que debía cubrir la entrevista: {'; '.join(temas or []) or 'no especificados'}\n\nTranscripción:\n{dialogo}",
+        text_format=SuficienciaEntrevista,
+    )
+    return resp.output_parsed, True
 
 
 def _perfil_demo() -> PerfilProfundo:
@@ -1162,6 +1226,29 @@ def _perfil_demo() -> PerfilProfundo:
     )
 
 
+def _bloque_cv(analisis_cv: Optional[dict], cv_datos: Optional[dict]) -> str:
+    """Resumen del Análisis de CV que entra a la evaluación integral. NUNCA incluye nada del
+    prefiltro por WhatsApp (2026-09-13): el prefiltro es un filtro de entrada, no una evaluación."""
+    a = analisis_cv or {}
+    d = cv_datos or {}
+    if not a.get("requisitos_cumplidos") and not a.get("brechas") and not d.get("resumen_profesional"):
+        return "(sin CV analizado — evalúa solo con la entrevista y dilo en el resumen)"
+    lineas = []
+    if d.get("resumen_profesional"):
+        lineas.append(f"Resumen profesional: {d['resumen_profesional']}")
+    if d.get("experiencia_relevante"):
+        lineas.append(f"Experiencia relevante: {d['experiencia_relevante']}")
+    if a.get("fortalezas_cv"):
+        lineas.append("Fortalezas del CV: " + "; ".join(a["fortalezas_cv"]))
+    if a.get("requisitos_cumplidos"):
+        lineas.append("Requisitos acreditados en el CV: " + "; ".join(a["requisitos_cumplidos"]))
+    if a.get("brechas"):
+        lineas.append("Brechas / requisitos NO acreditados en el CV: " + "; ".join(a["brechas"]))
+    if a.get("compatibilidad_cv"):
+        lineas.append(f"Compatibilidad según el CV: {a['compatibilidad_cv']}")
+    return "\n".join(lineas)
+
+
 def evaluar_entrevista(
     titulo: str,
     requisitos: str,
@@ -1170,15 +1257,23 @@ def evaluar_entrevista(
     perfil_ideal: str = "",
     temas: Optional[List[str]] = None,
     enfoque_entrevista: str = "profesional",
+    faltante: Optional[List[str]] = None,
+    analisis_cv: Optional[dict] = None,
+    cv_datos: Optional[dict] = None,
 ) -> Tuple[EvaluacionEntrevista, bool]:
+    """EVALUACIÓN INTEGRAL (2026-09-13): se basa ÚNICAMENTE en Análisis de CV + Entrevista Red Human.
+    Los datos del prefiltro por WhatsApp quedan estrictamente fuera (evita contradicciones).
+    Estructura: Afinidad (match_perfil) / Fortalezas / Puntos por validar (riesgos) / Recomendación,
+    más lo que faltó (`faltante`) cuando la entrevista fue corta pero suficiente."""
     enfoque_entrevista = _enfoque_valido(enfoque_entrevista)
+    faltante = list(faltante or [])
     client = _client()
     if client is None:
         return (
             EvaluacionEntrevista(
-                resumen="Modo demo: agrega OPENAI_API_KEY para evaluar la entrevista real.",
+                resumen="Modo demo: agrega OPENAI_API_KEY para la evaluación integral real (CV + Entrevista Red Human).",
                 fortalezas=["Completó la entrevista"],
-                riesgos=[],
+                riesgos=(["No se cubrió: " + ", ".join(faltante)] if faltante else []),
                 areas_desarrollo=[],
                 calif_experiencia=7.0,
                 calif_comunicacion=7.0,
@@ -1186,6 +1281,7 @@ def evaluar_entrevista(
                 recomendacion="revision",
                 evidencia="Evaluación simulada (modo demo).",
                 perfil=_perfil_demo(),
+                faltante=faltante,
             ),
             False,
         )
@@ -1194,11 +1290,17 @@ def evaluar_entrevista(
     resp = client.responses.parse(
         model=MODEL,
         instructions=(
-            "Evalúas entrevistas laborales para Red Human AI (México). Califica SOLO con base en lo dicho en la "
-            "transcripción — nunca inventes. Tu salida es una RECOMENDACIÓN preliminar: la decisión final la toma "
-            "una persona de RH (human-in-the-loop, LFPDPPP). Sé objetivo y cita evidencia textual del candidato en "
-            "cada conclusión. Construye el perfil profundo por dimensión; si la entrevista no cubrió una dimensión, "
-            "márcala evaluado=false y déjala vacía — jamás la rellenes por inferencia. "
+            "Haces la EVALUACIÓN INTEGRAL de un candidato para Red Human (México) con DOS fuentes y solo dos: "
+            "(1) el Análisis de CV y (2) la transcripción de la Entrevista Red Human. Ignora por completo "
+            "cualquier prefiltro o cuestionario previo. Califica SOLO con base en esas dos fuentes — nunca "
+            "inventes. Estructura tu salida así: AFINIDAD (match_perfil 0-100) integrando CV y entrevista; "
+            "FORTALEZAS (fortalezas, con evidencia del CV o de lo dicho); PUNTOS POR VALIDAR (riesgos: brechas "
+            "del CV no resueltas en la entrevista y dudas que RH debe validar); RECOMENDACIÓN preliminar "
+            "(recomendacion) — la decisión final la toma una persona de RH (human-in-the-loop, LFPDPPP). "
+            "Si el CV acredita algo que la entrevista contradice, o viceversa, dilo en puntos por validar. "
+            "Si se te indican temas que la entrevista NO cubrió, repítelos en `faltante`, no los infieras y "
+            "no los califiques. Construye el perfil profundo por dimensión; si la entrevista no cubrió una "
+            "dimensión, márcala evaluado=false y déjala vacía. "
             f"Enfoque de la entrevista: {enfoque_entrevista} ({ENFOQUE_ENTREVISTA_TEMAS[enfoque_entrevista]}); "
             "no evalúes dimensiones personales si el enfoque es solo profesional. "
             f"CUMPLIMIENTO (NO NEGOCIABLE): nunca registres, cites ni uses datos sobre {DATOS_SENSIBLES_PROHIBIDOS}, "
@@ -1206,12 +1308,17 @@ def evaluar_entrevista(
         ),
         input=(
             f"Puesto: {titulo}\nRequisitos indispensables: {requisitos}\nPerfil ideal: {perfil_ideal or 'no especificado'}\n"
-            f"Temas que la entrevista debía cubrir: {'; '.join(temas or []) or 'no especificados'}\n\n"
-            f"Transcripción:\n{dialogo}"
+            f"Temas que la entrevista debía cubrir: {'; '.join(temas or []) or 'no especificados'}\n"
+            + (f"Temas que la entrevista NO cubrió (RH los validará después): {'; '.join(faltante)}\n" if faltante else "")
+            + f"\nANÁLISIS DE CV:\n{_bloque_cv(analisis_cv, cv_datos)}\n\n"
+            f"ENTREVISTA RED HUMAN (transcripción):\n{dialogo}"
         ),
         text_format=EvaluacionEntrevista,
     )
-    return resp.output_parsed, True
+    salida = resp.output_parsed
+    if faltante and not salida.faltante:
+        salida.faltante = faltante
+    return salida, True
 
 # ============================================================
 # 3.5) Capacitación (Fase 1) — generación de curso con IA

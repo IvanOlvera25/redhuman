@@ -85,3 +85,11 @@ Plataforma SaaS de agente de IA de RH para México. `red-human-app` (Next.js 15)
 - OAuth con permisos DELEGADOS, conexión POR CUENTA (`IntegracionTeams`, una fila por Cuenta). Tokens SIEMPRE cifrados (Fernet con clave derivada de `TEAMS_CLIENT_SECRET`, `services/teams.py`); nunca se exponen por la API. Rotar el secret obliga a reconectar.
 - La reunión se crea con `POST /me/events` (`isOnlineMeeting` + `teamsForBusiness`, asistentes = correos de candidato y entrevistador): Graph manda las invitaciones de calendario. Se crea ANTES de guardar la entrevista; si falla → 502 y no se guarda nada (decisión del usuario). Modificar/cancelar sincronizan la reunión best-effort (nunca bloquean).
 - Con Teams conectado la UI NO pide la liga en Videollamada; «Usar otra liga» (`usar_teams=false`) es la excepción. No agregar modalidades ni pasos.
+
+## Evaluación del candidato (2026-09-13)
+
+- Prefiltro por WhatsApp = SOLO filtro de entrada: resultado `cumple` | `no_cumple`, sin score. `Postulacion.score` lo escribe únicamente el Análisis de CV. El prefiltro NO participa en la evaluación integral ni en la afinidad.
+- Evaluación integral (`ia.evaluar_entrevista`) = Análisis de CV + Entrevista Red Human, nada más. Estructura: Afinidad (`match_perfil`), Fortalezas, Puntos por validar (`riesgos`), Recomendación, `faltante`.
+- `/finalizar` valida el transcript antes de evaluar: sin respuestas útiles → `interrumpida` (`motivo=sin_respuestas`); pocas respuestas → `ia.suficiencia_entrevista` decide `parcial` (sin score) o evaluar indicando lo que faltó. Nunca generar score ni recomendar entrevista humana sin entrevista válida; la acción siguiente es «Reintentar Entrevista Red Human» (reabrir).
+- La sala pública nunca debe quedar en negro: errores de sesión → fase `cerrada`/`error` con mensaje; fallo del avatar → sesión de texto forzada (`POST /sesion {"modo":"texto"}`); `error.tsx` en la ruta.
+- Embudos y contadores por etapa cuentan solo postulaciones activas.

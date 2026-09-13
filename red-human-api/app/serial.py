@@ -193,33 +193,53 @@ def _sintesis_global(p: Postulacion) -> dict:
     Fase 2: todo sale de la Postulación — las entrevistas de OTRA postulación de la misma
     persona no cuentan para esta (cada aplicación se evalúa por sí sola)."""
     a = p.analisis or {}
-    score = p.score
+    score = p.score  # SOLO del Análisis de CV (el prefiltro ya no genera score, 2026-09-13)
     resultado_apto = p.resultado_apto
     ultima_eh = p.entrevistas_humanas[-1] if p.entrevistas_humanas else None
     ultima_ent = p.entrevistas[-1] if p.entrevistas else None
 
-    eval_ia = (ultima_ent.evaluacion or {}) if ultima_ent else {}
+    # 2026-09-13: solo una Entrevista Red Human EVALUADA entra a la evaluación integral. Una
+    # interrumpida (sin respuestas / desconexión) o parcial no aporta score ni fortalezas.
+    entrevista_valida = bool(ultima_ent and ultima_ent.estado == "evaluada" and ultima_ent.evaluacion)
+    eval_ia = (ultima_ent.evaluacion or {}) if entrevista_valida else {}
     match_ia = eval_ia.get("match_perfil")
     respuestas = a.get("respuestas_prefiltro") or []
+    hay_cv = bool(a.get("requisitos_cumplidos") or a.get("brechas") or a.get("fortalezas_cv"))
 
-    # --- C. Prefiltro: "Cumple X de Y criterios" (o solo los incumplimientos) ---
+    # --- C. Prefiltro: SOLO un status de entrada (Cumple / No cumple) — no participa en la
+    # evaluación integral ni aporta afinidad, fortalezas ni puntos por validar (2026-09-13). ---
     prefiltro_resumen = None
-    if respuestas:
+    if respuestas or a.get("prefiltro_resultado"):
         cumple_n = sum(1 for r in respuestas if r.get("cumple") is True)
         incumplidos = [r.get("criterio") or r.get("pregunta") for r in respuestas if r.get("cumple") is False]
-        prefiltro_resumen = {"cumple": cumple_n, "total": len(respuestas), "incumplidos": incumplidos}
+        prefiltro_resumen = {
+            "cumple": cumple_n, "total": len(respuestas), "incumplidos": incumplidos,
+            "resultado": a.get("prefiltro_resultado") or ("no_cumple" if p.estado == "no_cumple" else "cumple" if p.prefiltro_completo else None),
+        }
 
-    # --- D. Afinidad global: score CV/Prefiltro, promediado con match de Entrevista IA si la
-    # hay, ajustado por el resultado de Entrevista Humana si la hay (la señal más autoritativa:
-    # una persona real ya evaluó). Cada fuente usada queda citada en `sintesisAfinidad`. ---
+    # --- Status de la Entrevista Red Human (bloque propio en la ficha) ---
+    entrevista_status = None
+    if ultima_ent:
+        ev_raw = ultima_ent.evaluacion or {}
+        entrevista_status = {
+            "codigo": ultima_ent.codigo, "estado": ultima_ent.estado, "cierre": ultima_ent.cierre or "",
+            "motivo": ultima_ent.motivo or "", "turnosCandidato": sum(1 for m in (ultima_ent.transcript or []) if m.get("rol") == "user"),
+            "faltante": list(ev_raw.get("faltante") or []), "motivoIa": ev_raw.get("motivo_ia") or "",
+            "intentosPrevios": len(ultima_ent.intentos_previos or []),
+            "accionSiguiente": "reintentar" if ultima_ent.estado in ("interrumpida", "parcial") else None,
+        }
+
+    # --- D. Afinidad (EVALUACIÓN INTEGRAL): Análisis de CV + Entrevista Red Human válida,
+    # ajustada por la Entrevista Humana si la hay (la señal más autoritativa). El prefiltro
+    # queda estrictamente fuera. Cada fuente usada queda citada en `sintesisAfinidad`. ---
     afinidad: Optional[int] = None
     fuentes: List[str] = []
-    if score:
+    if score and hay_cv:
         afinidad = score
-        fuentes.append(f"CV/Prefiltro: {score}/100 de ajuste")
+        fuentes.append(f"Análisis de CV: {score}/100 de ajuste")
     if match_ia is not None:
         afinidad = round(((afinidad or 0) + match_ia) / 2) if afinidad is not None else match_ia
-        fuentes.append(f"Entrevista IA: {match_ia}% de match")
+        fuentes.append(f"Entrevista Red Human: {match_ia}/100 de afinidad")
     if ultima_eh and ultima_eh.resultado:
         legible = "aprobado" if ultima_eh.resultado == "aprobado" else "no aprobado"
         fuentes.append(f"Entrevista Humana con {ultima_eh.entrevistador or 'RH'}: {legible}")
@@ -232,13 +252,13 @@ def _sintesis_global(p: Postulacion) -> dict:
     # etapa YA calificó, prioridad a la señal más reciente (Entrevista > Prefiltro > CV). ---
     fortalezas = _dedupe_cap(
         [*(eval_ia.get("fortalezas") or []),
-         *[r.get("criterio") or r.get("pregunta") for r in respuestas if r.get("cumple") is True],
+         *(a.get("fortalezas_cv") or []),
          *(a.get("requisitos_cumplidos") or [])],
         4,
     )
     puntos_por_validar = _dedupe_cap(
         [*(eval_ia.get("riesgos") or []),
-         *[r.get("criterio") or r.get("pregunta") for r in respuestas if r.get("cumple") is False],
+         *[f"No se cubrió en la entrevista: {t}" for t in (eval_ia.get("faltante") or [])],
          *(a.get("brechas") or []),
          *([f"Segunda entrevista sugerida" + (f": {ultima_eh.comentario}" if ultima_eh.comentario else "")]
            if ultima_eh and ultima_eh.recomendacion == "segunda_entrevista" else [])],
@@ -258,16 +278,29 @@ def _sintesis_global(p: Postulacion) -> dict:
     elif resultado_apto is True and ultima_eh and ultima_eh.resultado == "aprobado" and ultima_eh.recomendacion == "avanzar":
         recomendacion = "Avanzar a contratación"
         motivo = "La Entrevista Humana confirmó al candidato como aprobado, con recomendación de avanzar."
-    elif resultado_apto is True:
+    elif ultima_ent and ultima_ent.estado in ("interrumpida", "parcial") and not (ultima_eh and ultima_eh.resultado):
+        # 2026-09-13: sin entrevista válida no se recomienda entrevista humana — primero reintentar.
+        recomendacion = "Reintentar Entrevista Red Human"
+        motivo = (
+            "La Entrevista Red Human quedó sin respuestas del candidato." if ultima_ent.motivo == "sin_respuestas"
+            else "La Entrevista Red Human quedó parcial: la información no alcanza para una evaluación integral." if ultima_ent.estado == "parcial"
+            else "La Entrevista Red Human se interrumpió antes de terminar."
+        )
+    elif resultado_apto is True and entrevista_valida:
         recomendacion = "Realizar entrevista humana"
         motivo = (
             "La Entrevista Humana sugiere una segunda ronda antes de decidir."
             if ultima_eh and ultima_eh.recomendacion == "segunda_entrevista"
-            else "Compatible según CV/Prefiltro/Entrevista IA, pero falta la validación de una Entrevista Humana."
+            else "Compatible según Análisis de CV y Entrevista Red Human, pero falta la validación de una Entrevista Humana."
         )
+    elif resultado_apto is True:
+        recomendacion = "Realizar Entrevista Red Human"
+        motivo = "Pasó el prefiltro; la evaluación integral requiere la Entrevista Red Human."
 
     return {
         "prefiltroResumen": prefiltro_resumen,
+        "entrevistaStatus": entrevista_status,
+        "evaluacionIntegral": bool(match_ia is not None or (score and hay_cv and entrevista_valida)),
         "afinidadGlobal": afinidad,
         "sintesisAfinidad": " · ".join(fuentes),
         "fortalezasPrincipales": fortalezas,
@@ -468,6 +501,7 @@ def entrevista_dict(e: Entrevista) -> dict:
         "evaluacion": e.evaluacion or None,
         # Fase 4: cómo cerró y cuándo; intentos previos si RH la reabrió.
         "cierre": e.cierre or "",
+        "motivo": e.motivo or "",  # sin_respuestas | desconexion | parcial | "" (ver MOTIVOS_ENTREVISTA)
         "iniciadaEn": iso(e.iniciada_en),
         "finalizadaEn": iso(e.finalizada_en),
         "intentosPrevios": len(e.intentos_previos or []),

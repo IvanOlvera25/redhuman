@@ -207,6 +207,7 @@ def publica(token: str, db: Session = Depends(get_db)):
         "tipo": e.tipo,
         "estado": e.estado,
         "cierre": e.cierre or "",
+        "motivo": e.motivo or "",
         "consentimiento": e.consentimiento,
         "avatar_disponible": avatar_activo(),
         "duracion_max_seg": settings.anam_max_sesion_seg,
@@ -251,14 +252,26 @@ def _system_prompt(e: Entrevista) -> str:
     )
 
 
+ESTADOS_CERRADOS = ("completada", "evaluada", "interrumpida", "parcial")
+MENSAJE_CERRADA = "Esta entrevista ya fue completada o interrumpida. Solicita a RH reabrirla."
+
+
+class SesionIn(BaseModel):
+    # 2026-09-13: el navegador puede FORZAR texto (p. ej. el avatar no pudo transmitir video) sin
+    # depender de la configuración del servidor; así una falla de Anam nunca deja la sala en negro.
+    modo: Optional[str] = None  # "texto" | None (auto)
+
+
 @router.post("/publica/{token}/sesion")
-async def sesion(token: str, db: Session = Depends(get_db)):
-    """Inicia la sesión: token de avatar (Anam) o modo texto si no hay clave."""
+async def sesion(token: str, datos: Optional[SesionIn] = None, db: Session = Depends(get_db)):
+    """Inicia la sesión: token de avatar (Anam) o modo texto si no hay clave (o si el navegador
+    pide texto). 403 sin consentimiento, 409 si la entrevista ya está cerrada."""
     e = _por_token(db, token)
     if not e.consentimiento:
         raise HTTPException(403, "Primero se requiere el consentimiento del candidato.")
-    if e.estado in ("completada", "evaluada", "interrumpida"):
-        raise HTTPException(409, "Esta entrevista ya fue cerrada. RH puede reabrirla si hace falta.")
+    if e.estado in ESTADOS_CERRADOS:
+        raise HTTPException(409, MENSAJE_CERRADA)
+    forzar_texto = bool(datos and datos.modo == "texto")
 
     p, v, empresa = _contexto(e)
     saludo = ia.mensaje_inicial_entrevista(v.titulo if v else "")
@@ -268,7 +281,8 @@ async def sesion(token: str, db: Session = Depends(get_db)):
 
     ses = None
     try:
-        ses = await crear_sesion_avatar("Red Human", _system_prompt(e), saludo)
+        if not forzar_texto:
+            ses = await crear_sesion_avatar("Red Human", _system_prompt(e), saludo)
     except Exception as ex:  # el avatar nunca debe tumbar la entrevista: cae a texto
         print(f"[ERROR] crear_sesion_avatar falló: {str(ex)}", flush=True)
         registrar(db, "sistema", "avatar_error", "entrevista", e.codigo, {"error": str(ex)[:300]})
@@ -311,6 +325,23 @@ class FinalizarIn(BaseModel):
 
 # Mínimo de intervenciones del candidato para considerar que hubo entrevista que evaluar.
 MIN_TURNOS_CANDIDATO = 2
+# 2026-09-13: con menos turnos ÚTILES que esto, la IA decide primero si la información alcanza
+# (suficiencia) antes de generar cualquier score o recomendación.
+TURNOS_ENTREVISTA_COMPLETA = 5
+
+
+def _cerrar_sin_evaluar(db: Session, e: Entrevista, p, motivo: str, turnos: int, extra: Optional[dict] = None) -> dict:
+    """Entrevista sin evaluación (2026-09-13): sin score, sin recomendación, la postulación NO se
+    mueve. Acción siguiente para RH: «Reintentar Entrevista Red Human» (POST /entrevistas/{codigo}/reabrir)."""
+    e.estado = "parcial" if motivo == "parcial" else "interrumpida"
+    e.motivo = motivo
+    e.evaluacion = {"parcial": True, **(extra or {})} if motivo == "parcial" else None
+    registrar(
+        db, "sistema", "entrevista_" + ("parcial" if motivo == "parcial" else "interrumpida"), "entrevista", e.codigo,
+        {"cierre": e.cierre, "motivo": motivo, "turnos_candidato": turnos, "postulacion": p.codigo if p else None, **(extra or {})},
+    )
+    db.commit()
+    return entrevista_dict(e)
 
 
 def _cierre_verificado(e: Entrevista, cierre_declarado: str) -> str:
@@ -336,7 +367,7 @@ async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db
     Evaluación — sin que el candidato presione nada. Una entrevista con cierre por desconexión o
     tiempo y casi sin turnos del candidato queda `interrumpida` (sin evaluar) para que RH la reabra."""
     e = _por_token(db, token)
-    if e.estado in ("evaluada", "interrumpida"):
+    if e.estado in ("evaluada", "interrumpida", "parcial"):
         return entrevista_dict(e)
     if e.estado != "en_curso":
         raise HTTPException(409, "La entrevista no está en curso; no hay nada que cerrar.")
@@ -351,28 +382,45 @@ async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db
     e.cierre = _cierre_verificado(e, datos.cierre)
     e.finalizada_en = datetime.now(timezone.utc)
     turnos_candidato = sum(1 for m in (e.transcript or []) if m.get("rol") == "user")
+    turnos_utiles, _chars = ia.texto_util_candidato(e.transcript or [])
 
     p, v, empresa = _contexto(e)
+    guion = e.guion or {}
+    temas = ia.temas_de_guion(guion)
 
+    # 2026-09-13 — validación del transcript ANTES de cualquier evaluación:
+    # (a) sin respuestas reales del candidato → interrumpida «Sin respuestas», nada de score.
+    if turnos_utiles == 0:
+        return _cerrar_sin_evaluar(db, e, p, "sin_respuestas", turnos_candidato)
+    # (b) se cortó (desconexión/tiempo) con muy pocas respuestas → interrumpida.
     if e.cierre not in CIERRES_COMPLETOS and turnos_candidato < MIN_TURNOS_CANDIDATO:
-        e.estado = "interrumpida"
-        registrar(
-            db, "sistema", "entrevista_interrumpida", "entrevista", e.codigo,
-            {"cierre": e.cierre, "turnos_candidato": turnos_candidato, "postulacion": p.codigo if p else None},
-        )
-        db.commit()
-        return entrevista_dict(e)
+        return _cerrar_sin_evaluar(db, e, p, "desconexion", turnos_candidato)
+    # (c) contestó poco → la IA decide si alcanza; si no, «Entrevista parcial» sin score integral.
+    faltante: List[str] = []
+    if turnos_utiles < TURNOS_ENTREVISTA_COMPLETA:
+        suf, _ = ia.suficiencia_entrevista(v.titulo if v else "vacante general", temas, e.transcript or [])
+        if not suf.suficiente:
+            return _cerrar_sin_evaluar(
+                db, e, p, "parcial", turnos_candidato,
+                {"faltante": suf.temas_faltantes, "cubierto": suf.temas_cubiertos, "motivo_ia": suf.motivo},
+            )
+        faltante = suf.temas_faltantes
 
     e.estado = "completada"
-    guion = e.guion or {}
+    e.motivo = ""
     ev, con_ia = ia.evaluar_entrevista(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",
         e.transcript or [],
         perfil_ideal=(v.perfil_ideal if v else "") or "",
-        temas=ia.temas_de_guion(guion),
+        temas=temas,
         enfoque_entrevista=(v.enfoque_entrevista if v else "profesional") or "profesional",
+        faltante=faltante,
+        analisis_cv=(p.analisis or {}) if p else {},
+        cv_datos=(p.candidato.cv_datos or {}) if p and p.candidato else {},
     )
+    if faltante and not ev.faltante:
+        ev.faltante = faltante
     e.evaluacion = ev.model_dump()
     e.estado = "evaluada"
     # p.score / p.evidencia son el resultado de Luna sobre el CV (ver ia.AjustePerfil,
@@ -431,7 +479,7 @@ def reabrir(
     p = e.postulacion
     if not p or p.cuenta_id != cuenta.id:
         raise HTTPException(404, "Entrevista no encontrada")
-    if e.estado not in ("evaluada", "interrumpida", "completada", "en_curso"):
+    if e.estado not in ("evaluada", "interrumpida", "parcial", "completada", "en_curso"):
         raise HTTPException(409, "La entrevista no está cerrada ni en curso.")
     intento = {
         "estado": e.estado, "cierre": e.cierre, "iniciada_en": e.iniciada_en.isoformat() if e.iniciada_en else None,
@@ -442,6 +490,7 @@ def reabrir(
     e.transcript = []
     e.evaluacion = {}
     e.cierre = ""
+    e.motivo = ""
     e.iniciada_en = None
     e.finalizada_en = None
     e.estado = "programada"

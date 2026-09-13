@@ -1657,8 +1657,32 @@ function estadoAnalisisCv(c: Candidato, enVuelo: boolean): EstadoAnalisisCv {
 const TONOS_RECOMENDACION: Record<string, { card: string; texto: string; icon: typeof CheckCircle2 }> = {
   "Avanzar a contratación": { card: "border-good/30 bg-good-soft/20", texto: "text-good", icon: CheckCircle2 },
   "Realizar entrevista humana": { card: "border-warn/30 bg-warn-soft/20", texto: "text-warn", icon: UserCheck },
+  "Realizar Entrevista Red Human": { card: "border-brand/30 bg-brand-soft/20", texto: "text-brand", icon: UserCheck },
+  "Reintentar Entrevista Red Human": { card: "border-warn/30 bg-warn-soft/20", texto: "text-warn", icon: RotateCw },
   "No avanzar": { card: "border-bad/30 bg-bad-soft/20", texto: "text-bad", icon: XCircle },
 };
+
+/** 2026-09-13: status legible de la Entrevista Red Human (bloque propio en Resumen y Evaluaciones). */
+function textoEntrevistaStatus(s: NonNullable<Candidato["entrevistaStatus"]>): { titulo: string; detalle: string; tono: "good" | "warn" | "bad" | "neutral" } {
+  switch (s.estado) {
+    case "evaluada":
+      return { titulo: "Entrevista Red Human realizada y evaluada", detalle: s.faltante.length ? `No se cubrió: ${s.faltante.join(", ")}.` : "", tono: "good" };
+    case "interrumpida":
+      return {
+        titulo: s.motivo === "sin_respuestas" ? "Entrevista Red Human sin respuestas" : "Entrevista Red Human interrumpida",
+        detalle: s.motivo === "sin_respuestas" ? "El candidato no contestó. No se generó evaluación ni score. Acción: reintentar." : "Se cortó antes de terminar. No se generó evaluación. Acción: reintentar.",
+        tono: "bad",
+      };
+    case "parcial":
+      return { titulo: "Entrevista Red Human parcial", detalle: `${s.motivoIa ? s.motivoIa + " " : ""}Sin score integral.${s.faltante.length ? ` Faltó: ${s.faltante.join(", ")}.` : ""} Acción: reintentar.`, tono: "warn" };
+    case "en_curso":
+      return { titulo: "Entrevista Red Human en curso", detalle: "", tono: "neutral" };
+    case "completada":
+      return { titulo: "Entrevista Red Human completada, evaluando…", detalle: "", tono: "neutral" };
+    default:
+      return { titulo: "Entrevista Red Human programada", detalle: "Aún no se realiza.", tono: "neutral" };
+  }
+}
 
 function PestanaResumen({
   c,
@@ -1792,16 +1816,16 @@ function PestanaResumen({
         </Card>
       </div>
 
-      {/* C. Prefiltro */}
+      {/* C. Prefiltro — SOLO filtro de entrada (Cumple / No cumple), sin score (2026-09-13) */}
       <div>
-        <Eyebrow>Prefiltro</Eyebrow>
+        <Eyebrow>Prefiltro de entrada</Eyebrow>
         <Card className="mt-2 p-4">
           {!c.prefiltroResumen ? (
             <p className="text-sm text-ink-3">Prefiltro en curso — todavía no hay criterios evaluados.</p>
-          ) : c.prefiltroResumen.incumplidos.length > 0 ? (
+          ) : c.prefiltroResumen.resultado === "no_cumple" || c.prefiltroResumen.incumplidos.length > 0 ? (
             <div>
               <p className="text-sm font-semibold text-warn">
-                Prefiltro: incumple {c.prefiltroResumen.incumplidos.length} de {c.prefiltroResumen.total} criterios
+                Prefiltro: No cumple{c.prefiltroResumen.total ? ` (incumple ${c.prefiltroResumen.incumplidos.length} de ${c.prefiltroResumen.total} criterios)` : ""}
               </p>
               <ul className="mt-2 space-y-1">
                 {c.prefiltroResumen.incumplidos.map((x, i) => (
@@ -1811,16 +1835,39 @@ function PestanaResumen({
             </div>
           ) : (
             <p className="text-sm font-semibold text-good">
-              Prefiltro: Cumple {c.prefiltroResumen.cumple} de {c.prefiltroResumen.total} criterios
+              Prefiltro: Cumple{c.prefiltroResumen.total ? ` (${c.prefiltroResumen.cumple} de ${c.prefiltroResumen.total} criterios)` : ""}
             </p>
           )}
+          <p className="mt-1.5 text-[11px] text-ink-3">Filtro básico de entrada; no forma parte de la evaluación integral.</p>
         </Card>
       </div>
 
-      {/* D. Afinidad con la vacante */}
-      {c.afinidadGlobal != null && (
+      {/* C2. Status de la Entrevista Red Human (2026-09-13) */}
+      {c.entrevistaStatus && (
         <div>
-          <Eyebrow>Afinidad con la vacante</Eyebrow>
+          <Eyebrow>Entrevista Red Human</Eyebrow>
+          <Card className="mt-2 p-4">
+            {(() => {
+              const st = textoEntrevistaStatus(c.entrevistaStatus);
+              return (
+                <>
+                  <p className={cn("text-sm font-semibold", st.tono === "good" ? "text-good" : st.tono === "warn" ? "text-warn" : st.tono === "bad" ? "text-bad" : "text-ink")}>{st.titulo}</p>
+                  {st.detalle && <p className="mt-1 text-xs leading-relaxed text-ink-2">{st.detalle}</p>}
+                  <p className="mt-1 text-[11px] text-ink-3">
+                    {c.entrevistaStatus.turnosCandidato} respuestas{c.entrevistaStatus.intentosPrevios ? ` · ${c.entrevistaStatus.intentosPrevios} intento(s) previo(s)` : ""}
+                    {c.entrevistaStatus.accionSiguiente === "reintentar" ? " · Reintentar desde el tablero de Entrevistas (botón «Reintentar»)." : ""}
+                  </p>
+                </>
+              );
+            })()}
+          </Card>
+        </div>
+      )}
+
+      {/* D. Evaluación integral (Análisis de CV + Entrevista Red Human) — solo con entrevista válida */}
+      {c.afinidadGlobal != null && c.evaluacionIntegral && (
+        <div>
+          <Eyebrow>Evaluación integral · Afinidad con la vacante</Eyebrow>
           <Card className="mt-2 p-5">
             <div className="flex flex-wrap items-center gap-4">
               <ScoreRing score={c.afinidadGlobal} />
@@ -1919,43 +1966,118 @@ function PestanaResumen({
    ============================================================ */
 function PestanaEvaluaciones({ c }: { c: Candidato }) {
   const a = c.analisis ?? {};
+  const hayCv = Boolean(a.requisitos_cumplidos?.length || a.brechas?.length || a.fortalezas_cv?.length || c.cvDatos?.resumen_profesional);
   const ultimaEntrevista = c.entrevistas?.[c.entrevistas.length - 1];
-  const evalAvatar = ultimaEntrevista?.evaluacion as
-    | { resumen?: string; fortalezas?: string[]; riesgos?: string[]; areas_desarrollo?: string[]; perfil?: PerfilProfundo | null }
+  // 2026-09-13: solo una entrevista EVALUADA alimenta la Evaluación Integral (interrumpida/parcial no)
+  const evalAvatar = (ultimaEntrevista?.estado === "evaluada" ? ultimaEntrevista?.evaluacion : null) as
+    | { resumen?: string; fortalezas?: string[]; riesgos?: string[]; areas_desarrollo?: string[]; perfil?: PerfilProfundo | null; match_perfil?: number; recomendacion?: string; faltante?: string[] }
     | null
     | undefined;
   const historialEh = c.entrevistasHumanas ?? [];
 
   return (
     <div className="flex flex-col gap-5">
-      {/* Tarjeta de Score de Afinidad */}
+      {/* ===== 1) ANÁLISIS DE CV — disponible desde el inicio (independiente del prefiltro) ===== */}
       <Card className="border-brand/30 bg-brand-soft/20 p-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
-            <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-brand">
-              Evaluación de Afinidad de IA (Luna)
-            </span>
-            <h3 className="font-display text-xl font-bold text-ink">Score de Ajuste: {c.score} / 100</h3>
-            <p className="text-xs sm:text-sm text-ink-2 max-w-xl">
-              {c.evidencia || "Ajuste preliminar comparado contra los requisitos de la vacante."}
-            </p>
+            <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-brand">1 · Análisis de CV</span>
+            {hayCv ? (
+              <>
+                <h3 className="font-display text-xl font-bold text-ink">Ajuste del CV: {c.score} / 100</h3>
+                <p className="text-xs sm:text-sm text-ink-2 max-w-xl">{c.evidencia || "Ajuste preliminar comparado contra los requisitos de la vacante."}</p>
+              </>
+            ) : (
+              <>
+                <h3 className="font-display text-xl font-bold text-ink">Sin CV analizado</h3>
+                <p className="text-xs sm:text-sm text-ink-2 max-w-xl">Sube el CV en Documentos para obtener el análisis (experiencia relevante, fortalezas, brechas y compatibilidad).</p>
+              </>
+            )}
           </div>
-          <div className="flex items-center gap-3 self-start sm:self-auto">
-            <div className="scale-125">
-              <ScoreRing score={c.score} />
+          {hayCv && (
+            <div className="flex items-center gap-3 self-start sm:self-auto">
+              <div className="scale-125">
+                <ScoreRing score={c.score} />
+              </div>
             </div>
-          </div>
+          )}
         </div>
+        {hayCv && (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            {(a.experiencia_relevante_cv || c.cvDatos?.experiencia_relevante) && (
+              <div className="sm:col-span-2">
+                <p className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-3">Experiencia relevante</p>
+                <p className="mt-1 text-xs leading-relaxed text-ink-2">{a.experiencia_relevante_cv || c.cvDatos?.experiencia_relevante}</p>
+              </div>
+            )}
+            {Boolean(a.fortalezas_cv?.length) && (
+              <div>
+                <p className="font-mono text-[11px] font-bold uppercase tracking-wider text-good">Fortalezas</p>
+                <ul className="mt-1 space-y-1">{a.fortalezas_cv!.map((x, i) => <li key={i} className="text-xs leading-relaxed text-ink-2">• {x}</li>)}</ul>
+              </div>
+            )}
+            {Boolean(a.brechas?.length) && (
+              <div>
+                <p className="font-mono text-[11px] font-bold uppercase tracking-wider text-warn">Brechas / requisitos no acreditados</p>
+                <ul className="mt-1 space-y-1">{a.brechas!.map((x, i) => <li key={i} className="text-xs leading-relaxed text-ink-2">• {x}</li>)}</ul>
+              </div>
+            )}
+            {a.compatibilidad_cv && (
+              <div className="sm:col-span-2">
+                <p className="font-mono text-[11px] font-bold uppercase tracking-wider text-ink-3">Compatibilidad</p>
+                <p className="mt-1 text-xs leading-relaxed text-ink-2">{a.compatibilidad_cv}</p>
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      {/* ===== 2) STATUS DE LA ENTREVISTA RED HUMAN ===== */}
+      <Card className="p-5">
+        <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-human">2 · Entrevista Red Human</span>
+        {c.entrevistaStatus ? (
+          (() => {
+            const st = textoEntrevistaStatus(c.entrevistaStatus);
+            return (
+              <>
+                <h3 className={cn("font-display mt-1 text-lg font-bold", st.tono === "good" ? "text-good" : st.tono === "warn" ? "text-warn" : st.tono === "bad" ? "text-bad" : "text-ink")}>{st.titulo}</h3>
+                {st.detalle && <p className="mt-1 text-xs leading-relaxed text-ink-2">{st.detalle}</p>}
+                <p className="mt-1 text-[11px] text-ink-3">
+                  {c.entrevistaStatus.turnosCandidato} respuestas del candidato
+                  {c.entrevistaStatus.intentosPrevios ? ` · ${c.entrevistaStatus.intentosPrevios} intento(s) previo(s)` : ""}
+                  {c.entrevistaStatus.accionSiguiente === "reintentar" ? " · Acción siguiente: Reintentar Entrevista Red Human (tablero de Entrevistas → «Reintentar»)." : ""}
+                </p>
+              </>
+            );
+          })()
+        ) : (
+          <p className="mt-1 text-sm text-ink-3">Todavía no hay Entrevista Red Human para esta postulación.</p>
+        )}
       </Card>
 
       {/* Tarjeta de la evaluación del avatar de entrevista — solo texto descriptivo, sin score:
           el número de afinidad es de Luna (arriba); esto es lo que se habló en la entrevista. */}
+      {/* ===== 3) EVALUACIÓN INTEGRAL (Análisis de CV + Entrevista Red Human) — solo con entrevista válida ===== */}
       {evalAvatar?.resumen && (
         <Card className="border-human/30 bg-human-soft/20 p-5">
           <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-human">
-            Evaluación de la Entrevista Red Human
+            3 · Evaluación integral (CV + Entrevista Red Human)
           </span>
+          <div className="mt-2 flex flex-wrap items-center gap-4">
+            {evalAvatar.match_perfil != null && <ScoreRing score={evalAvatar.match_perfil} />}
+            <div>
+              {evalAvatar.match_perfil != null && <p className="font-display text-lg font-bold text-ink">Afinidad {evalAvatar.match_perfil}/100</p>}
+              {evalAvatar.recomendacion && (
+                <p className="text-xs text-ink-2">
+                  Recomendación preliminar: <b className="text-ink">{evalAvatar.recomendacion === "avanzar" ? "avanzar" : evalAvatar.recomendacion === "no_avanzar" ? "no avanzar" : "revisión humana"}</b> — la decisión final es de RH.
+                </p>
+              )}
+            </div>
+          </div>
           <p className="mt-2 text-sm leading-relaxed text-ink">{evalAvatar.resumen}</p>
+          {Boolean(evalAvatar.faltante?.length) && (
+            <p className="mt-2 text-xs leading-relaxed text-warn">La entrevista no cubrió: {evalAvatar.faltante!.join(", ")} — validar en la Entrevista Humana.</p>
+          )}
 
           {Boolean(evalAvatar.fortalezas?.length) && (
             <div className="mt-3">
@@ -1970,7 +2092,7 @@ function PestanaEvaluaciones({ c }: { c: Candidato }) {
 
           {Boolean(evalAvatar.riesgos?.length) && (
             <div className="mt-3">
-              <p className="font-mono text-[11px] uppercase tracking-wider text-warn font-bold">Puntos de atención</p>
+              <p className="font-mono text-[11px] uppercase tracking-wider text-warn font-bold">Puntos por validar</p>
               <ul className="mt-1.5 space-y-1">
                 {evalAvatar.riesgos!.map((x, i) => (
                   <li key={i} className="text-xs leading-relaxed text-ink-2">• {x}</li>
@@ -1996,27 +2118,6 @@ function PestanaEvaluaciones({ c }: { c: Candidato }) {
               <PerfilProfundoVista perfil={evalAvatar.perfil} />
             </div>
           )}
-        </Card>
-      )}
-
-      {/* Match y recomendación de la entrevista con avatar — antes vivía colapsable dentro del
-          footer de decisión; ya con pestaña propia se muestra siempre visible aquí. */}
-      {(c.etapa === "Entrevista IA" || c.etapa === "Evaluación") &&
-        (c.entrevistaMatch != null || c.entrevistaRecomendacion) && (
-        <Card className="p-4">
-          <Eyebrow>Evaluación de la entrevista</Eyebrow>
-          <div className="mt-2 space-y-1 text-xs text-ink-2">
-            {c.entrevistaMatch != null && (
-              <p>
-                Match de la entrevista: <b className="text-ink">{c.entrevistaMatch}%</b>
-              </p>
-            )}
-            {c.entrevistaRecomendacion && (
-              <p>
-                Recomendación de la IA: <b className="text-ink">{c.entrevistaRecomendacion}</b>
-              </p>
-            )}
-          </div>
         </Card>
       )}
 

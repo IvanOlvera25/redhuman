@@ -47,9 +47,11 @@ def _slug_unico(db: Session, titulo: str, vacante_id: int) -> str:
 
 def _embudo(db: Session, vacante_id: int) -> dict:
     """Conteo por etapa y por clasificación del agente — alimenta la tarjeta de la vacante."""
+    # 2026-09-13: el embudo cuenta SOLO postulaciones ACTIVAS (una descartada/contratada/cerrada ya
+    # no está "en" ninguna etapa) — mismo criterio que el Kanban (B4).
     filas = (
         db.query(Postulacion.etapa, Postulacion.estado, func.count(Postulacion.id))
-        .filter(Postulacion.vacante_id == vacante_id, Postulacion.es_prueba.is_(False))
+        .filter(Postulacion.vacante_id == vacante_id, Postulacion.es_prueba.is_(False), Postulacion.activa.is_(True))
         .group_by(Postulacion.etapa, Postulacion.estado)
         .all()
     )
