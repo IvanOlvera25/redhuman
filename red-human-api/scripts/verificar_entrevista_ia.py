@@ -132,7 +132,7 @@ with TestClient(app) as client:
     check(r.status_code == 200 and not r.json()["terminada"] and "Pregunta" not in r.json()["respuesta"], "afirmativo → primera pregunta de inmediato, sin numerar")
     terminada = False
     for i in range(10):
-        r = client.post(f"/entrevistas/publica/{TOKEN}/turno", json={"texto": f"respuesta {i}"})
+        r = client.post(f"/entrevistas/publica/{TOKEN}/turno", json={"texto": f"Trabajé tres años en caja y atención al cliente, resolviendo devoluciones y arqueos diarios. Turno {i}."})
         if r.json()["terminada"]:
             terminada = True
             break
@@ -177,9 +177,46 @@ with TestClient(app) as client:
     client.post(f"/entrevistas/publica/{TOKEN}/sesion")
     r = client.post(f"/entrevistas/publica/{TOKEN}/finalizar", json={"cierre": "marcador", "transcript": [
         {"rol": "assistant", "texto": "¿listo?"}, {"rol": "user", "texto": "sí"}, {"rol": "assistant", "texto": "¿experiencia?"},
-        {"rol": "user", "texto": "3 años"}, {"rol": "assistant", "texto": "ok, gracias y adiós"}]})
+        {"rol": "user", "texto": "Trabajé tres años en caja y atención al cliente, resolviendo devoluciones y arqueos diarios."}, {"rol": "assistant", "texto": "¿decisiones?"}, {"rol": "user", "texto": "Trabajé tres años en caja y atención al cliente, resolviendo devoluciones y arqueos diarios."},
+        {"rol": "assistant", "texto": "¿presión?"}, {"rol": "user", "texto": "Trabajé tres años en caja y atención al cliente, resolviendo devoluciones y arqueos diarios."}, {"rol": "assistant", "texto": "ok, gracias y adiós"}]})
     check(r.json()["estado"] == "evaluada" and r.json()["cierre"] == "manual", "cierre 'marcador' declarado SIN la despedida fija → el servidor lo degrada a 'manual' (no confía)")
     check(r.json()["intentosPrevios"] == 2, "dos intentos archivados")
+
+    # ============ 2026-09-13 — validación del transcript en /finalizar ============
+    r = client.post(f"/entrevistas/{ENT}/reabrir", json={})
+    client.post(f"/entrevistas/publica/{TOKEN}/sesion")
+    r = client.post(f"/entrevistas/publica/{TOKEN}/finalizar", json={"cierre": "manual", "transcript": [
+        {"rol": "assistant", "texto": "Hola, ¿comenzamos?"}, {"rol": "user", "texto": "sí"}, {"rol": "assistant", "texto": "¿experiencia?"}]})
+    check(r.status_code == 200 and r.json()["estado"] == "interrumpida" and r.json()["motivo"] == "sin_respuestas" and r.json()["evaluacion"] is None,
+          "sin respuestas reales (solo 'sí') → interrumpida con motivo sin_respuestas, SIN evaluación ni score")
+    db.expire_all()
+    check(p.etapa == "Entrevista IA", "sin respuestas: la postulación no se mueve (acción siguiente: reintentar)")
+    r = client.get(f"/candidatos/{p.codigo}")
+    check(r.json().get("recomendacionRedHuman") == "Reintentar Entrevista Red Human" and r.json()["entrevistaStatus"]["accionSiguiente"] == "reintentar",
+          "ficha: recomendación «Reintentar Entrevista Red Human» y status de la entrevista con acción reintentar")
+    r = client.post(f"/entrevistas/publica/{TOKEN}/sesion")
+    check(r.status_code == 409 and "reabrirla" in r.json()["detail"], "sesión sobre entrevista interrumpida → 409 con mensaje claro para el candidato")
+    # parcial: 1-2 respuestas útiles → la IA (demo: heurística) dice que no alcanza
+    r = client.post(f"/entrevistas/{ENT}/reabrir", json={})
+    client.post(f"/entrevistas/publica/{TOKEN}/sesion")
+    r = client.post(f"/entrevistas/publica/{TOKEN}/finalizar", json={"cierre": "manual", "transcript": [
+        {"rol": "assistant", "texto": "¿comenzamos?"}, {"rol": "user", "texto": "sí"}, {"rol": "assistant", "texto": "¿experiencia?"},
+        {"rol": "user", "texto": "Trabajé tres años en caja y atención al cliente, resolviendo devoluciones y arqueos diarios."}, {"rol": "assistant", "texto": "¿decisiones?"}]})
+    check(r.status_code == 200 and r.json()["estado"] == "parcial" and r.json()["motivo"] == "parcial" and r.json()["evaluacion"].get("parcial") and "match_perfil" not in r.json()["evaluacion"],
+          "contestó poco e insuficiente → Entrevista parcial, sin score integral, con temas faltantes")
+    check(len(r.json()["evaluacion"].get("faltante", [])) >= 1, "parcial: lista de temas faltantes para RH")
+    # corta pero suficiente (3 respuestas útiles en demo) → evaluada indicando lo que faltó
+    r = client.post(f"/entrevistas/{ENT}/reabrir", json={})
+    client.post(f"/entrevistas/publica/{TOKEN}/sesion")
+    tr = [{"rol": "assistant", "texto": "¿comenzamos?"}, {"rol": "user", "texto": "sí"}]
+    for i in range(3):
+        tr += [{"rol": "assistant", "texto": f"pregunta {i}"}, {"rol": "user", "texto": "Trabajé tres años en caja y atención al cliente, resolviendo devoluciones y arqueos diarios."}]
+    tr.append({"rol": "assistant", "texto": f"{ia.DESPEDIDA_ENTREVISTA}, Lucía. Gracias."})
+    r = client.post(f"/entrevistas/publica/{TOKEN}/finalizar", json={"cierre": "marcador", "transcript": tr})
+    check(r.status_code == 200 and r.json()["estado"] == "evaluada" and r.json()["evaluacion"]["match_perfil"] == 70 and len(r.json()["evaluacion"]["faltante"]) >= 1,
+          "corta pero suficiente → evaluada e indica lo que faltó (`faltante`)")
+    r = client.get(f"/candidatos/{p.codigo}")
+    check(r.json()["evaluacionIntegral"] is True and r.json()["entrevistaStatus"]["estado"] == "evaluada", "ficha: evaluación integral disponible solo con entrevista válida")
     # aislamiento: reabrir desde otra cuenta
     otra = Cuenta(nombre="Otra", nombre_comercial="Otra", estado="Activa")
     db.add(otra)

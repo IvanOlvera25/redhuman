@@ -424,7 +424,13 @@ class Archivo(Base):
     candidato: Mapped[Candidato] = relationship(back_populates="archivos")
 
 
-ESTADOS_ENTREVISTA = ["programada", "en_curso", "completada", "evaluada", "interrumpida"]
+# parcial = el candidato contestó poco y la IA determinó que NO hay información suficiente para una
+# evaluación integral (2026-09-13). Igual que interrumpida, no genera score ni recomendación.
+ESTADOS_ENTREVISTA = ["programada", "en_curso", "completada", "evaluada", "interrumpida", "parcial"]
+# Motivos de una entrevista NO evaluada (Entrevista.motivo): sin_respuestas = transcript vacío o
+# sin intervenciones reales del candidato · desconexion = se cortó con muy pocas respuestas ·
+# parcial = contestó poco y la IA juzgó insuficiente. Acción siguiente: «Reintentar Entrevista Red Human».
+MOTIVOS_ENTREVISTA = ["", "sin_respuestas", "desconexion", "parcial"]
 # herramienta = tool `terminar_entrevista` del avatar · marcador = despedida detectada en el
 # transcript · texto = `terminada` del modo texto · manual = botón del candidato ·
 # desconexion = CONNECTION_CLOSED / red · tiempo = tope de sesión.
@@ -453,6 +459,7 @@ class Entrevista(Base):
     # Fase 4 (Punto 4): cómo terminó — señal que el backend pudo verificar (ver CIERRES_ENTREVISTA).
     # Vacío mientras sigue abierta. La transición a evaluada/interrumpida SOLO ocurre en /finalizar.
     cierre: Mapped[str] = mapped_column(String(20), default="")
+    motivo: Mapped[str] = mapped_column(String(30), default="")  # ver MOTIVOS_ENTREVISTA
     iniciada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     finalizada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Reapertura explícita por RH: cada intento anterior se archiva aquí ({transcript, evaluacion,

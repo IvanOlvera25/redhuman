@@ -1206,6 +1206,10 @@ export interface EvaluacionEntrevista {
   evidencia: string;
   /** Fase 4: conocimiento profundo; null en evaluaciones previas a Fase 4. */
   perfil?: PerfilProfundo | null;
+  /** 2026-09-13: temas que la entrevista no cubrió (corta pero suficiente). */
+  faltante?: string[];
+  /** 2026-09-13: entrevista parcial — sin score integral. */
+  parcial?: boolean;
 }
 
 export type CierreEntrevista = "" | "herramienta" | "marcador" | "texto" | "manual" | "desconexion" | "tiempo";
@@ -1226,7 +1230,7 @@ export interface Entrevista {
   nombre: string;
   puesto: string;
   tipo: "avatar" | "texto";
-  estado: "programada" | "en_curso" | "completada" | "evaluada" | "interrumpida";
+  estado: "programada" | "en_curso" | "completada" | "evaluada" | "interrumpida" | "parcial";
   token: string;
   consentimiento: boolean;
   programada: string | null;
@@ -1239,6 +1243,8 @@ export interface Entrevista {
   ligaMeet: string;
   /* --- Fase 4: cierre verificable + reapertura --- */
   cierre?: CierreEntrevista;
+  /** 2026-09-13: sin_respuestas | desconexion | parcial | "" */
+  motivo?: string;
   iniciadaEn?: string | null;
   finalizadaEn?: string | null;
   intentosPrevios?: number;
@@ -1292,6 +1298,8 @@ export interface EntrevistaPublica {
   tipo: string;
   estado: string;
   cierre?: CierreEntrevista;
+  /** 2026-09-13: por qué no se evaluó (sin_respuestas | desconexion | parcial). */
+  motivo?: string;
   consentimiento: boolean;
   avatar_disponible: boolean;
   duracion_max_seg?: number;
@@ -1305,9 +1313,12 @@ export function consentirEntrevista(token: string) {
   return post<{ ok: boolean }>(`/entrevistas/publica/${token}/consentimiento`, { acepta: true });
 }
 
-export function iniciarEntrevista(token: string) {
+/** `forzarTexto` (2026-09-13): el navegador pide modo texto aunque el servidor tenga avatar — se usa
+ * cuando el stream de Anam no arranca, para que la sala nunca se quede en negro. */
+export function iniciarEntrevista(token: string, forzarTexto = false) {
   return post<{ modo: "avatar" | "texto"; nombre?: string; session_token?: string; mensajes?: { rol: string; texto: string }[] }>(
     `/entrevistas/publica/${token}/sesion`,
+    forzarTexto ? { modo: "texto" } : {},
   );
 }
 

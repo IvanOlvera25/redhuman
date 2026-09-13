@@ -60,12 +60,13 @@ transversal):
    hiciste y cuál es el siguiente paso.
 
 ## Lo último que se hizo
-**Fase 7B — Microsoft Teams en Entrevista Humana — 2026-09-12: CÓDIGO LISTO, sin commit/deploy**
-(ver sección al final; la validación real con Microsoft Graph la hace el usuario tras desplegar, las
-credenciales solo existen en producción). Antes, ya desplegados: Fase 7A (`c67f2d6`), Parte 3
-(`c1f3cd3`), Parte 2 (`4dd3031`), Parte 1 (`785516f`), Fase 4 (`8b45d18`), Fase 2 (`24acfd7`),
-Configuración (`47a4a8b`). Pendientes: spike de Anam y guion de ejemplo (Fase 4); `RESEND_API_KEY`/
-`RESEND_FROM` en producción (7A).
+**Correcciones urgentes de negocio (2026-09-13): CÓDIGO LISTO, sin commit/deploy** — pantalla negra
+en la sala de Entrevista IA, validación del transcript en `/finalizar` (sin respuestas / parcial),
+prefiltro sin score, evaluación integral = CV + Entrevista Red Human, embudo solo activas (ver sección
+al final). Ya desplegados: Fase 7B (`ff61558`), Fase 7A (`c67f2d6`), Parte 3 (`c1f3cd3`), Parte 2
+(`4dd3031`), Parte 1 (`785516f`), Fase 4 (`8b45d18`), Fase 2 (`24acfd7`), Configuración (`47a4a8b`).
+Pendientes: validación real de Teams; spike de Anam y guion de ejemplo (Fase 4); `RESEND_API_KEY`/
+`RESEND_FROM` en producción (7A). `contexto_red_human.md` (raíz) resume la arquitectura para otra IA.
 
 ## Lo que sigue
 
@@ -1435,7 +1436,7 @@ correo en Configuración → Notificaciones (las reglas guardadas no se tocan so
 Pendiente de producción: `RESEND_API_KEY`/`RESEND_FROM` con dominio verificado.
 
 
-## Fase 7B — Microsoft Teams en Entrevista Humana — 2026-09-12 (CÓDIGO LISTO, sin commit/deploy; validación real pendiente del usuario)
+## Fase 7B — Microsoft Teams en Entrevista Humana — 2026-09-12 (comiteada `ff61558` y desplegada; validación real pendiente del usuario)
 
 **Contexto:** no existía ningún patrón OAuth en el sistema (todas las integraciones son claves de
 servidor). Las credenciales de Azure existen SOLO en producción por decisión del usuario: se construyó
@@ -1505,3 +1506,70 @@ redirige con error, páginas 200). **Limitación honesta:** no se probó contra 
    evento con invitados en el calendario M365. Cualquier error de Graph aparece en el modal (502 con
    motivo) y en Integraciones (`ultimoError`).
 5. Commit y deploy cuando se apruebe.
+
+
+## Correcciones urgentes de negocio (cliente) — 2026-09-13 (CÓDIGO LISTO, sin commit/deploy)
+
+Cinco cambios pedidos por el cliente sobre bugs bloqueantes en pruebas. Sin plan mode por urgencia
+explícita; todo verificado con suites + smoke con servidores reales.
+
+1. **Pantalla negra en la sala de Entrevista IA** (`app/entrevista/[token]/page.tsx`): (a) cuando
+   `/consentimiento` o `/sesion` rechazan (409 cerrada, 403, red) ya no se muestra el genérico «Liga no
+   disponible»: `rechazoSesion()` reconsulta el estado y pinta la fase `cerrada` («Esta entrevista ya
+   fue completada o interrumpida. Solicita a RH reabrirla.») o `error` con el detalle y botón
+   «Intentar de nuevo»; (b) **causa real del negro en modo avatar**: `streamToVideoElement` corría fuera
+   del try/catch → si Anam no arrancaba, el `<video>` quedaba en negro para siempre. Ahora hay
+   vigilante de 25 s sin `SESSION_READY`, `catch` del stream y `CONNECTION_CLOSED` antes de estar listo
+   → `caerATexto()` pide una sesión de texto forzada (`POST /sesion {"modo":"texto"}`, nuevo en el
+   backend) y entra a la sala de chat; (c) `error.tsx` de la ruta (límite de error) para que un fallo
+   de render nunca deje la pantalla en negro; (d) verificado: sin `ANAM_LLM_ID` el backend ya cae a
+   texto (`avatar_activo()` exige las 3 variables) sin tocar el frontend. Backend: `ESTADOS_CERRADOS`
+   incluye `parcial`; `GET /publica` expone `motivo`.
+2. **Validación del transcript en `/finalizar`** (`routers/entrevistas.py`, `ia.py`, `models.py`):
+   `ia.texto_util_candidato` cuenta turnos con contenido real (≥ 12 caracteres). Sin respuestas
+   útiles → `interrumpida` con `Entrevista.motivo = "sin_respuestas"` (columna nueva, `sincronizar()`),
+   **sin** `evaluar_entrevista`, sin score, postulación sin mover; desconexión con < 2 turnos →
+   `motivo = "desconexion"`. Con < 5 turnos útiles → `ia.suficiencia_entrevista` (nuevo prompt; demo:
+   heurística ≥ 3 turnos) decide: insuficiente → estado nuevo **`parcial`** (`ESTADOS_ENTREVISTA`),
+   `evaluacion = {parcial: true, faltante, cubierto, motivo_ia}` sin score integral; suficiente →
+   se evalúa indicando lo que faltó (`EvaluacionEntrevista.faltante`). Acción siguiente en ambos
+   casos: «Reintentar Entrevista Red Human» (`POST /entrevistas/{codigo}/reabrir`, botón «Reintentar»
+   en el tablero; `reabrir` acepta `parcial`).
+3. **Prefiltro sin score** (`ia.prefiltro_turno`, `candidatos.procesar_prefiltro`,
+   `_auto_decision_zero_touch`): `TurnoPrefiltro.estado` ∈ {cumple, no_cumple} (se eliminó `revision`
+   y `score`); el prompt lo declara filtro básico de entrada. `procesar_prefiltro` ya NO escribe
+   `p.score` (solo lo escribe el análisis de CV) ni pisa `p.evidencia`; guarda
+   `analisis.prefiltro_resultado/prefiltro_evidencia`. La decisión Zero-Touch usa el resultado del
+   prefiltro (`resultado_prefiltro`), no el umbral de score (queda como respaldo solo para llamadas
+   viejas sin resultado).
+4. **Evaluación integral = Análisis de CV + Entrevista Red Human** (`ia.evaluar_entrevista(...,
+   faltante=, analisis_cv=, cv_datos=)`, `_bloque_cv`): el prompt recibe las dos fuentes y excluye
+   explícitamente el prefiltro; estructura Afinidad (`match_perfil`) / Fortalezas / Puntos por validar
+   (`riesgos`) / Recomendación (+`faltante`). `ia.AjustePerfil` gana `fortalezas` y `compatibilidad`;
+   `_aplicar_cv` guarda `fortalezas_cv`, `compatibilidad_cv`, `experiencia_relevante_cv` en
+   `analisis`. `serial._sintesis_global`: afinidad = CV + entrevista **evaluada** (interrumpida/parcial
+   no cuentan), fortalezas/puntos sin prefiltro, nuevos `entrevistaStatus` y `evaluacionIntegral`,
+   recomendaciones nuevas «Reintentar Entrevista Red Human» / «Realizar Entrevista Red Human».
+   Frontend (`candidatos/page.tsx`): Resumen muestra Prefiltro solo como Cumple/No cumple + bloque
+   «Entrevista Red Human» (status) + «Evaluación integral» solo con entrevista válida; la pestaña
+   Evaluaciones queda en 3 bloques separados: 1) Análisis de CV (desde el inicio: experiencia
+   relevante, fortalezas, brechas, compatibilidad), 2) Status de Entrevista Red Human, 3) Evaluación
+   integral (afinidad, fortalezas, puntos por validar, recomendación, perfil profundo) solo si la
+   entrevista es válida. Tablero de Entrevistas: estado `parcial`, botón «Reintentar».
+5. **Contadores del embudo**: `routers/vacantes._embudo` y `metricas.pipeline` (`por_etapa`) cuentan
+   solo postulaciones **activas** (antes incluían descartadas/contratadas); `vacantes/page.tsx` recarga
+   al volver a la pestaña/ventana y cada 30 s; el Kanban ya recargaba tras cada movimiento.
+
+**Verificación:** `verificar_entrevista_ia.py` **60** (+8: sin respuestas → interrumpida sin
+evaluación y sin mover; 409 con mensaje claro; parcial sin score con faltantes; corta pero suficiente
+→ evaluada con `faltante`; ficha con recomendación «Reintentar…», `entrevistaStatus`,
+`evaluacionIntegral`), `verificar_fase2.py` 67, `config_admin` 53, `formulario_vacante` 40,
+`entrevista_humana` 28, `teams` 41; `pyflakes`; `tsc` + `next build` limpios; smoke real: embudo
+activo, sesión forzada a texto, finalizar sin respuestas → interrumpida/sin_respuestas, 409 con
+mensaje, ficha con «Reintentar…», reabrir, descartar → embudo vacío, páginas 200. **Limitación:** el
+fallback del avatar no se probó con Anam real (sin clave); la suficiencia real depende del modelo.
+Esquema: `entrevistas.motivo` (columna nueva). Sin script de datos.
+
+### Siguiente paso
+Revisar el diff, probar en navegador la sala (token cerrado → mensaje claro; avatar sin stream →
+texto) y aprobar commit/deploy.

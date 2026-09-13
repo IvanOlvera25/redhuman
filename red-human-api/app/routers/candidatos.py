@@ -526,6 +526,10 @@ def _aplicar_cv(c: Candidato, p: Postulacion, datos: ia.CVExtraido, vac: Optiona
             "ia": con_ia,
             "requisitos_cumplidos": ajuste.requisitos_cumplidos,
             "brechas": ajuste.brechas,
+            # 2026-09-13: bloque «Análisis de CV» (experiencia relevante, fortalezas, brechas, compatibilidad)
+            "fortalezas_cv": list(ajuste.fortalezas or []),
+            "compatibilidad_cv": ajuste.compatibilidad or "",
+            "experiencia_relevante_cv": datos.experiencia_relevante or "",
             "alertas": datos.alertas,
             "datos_faltantes": datos.datos_faltantes,
         })
@@ -1007,7 +1011,7 @@ async def _avisar_apto_e_iniciar_agenda(db: Session, p: Postulacion) -> dict:
     return envio
 
 
-async def _auto_decision_zero_touch(db: Session, p: Postulacion) -> dict:
+async def _auto_decision_zero_touch(db: Session, p: Postulacion, resultado_prefiltro: str = "") -> dict:
     """Flujo Zero-Touch: al terminar el prefiltro, clasifica la postulación contra
     UMBRAL_ZERO_TOUCH y le avisa el resultado por WhatsApp sin intervención de RH.
 
@@ -1019,14 +1023,17 @@ async def _auto_decision_zero_touch(db: Session, p: Postulacion) -> dict:
     Regresa {"respuesta": str, "whatsapp": dict} — el ÚNICO mensaje que debe ver el candidato
     en el turno de cierre del prefiltro (ver procesar_prefiltro).
     """
-    if p.score < UMBRAL_ZERO_TOUCH:
+    # 2026-09-13: la decisión binaria sale del resultado del prefiltro (cumple / no_cumple), ya no
+    # de un score — el prefiltro es solo un filtro de entrada. El score de CV no participa aquí.
+    no_cumple = (resultado_prefiltro == "no_cumple") if resultado_prefiltro else (p.score < UMBRAL_ZERO_TOUCH)
+    if no_cumple:
         p.estado = "no_cumple"
         texto = (
             f"Gracias por tu tiempo, {p.nombre.split(' ')[0]}. Después de revisar tus respuestas, "
             "por ahora tu perfil no se alinea con lo que busca esta vacante. Guardamos tu información "
             "por si surge una oportunidad más adelante. ¡Mucho éxito en tu búsqueda! 🙌"
         )
-        registrar(db, "agente-ia", "auto_descartado_zero_touch", "postulacion", p.codigo, {"score": p.score, "umbral": UMBRAL_ZERO_TOUCH})
+        registrar(db, "agente-ia", "auto_descartado_zero_touch", "postulacion", p.codigo, {"prefiltro": resultado_prefiltro or "score", "score_cv": p.score})
         envio = await _enviar_whatsapp(p, texto)
         # Se guarda igual sin teléfono (p.ej. pruebas por simulador): así el veredicto real
         # siempre queda en el historial, aunque no haya salido por WhatsApp.
@@ -1037,7 +1044,7 @@ async def _auto_decision_zero_touch(db: Session, p: Postulacion) -> dict:
     # antes la tarjeta solo se movía al agendar la cita, así que una postulación ya clasificada
     # como apta seguía viéndose "atorada" en Prefiltro mientras coordinaba fecha/hora.
     p.etapa = "Entrevista IA"
-    registrar(db, "agente-ia", "auto_apto_zero_touch", "postulacion", p.codigo, {"score": p.score, "umbral": UMBRAL_ZERO_TOUCH})
+    registrar(db, "agente-ia", "auto_apto_zero_touch", "postulacion", p.codigo, {"prefiltro": resultado_prefiltro or "score", "score_cv": p.score})
     envio = await _avisar_apto_e_iniciar_agenda(db, p)
     return {"respuesta": _texto_apto(p), "whatsapp": envio}
 
@@ -1176,16 +1183,21 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
         # Turno de cierre: turno.respuesta es el mensaje genérico ("gracias, RH revisará") — nunca
         # debe llegar por WhatsApp ni quedar en el historial: _auto_decision_zero_touch manda el
         # veredicto real y mandar los dos seguidos confundía al candidato.
-        p.score = turno.score or 0
-        p.evidencia = turno.evidencia or ""
+        # 2026-09-13: el prefiltro NO genera score ni pisa la evidencia del CV — su único resultado
+        # es cumple/no_cumple (filtro básico de entrada); p.score sigue siendo SOLO el del CV.
         p.prefiltro_completo = True
-        analisis_actual.update({"origen": "prefiltro", "ia": con_ia})
+        analisis_actual.update({
+            "origen": analisis_actual.get("origen") or "prefiltro", "ia": con_ia,
+            "prefiltro_resultado": turno.estado, "prefiltro_evidencia": turno.evidencia or "",
+        })
+        if not p.evidencia:
+            p.evidencia = turno.evidencia or ""
         registrar(
             db, "agente-ia", "prefiltro_clasificado", "postulacion", p.codigo,
-            {"ia": con_ia, "estado_ia": turno.estado, "score": p.score, "evidencia": p.evidencia},
+            {"ia": con_ia, "estado_ia": turno.estado, "evidencia": turno.evidencia or ""},
         )
-        resultado_cierre = await _auto_decision_zero_touch(db, p)
-        clasificacion = {"estado": p.estado, "score": p.score, "evidencia": p.evidencia}
+        resultado_cierre = await _auto_decision_zero_touch(db, p, turno.estado)
+        clasificacion = {"estado": p.estado, "evidencia": turno.evidencia or ""}
         respuesta_final = resultado_cierre["respuesta"]
         envio = resultado_cierre["whatsapp"]
     else:

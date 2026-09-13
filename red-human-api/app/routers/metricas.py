@@ -28,8 +28,11 @@ def pipeline(db: Session = Depends(get_db), cuenta: Cuenta = Depends(cuenta_actu
     """Embudo de punta a punta: captación → prefiltro → entrevista → expediente → alta."""
     # Fase 2: el embudo cuenta POSTULACIONES (una persona con 2 vacantes son 2 en el embudo).
     total_candidatos = _postulaciones(db, cuenta.id).count()
+    # 2026-09-13: "por etapa" cuenta solo postulaciones ACTIVAS (mismo criterio que el Kanban y el
+    # embudo de cada vacante) — una descartada/contratada ya no está en ninguna etapa.
     por_etapa = dict(
-        _postulaciones(db, cuenta.id).with_entities(Postulacion.etapa, func.count(Postulacion.id)).group_by(Postulacion.etapa).all()
+        _postulaciones(db, cuenta.id).filter(Postulacion.activa.is_(True))
+        .with_entities(Postulacion.etapa, func.count(Postulacion.id)).group_by(Postulacion.etapa).all()
     )
     por_estado = dict(
         _postulaciones(db, cuenta.id).with_entities(Postulacion.estado, func.count(Postulacion.id)).group_by(Postulacion.estado).all()

@@ -29,7 +29,13 @@ import {
   type EntrevistaPublica,
 } from "@/lib/api";
 
-type Fase = "cargando" | "no_disponible" | "consentimiento" | "conectando" | "sala" | "finalizando" | "fin" | "interrumpida";
+type Fase = "cargando" | "no_disponible" | "cerrada" | "error" | "consentimiento" | "conectando" | "sala" | "finalizando" | "fin" | "interrumpida";
+
+const ESTADOS_CERRADOS = ["completada", "evaluada", "interrumpida", "parcial"];
+const MENSAJE_CERRADA = "Esta entrevista ya fue completada o interrumpida. Solicita a RH reabrirla.";
+/* Si el avatar no manda SESSION_READY en este tiempo, la sala cae a modo texto en vez de quedarse
+   con el video en negro (2026-09-13). */
+const ESPERA_AVATAR_SEG = 25;
 type Msg = { rol: "assistant" | "user"; texto: string };
 
 /* Fase 4 (Punto 3) — silencio. La regla del documento define la frase del inicio; la variante
@@ -62,19 +68,40 @@ export default function SalaEntrevista() {
   const finalizadoRef = useRef(false);
   const nombreRef = useRef("");
   const silencioRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; avisos: number; hablando: boolean }>({ timer: null, avisos: 0, hablando: false });
+  const [errorTexto, setErrorTexto] = useState("");
+  const avatarListoRef = useRef(false);
 
   useEffect(() => {
     // precalienta el chunk del SDK del avatar; el clic solo tiene que iniciar el stream
     import("@anam-ai/js-sdk").catch(() => {});
-    fetchEntrevistaPublica(token).then((i) => {
-      if (!i) return setFase("no_disponible");
-      setInfo(i);
-      nombreRef.current = i.candidato;
-      if (i.estado === "completada" || i.estado === "evaluada") return setFase("fin");
-      if (i.estado === "interrumpida") return setFase("interrumpida");
-      setFase("consentimiento");
-    });
+    fetchEntrevistaPublica(token)
+      .then((i) => {
+        if (!i) return setFase("no_disponible");
+        setInfo(i);
+        nombreRef.current = i.candidato;
+        if (i.estado === "completada" || i.estado === "evaluada") return setFase("fin");
+        if (i.estado === "interrumpida" || i.estado === "parcial") return setFase("interrumpida");
+        setFase("consentimiento");
+      })
+      .catch(() => setFase("no_disponible"));
   }, [token]);
+
+  /** 2026-09-13: la API rechazó consentimiento/sesión (409 cerrada, 403 sin consentimiento, red…).
+   * Nunca dejamos la pantalla en blanco: se muestra un mensaje claro según el estado real. */
+  const rechazoSesion = useCallback(
+    async (detalle: string) => {
+      const actual = await fetchEntrevistaPublica(token).catch(() => null);
+      if (actual) setInfo(actual);
+      if (!actual) return setFase("no_disponible");
+      if (ESTADOS_CERRADOS.includes(actual.estado) || /cerrada|reabrir/i.test(detalle)) {
+        setErrorTexto(MENSAJE_CERRADA);
+        return setFase("cerrada");
+      }
+      setErrorTexto(detalle || "No pudimos iniciar tu entrevista. Intenta de nuevo en unos segundos.");
+      setFase("error");
+    },
+    [token],
+  );
 
   /** Cierre único (Fase 4): cualquiera de los caminos (automático, botón, desconexión) pasa por aquí
    * UNA sola vez; el servidor verifica `cierre` contra el transcript y decide evaluada/interrumpida. */
@@ -118,12 +145,30 @@ export default function SalaEntrevista() {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
   }, [mensajes, pensando]);
 
+  /** Modo texto como red de seguridad: se pide al servidor una sesión de texto y se entra a la sala. */
+  const entrarTexto = useCallback(
+    async (s: { mensajes?: { rol: string; texto: string }[] } | null) => {
+      let datos = s;
+      if (!datos || !datos.mensajes) {
+        const r = await iniciarEntrevista(token, true);
+        if (!r.ok) return rechazoSesion(r.error);
+        datos = r.data;
+      }
+      setModo("texto");
+      const iniciales = (datos.mensajes ?? []).map((m) => ({ rol: m.rol as Msg["rol"], texto: m.texto }));
+      setMensajes(iniciales);
+      transcriptRef.current = iniciales;
+      setFase("sala");
+    },
+    [token, rechazoSesion],
+  );
+
   const empezar = useCallback(async () => {
     setFase("conectando");
     const ok = await consentirEntrevista(token);
-    if (!ok.ok) return setFase("no_disponible");
+    if (!ok.ok) return rechazoSesion(ok.error);
     const sesion = await iniciarEntrevista(token);
-    if (!sesion.ok) return setFase("no_disponible");
+    if (!sesion.ok) return rechazoSesion(sesion.error);
     const s = sesion.data;
 
     if (s.modo === "avatar" && s.session_token) {
@@ -162,28 +207,54 @@ export default function SalaEntrevista() {
           silencioRef.current.avisos = 0;
           programarAvisoSilencio();
         });
-        anam.addListener(AnamEvent.SESSION_READY, () => programarAvisoSilencio());
+        anam.addListener(AnamEvent.SESSION_READY, () => {
+          avatarListoRef.current = true;
+          programarAvisoSilencio();
+        });
         // Respaldo: si Anam corta la conexión (timeout de ANAM_MAX_SESION_SEG, falla de red) sin
         // que hubiera cierre automático ni botón, igual se cierra — el servidor lo registra como
         // "desconexion" y, si casi no hubo turnos, la deja como interrumpida para que RH la reabra.
-        anam.addListener(AnamEvent.CONNECTION_CLOSED, () => cerrar("desconexion", true));
+        anam.addListener(AnamEvent.CONNECTION_CLOSED, () => {
+          // Si la conexión se cierra ANTES de que el avatar estuviera listo, fue una falla del
+          // avatar (no del candidato): se cae a texto en vez de marcar la entrevista interrumpida.
+          if (!avatarListoRef.current) return void caerATexto("conexión cerrada antes de iniciar");
+          cerrar("desconexion", true);
+        });
         setModo("avatar");
         setFase("sala");
+        // Si el stream falla o nunca llega SESSION_READY, la sala NO se queda en negro: se cae a
+        // texto con una sesión forzada (2026-09-13). Solo si todavía no se terminó/cerró.
+        const caerATexto = async (motivo: unknown) => {
+          if (finalizadoRef.current || avatarListoRef.current) return;
+          console.error("❌ Avatar no disponible, cayendo a texto:", motivo);
+          avatarListoRef.current = true; // evita doble caída
+          try {
+            await anam.stopStreaming?.();
+          } catch {}
+          anamRef.current = null;
+          await entrarTexto(null);
+        };
+        const vigilante = setTimeout(() => caerATexto("sin SESSION_READY en " + ESPERA_AVATAR_SEG + " s"), ESPERA_AVATAR_SEG * 1000);
         // el elemento <video id="avatar-video"> ya está montado al entrar a "sala"
-        setTimeout(() => client.streamToVideoElement("avatar-video"), 0);
+        setTimeout(() => {
+          Promise.resolve()
+            .then(() => client.streamToVideoElement("avatar-video"))
+            .then(() => clearTimeout(vigilante))
+            .catch((err) => {
+              clearTimeout(vigilante);
+              caerATexto(err);
+            });
+        }, 0);
         return;
       } catch (err) {
-        // si el avatar falla en el navegador, seguimos por texto
+        // si el avatar falla en el navegador, seguimos por texto (sesión de texto forzada)
         console.error("❌ Error inicializando Anam:", err);
+        return entrarTexto(null);
       }
     }
 
-    setModo("texto");
-    const iniciales = (s.mensajes ?? []).map((m) => ({ rol: m.rol as Msg["rol"], texto: m.texto }));
-    setMensajes(iniciales);
-    transcriptRef.current = iniciales;
-    setFase("sala");
-  }, [token]);
+    await entrarTexto(s);
+  }, [token, cerrar, programarAvisoSilencio, rechazoSesion, entrarTexto]);
 
   const enviar = useCallback(async () => {
     const t = texto.trim();
@@ -228,6 +299,26 @@ export default function SalaEntrevista() {
             <p className="mt-2 text-sm text-ink-2">
               Esta entrevista no existe o ya no está activa. Verifica la liga que recibiste o contacta al equipo de RH.
             </p>
+          </Card>
+        )}
+
+        {fase === "cerrada" && (
+          <Card className="p-8 text-center">
+            <span className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-warn/10">
+              <ShieldCheck className="h-7 w-7 text-warn" />
+            </span>
+            <h1 className="font-display mt-4 text-xl font-bold">Esta entrevista ya está cerrada</h1>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">{errorTexto || MENSAJE_CERRADA}</p>
+          </Card>
+        )}
+
+        {fase === "error" && (
+          <Card className="p-8 text-center">
+            <h1 className="font-display text-xl font-bold">No pudimos iniciar tu entrevista</h1>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">{errorTexto}</p>
+            <Button className="mt-5" onClick={() => setFase("consentimiento")}>
+              Intentar de nuevo
+            </Button>
           </Card>
         )}
 
@@ -385,8 +476,12 @@ export default function SalaEntrevista() {
             </span>
             <h1 className="font-display mt-4 text-2xl font-bold">La entrevista se interrumpió</h1>
             <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">
-              Se perdió la conexión antes de que pudiéramos platicar. No te preocupes: el equipo de RH
-              {info ? ` de ${info.empresa}` : ""} puede reabrir esta misma liga para que la retomes.
+              {info?.motivo === "sin_respuestas"
+                ? "No recibimos tus respuestas."
+                : info?.estado === "parcial"
+                  ? "La entrevista quedó incompleta."
+                  : "Se perdió la conexión antes de que pudiéramos platicar."}{" "}
+              No te preocupes: el equipo de RH{info ? ` de ${info.empresa}` : ""} puede reabrir esta misma liga para que la retomes.
             </p>
           </Card>
         )}
