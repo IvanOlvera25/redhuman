@@ -41,7 +41,7 @@ const ESPERA_AVATAR_SEG = 60;
    el error crudo (código/razón de CONNECTION_CLOSED, error del SDK, timeout) se pinta en un bloque rojo en
    la sala, y arriba se muestra si el session_token llegó del backend, el contexto seguro (HTTPS) y la
    bitácora de eventos del SDK. Regresar a `false` cuando se encuentre la causa. */
-const DIAGNOSTICO_AVATAR = true;
+const DIAGNOSTICO_AVATAR = false;
 const MENSAJE_MICROFONO =
   "Para la entrevista en video necesitamos acceso a tu micrófono. Permítelo en tu navegador y vuelve a intentar, o continúa por chat.";
 type Msg = { rol: "assistant" | "user"; texto: string };
@@ -416,7 +416,7 @@ export default function SalaEntrevista() {
       </header>
 
       <div className="mx-auto max-w-3xl px-5 py-8 sm:py-10">
-        {seguro === false && (
+        {DIAGNOSTICO_AVATAR && seguro === false && (
           <div className="mb-6 rounded-xl border-4 border-red-600 bg-red-600 p-6 text-center text-white">
             <p className="text-2xl font-black tracking-wide sm:text-3xl">HTTPS REQUERIDO PARA EL AVATAR</p>
             <p className="mt-2 text-sm font-semibold">
@@ -440,7 +440,7 @@ export default function SalaEntrevista() {
             )}
           </div>
         )}
-        {errorAvatar && (
+        {DIAGNOSTICO_AVATAR && errorAvatar && (
           <div className="mb-4 rounded-xl border-2 border-red-600 bg-red-600/15 p-4 text-red-700 dark:text-red-300">
             <p className="text-base font-black">❌ ERROR DEL AVATAR (sin fallback a texto — modo diagnóstico)</p>
             <pre className="mt-2 whitespace-pre-wrap break-all font-mono text-xs">{errorAvatar}</pre>
