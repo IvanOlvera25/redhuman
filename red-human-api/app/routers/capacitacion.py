@@ -383,6 +383,7 @@ async def sesion(token: str, db: Session = Depends(get_db)):
     try:
         ses = await crear_sesion_avatar("Instructor", prompt, saludo)
     except Exception as ex:  # el avatar nunca debe tumbar la sesión: cae a modo texto
+        print(f"[ERROR] crear_sesion_avatar falló (curso {a.codigo}): {str(ex)}", flush=True)
         registrar(db, "sistema", "avatar_error", "asignacion_curso", a.codigo, {"error": str(ex)[:300]})
 
     if ses is None:
@@ -390,7 +391,9 @@ async def sesion(token: str, db: Session = Depends(get_db)):
         return {"modo": "texto", "mensajes": [{"rol": "assistant", "texto": saludo}], **asignacion_publica_dict(a)}
 
     db.commit()
-    return {"modo": "avatar", **ses, **asignacion_publica_dict(a)}
+    # `mensajes` también en modo avatar: si el navegador no logra transmitir el video, sigue el módulo
+    # por chat con este saludo sin pedir otra sesión (2026-09-14).
+    return {"modo": "avatar", **ses, "mensajes": [{"rol": "assistant", "texto": saludo}], **asignacion_publica_dict(a)}
 
 
 class TurnoIn(BaseModel):

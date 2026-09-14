@@ -29,14 +29,32 @@ import {
   type EntrevistaPublica,
 } from "@/lib/api";
 
-type Fase = "cargando" | "no_disponible" | "cerrada" | "error" | "consentimiento" | "conectando" | "sala" | "finalizando" | "fin" | "interrumpida";
+type Fase = "cargando" | "no_disponible" | "cerrada" | "error" | "microfono" | "consentimiento" | "conectando" | "sala" | "finalizando" | "fin" | "interrumpida";
 
 const ESTADOS_CERRADOS = ["completada", "evaluada", "interrumpida", "parcial"];
 const MENSAJE_CERRADA = "Esta entrevista ya fue completada o interrumpida. Solicita a RH reabrirla.";
-/* Si el avatar no manda SESSION_READY en este tiempo, la sala cae a modo texto en vez de quedarse
-   con el video en negro (2026-09-13). */
-const ESPERA_AVATAR_SEG = 25;
+/* Si el avatar no manda SESSION_READY ni empieza a reproducir video en este tiempo, la sala cae a
+   modo texto en vez de quedarse en negro (2026-09-13). 2026-09-14: subido a 60 s — Anam puede tardar
+   más de 25 s en producción (arranque del motor + WebRTC) y el vigilante abortaba de más. */
+const ESPERA_AVATAR_SEG = 60;
+const MENSAJE_MICROFONO =
+  "Para la entrevista en video necesitamos acceso a tu micrófono. Permítelo en tu navegador y vuelve a intentar, o continúa por chat.";
 type Msg = { rol: "assistant" | "user"; texto: string };
+/* Estado de la conexión del avatar: "conectando" hasta SESSION_READY / VIDEO_PLAY_STARTED; "listo" con
+   video; "abandonado" cuando se cayó a texto. Distingue el CONNECTION_CLOSED que dispara nuestro propio
+   stopStreaming() (al abandonar) del que manda Anam cuando la sesión real termina. */
+type EstadoAvatar = "inactivo" | "conectando" | "listo" | "abandonado";
+
+/** Espera a que React monte el elemento (el <video> aparece al pasar a "sala"); antes se asumía con
+ * setTimeout(0) y el SDK podía fallar con "video element not found". */
+async function esperarElemento(id: string, maxMs = 5000): Promise<boolean> {
+  const inicio = Date.now();
+  while (Date.now() - inicio < maxMs) {
+    if (document.getElementById(id)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
 
 /* Fase 4 (Punto 3) — silencio. La regla del documento define la frase del inicio; la variante
    intermedia es un supuesto ajustable. Los tiempos son conservadores para no interrumpir a
@@ -69,7 +87,8 @@ export default function SalaEntrevista() {
   const nombreRef = useRef("");
   const silencioRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; avisos: number; hablando: boolean }>({ timer: null, avisos: 0, hablando: false });
   const [errorTexto, setErrorTexto] = useState("");
-  const avatarListoRef = useRef(false);
+  const avatarRef = useRef<EstadoAvatar>("inactivo");
+  const microfonoRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
     // precalienta el chunk del SDK del avatar; el clic solo tiene que iniciar el stream
@@ -114,6 +133,8 @@ export default function SalaEntrevista() {
       try {
         await anamRef.current?.stopStreaming?.();
       } catch {}
+      microfonoRef.current?.getTracks().forEach((t) => t.stop());
+      microfonoRef.current = null;
       const r = await finalizarEntrevista(token, conTranscript ? transcriptRef.current : undefined, cierre);
       setFase(r.ok && r.data.estado === "interrumpida" ? "interrumpida" : "fin");
     },
@@ -170,8 +191,21 @@ export default function SalaEntrevista() {
     const sesion = await iniciarEntrevista(token);
     if (!sesion.ok) return rechazoSesion(sesion.error);
     const s = sesion.data;
+    if (s.modo === "texto" && s.motivo) console.warn("ℹ️ Entrevista en modo texto:", s.motivo);
 
     if (s.modo === "avatar" && s.session_token) {
+      // 2026-09-14: el micrófono se pide ANTES de tocar el SDK. Si el candidato lo niega (o el navegador
+      // no lo expone), el SDK cerraba la conexión al instante (MICROPHONE_PERMISSION_DENIED) y la sala
+      // caía a texto sin explicar nada. Ahora se avisa y se puede reintentar o seguir por chat.
+      let microfono: MediaStream | null = null;
+      try {
+        microfono = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
+      } catch (err) {
+        console.error("❌ Micrófono no disponible:", err);
+        setErrorTexto(MENSAJE_MICROFONO);
+        return setFase("microfono");
+      }
+      microfonoRef.current = microfono;
       try {
         const { createClient, AnamEvent } = await import("@anam-ai/js-sdk");
         const client = createClient(s.session_token);
@@ -182,6 +216,32 @@ export default function SalaEntrevista() {
         };
         anamRef.current = anam;
         if (s.nombre) nombreRef.current = s.nombre;
+        avatarRef.current = "conectando";
+        let vigilante: ReturnType<typeof setTimeout> | null = null;
+
+        const avatarListo = (origen: string) => {
+          if (avatarRef.current !== "conectando") return;
+          avatarRef.current = "listo";
+          if (vigilante) clearTimeout(vigilante);
+          console.info("✅ Avatar listo (" + origen + ")");
+          programarAvisoSilencio();
+        };
+        // Si el stream falla o nunca llega el video, la sala NO se queda en negro: se cae a texto con
+        // una sesión forzada (2026-09-13). Solo mientras se estaba conectando y no se cerró.
+        const caerATexto = async (motivo: unknown) => {
+          if (finalizadoRef.current || avatarRef.current !== "conectando") return;
+          avatarRef.current = "abandonado";
+          if (vigilante) clearTimeout(vigilante);
+          console.error("❌ Avatar no disponible, cayendo a texto:", motivo);
+          anamRef.current = null;
+          try {
+            await anam.stopStreaming?.();
+          } catch {}
+          microfonoRef.current?.getTracks().forEach((t) => t.stop());
+          microfonoRef.current = null;
+          await entrarTexto(null);
+        };
+
         anam.addListener(AnamEvent.MESSAGE_HISTORY_UPDATED, (historial: { role: string; content: string }[]) => {
           transcriptRef.current = historial.map((m) => ({
             rol: m.role === "persona" ? "assistant" : "user",
@@ -207,48 +267,49 @@ export default function SalaEntrevista() {
           silencioRef.current.avisos = 0;
           programarAvisoSilencio();
         });
-        anam.addListener(AnamEvent.SESSION_READY, () => {
-          avatarListoRef.current = true;
-          programarAvisoSilencio();
-        });
+        // Cualquiera de las dos señales confirma que el avatar ya está en la sala (SDK 4.x manda ambas;
+        // con una basta para que el vigilante deje de contar).
+        anam.addListener(AnamEvent.SESSION_READY, () => avatarListo("SESSION_READY"));
+        anam.addListener(AnamEvent.VIDEO_PLAY_STARTED, () => avatarListo("VIDEO_PLAY_STARTED"));
+        anam.addListener(AnamEvent.SERVER_WARNING, (msg: unknown) => console.warn("⚠️ Anam:", msg));
         // Respaldo: si Anam corta la conexión (timeout de ANAM_MAX_SESION_SEG, falla de red) sin
         // que hubiera cierre automático ni botón, igual se cierra — el servidor lo registra como
         // "desconexion" y, si casi no hubo turnos, la deja como interrumpida para que RH la reabra.
-        anam.addListener(AnamEvent.CONNECTION_CLOSED, () => {
+        anam.addListener(AnamEvent.CONNECTION_CLOSED, (codigo?: string, razon?: string) => {
+          // lo cerramos nosotros al caer a texto: no es una desconexión del candidato
+          if (avatarRef.current === "abandonado") return;
           // Si la conexión se cierra ANTES de que el avatar estuviera listo, fue una falla del
           // avatar (no del candidato): se cae a texto en vez de marcar la entrevista interrumpida.
-          if (!avatarListoRef.current) return void caerATexto("conexión cerrada antes de iniciar");
+          if (avatarRef.current === "conectando") {
+            return void caerATexto(`conexión cerrada antes de iniciar (${codigo ?? "?"}${razon ? ": " + razon : ""})`);
+          }
           cerrar("desconexion", true);
         });
         setModo("avatar");
         setFase("sala");
-        // Si el stream falla o nunca llega SESSION_READY, la sala NO se queda en negro: se cae a
-        // texto con una sesión forzada (2026-09-13). Solo si todavía no se terminó/cerró.
-        const caerATexto = async (motivo: unknown) => {
-          if (finalizadoRef.current || avatarListoRef.current) return;
-          console.error("❌ Avatar no disponible, cayendo a texto:", motivo);
-          avatarListoRef.current = true; // evita doble caída
-          try {
-            await anam.stopStreaming?.();
-          } catch {}
-          anamRef.current = null;
-          await entrarTexto(null);
-        };
-        const vigilante = setTimeout(() => caerATexto("sin SESSION_READY en " + ESPERA_AVATAR_SEG + " s"), ESPERA_AVATAR_SEG * 1000);
-        // el elemento <video id="avatar-video"> ya está montado al entrar a "sala"
-        setTimeout(() => {
-          Promise.resolve()
-            .then(() => client.streamToVideoElement("avatar-video"))
-            .then(() => clearTimeout(vigilante))
-            .catch((err) => {
-              clearTimeout(vigilante);
-              caerATexto(err);
-            });
-        }, 0);
+        vigilante = setTimeout(() => caerATexto(`sin SESSION_READY ni video en ${ESPERA_AVATAR_SEG} s`), ESPERA_AVATAR_SEG * 1000);
+        void (async () => {
+          if (!(await esperarElemento("avatar-video"))) return caerATexto("no se montó el elemento de video");
+          // Un segundo intento cubre fallas transitorias al arrancar la sesión (red, 5xx de Anam);
+          // "Already streaming" significa que el primer intento sí conectó y solo falló después.
+          for (let intento = 1; intento <= 2; intento++) {
+            if (avatarRef.current !== "conectando") return;
+            try {
+              await client.streamToVideoElement("avatar-video", microfono ?? undefined);
+              return;
+            } catch (err) {
+              console.error(`❌ streamToVideoElement falló (intento ${intento}):`, err);
+              if (intento === 2 || /already streaming/i.test(String((err as Error)?.message ?? err))) return caerATexto(err);
+              await new Promise((r) => setTimeout(r, 1500));
+            }
+          }
+        })();
         return;
       } catch (err) {
         // si el avatar falla en el navegador, seguimos por texto (sesión de texto forzada)
         console.error("❌ Error inicializando Anam:", err);
+        microfonoRef.current?.getTracks().forEach((t) => t.stop());
+        microfonoRef.current = null;
         return entrarTexto(null);
       }
     }
@@ -319,6 +380,29 @@ export default function SalaEntrevista() {
             <Button className="mt-5" onClick={() => setFase("consentimiento")}>
               Intentar de nuevo
             </Button>
+          </Card>
+        )}
+
+        {fase === "microfono" && (
+          <Card className="p-8 text-center">
+            <h1 className="font-display text-xl font-bold">Necesitamos tu micrófono</h1>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">{errorTexto || MENSAJE_MICROFONO}</p>
+            <div className="mt-5 flex flex-wrap justify-center gap-3">
+              <Button onClick={empezar}>
+                <Video className="h-4 w-4" />
+                Reintentar en video
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setFase("conectando");
+                  void entrarTexto(null);
+                }}
+              >
+                <MessageCircle className="h-4 w-4" />
+                Continuar por chat
+              </Button>
+            </div>
           </Card>
         )}
 

@@ -31,6 +31,8 @@ import {
 
 type Fase = "cargando" | "no_disponible" | "bienvenida" | "conectando" | "sala" | "avanzando" | "fin";
 type Msg = { rol: "assistant" | "user"; texto: string };
+/* Tiempo máximo para que el avatar transmita antes de seguir el módulo por chat (2026-09-14). */
+const ESPERA_AVATAR_SEG = 60;
 
 export default function SalaCapacitacion() {
   const params = useParams();
@@ -86,10 +88,50 @@ export default function SalaCapacitacion() {
           }));
           setMensajes(transcriptRef.current.slice(-4));
         });
+        // 2026-09-14 (mismo patrón que la sala de entrevista): si el avatar no llega a transmitir —
+        // micrófono negado, WebRTC bloqueado, Anam sin responder en ESPERA_AVATAR_SEG — la sala NO se
+        // queda en negro: se sigue el módulo por chat con el mismo instructor (/turno funciona igual).
+        let listo = false;
+        let vigilante: ReturnType<typeof setTimeout> | null = null;
+        const caerATexto = async (motivo: unknown) => {
+          if (listo) return;
+          listo = true;
+          if (vigilante) clearTimeout(vigilante);
+          console.error("❌ Avatar no disponible, siguiendo por chat:", motivo);
+          anamRef.current = null;
+          try {
+            await anam.stopStreaming?.();
+          } catch {}
+          setModo("texto");
+          const iniciales = (s.mensajes ?? []).map((m) => ({ rol: m.rol as Msg["rol"], texto: m.texto }));
+          setMensajes(iniciales);
+          transcriptRef.current = iniciales;
+        };
+        const avatarListo = () => {
+          if (listo) return;
+          listo = true;
+          if (vigilante) clearTimeout(vigilante);
+        };
+        anam.addListener(AnamEvent.SESSION_READY, avatarListo);
+        anam.addListener(AnamEvent.VIDEO_PLAY_STARTED, avatarListo);
+        anam.addListener(AnamEvent.CONNECTION_CLOSED, (codigo?: string, razon?: string) => {
+          if (!listo) void caerATexto(`conexión cerrada antes de iniciar (${codigo ?? "?"}${razon ? ": " + razon : ""})`);
+        });
         setModo("avatar");
         setFase("sala");
-        // el elemento <video id="avatar-video"> ya está montado al entrar a "sala"
-        setTimeout(() => client.streamToVideoElement("avatar-video"), 0);
+        vigilante = setTimeout(() => caerATexto(`sin SESSION_READY ni video en ${ESPERA_AVATAR_SEG} s`), ESPERA_AVATAR_SEG * 1000);
+        void (async () => {
+          // el <video id="avatar-video"> se monta al pasar a "sala": se espera a que exista en el DOM
+          const inicio = Date.now();
+          while (!document.getElementById("avatar-video") && Date.now() - inicio < 5000) {
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          try {
+            await client.streamToVideoElement("avatar-video");
+          } catch (err) {
+            caerATexto(err);
+          }
+        })();
         return;
       } catch (err) {
         // si el avatar falla en el navegador, seguimos por texto

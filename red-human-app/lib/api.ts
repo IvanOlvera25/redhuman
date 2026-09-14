@@ -1316,7 +1316,13 @@ export function consentirEntrevista(token: string) {
 /** `forzarTexto` (2026-09-13): el navegador pide modo texto aunque el servidor tenga avatar — se usa
  * cuando el stream de Anam no arranca, para que la sala nunca se quede en negro. */
 export function iniciarEntrevista(token: string, forzarTexto = false) {
-  return post<{ modo: "avatar" | "texto"; nombre?: string; session_token?: string; mensajes?: { rol: string; texto: string }[] }>(
+  return post<{
+    modo: "avatar" | "texto";
+    nombre?: string;
+    session_token?: string;
+    mensajes?: { rol: string; texto: string }[];
+    motivo?: string; // modo texto: por qué (config del servidor, rechazo de Anam, petición del navegador)
+  }>(
     `/entrevistas/publica/${token}/sesion`,
     forzarTexto ? { modo: "texto" } : {},
   );

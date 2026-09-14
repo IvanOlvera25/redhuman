@@ -19,7 +19,7 @@ from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import CIERRES_COMPLETOS, CIERRES_ENTREVISTA, Candidato, Cuenta, Entrevista, Usuario, Vacante, registrar
 from ..serial import entrevista_dict, nombre_empresa_candidato
 from ..services import ia
-from ..services.avatar import avatar_activo, crear_sesion_avatar
+from ..services.avatar import avatar_activo, crear_sesion_avatar, probar_avatar
 from ..services.configuracion import modo_prueba_activo
 from ..services.entrevistas import crear_entrevista_para_candidato
 from ..services.whatsapp import enviar_mensaje
@@ -78,6 +78,13 @@ def metricas(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)
         "recomendaciones": recomendaciones,
         "avatar_activo": avatar_activo(),
     }
+
+
+@router.get("/avatar/diagnostico")
+async def diagnostico_avatar(_: Usuario = Depends(usuario_actual)):
+    """Prueba real de Anam desde el servidor (2026-09-14): qué variables ve el proceso y si Anam emite
+    un session token. Sin claves en la respuesta. Para soporte cuando "la sala cae a texto"."""
+    return await probar_avatar()
 
 
 # ------------------------------------------------------------
@@ -280,19 +287,28 @@ async def sesion(token: str, datos: Optional[SesionIn] = None, db: Session = Dep
         e.iniciada_en = datetime.now(timezone.utc)
 
     ses = None
-    try:
-        if not forzar_texto:
+    # `motivo` viaja al navegador (solo texto descriptivo, sin claves) para que en consola se vea POR QUÉ
+    # se cayó a texto: configuración del servidor, rechazo de Anam o petición explícita del navegador.
+    motivo = ""
+    if forzar_texto:
+        motivo = "el navegador pidió modo texto"
+    elif not avatar_activo():
+        motivo = "avatar no configurado en el servidor (ANAM_API_KEY / ANAM_AVATAR_ID / ANAM_LLM_ID)"
+        print(f"[AVISO] entrevista {e.codigo} en texto: {motivo}", flush=True)
+    else:
+        try:
             ses = await crear_sesion_avatar("Red Human", _system_prompt(e), saludo)
-    except Exception as ex:  # el avatar nunca debe tumbar la entrevista: cae a texto
-        print(f"[ERROR] crear_sesion_avatar falló: {str(ex)}", flush=True)
-        registrar(db, "sistema", "avatar_error", "entrevista", e.codigo, {"error": str(ex)[:300]})
+        except Exception as ex:  # el avatar nunca debe tumbar la entrevista: cae a texto
+            motivo = f"Anam rechazó la sesión: {str(ex)[:300]}"
+            print(f"[ERROR] crear_sesion_avatar falló ({e.codigo}): {str(ex)}", flush=True)
+            registrar(db, "sistema", "avatar_error", "entrevista", e.codigo, {"error": str(ex)[:300]})
 
     if ses is None:
         e.tipo = "texto"
         if not e.transcript:
             e.transcript = [{"rol": "assistant", "texto": saludo}]
         db.commit()
-        return {"modo": "texto", "mensajes": e.transcript, "nombre": _nombre_entrevistado(e)}
+        return {"modo": "texto", "mensajes": e.transcript, "nombre": _nombre_entrevistado(e), "motivo": motivo}
 
     e.tipo = "avatar"
     db.commit()

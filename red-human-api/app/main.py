@@ -20,7 +20,7 @@ from .migraciones import candidatos_sin_postulacion, sincronizar
 from .routers import agente, auth, candidatos, capacitacion, clientes, colaboradores, configuracion, contratacion, cuentas, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
 from .seed import sembrar, sembrar_admin
 from .services.agenda import revisar_videollamadas_noshow
-from .services.avatar import avatar_activo
+from .services.avatar import avatar_activo, estado_avatar
 from .services.ia import ia_activa
 from .services.whatsapp import proveedor as whatsapp_proveedor, whatsapp_activo
 
@@ -47,6 +47,18 @@ async def lifespan(app: FastAPI):
                 f"[fase2] {pendientes} candidato(s) sin postulación: la base no está migrada a Fase 2. "
                 "Corre `python scripts/migrar_postulaciones.py --forzar` (desde red-human-api/) y vuelve a arrancar."
             )
+
+    # 2026-09-14: en el log de arranque queda qué variables de Anam ve ESTE proceso (presencia, no
+    # valores). Si la sala "cae a texto" en producción, aquí se ve si es configuración o Anam.
+    ea = estado_avatar()
+    print(
+        "[avatar] Anam "
+        + ("ACTIVO" if ea["activo"] else "INACTIVO (entrevistas por texto)")
+        + f" · ANAM_API_KEY={'ok' if ea['ANAM_API_KEY'] else 'FALTA'}"
+        + f" ANAM_AVATAR_ID={'ok' if ea['ANAM_AVATAR_ID'] else 'FALTA'}"
+        + f" ANAM_LLM_ID={'ok' if ea['ANAM_LLM_ID'] else 'FALTA'}",
+        flush=True,
+    )
 
     scheduler.add_job(
         revisar_videollamadas_noshow, "interval", minutes=5,
