@@ -37,6 +37,11 @@ const MENSAJE_CERRADA = "Esta entrevista ya fue completada o interrumpida. Solic
    modo texto en vez de quedarse en negro (2026-09-13). 2026-09-14: subido a 60 s — Anam puede tardar
    más de 25 s en producción (arranque del motor + WebRTC) y el vigilante abortaba de más. */
 const ESPERA_AVATAR_SEG = 60;
+/* 2026-09-14 (demo en producción): DIAGNÓSTICO VISUAL. Con `true`, el avatar NO cae a texto cuando falla:
+   el error crudo (código/razón de CONNECTION_CLOSED, error del SDK, timeout) se pinta en un bloque rojo en
+   la sala, y arriba se muestra si el session_token llegó del backend, el contexto seguro (HTTPS) y la
+   bitácora de eventos del SDK. Regresar a `false` cuando se encuentre la causa. */
+const DIAGNOSTICO_AVATAR = true;
 const MENSAJE_MICROFONO =
   "Para la entrevista en video necesitamos acceso a tu micrófono. Permítelo en tu navegador y vuelve a intentar, o continúa por chat.";
 type Msg = { rol: "assistant" | "user"; texto: string };
@@ -88,9 +93,22 @@ export default function SalaEntrevista() {
   const silencioRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; avisos: number; hablando: boolean }>({ timer: null, avisos: 0, hablando: false });
   const [errorTexto, setErrorTexto] = useState("");
   const avatarRef = useRef<EstadoAvatar>("inactivo");
+  const [errorAvatar, setErrorAvatar] = useState("");
+  const [seguro, setSeguro] = useState<boolean | null>(null);
+  const [debug, setDebug] = useState<{ modo?: string; token?: string; motivo?: string; eventos: string[] }>({ eventos: [] });
+  const bitacora = useCallback((linea: string) => {
+    const hora = new Date().toISOString().slice(11, 23);
+    console.info("[avatar]", linea);
+    setDebug((d) => ({ ...d, eventos: [...d.eventos, `${hora} ${linea}`].slice(-30) }));
+  }, []);
   const microfonoRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
+    // Sin contexto seguro (HTTP que no sea localhost) el navegador NO expone getUserMedia y Anam no
+    // puede ni pedir micrófono: el avatar es imposible. Se avisa en grande en vez de caer en silencio.
+    const esSeguro = typeof window !== "undefined" && window.isSecureContext === true;
+    setSeguro(esSeguro);
+    if (!esSeguro) console.error("❌ Contexto NO seguro (HTTP): el avatar requiere HTTPS", window.location.href);
     // precalienta el chunk del SDK del avatar; el clic solo tiene que iniciar el stream
     import("@anam-ai/js-sdk").catch(() => {});
     fetchEntrevistaPublica(token)
@@ -192,6 +210,16 @@ export default function SalaEntrevista() {
     if (!sesion.ok) return rechazoSesion(sesion.error);
     const s = sesion.data;
     if (s.modo === "texto" && s.motivo) console.warn("ℹ️ Entrevista en modo texto:", s.motivo);
+    setDebug((d) => ({
+      ...d,
+      modo: s.modo,
+      motivo: s.motivo || "",
+      token: s.session_token ? `sí (${s.session_token.length} chars, ${s.session_token.slice(0, 12)}…)` : "VACÍO",
+    }));
+    bitacora(`POST /sesion → modo=${s.modo} session_token=${s.session_token ? "sí" : "NO"}${s.motivo ? " motivo=" + s.motivo : ""}`);
+    if (DIAGNOSTICO_AVATAR && s.modo === "texto") {
+      setErrorAvatar(`El backend NO regresó sesión de avatar (modo=texto). Motivo: ${s.motivo || "sin motivo"}`);
+    }
 
     if (s.modo === "avatar" && s.session_token) {
       // 2026-09-14: el micrófono se pide ANTES de tocar el SDK. Si el candidato lo niega (o el navegador
@@ -202,10 +230,12 @@ export default function SalaEntrevista() {
         microfono = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
       } catch (err) {
         console.error("❌ Micrófono no disponible:", err);
-        setErrorTexto(MENSAJE_MICROFONO);
+        bitacora(`getUserMedia falló: ${(err as Error)?.name ?? ""} ${(err as Error)?.message ?? String(err)}`);
+        setErrorTexto(MENSAJE_MICROFONO + ` [${(err as Error)?.name ?? ""}: ${(err as Error)?.message ?? String(err)}]`);
         return setFase("microfono");
       }
       microfonoRef.current = microfono;
+      bitacora("micrófono OK");
       try {
         const { createClient, AnamEvent } = await import("@anam-ai/js-sdk");
         const client = createClient(s.session_token);
@@ -228,11 +258,30 @@ export default function SalaEntrevista() {
         };
         // Si el stream falla o nunca llega el video, la sala NO se queda en negro: se cae a texto con
         // una sesión forzada (2026-09-13). Solo mientras se estaba conectando y no se cerró.
+        const describir = (m: unknown) => {
+          if (m instanceof Error) {
+            const extra = (m as unknown as { code?: unknown; status?: unknown; cause?: unknown; details?: unknown });
+            return `${m.name}: ${m.message}` + (extra.code !== undefined ? ` code=${String(extra.code)}` : "") +
+              (extra.status !== undefined ? ` status=${String(extra.status)}` : "") +
+              (extra.cause !== undefined ? ` cause=${JSON.stringify(extra.cause)}` : "") +
+              (extra.details !== undefined ? ` details=${JSON.stringify(extra.details)}` : "");
+          }
+          if (typeof m === "object" && m !== null) {
+            try { return JSON.stringify(m); } catch { return String(m); }
+          }
+          return String(m);
+        };
         const caerATexto = async (motivo: unknown) => {
           if (finalizadoRef.current || avatarRef.current !== "conectando") return;
           avatarRef.current = "abandonado";
           if (vigilante) clearTimeout(vigilante);
           console.error("❌ Avatar no disponible, cayendo a texto:", motivo);
+          bitacora("FALLA: " + describir(motivo));
+          if (DIAGNOSTICO_AVATAR) {
+            // DIAGNÓSTICO: NO se cae a texto — el error crudo queda en pantalla para verlo en la demo.
+            setErrorAvatar(describir(motivo));
+            return;
+          }
           anamRef.current = null;
           try {
             await anam.stopStreaming?.();
@@ -271,11 +320,18 @@ export default function SalaEntrevista() {
         // con una basta para que el vigilante deje de contar).
         anam.addListener(AnamEvent.SESSION_READY, () => avatarListo("SESSION_READY"));
         anam.addListener(AnamEvent.VIDEO_PLAY_STARTED, () => avatarListo("VIDEO_PLAY_STARTED"));
-        anam.addListener(AnamEvent.SERVER_WARNING, (msg: unknown) => console.warn("⚠️ Anam:", msg));
+        anam.addListener(AnamEvent.SERVER_WARNING, (msg: unknown) => {
+          console.warn("⚠️ Anam:", msg);
+          bitacora("SERVER_WARNING: " + describir(msg));
+        });
+        for (const ev of ["CONNECTION_ESTABLISHED", "DATA_CHANNEL_OPEN", "INPUT_AUDIO_STREAM_STARTED", "VIDEO_STREAM_STARTED", "AUDIO_STREAM_STARTED", "MIC_PERMISSION_PENDING", "MIC_PERMISSION_GRANTED", "MIC_PERMISSION_DENIED", "SESSION_READY", "VIDEO_PLAY_STARTED"]) {
+          anam.addListener(ev, () => bitacora(ev));
+        }
         // Respaldo: si Anam corta la conexión (timeout de ANAM_MAX_SESION_SEG, falla de red) sin
         // que hubiera cierre automático ni botón, igual se cierra — el servidor lo registra como
         // "desconexion" y, si casi no hubo turnos, la deja como interrumpida para que RH la reabra.
         anam.addListener(AnamEvent.CONNECTION_CLOSED, (codigo?: string, razon?: string) => {
+          bitacora(`CONNECTION_CLOSED code=${codigo ?? "?"} reason=${razon ?? ""} estado=${avatarRef.current}`);
           // lo cerramos nosotros al caer a texto: no es una desconexión del candidato
           if (avatarRef.current === "abandonado") return;
           // Si la conexión se cierra ANTES de que el avatar estuviera listo, fue una falla del
@@ -287,6 +343,7 @@ export default function SalaEntrevista() {
         });
         setModo("avatar");
         setFase("sala");
+        bitacora("createClient OK, esperando <video> y stream…");
         vigilante = setTimeout(() => caerATexto(`sin SESSION_READY ni video en ${ESPERA_AVATAR_SEG} s`), ESPERA_AVATAR_SEG * 1000);
         void (async () => {
           if (!(await esperarElemento("avatar-video"))) return caerATexto("no se montó el elemento de video");
@@ -299,6 +356,7 @@ export default function SalaEntrevista() {
               return;
             } catch (err) {
               console.error(`❌ streamToVideoElement falló (intento ${intento}):`, err);
+              bitacora(`streamToVideoElement intento ${intento}: ` + describir(err));
               if (intento === 2 || /already streaming/i.test(String((err as Error)?.message ?? err))) return caerATexto(err);
               await new Promise((r) => setTimeout(r, 1500));
             }
@@ -308,14 +366,24 @@ export default function SalaEntrevista() {
       } catch (err) {
         // si el avatar falla en el navegador, seguimos por texto (sesión de texto forzada)
         console.error("❌ Error inicializando Anam:", err);
+        const e = err as Error;
+        bitacora(`init SDK falló: ${e?.name ?? ""} ${e?.message ?? String(err)}`);
         microfonoRef.current?.getTracks().forEach((t) => t.stop());
         microfonoRef.current = null;
+        if (DIAGNOSTICO_AVATAR) {
+          setErrorAvatar(`Error inicializando el SDK de Anam: ${e?.name ?? ""} ${e?.message ?? String(err)}`);
+          setModo("avatar");
+          return setFase("sala");
+        }
         return entrarTexto(null);
       }
     }
 
+    if (DIAGNOSTICO_AVATAR && s.modo === "avatar" && !s.session_token) {
+      setErrorAvatar("El backend dijo modo=avatar pero session_token llegó VACÍO.");
+    }
     await entrarTexto(s);
-  }, [token, cerrar, programarAvisoSilencio, rechazoSesion, entrarTexto]);
+  }, [token, cerrar, programarAvisoSilencio, rechazoSesion, entrarTexto, bitacora]);
 
   const enviar = useCallback(async () => {
     const t = texto.trim();
@@ -348,6 +416,40 @@ export default function SalaEntrevista() {
       </header>
 
       <div className="mx-auto max-w-3xl px-5 py-8 sm:py-10">
+        {seguro === false && (
+          <div className="mb-6 rounded-xl border-4 border-red-600 bg-red-600 p-6 text-center text-white">
+            <p className="text-2xl font-black tracking-wide sm:text-3xl">HTTPS REQUERIDO PARA EL AVATAR</p>
+            <p className="mt-2 text-sm font-semibold">
+              Esta página se abrió por HTTP (contexto no seguro). El navegador bloquea el micrófono y WebRTC, así que el
+              video de Red Human no puede iniciar. Abre la misma liga con <b>https://</b>.
+            </p>
+            <p className="mt-1 break-all font-mono text-xs opacity-90">{typeof window !== "undefined" ? window.location.href : ""}</p>
+          </div>
+        )}
+        {DIAGNOSTICO_AVATAR && fase !== "cargando" && (
+          <div className="mb-4 rounded-lg border border-amber-500/60 bg-amber-500/10 p-3 font-mono text-[11px] leading-snug text-ink">
+            <p className="font-bold">DIAGNÓSTICO AVATAR (temporal)</p>
+            <p>secureContext: {seguro === null ? "?" : String(seguro)} · protocolo: {typeof window !== "undefined" ? window.location.protocol : "?"} · avatar_disponible (backend): {info ? String(info.avatar_disponible) : "?"}</p>
+            <p>modo: {debug.modo ?? "—"} · session_token: {debug.token ?? "—"}{debug.motivo ? ` · motivo: ${debug.motivo}` : ""}</p>
+            {debug.eventos.length > 0 && (
+              <ul className="mt-1 max-h-40 overflow-y-auto border-t border-amber-500/40 pt-1">
+                {debug.eventos.map((l, i) => (
+                  <li key={i} className="break-all">{l}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+        {errorAvatar && (
+          <div className="mb-4 rounded-xl border-2 border-red-600 bg-red-600/15 p-4 text-red-700 dark:text-red-300">
+            <p className="text-base font-black">❌ ERROR DEL AVATAR (sin fallback a texto — modo diagnóstico)</p>
+            <pre className="mt-2 whitespace-pre-wrap break-all font-mono text-xs">{errorAvatar}</pre>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button size="sm" onClick={() => { setErrorAvatar(""); void empezar(); }}>Reintentar video</Button>
+              <Button size="sm" variant="secondary" onClick={() => { setErrorAvatar(""); avatarRef.current = "abandonado"; anamRef.current = null; void entrarTexto(null); }}>Continuar por chat</Button>
+            </div>
+          </div>
+        )}
         {fase === "cargando" && (
           <div className="grid place-items-center py-24 text-ink-3">
             <Loader2 className="h-6 w-6 animate-spin" />
