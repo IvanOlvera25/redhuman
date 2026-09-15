@@ -1,14 +1,14 @@
 """Login, sesión y administración de usuarios de RH."""
 import re
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_admin
 from ..models import ROLES, Cuenta, Usuario, UsuarioCuenta, registrar
-from ..services import auth
+from ..services import auth, masivo
 from ..services.whatsapp import clave_telefono
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -34,6 +34,8 @@ def usuario_dict(u: Usuario) -> dict:
            for uc in u.cuentas
            if uc.cuenta.estado == "Activa"
        ],
+       # Fase 2: con varias Cuentas, con esta arranca la sesión (null = la primera).
+       "cuentaPredeterminadaId": u.cuenta_predeterminada_id,
    }
 
 
@@ -195,6 +197,56 @@ def crear(
    registrar(db, admin.nombre, "usuario_creado", "usuario", correo, {"rol": u.rol})
    db.commit()
    return usuario_dict(u)
+
+@router.post("/usuarios/masivo", status_code=201)
+async def crear_masivo(
+   archivo: UploadFile = File(...), db: Session = Depends(get_db), admin: Usuario = Depends(usuario_admin),
+   cuenta: Cuenta = Depends(cuenta_actual),
+):
+   """Fase 2 (2026-09-15) — alta masiva de usuarios desde CSV/Excel. Columnas: correo, nombre,
+   puesto, telefono, rol, password (opcional: si falta se genera una temporal y se regresa en la
+   fila). Cada fila se valida con las MISMAS reglas que POST /usuarios; las que fallan se reportan
+   con su número de fila y las demás sí se crean (savepoint por fila). Quedan vinculadas a la
+   Cuenta actual."""
+   filas = await masivo.leer_tabla(archivo)
+   resultado = masivo.Resultado()
+   for numero, fila in filas:
+       correo = fila.get("correo", "")
+       nombre = fila.get("nombre", "")
+       if not correo and not nombre:
+           continue  # renglón vacío
+       password = fila.get("password") or fila.get("contrasena") or ""
+       generada = ""
+       if not password:
+           password = generada = auth.password_temporal()
+       rol = fila.get("rol") or "Usuario"
+       rol = "Administrador" if rol.strip().lower().startswith("admin") else "Usuario"
+       sp = db.begin_nested()
+       try:
+           if len(nombre.strip()) < 3:
+               raise HTTPException(400, "El nombre debe tener al menos 3 caracteres.")
+           u = crear_usuario_basico(db, correo, nombre, fila.get("puesto", ""), rol, password, fila.get("telefono", ""))
+           db.add(UsuarioCuenta(usuario_id=u.id, cuenta_id=cuenta.id))
+           db.flush()
+           sp.commit()
+           resultado.ok(numero, {"id": u.id, "correo": u.correo, "nombre": u.nombre, "rol": u.rol, "passwordTemporal": generada or None})
+       except HTTPException as ex:
+           sp.rollback()
+           resultado.error(numero, str(ex.detail), correo or nombre)
+   registrar(db, admin.nombre, "usuarios_carga_masiva", "cuenta", str(cuenta.id), {"archivo": archivo.filename, **resultado.resumen()})
+   db.commit()
+   return resultado.dict()
+
+
+@router.get("/usuarios/masivo/plantilla")
+def plantilla_masivo_usuarios(_: Usuario = Depends(usuario_admin)):
+   """CSV de ejemplo con las columnas que acepta la carga masiva de usuarios."""
+   return masivo.csv_plantilla(
+       "usuarios",
+       ["correo", "nombre", "puesto", "telefono", "rol", "password"],
+       [["ana@empresa.mx", "Ana López", "Reclutadora", "5512345678", "Usuario", ""]],
+   )
+
 
 class ActualizarUsuarioIn(BaseModel):
    nombre: Optional[str] = None

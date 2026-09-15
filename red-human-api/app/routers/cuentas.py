@@ -9,6 +9,7 @@ import os
 import shutil
 import uuid
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -40,6 +41,7 @@ def _cuenta_dict(cu: Cuenta, actual_id: Optional[int] = None) -> dict:
         "whatsappComunicacion": cu.whatsapp_comunicacion,
         "estado": cu.estado,
         "esActual": cu.id == actual_id,
+        "eliminadaEn": cu.eliminada_en.isoformat() if cu.eliminada_en else None,
         "usuarios": len(cu.usuarios),
         "clientes": len(cu.clientes),
     }
@@ -85,19 +87,87 @@ def _por_id(db: Session, cuenta_id: int, admin: Usuario) -> Cuenta:
 
 @router.get("")
 def listar(
+    incluir_eliminadas: bool = False,
     db: Session = Depends(get_db),
     admin: Usuario = Depends(usuario_admin),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Cuentas vinculadas al administrador (activas e inactivas), la actual marcada."""
-    cuentas = (
+    """Cuentas vinculadas al administrador (activas e inactivas), la actual marcada. Las eliminadas
+    (baja lógica, Fase 2) no aparecen salvo `incluir_eliminadas=true`."""
+    q = (
         db.query(Cuenta)
         .join(UsuarioCuenta, UsuarioCuenta.cuenta_id == Cuenta.id)
         .filter(UsuarioCuenta.usuario_id == admin.id)
-        .order_by(Cuenta.id)
-        .all()
     )
-    return [_cuenta_dict(c, cuenta.id) for c in cuentas]
+    if not incluir_eliminadas:
+        q = q.filter(Cuenta.estado != "Eliminada")
+    cuentas = q.order_by(Cuenta.id).all()
+    return [{**_cuenta_dict(c, cuenta.id), "esPredeterminada": c.id == admin.cuenta_predeterminada_id} for c in cuentas]
+
+
+@router.delete("/{cuenta_id}")
+def eliminar_cuenta(
+    cuenta_id: int, db: Session = Depends(get_db), admin: Usuario = Depends(usuario_admin),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Baja LÓGICA de una Cuenta (Fase 2, 2026-09-15): estado «Eliminada» + fecha/quién. No se borra
+    nada (vacantes, postulaciones, bitácora, usuarios vinculados siguen en la base) y se puede
+    restaurar. Reglas: no se elimina la Cuenta con la que se está operando, ni la última activa del
+    administrador (se quedaría sin acceso). Si era la predeterminada de alguien, se le quita."""
+    cu = _por_id(db, cuenta_id, admin)
+    if cu.estado == "Eliminada":
+        raise HTTPException(409, "Esta Cuenta ya está eliminada.")
+    if cu.id == cuenta.id:
+        raise HTTPException(409, "No puedes eliminar la Cuenta con la que estás operando: cambia de Cuenta primero.")
+    activas = (
+        db.query(Cuenta)
+        .join(UsuarioCuenta, UsuarioCuenta.cuenta_id == Cuenta.id)
+        .filter(UsuarioCuenta.usuario_id == admin.id, Cuenta.estado == "Activa", Cuenta.id != cu.id)
+        .count()
+    )
+    if activas == 0:
+        raise HTTPException(409, "No puedes eliminar tu única Cuenta activa.")
+    cu.estado = "Eliminada"
+    cu.eliminada_en = datetime.now(timezone.utc)
+    cu.eliminada_por = admin.nombre
+    for u in db.query(Usuario).filter(Usuario.cuenta_predeterminada_id == cu.id).all():
+        u.cuenta_predeterminada_id = None
+    registrar(db, admin.nombre, "cuenta_eliminada", "cuenta", str(cu.id), {"nombre": cu.nombre_visible, "correo_rh": admin.correo})
+    db.commit()
+    return {"ok": True, "cuenta": _cuenta_dict(cu, cuenta.id)}
+
+
+@router.post("/{cuenta_id}/restaurar")
+def restaurar_cuenta(
+    cuenta_id: int, db: Session = Depends(get_db), admin: Usuario = Depends(usuario_admin),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Deshace la baja lógica: la Cuenta vuelve a «Activa»."""
+    cu = _por_id(db, cuenta_id, admin)
+    if cu.estado != "Eliminada":
+        raise HTTPException(409, "Esta Cuenta no está eliminada.")
+    cu.estado = "Activa"
+    cu.eliminada_en = None
+    cu.eliminada_por = ""
+    registrar(db, admin.nombre, "cuenta_restaurada", "cuenta", str(cu.id), {"nombre": cu.nombre_visible, "correo_rh": admin.correo})
+    db.commit()
+    return _cuenta_dict(cu, cuenta.id)
+
+
+@router.post("/{cuenta_id}/predeterminada")
+def marcar_predeterminada(
+    cuenta_id: int, db: Session = Depends(get_db), admin: Usuario = Depends(usuario_admin),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Cuenta con la que arranca la sesión de ESTE usuario cuando tiene varias (Fase 2). Es por
+    usuario (Usuario.cuenta_predeterminada_id), no global: dos admins pueden preferir distinta."""
+    cu = _por_id(db, cuenta_id, admin)
+    if cu.estado != "Activa":
+        raise HTTPException(409, "Solo una Cuenta activa puede ser la predeterminada.")
+    admin.cuenta_predeterminada_id = cu.id
+    registrar(db, admin.nombre, "cuenta_predeterminada", "cuenta", str(cu.id), {"usuario": admin.correo})
+    db.commit()
+    return {"ok": True, "cuentaPredeterminadaId": cu.id}
 
 
 class CrearCuentaIn(BaseModel):

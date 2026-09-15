@@ -137,6 +137,8 @@ export interface UsuarioRH {
   /** Lista de Cuentas activas a las que tiene acceso este usuario.
    * Cuando solo hay una, el frontend no muestra ningún selector (regla Fase A). */
   cuentas: { id: number; nombre: string; nombreComercial: string }[];
+  /** Fase 2: Cuenta con la que arranca la sesión (null = la primera vinculada). */
+  cuentaPredeterminadaId?: number | null;
 }
 
 export function login(correo: string, password: string) {
@@ -232,8 +234,11 @@ export interface DatosCuenta {
   contactoNombre: string;
   correoComunicacion: string;
   whatsappComunicacion: string;
-  estado: "Activa" | "Inactiva";
+  estado: "Activa" | "Inactiva" | "Eliminada";
   esActual: boolean;
+  /** Fase 2: Cuenta con la que arranca la sesión de ESTE usuario (por usuario, no global). */
+  esPredeterminada?: boolean;
+  eliminadaEn?: string | null;
   usuarios: number;
   clientes: number;
 }
@@ -280,8 +285,50 @@ export function subirLogoCuenta(archivo: File) {
 }
 
 /** Solo las Cuentas a las que el admin está vinculado (nunca todas las del sistema). */
-export function fetchCuentas() {
-  return get<DatosCuenta[]>("/cuentas");
+export function fetchCuentas(incluirEliminadas = false) {
+  return get<DatosCuenta[]>(`/cuentas${incluirEliminadas ? "?incluir_eliminadas=true" : ""}`);
+}
+
+/** Fase 2: baja lógica (nada se borra; se puede restaurar). No admite la Cuenta actual ni la última activa. */
+export function eliminarCuenta(id: number) {
+  return eliminar<{ ok: boolean; cuenta: DatosCuenta }>(`/cuentas/${id}`);
+}
+
+export function restaurarCuenta(id: number) {
+  return post<DatosCuenta>(`/cuentas/${id}/restaurar`);
+}
+
+export function marcarCuentaPredeterminada(id: number) {
+  return post<{ ok: boolean; cuentaPredeterminadaId: number }>(`/cuentas/${id}/predeterminada`);
+}
+
+/* ---------- Fase 2: cargas masivas (CSV/Excel) ---------- */
+
+export type TipoCargaMasiva = "usuarios" | "clientes" | "plantillas";
+
+export interface ResultadoCargaMasiva {
+  total: number;
+  creados: number;
+  errores: number;
+  filas: ({ fila: number } & Record<string, unknown>)[];
+  fallas: { fila: number; referencia: string; error: string }[];
+}
+
+const RUTAS_MASIVO: Record<TipoCargaMasiva, string> = {
+  usuarios: "/auth/usuarios/masivo",
+  clientes: "/clientes/masivo",
+  plantillas: "/plantillas/masivo",
+};
+
+export function cargaMasiva(tipo: TipoCargaMasiva, archivo: File) {
+  const form = new FormData();
+  form.append("archivo", archivo);
+  return subir<ResultadoCargaMasiva>(RUTAS_MASIVO[tipo], form);
+}
+
+/** CSV de ejemplo con las columnas exactas (autenticado por cookie, como urlArchivo). */
+export function urlPlantillaCargaMasiva(tipo: TipoCargaMasiva) {
+  return urlArchivo(`${RUTAS_MASIVO[tipo]}/plantilla`);
 }
 
 export function crearCuenta(datos: CamposCuenta & { nombre: string }) {

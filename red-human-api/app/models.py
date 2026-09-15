@@ -780,9 +780,13 @@ class Cuenta(Base):
     contacto_nombre: Mapped[str] = mapped_column(String(150), default="")
     correo_comunicacion: Mapped[str] = mapped_column(String(200), default="")
     whatsapp_comunicacion: Mapped[str] = mapped_column(String(30), default="")
-    estado: Mapped[str] = mapped_column(String(20), default="Activa")  # Activa | Inactiva
+    estado: Mapped[str] = mapped_column(String(20), default="Activa")  # Activa | Inactiva | Eliminada
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
     actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+    # Fase 2 (2026-09-15): baja lógica. Una Cuenta eliminada conserva TODO (vacantes, postulaciones,
+    # bitácora) pero deja de aparecer en listados/selector y el webhook de WhatsApp no la usa.
+    eliminada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    eliminada_por: Mapped[str] = mapped_column(String(150), default="")
 
     clientes: Mapped[List["Cliente"]] = relationship(back_populates="cuenta")
     usuarios: Mapped[List["UsuarioCuenta"]] = relationship(back_populates="cuenta")
@@ -960,6 +964,9 @@ class Usuario(Base):
     # Visibilidad automática (Fase A): si puede alternar Mío/Mi equipo, y a quién reporta.
     ve_equipo: Mapped[bool] = mapped_column(Boolean, default=False)
     reporta_a_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
+    # Fase 2 (2026-09-15): Cuenta con la que arranca la sesión cuando el usuario tiene varias
+    # (POST /cuentas/{id}/predeterminada). Null = la primera vinculada, como siempre.
+    cuenta_predeterminada_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True)
 
     sesiones: Mapped[List["Sesion"]] = relationship(back_populates="usuario", cascade="all, delete-orphan")
     cuentas: Mapped[List["UsuarioCuenta"]] = relationship(back_populates="usuario", cascade="all, delete-orphan")
