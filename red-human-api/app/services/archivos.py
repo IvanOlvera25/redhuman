@@ -75,14 +75,19 @@ def _firma_valida(contenido: bytes, extension: str) -> bool:
 
 async def validar(archivo: UploadFile, etiqueta: str = "archivo") -> ArchivoValidado:
     """Lee la subida y la valida. Lanza HTTPException con mensaje para RH si algo falla."""
-    nombre = _sanear(archivo.filename or "archivo")
+    return validar_bytes(await archivo.read(), archivo.filename or "archivo", etiqueta)
+
+
+def validar_bytes(contenido: bytes, nombre_original: str, etiqueta: str = "archivo") -> ArchivoValidado:
+    """Misma validación que `validar` para un binario ya en memoria (2026-09-15: documentos que
+    llegan por WhatsApp y se descargan de Meta) — extensión admitida, tamaño y firma binaria."""
+    nombre = _sanear(nombre_original or "archivo")
     extension = nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ""
 
     if extension not in FORMATOS:
         pista = PISTAS.get(extension, f"Acepta: {EXTENSIONES_OK}.")
         raise HTTPException(415, f"No se puede procesar «{nombre}». {pista}")
 
-    contenido = await archivo.read()
     tamano = len(contenido)
     if tamano > MAX_BYTES:
         raise HTTPException(413, f"El {etiqueta} pesa {tamano // 1024 // 1024} MB; el máximo son 10 MB.")

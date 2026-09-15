@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     # Sin ella, esos mensajes los rechaza Meta con el error 131047.
     meta_plantilla_aviso: str = ""
     meta_plantilla_idioma: str = "es_MX"
+    # 2026-09-15 — Solicitud/recordatorio de documentos por WhatsApp (Contratación/Onboarding).
+    # Plantilla aprobada en Meta que pide los papeles; se dispara con «Solicitar documentos» y
+    # «Enviar recordatorio». Sus variables {{1}}..{{n}} se llenan en el orden de
+    # META_PLANTILLA_DOCUMENTOS_PARAMS (valores válidos: nombre, documentos, liga, empresa, vacante).
+    # Si la plantilla falla (no aprobada, nombre distinto) o está vacía, sale el texto libre de siempre.
+    meta_plantilla_documentos: str = "solicitud_documentos_rh"
+    meta_plantilla_documentos_params: str = "nombre,documentos,liga"
 
     # --- Gateway propio (alternativa sin costo por mensaje) ---
     waha_url: str = "http://localhost:3001"

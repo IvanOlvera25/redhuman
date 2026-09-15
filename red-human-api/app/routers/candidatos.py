@@ -1065,12 +1065,13 @@ def _parsear_fecha_cita(valor: str) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
-async def _procesar_turno_agenda(db: Session, p: Postulacion, historial: List[dict], canal: str) -> dict:
+async def _procesar_turno_agenda(db: Session, p: Postulacion, historial: List[dict], canal: str, nota: str = "") -> dict:
     """Turno posterior a la clasificación: coordina la videollamada con la herramienta
-    agendar_videollamada (function calling) — ver ia.agenda_turno."""
+    agendar_videollamada (function calling) — ver ia.agenda_turno. `nota` (2026-09-15): contexto
+    extra para el modelo cuando se está reagendando."""
     v = p.vacante
     turno, con_ia = ia.agenda_turno(
-        nombre_ficha(p), v.titulo if v else "", historial, db=db, candidato=p
+        nombre_ficha(p), v.titulo if v else "", historial, db=db, candidato=p, nota=nota
     )
 
     respuesta_final = turno.respuesta
@@ -1110,6 +1111,61 @@ async def _procesar_turno_onboarding(db: Session, p: Postulacion, historial: Lis
     _actualizar_ultima_actividad(p)
     db.commit()
     return {"respuesta": turno.respuesta, "clasificacion": None, "ia": con_ia, "whatsapp": envio}
+
+
+# 2026-09-15 — intención de reagendar la videollamada por WhatsApp. Palabras completas, sin acentos.
+_RE_REAGENDAR = re.compile(
+    r"\b(re-?agendar|re-?agendo|re-?agendamos|reprogramar|reprogramo|cambiar|cambio|mover|otra fecha|otro dia|otro horario|"
+    r"nueva fecha|no pude|no puedo|no podre|no alcance|no alcanzo|no llegue|se me paso|se me olvido|me perdi|otra cita|"
+    r"nueva cita|agendar de nuevo)\b"
+)
+_ACEPTA_REAGENDAR = {"si", "claro", "ok", "va", "vale", "dale", "acepto", "adelante", "porfavor", "por favor", "sale", "simon"}
+
+
+def _norm_txt(s: str) -> str:
+    return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
+
+
+def _quiere_reagendar(p: Postulacion, texto: str) -> bool:
+    """True si el candidato, con cita ya agendada, pide moverla — o si contesta que sí al aviso de
+    no-show («¿Te gustaría reagendar?»). Antes cualquier mensaje caía en la respuesta fija «Ya tienes
+    tu videollamada agendada» y la cita nunca se movía."""
+    if not p.videollamada_agendada_en:
+        return False
+    t = _norm_txt(texto)
+    if _RE_REAGENDAR.search(t):
+        return True
+    if p.videollamada_aviso_noshow_enviado:
+        palabras = set(re.findall(r"[a-z]+", t))
+        return bool(palabras & _ACEPTA_REAGENDAR)
+    return False
+
+
+async def _reabrir_agenda(db: Session, p: Postulacion, historial: List[dict], canal: str) -> dict:
+    """Suelta la cita anterior (queda en `analisis.videollamadas_anteriores`) y vuelve a la
+    coordinación con la herramienta de agendamiento, en la MISMA postulación."""
+    analisis = dict(p.analisis or {})
+    anteriores = list(analisis.get("videollamadas_anteriores") or [])
+    anteriores.append({
+        "fecha": p.videollamada_agendada_en.isoformat() if p.videollamada_agendada_en else None,
+        "liga": p.videollamada_liga or "",
+        "noshow": bool(p.videollamada_aviso_noshow_enviado),
+        "reagendada_en": datetime.now(timezone.utc).isoformat(),
+    })
+    analisis["videollamadas_anteriores"] = anteriores
+    p.analisis = analisis
+    registrar(
+        db, "agente-ia", "videollamada_reagendar_solicitada", "postulacion", p.codigo,
+        {"cita_anterior": anteriores[-1]["fecha"], "noshow": anteriores[-1]["noshow"], "canal": canal},
+    )
+    p.videollamada_agendada_en = None
+    p.videollamada_liga = ""
+    p.videollamada_aviso_noshow_enviado = False
+    db.flush()
+    return await _procesar_turno_agenda(db, p, historial, canal, nota=(
+        "El candidato ya tenía una videollamada agendada y pidió REAGENDARLA (o no asistió). Reconoce el "
+        "cambio con naturalidad, sin reprochar, y pregunta su nueva disponibilidad."
+    ))
 
 
 async def _procesar_turno_post_completo(db: Session, p: Postulacion, texto: str, canal: str) -> dict:
@@ -1154,6 +1210,11 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
     # Zero-Touch fase 1: apto y sin videollamada agendada -> herramienta de agendamiento.
     if p.prefiltro_completo and p.estado == "cumple" and not p.videollamada_agendada_en:
         return await _procesar_turno_agenda(db, p, historial, canal)
+
+    # 2026-09-15: con cita agendada, "quiero reagendar" / "sí" tras el aviso de no-show → se reabre
+    # la coordinación en esta misma postulación (nunca al menú de vacantes ni respuesta fija).
+    if p.prefiltro_completo and p.estado == "cumple" and _quiere_reagendar(p, texto):
+        return await _reabrir_agenda(db, p, historial, canal)
 
     # Ya no hay nada más que resolver (no_cumple avisado, o cita ya agendada): respuesta fija.
     if p.prefiltro_completo:
@@ -1889,8 +1950,10 @@ def guardar_condiciones_contratacion(
 async def _disparar_mensaje_onboarding(
     db: Session, p: Postulacion, evento: str, accion: str, liga: str, u: Usuario, notificar: Optional[NotificarIn] = None
 ) -> dict:
-    if p.etapa != "Onboarding":
-        raise HTTPException(409, "Esta acción es solo para postulaciones en la etapa de Onboarding.")
+    # 2026-09-15: también en Contratación — el expediente nace en esa etapa y el cliente pide los
+    # papeles (INE, comprobante) desde ahí por WhatsApp.
+    if p.etapa not in ("Contratación", "Onboarding"):
+        raise HTTPException(409, "Esta acción es solo para postulaciones en Contratación u Onboarding.")
     override = override_de(notificar)
     resultados = await notificaciones.disparar(db, evento, p, u.nombre, liga=liga, override=override)
     registrar(db, u.nombre, accion, "postulacion", p.codigo, {"notificaciones": resultados, "correo_rh": u.correo, "notificar_override": override})

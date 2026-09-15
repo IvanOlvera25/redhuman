@@ -60,9 +60,13 @@ async def lifespan(app: FastAPI):
         flush=True,
     )
 
+    # max_instances=1 + coalesce: si una corrida se alarga (Meta lento) la siguiente NO se encola
+    # encima ni se acumulan disparos perdidos — junto con la reclamación del flag en
+    # services/agenda.py evita el aviso de reagendar duplicado (2026-09-15).
     scheduler.add_job(
         revisar_videollamadas_noshow, "interval", minutes=5,
         id="noshow_videollamadas", replace_existing=True,
+        max_instances=1, coalesce=True, misfire_grace_time=120,
     )
     scheduler.start()
     try:

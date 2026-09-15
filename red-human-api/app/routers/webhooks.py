@@ -33,10 +33,11 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual
-from ..models import Bitacora, Candidato, Cuenta, Postulacion, Usuario, Vacante, registrar
+from ..models import CONTEXTO_WHATSAPP_HORAS, ETAPAS_CONTEXTO_LARGO, Bitacora, Candidato, Cuenta, Postulacion, Usuario, Vacante, registrar
 from ..services.configuracion import modo_prueba_activo, ventana_modo_prueba_min
-from ..services.whatsapp import enviar_mensaje, enviar_lista_interactiva, parsear_webhook
+from ..services.whatsapp import descargar_media, enviar_mensaje, enviar_lista_interactiva, parsear_webhook
 from .candidatos import (
+    _actualizar_ultima_actividad,
     _crear_candidato,
     crear_postulacion,
     fijar_conversacion,
@@ -44,6 +45,7 @@ from .candidatos import (
     postulacion_para_vacante,
     procesar_prefiltro,
 )
+from .contratacion import adjuntar_documento_bytes, documento_para_adjunto
 
 # Modo Prueba: una conversación con actividad más vieja que la ventana configurada
 # (ConfiguracionSistema.modo_prueba_ventana_min, Punto 13; 60 min por defecto) ya no se
@@ -190,14 +192,34 @@ def _buscar_o_crear_candidato(db: Session, wa_id: str, nombre: str, cuenta_id: i
     return c
 
 
-def _conversacion_fria(db: Session, c: Candidato) -> bool:
-    ultima = c.mensajes[-1].creado_en if c.mensajes else c.creado_en
+def _utc(dt: Optional[datetime]) -> Optional[datetime]:
     # SQLite descarta el offset de un DateTime(timezone=True) y regresa un datetime naive con
     # los mismos números de reloj UTC — hay que reponerle el tzinfo antes de restar.
-    if ultima.tzinfo is None:
-        ultima = ultima.replace(tzinfo=timezone.utc)
-    ventana = timedelta(minutes=ventana_modo_prueba_min(db)) or VENTANA_MODO_PRUEBA_DEFAULT
-    return datetime.now(timezone.utc) - ultima >= ventana
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _ultima_actividad(p: Postulacion) -> datetime:
+    """Último rastro de vida de ESTA postulación: mensaje del chat, actividad registrada por RH/IA
+    (entrevista, documento, etapa) o su creación. Antes se miraba solo el último mensaje de la
+    persona, así que una entrevista agendada hace 2 h por RH no contaba como actividad."""
+    marcas = [p.creado_en, p.ultima_actividad_en, p.mensajes[-1].creado_en if p.mensajes else None]
+    return max(_utc(m) for m in marcas if m is not None)
+
+
+def _ventana_contexto(db: Session, p: Postulacion) -> Tuple[timedelta, str]:
+    """(ventana, motivo_cierre) que aplica a esta postulación en Modo Prueba (2026-09-15):
+    en Prefiltro la ventana corta configurada (`prueba_expirada`); en etapas avanzadas la memoria
+    de CONTEXTO_WHATSAPP_HORAS (5 días) y, pasada, se cierra por `sin_interes`."""
+    if p.etapa in ETAPAS_CONTEXTO_LARGO:
+        return timedelta(hours=CONTEXTO_WHATSAPP_HORAS), "sin_interes"
+    return (timedelta(minutes=ventana_modo_prueba_min(db)) or VENTANA_MODO_PRUEBA_DEFAULT), "prueba_expirada"
+
+
+def _conversacion_fria(db: Session, p: Postulacion) -> Tuple[bool, str]:
+    ventana, motivo = _ventana_contexto(db, p)
+    return datetime.now(timezone.utc) - _ultima_actividad(p) >= ventana, motivo
 
 
 async def _resolver_postulacion(
@@ -211,13 +233,21 @@ async def _resolver_postulacion(
         conv = None
 
     # Modo Prueba: la conversación en curso ya está fría → se cierra y se empieza de cero,
-    # sin tocar teléfono ni wa_id de la persona.
-    if prueba and conv and _conversacion_fria(db, c):
-        conv.cerrar("prueba_expirada")
-        registrar(db, "sistema", "postulacion_prueba_expirada", "postulacion", conv.codigo, {"candidato": c.codigo})
-        conv = None
-        c.postulacion_conversacion_id = None
-        db.flush()
+    # sin tocar teléfono ni wa_id de la persona. 2026-09-15: la ventana depende de la etapa —
+    # en Prefiltro la corta configurada; con entrevista/evaluación/contratación/onboarding en
+    # curso el contexto vive CONTEXTO_WHATSAPP_HORAS (5 días) y solo entonces se cierra por
+    # `sin_interes`. Antes, 60 min de silencio mandaban al candidato al menú de vacantes.
+    if prueba and conv:
+        fria, motivo = _conversacion_fria(db, conv)
+        if fria:
+            conv.cerrar(motivo)
+            registrar(
+                db, "sistema", "postulacion_" + motivo, "postulacion", conv.codigo,
+                {"candidato": c.codigo, "etapa": conv.etapa, "ultima_actividad": _ultima_actividad(conv).isoformat()},
+            )
+            conv = None
+            c.postulacion_conversacion_id = None
+            db.flush()
 
     activas = c.postulaciones_activas
     esperando = [p for p in activas if p.espera_respuesta]
@@ -268,6 +298,64 @@ async def _resolver_postulacion(
     p = crear_postulacion(db, c, None, cuenta_id, "whatsapp", es_prueba=prueba)
     fijar_conversacion(p)
     return p, "postulacion_nueva"
+
+
+# Etapas en las que un adjunto de WhatsApp es un documento del expediente de contratación.
+ETAPAS_DOCUMENTOS = ("Contratación", "Onboarding")
+
+
+async def _recibir_documento_whatsapp(db: Session, p: Postulacion, msg: dict, telefono: str) -> dict:
+    """Descarga el medio de Meta (Graph: /{media_id} → url → binario) y lo adjunta al Expediente de la
+    postulación como Documento, con la MISMA validación (firma binaria + IA) que la liga pública y
+    la subida de RH. El tipo se resuelve por el pie de foto / nombre del archivo; si no coincide con
+    nada, se usa el primer obligatorio pendiente; si no falta ninguno, se agrega como documento
+    adicional. Nunca truena: cualquier fallo se le explica al candidato por WhatsApp."""
+    media = msg.get("media") or {}
+    e = p.expediente
+    etiqueta = media.get("filename") or f"{msg.get('tipo')} de WhatsApp"
+    guardar_mensaje(db, p, "user", f"[📎 {etiqueta}]" + (f" {msg.get('texto')}" if msg.get("texto") else ""), "whatsapp", wa_id=msg.get("wa_id", ""))
+    db.flush()
+
+    descarga = await descargar_media(media.get("id", ""))
+    if not descarga.get("ok"):
+        registrar(db, "sistema", "documento_whatsapp_error", "postulacion", p.codigo, {"media": media, "error": descarga.get("detalle", "")})
+        aviso = "Recibí tu archivo pero no pude descargarlo 😕 ¿Me lo puedes reenviar? Si sigue fallando, súbelo desde la liga que te compartimos."
+        envio = await enviar_mensaje(telefono, aviso)
+        guardar_mensaje(db, p, "assistant", aviso, "whatsapp", envio)
+        db.commit()
+        return {"documento": None, "error": descarga.get("detalle", "")}
+
+    doc = documento_para_adjunto(db, e, msg.get("texto", ""), descarga.get("filename", ""))
+    try:
+        res = await adjuntar_documento_bytes(
+            db, e, doc, descarga["contenido"], descarga.get("filename") or etiqueta, descarga.get("mime", ""),
+            subido_por=f"whatsapp:{p.candidato.codigo if p.candidato else ''}",
+        )
+    except HTTPException as ex:
+        registrar(db, "sistema", "documento_whatsapp_rechazado", "documento", f"{e.id}:{doc.tipo}", {"detalle": str(ex.detail)})
+        aviso = f"No pude registrar tu archivo como «{doc.tipo}»: {ex.detail} Envíalo en PDF o foto (JPG/PNG) por favor. 🙏"
+        envio = await enviar_mensaje(telefono, aviso)
+        guardar_mensaje(db, p, "assistant", aviso, "whatsapp", envio)
+        db.commit()
+        return {"documento": doc.tipo, "error": str(ex.detail)}
+
+    pendientes = e.pendientes
+    estado = res["documento"]["estado"]
+    if estado == "rechazado":
+        respuesta = f"Recibí tu {doc.tipo}, pero no pasó la validación: {res['documento']['notas']} ¿Me lo mandas de nuevo? 🙏"
+    elif pendientes:
+        respuesta = f"¡Listo! Recibí tu {doc.tipo} ✅ Me falta: {', '.join(pendientes)}. Mándamelos por aquí cuando puedas."
+    else:
+        respuesta = f"¡Listo! Recibí tu {doc.tipo} ✅ Con esto tu expediente ya está completo; RH lo revisa y te confirma. 🎉"
+    envio = await enviar_mensaje(telefono, respuesta)
+    guardar_mensaje(db, p, "assistant", respuesta, "whatsapp", envio)
+    registrar(
+        db, "agente-ia", "documento_whatsapp_recibido", "documento", f"{e.id}:{doc.tipo}",
+        {"postulacion": p.codigo, "estado": estado, "archivo": descarga.get("filename", ""), "mime": descarga.get("mime", "")},
+    )
+    _actualizar_ultima_actividad(p)
+    db.commit()
+    return {"documento": doc.tipo, "estado": estado, "pendientes": pendientes, "whatsapp": envio}
 
 
 def _cuenta_whatsapp(db: Session, numero_receptor: str) -> Cuenta:
@@ -370,6 +458,21 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
         db.commit()
         return {"ok": True, "accion": ruteo, "candidato": c.codigo}
     print(f"[agente] Postulación {p.codigo} ({ruteo}) — candidato={c.codigo} {c.nombre}, consentimiento={p.consentimiento}, vacante_id={p.vacante_id}")
+
+    # ── 1.1 Documento o imagen adjunta (2026-09-15): si la postulación ya está en Contratación u
+    # Onboarding, el archivo ES el documento del expediente — se descarga de Meta y se adjunta.
+    # En cualquier otra etapa se sigue tratando el pie de foto como texto (comportamiento previo).
+    if msg.get("tipo") in ("image", "document") and msg.get("media") and p.etapa in ETAPAS_DOCUMENTOS and p.expediente:
+        resultado = await _recibir_documento_whatsapp(db, p, msg, telefono)
+        return {"ok": True, "accion": "documento_whatsapp", "candidato": c.codigo, "postulacion": p.codigo, **resultado}
+    if msg.get("tipo") in ("image", "document") and not texto:
+        # adjunto sin pie de foto fuera de Contratación/Onboarding: no hay nada que procesar como turno
+        aviso_adj = "Recibí tu archivo, pero por ahora solo puedo leer mensajes de texto en esta etapa. ¿Me lo cuentas por escrito? 🙂"
+        envio_adj = await enviar_mensaje(telefono, aviso_adj)
+        guardar_mensaje(db, p, "user", f"[📎 {msg.get('tipo')}: {(msg.get('media') or {}).get('filename') or 'archivo'}]", "whatsapp", wa_id=msg.get("wa_id", ""))
+        guardar_mensaje(db, p, "assistant", aviso_adj, "whatsapp", envio_adj)
+        db.commit()
+        return {"ok": True, "accion": "adjunto_ignorado", "candidato": c.codigo, "postulacion": p.codigo}
 
     # ── 2. Detectar vacante SOLO si la postulación sigue en selección (sin vacante, o con
     # vacante pero sin consentimiento — sigue respondiendo el menú inicial). Con vacante +

@@ -20,7 +20,8 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..models import ClienteContacto, EntrevistaHumana, Mensaje, NotificacionEnviada, Postulacion, ReglaNotificacion, Usuario
 from .correo import enviar_correo
-from .whatsapp import enviar_mensaje
+from .whatsapp import enviar_mensaje, enviar_plantilla_documentos
+from ..serial import nombre_empresa_candidato
 
 # RH/entrevistador capturan fecha/hora pensando en hora de México — nunca vienen con offset.
 # SQLite descarta el offset de un DateTime(timezone=True) y se queda con los números de reloj
@@ -270,8 +271,29 @@ def _regla(db: Session, cuenta_id: int, evento: str) -> Optional[ReglaNotificaci
     ).first()
 
 
+# Eventos que al candidato le llegan por WhatsApp con la plantilla META_PLANTILLA_DOCUMENTOS
+# (2026-09-15): así «Solicitar documentos» y «Enviar recordatorio» salen aunque la ventana de 24 h
+# esté cerrada, y el candidato contesta mandando el archivo por el mismo chat.
+EVENTOS_PLANTILLA_DOCUMENTOS = ("solicitud_documentos", "recordatorio_documentos")
+
+
+def _valores_plantilla_documentos(c: Postulacion, liga: str, extra: dict) -> dict:
+    v = c.vacante
+    pendientes = extra.get("pendientes")
+    if pendientes is None and c.expediente:
+        pendientes = c.expediente.pendientes
+    return {
+        "nombre": (c.nombre.split(" ")[0] if c.nombre else "") or "candidato(a)",
+        "documentos": ", ".join(pendientes) if pendientes else "INE y comprobante de domicilio",
+        "liga": liga or "",
+        "empresa": nombre_empresa_candidato(v) if v else "",
+        "vacante": extra.get("puesto") or (v.titulo if v else ""),
+    }
+
+
 async def _enviar_y_registrar(
     db: Session, p: Postulacion, evento: str, destinatario_tipo: str, canal: str, destino: str, contenido,
+    plantilla_valores: Optional[dict] = None,
 ) -> dict:
     """Regresa {destinatario, canal, destino, enviado, proveedor, detalle} — Fase 7A: el detalle de
     por qué NO salió un envío (sin correo, RESEND_API_KEY sin configurar, Meta rechazó…) ya no se
@@ -286,7 +308,9 @@ async def _enviar_y_registrar(
         ))
         return {**base, "enviado": False, "detalle": detalle}
     try:
-        if canal == "whatsapp":
+        if canal == "whatsapp" and plantilla_valores is not None:
+            envio = await enviar_plantilla_documentos(destino, plantilla_valores, contenido)
+        elif canal == "whatsapp":
             envio = await enviar_mensaje(destino, contenido)
         else:
             asunto, html = contenido
@@ -387,7 +411,8 @@ async def disparar(
     # --- Candidato: correo/teléfono ya en su ficha (punto 23) ---
     if regla.candidato_whatsapp:
         texto = _mensaje(evento, "candidato", "whatsapp", c, eh, liga, extra)
-        resultados.append(await _enviar_y_registrar(db, c, evento, "candidato", "whatsapp", c.telefono, texto))
+        valores = _valores_plantilla_documentos(c, liga, extra) if evento in EVENTOS_PLANTILLA_DOCUMENTOS else None
+        resultados.append(await _enviar_y_registrar(db, c, evento, "candidato", "whatsapp", c.telefono, texto, plantilla_valores=valores))
     if regla.candidato_correo:
         contenido = _mensaje(evento, "candidato", "correo", c, eh, liga, extra)
         resultados.append(await _enviar_y_registrar(db, c, evento, "candidato", "correo", c.correo, contenido))

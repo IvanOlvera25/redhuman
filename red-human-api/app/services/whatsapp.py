@@ -169,6 +169,70 @@ async def enviar_plantilla(
     return resultado
 
 
+PARAMS_PLANTILLA_DOCUMENTOS = ("nombre", "documentos", "liga", "empresa", "vacante")
+
+
+async def enviar_plantilla_documentos(telefono: str, valores: dict, texto_fallback: str) -> dict:
+    """Solicitud/recordatorio de documentos (2026-09-15): primero la plantilla aprobada
+    META_PLANTILLA_DOCUMENTOS (sirve también fuera de la ventana de 24 h), con sus variables en el
+    orden de META_PLANTILLA_DOCUMENTOS_PARAMS; si no está configurada o Meta la rechaza, se manda
+    el texto libre de siempre (que a su vez cae a META_PLANTILLA_AVISO fuera de ventana)."""
+    plantilla = (settings.meta_plantilla_documentos or "").strip()
+    if settings.whatsapp_provider == "meta" and plantilla:
+        claves = [k.strip().lower() for k in (settings.meta_plantilla_documentos_params or "").split(",") if k.strip()]
+        parametros = [str(valores.get(k, "") or "-") for k in claves if k in PARAMS_PLANTILLA_DOCUMENTOS]
+        resultado = await enviar_plantilla(telefono, plantilla, parametros, settings.meta_plantilla_idioma)
+        if resultado.get("enviado"):
+            resultado["plantilla"] = plantilla
+            return resultado
+        print(f"[whatsapp] plantilla de documentos «{plantilla}» no salió ({resultado.get('detalle')}); se manda texto libre")
+        alterno = await enviar_mensaje(telefono, texto_fallback)
+        alterno["motivo_fallback"] = f"plantilla {plantilla}: {resultado.get('detalle')}"
+        return alterno
+    return await enviar_mensaje(telefono, texto_fallback)
+
+
+# Meta → extensión aceptada por services/archivos.FORMATOS (documentos de expediente).
+_EXT_POR_MIME = {
+    "application/pdf": "pdf",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+}
+
+
+async def descargar_media(media_id: str) -> dict:
+    """Descarga un medio recibido por el webhook (2026-09-15): Graph `GET /{media_id}` regresa la URL
+    temporal + mime; la URL se lee con el mismo Bearer. Regresa {ok, contenido, mime, filename,
+    detalle} y nunca lanza — el webhook le explica al candidato si algo falla."""
+    if not media_id:
+        return {"ok": False, "detalle": "sin media_id"}
+    if settings.whatsapp_provider != "meta" or not settings.meta_whatsapp_token:
+        return {"ok": False, "detalle": "descarga de medios solo disponible con WHATSAPP_PROVIDER=meta"}
+    cabeceras = {"Authorization": f"Bearer {settings.meta_whatsapp_token}"}
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cli:
+            meta = await cli.get(f"{GRAPH_URL}/{settings.meta_api_version}/{media_id}", headers=cabeceras)
+            if meta.status_code >= 300:
+                err = _meta_error(meta)
+                return {"ok": False, "detalle": f"Graph {err['codigo']}: {err['mensaje']}"}
+            info = meta.json() or {}
+            url = info.get("url", "")
+            if not url:
+                return {"ok": False, "detalle": "Graph no regresó url del medio"}
+            binario = await cli.get(url, headers=cabeceras)
+            if binario.status_code >= 300:
+                return {"ok": False, "detalle": f"descarga del medio: HTTP {binario.status_code}"}
+    except Exception as e:  # red caída: no tumbar el webhook
+        return {"ok": False, "detalle": f"error de red: {e}"}
+    mime = (info.get("mime_type") or binario.headers.get("content-type") or "").split(";")[0].strip().lower()
+    ext = _EXT_POR_MIME.get(mime, "")
+    if not ext:
+        return {"ok": False, "detalle": f"formato no admitido ({mime or 'desconocido'}); acepta PDF, JPG o PNG"}
+    return {"ok": True, "contenido": binario.content, "mime": mime, "extension": ext, "filename": f"whatsapp_{media_id}.{ext}", "tamano": len(binario.content)}
+
+
 async def enviar_mensaje(telefono: str, texto: str) -> dict:
     """Envía un mensaje de texto. Regresa {enviado, proveedor, detalle}."""
     if settings.whatsapp_provider == "meta":
@@ -287,13 +351,26 @@ def parsear_webhook(payload: dict) -> Optional[dict]:
                 contactos = valor.get("contacts") or [{}]
                 nombre = ((contactos[0].get("profile") or {}).get("name")) or ""
                 elegido = _id_seleccionado(m)
+                # 2026-09-15: adjuntos (image/document) — el webhook los descarga y los adjunta al
+                # expediente cuando la postulación está en Contratación/Onboarding.
+                media = None
+                tipo_m = m.get("type", "text")
+                if tipo_m in ("image", "document") and isinstance(m.get(tipo_m), dict):
+                    cuerpo_m = m[tipo_m]
+                    media = {
+                        "id": cuerpo_m.get("id", ""),
+                        "mime_type": cuerpo_m.get("mime_type", ""),
+                        "filename": cuerpo_m.get("filename", ""),
+                        "sha256": cuerpo_m.get("sha256", ""),
+                    }
                 return {
                     "telefono": str(m.get("from", "")),
                     # si la opción no trae título legible, el id sirve de texto
                     "texto": _texto_de_meta(m) or elegido,
                     "nombre": nombre,
                     "wa_id": m.get("id", ""),
-                    "tipo": m.get("type", "text"),
+                    "tipo": tipo_m,
+                    "media": media,
                     "id_seleccionado": elegido,
                     # número de WhatsApp Business que RECIBIÓ el mensaje: con él se resuelve la
                     # Cuenta (ruteo por número) cuando hay más de una activa.
