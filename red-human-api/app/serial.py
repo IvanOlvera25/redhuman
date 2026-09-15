@@ -627,7 +627,7 @@ def expediente_dict(e: Expediente) -> dict:
     # 'alta' es el único estado que persiste; el resto se deriva del avance real de los documentos
     estado = "alta" if e.estado == "alta" else ("completo" if e.progreso == 100 else "integracion")
     # documentos que la IA aprobó pero que nadie de RH ha confirmado todavía (bloquean el alta)
-    sin_confirmar = [d.tipo for d in e.obligatorios if d.estado == "recibido" and not d.revisado_por]
+    sin_confirmar = e.sin_confirmar  # 2026-09-15: incluye digitales en revisión (cuentan para el %)
     return {
         "id": f"N-{500 + e.id}",
         "expedienteId": e.id,

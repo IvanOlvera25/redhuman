@@ -22,6 +22,7 @@ from ..serial import colaborador_dict, expediente_dict, nombre_empresa_candidato
 from ..services import archivos as fs
 from ..services import ia
 from ..services import notificaciones
+from ..services.pdf import pdf_carta_intencion
 from ..services.notificaciones import NotificarIn, override_de
 from ..services.configuracion import puede_forzar_prueba
 
@@ -485,11 +486,13 @@ async def alta(
         raise HTTPException(400, "No se puede dar de alta al colaborador: El expediente no tiene documentos adjuntos.")
     if e.progreso < 100 and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, f"El expediente está al {e.progreso}%. Faltan: {', '.join(e.pendientes)}.")
-    sin_revisar = [d.tipo for d in e.obligatorios if d.estado == "recibido" and not d.revisado_por]
+    # HITL: lo que cuenta para el % (recibido o digital en revisión) lo confirma una persona de RH
+    # antes del alta — el porcentaje ya no espera esa confirmación, el alta sí.
+    sin_revisar = e.sin_confirmar
     if sin_revisar and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(
             409,
-            "Antes del alta, una persona de RH debe confirmar los documentos validados por la IA: "
+            "Antes del alta, una persona de RH debe confirmar los documentos subidos (validados por la IA o en revisión): "
             + ", ".join(sin_revisar),
         )
 
@@ -537,6 +540,23 @@ def _fecha_larga(dt: Optional[datetime]) -> str:
     if not dt:
         return "por definir"
     return f"{dt.day} de {_MESES_LARGO[dt.month - 1]} de {dt.year}"
+
+
+def _datos_carta_intencion(e: Expediente) -> dict:
+    """Datos reales + fallback «por definir» que comparten el PDF y la vista HTML."""
+    c = e.candidato
+    vac = e.postulacion.vacante if e.postulacion else None
+    return {
+        "nombre": c.nombre if c else "[Nombre del colaborador]",
+        "empresa": (nombre_empresa_candidato(vac) if vac else "") or "la empresa",
+        "puesto": e.puesto or (vac.titulo if vac else "") or "el puesto",
+        "sueldo": e.sueldo or "por definir",
+        "tipo_contratacion": e.tipo_contratacion or "por definir",
+        "ubicacion": e.ubicacion or (c.ubicacion if c else "") or "por definir",
+        "jefe": e.jefe_directo or "por definir",
+        "fecha_ingreso": _fecha_larga(e.fecha_ingreso),
+        "hoy": _fecha_larga(datetime.now(timezone.utc)),
+    }
 
 
 def _html_carta_intencion(e: Expediente) -> str:
@@ -618,17 +638,13 @@ def carta_intencion(
     Cairo, GDK-PixBuf) que Linux (producción) resuelve con apt-get, pero que no vienen en
     Windows — si `import weasyprint` estuviera a nivel de módulo, tumbaría el arranque de TODA
     la API en una máquina sin esas librerías, no solo este endpoint."""
-    try:
-        import weasyprint
-    except OSError as ex:
-        raise HTTPException(
-            503,
-            "La generación de PDF no está disponible en este servidor: faltan librerías del "
-            f"sistema que requiere WeasyPrint (Pango/Cairo/GDK-PixBuf). Detalle: {ex}",
-        )
     e = _expediente(db, exp_id, cuenta.id)
-    html = _html_carta_intencion(e)
-    pdf = weasyprint.HTML(string=html).write_pdf()
+    # 2026-09-15 (Fase 1): el PDF se genera con fpdf2 (Python puro, sin Pango/Cairo): WeasyPrint
+    # fallaba en el servidor por librerías nativas y la carta no se generaba. Mismo contenido.
+    try:
+        pdf = pdf_carta_intencion(_datos_carta_intencion(e))
+    except Exception as ex:  # noqa: BLE001 — se reporta a RH, nunca 500 mudo
+        raise HTTPException(503, f"No se pudo generar el PDF de la carta de intención: {ex}")
     registrar(
         db, u.nombre, "carta_intencion_generada", "expediente", str(e.id),
         {"candidato": e.candidato.codigo if e.candidato else "", "correo_rh": u.correo},

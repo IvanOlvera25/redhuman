@@ -675,12 +675,15 @@ class Expediente(Base):
 
     @property
     def progreso(self) -> int:
-        """% de documentos OBLIGATORIOS ya recibidos — es lo que habilita el alta."""
+        """% de documentos OBLIGATORIOS ya entregados — es lo que habilita el alta.
+        2026-09-15 (Fase 1): un documento digital SUBIDO cuenta desde que llega (estado `recibido`
+        o `revision` con archivo); antes solo contaba `recibido`, así que en modo demo / con la IA
+        en duda el porcentaje se quedaba en 0 hasta que RH lo marcaba «recibido físicamente»."""
         docs = self.obligatorios
         if not docs:
             return 0
-        recibidos = sum(1 for d in docs if d.estado == "recibido")
-        return round(recibidos / len(docs) * 100)
+        entregados = sum(1 for d in docs if d.entregado)
+        return round(entregados / len(docs) * 100)
 
     @property
     def pendientes(self) -> List[str]:
@@ -689,6 +692,11 @@ class Expediente(Base):
     @property
     def por_revisar(self) -> List[str]:
         return [d.tipo for d in self.documentos if d.estado == "revision"]
+
+    @property
+    def sin_confirmar(self) -> List[str]:
+        """Obligatorios entregados que ninguna persona de RH ha confirmado todavía (HITL del alta)."""
+        return [d.tipo for d in self.obligatorios if d.entregado and not d.revisado_por]
 
 
 class Documento(Base):
@@ -708,6 +716,11 @@ class Documento(Base):
     revisado_por: Mapped[str] = mapped_column(String(150), default="")
     subido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+    @property
+    def entregado(self) -> bool:
+        """Cuenta para el porcentaje: recibido (físico o confirmado) o digital subido pendiente de revisión."""
+        return self.estado == "recibido" or (self.estado == "revision" and bool(self.archivo))
 
     expediente: Mapped[Expediente] = relationship(back_populates="documentos")
 

@@ -1545,11 +1545,34 @@ function ModalCandidato({
                 )}
               </div>
 
+              {/* 2026-09-15 (Fase 1): el error del alta se muestra AQUÍ, pegado al botón — antes solo
+                  aparecía arriba del cuerpo scrolleable y RH veía «parpadear» el botón sin explicación. */}
+              {c.etapa === "Onboarding" && aviso && aviso.tono !== "ok" && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-xl border border-bad/40 bg-bad-soft px-3 py-2.5 text-xs font-semibold text-bad"
+                >
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{aviso.texto}</span>
+                </div>
+              )}
               {/* Botón principal — siempre visible en Onboarding, sin importar el estado de los documentos */}
               {c.etapa === "Onboarding" && (
                 <Button
                   className="w-full"
-                  onClick={() => setConfirmacion("alta")}
+                  onClick={() => {
+                    // Validación previa (Fase 1): con documentos incompletos se avisa de inmediato, sin
+                    // abrir la confirmación ni pegarle al API. Con Modo Prueba se deja pasar (forzar).
+                    const progreso = c.expedienteProgreso ?? 0;
+                    if (progreso < 100 && !modoPrueba) {
+                      setAviso({
+                        tono: "error",
+                        texto: `La documentación no está completa (${progreso}%). Sube o marca como recibidos los documentos obligatorios pendientes antes de dar de alta.`,
+                      });
+                      return;
+                    }
+                    setConfirmacion("alta");
+                  }}
                   disabled={Boolean(ocupado) || c.expedienteEstado === "alta"}
                 >
                   <UserCheck className="h-4 w-4" />

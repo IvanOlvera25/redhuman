@@ -245,14 +245,18 @@ async def enviar_mensaje(telefono: str, texto: str) -> dict:
         })
         # Fuera de la ventana de 24 h el texto libre no pasa: reintenta con la
         # plantilla aprobada si está configurada.
-        if (
-            not resultado["enviado"]
-            and resultado.get("codigo") in CODIGOS_FUERA_DE_VENTANA
-            and settings.meta_plantilla_aviso
-        ):
-            alterno = await enviar_plantilla(telefono, settings.meta_plantilla_aviso, [texto])
-            alterno["motivo_fallback"] = resultado["detalle"]
-            return alterno
+        if not resultado["enviado"] and resultado.get("codigo") in CODIGOS_FUERA_DE_VENTANA:
+            if settings.meta_plantilla_aviso:
+                alterno = await enviar_plantilla(telefono, settings.meta_plantilla_aviso, [texto])
+                alterno["motivo_fallback"] = resultado["detalle"]
+                return alterno
+            # 2026-09-15: es la causa típica de «al entrevistador/cliente no le llega el WhatsApp»:
+            # nunca le ha escrito al número de la empresa, Meta solo acepta plantilla, y no hay
+            # plantilla configurada. Que el motivo llegue hasta la pantalla de RH.
+            resultado["detalle"] = (
+                f"{resultado['detalle']} — el destinatario no ha escrito al WhatsApp de la empresa en las "
+                "últimas 24 h; Meta solo permite plantilla aprobada y META_PLANTILLA_AVISO no está configurada."
+            )
         return resultado
 
     numero = numero_e164(telefono)

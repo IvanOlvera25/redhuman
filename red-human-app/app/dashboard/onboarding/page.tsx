@@ -265,7 +265,8 @@ function Expediente({
           ? `Confirma como RH los documentos validados por la IA: ${n.sinConfirmar!.join(", ")}.`
           : "";
 
-  const recibidos = n.documentos.filter((d) => d.estado === "recibido").length;
+  // 2026-09-15 (Fase 1): un digital subido (en revisión) ya cuenta como entregado, igual que el %.
+  const recibidos = n.documentos.filter((d) => d.estado === "recibido" || (d.estado === "revision" && d.tieneArchivo)).length;
   const evaluacion = n.evaluacion;
   const brechas = evaluacion?.brechas ?? [];
   const resultado = brechas.length > 0 ? "Apto con observaciones" : "Apto";
