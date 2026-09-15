@@ -187,6 +187,9 @@ export interface ConfiguracionSistema {
   modoPrueba: boolean;
   /** Punto 13: minutos sin actividad para que una conversación de prueba arranque una sesión nueva. */
   modoPruebaVentanaMin: number;
+  /** Fase 3: recordatorios automáticos de documentos — cada N días, a partir de esta hora (México). */
+  recordatorioDocumentosDias: number;
+  recordatorioDocumentosHora: number;
   candidatosPrueba: number;
   postulacionesPrueba: number;
 }
@@ -195,10 +198,17 @@ export function fetchConfiguracion() {
   return get<ConfiguracionSistema>("/configuracion");
 }
 
-export function actualizarConfiguracion(cambios: { modoPrueba?: boolean; modoPruebaVentanaMin?: number }) {
+export function actualizarConfiguracion(cambios: {
+  modoPrueba?: boolean;
+  modoPruebaVentanaMin?: number;
+  recordatorioDocumentosDias?: number;
+  recordatorioDocumentosHora?: number;
+}) {
   return patch<ConfiguracionSistema>("/configuracion", {
     modo_prueba: cambios.modoPrueba,
     modo_prueba_ventana_min: cambios.modoPruebaVentanaMin,
+    recordatorio_documentos_dias: cambios.recordatorioDocumentosDias,
+    recordatorio_documentos_hora: cambios.recordatorioDocumentosHora,
   });
 }
 
@@ -1673,10 +1683,11 @@ export function subirDocumentoPublico(token: string, tipo: string, archivo: File
 /** Onboarding · Bloque 4 (Preparación de ingreso) — contrato, alta administrativa, equipo/accesos. */
 export function actualizarPreparacion(
   expedienteId: number,
-  datos: { contrato?: string; altaAdministrativa?: string; equipoAccesos?: string },
+  datos: { contrato?: string; altaAdministrativa?: string; equipoAccesos?: string; documentosHasta?: string },
 ) {
   return patch<NuevoIngreso>(`/contratacion/expedientes/${expedienteId}/preparacion`, {
     contrato: datos.contrato,
+    documentos_hasta: datos.documentosHasta,
     alta_administrativa: datos.altaAdministrativa,
     equipo_accesos: datos.equipoAccesos,
   });

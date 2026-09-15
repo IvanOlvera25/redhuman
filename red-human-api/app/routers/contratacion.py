@@ -23,7 +23,7 @@ from ..services import archivos as fs
 from ..services import ia
 from ..services import notificaciones
 from ..services.pdf import pdf_carta_intencion
-from ..services.notificaciones import NotificarIn, override_de
+from ..services.notificaciones import TZ_MEXICO, NotificarIn, override_de
 from ..services.configuracion import puede_forzar_prueba
 
 router = APIRouter(prefix="/contratacion", tags=["contratacion"])
@@ -124,6 +124,8 @@ class PreparacionIn(BaseModel):
     contrato: Optional[str] = None
     alta_administrativa: Optional[str] = None
     equipo_accesos: Optional[str] = None
+    # Fase 3: «recordar hasta» (fecha ISO). "" = quitar los recordatorios automáticos.
+    documentos_hasta: Optional[str] = None
 
 
 @router.patch("/expedientes/{exp_id}/preparacion")
@@ -153,6 +155,19 @@ def actualizar_preparacion(
             raise HTTPException(400, f"equipo_accesos inválido. Usa uno de: {', '.join(ESTADOS_EQUIPO_ACCESOS)}")
         e.equipo_accesos = datos.equipo_accesos
         cambios.append("equipo_accesos")
+    if datos.documentos_hasta is not None:
+        if not datos.documentos_hasta.strip():
+            e.documentos_hasta = None
+        else:
+            try:
+                # medianoche de ese día en México → UTC (el cron respeta el final del día en México)
+                e.documentos_hasta = datetime.fromisoformat(datos.documentos_hasta[:10]).replace(tzinfo=TZ_MEXICO).astimezone(timezone.utc)
+            except ValueError:
+                raise HTTPException(400, "documentos_hasta inválida (usa ISO: 2026-10-15)")
+            if e.documentos_hasta.astimezone(TZ_MEXICO).date() < datetime.now(TZ_MEXICO).date():
+                raise HTTPException(400, "La fecha límite de documentos ya pasó.")
+        e.documentos_vencidos_avisado = False
+        cambios.append("documentos_hasta")
 
     if cambios:
         registrar(

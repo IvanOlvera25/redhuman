@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import ClienteContacto, EntrevistaHumana, Mensaje, NotificacionEnviada, Postulacion, ReglaNotificacion, Usuario
+from ..models import REGLAS_NOTIFICACION_DEFAULT, ClienteContacto, EntrevistaHumana, Mensaje, NotificacionEnviada, Postulacion, ReglaNotificacion, Usuario
 from .correo import enviar_correo
 from .whatsapp import enviar_mensaje, enviar_plantilla_documentos
 from ..serial import nombre_empresa_candidato
@@ -251,10 +251,12 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
             if pendientes is not None:
                 # contratacion.py::recordatorio — lista lo que falta del Expediente en curso.
                 detalle_rechazos = extra.get("detalle_rechazos", "")
+                fecha_limite = extra.get("fecha_limite")
                 texto = (
                     f"Hola {primer_nombre} 👋 Para completar tu expediente de {puesto} "
                     f"me falta recibir: {', '.join(pendientes)}."
                     + (f"\n\nAlgunos necesitan volver a enviarse:{detalle_rechazos}" if detalle_rechazos else "")
+                    + (f"\n\nLa fecha límite es el {_fecha_hora_legible_mx(fecha_limite).split(' a las')[0]}." if fecha_limite else "")
                     + "\n\nMándalos por aquí cuando puedas. 🙌"
                 )
             else:
@@ -400,7 +402,13 @@ async def disparar(
         return []
     regla_guardada = _regla(db, c.cuenta_id, evento)
     if not regla_guardada and not override:
-        return []
+        # Fase 3 (2026-09-15): sin regla guardada (nadie abrió Configuración → Notificaciones todavía)
+        # se aplica la regla con la que NACERÍA (REGLAS_NOTIFICACION_DEFAULT) — antes un evento
+        # automático (recordatorio, no-show) no mandaba nada en una Cuenta nueva.
+        defaults = REGLAS_NOTIFICACION_DEFAULT.get(evento)
+        if not defaults:
+            return []
+        override = dict(defaults)
     regla = _ReglaEfectiva(regla_guardada, override)
     if not regla.alguno():
         return []

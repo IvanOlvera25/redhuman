@@ -662,6 +662,11 @@ class Expediente(Base):
     # EntrevistaHumana, sigue válido hasta que el expediente llega a estado "alta".
     token: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True, nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    # Fase 3 (2026-09-15): «recordar hasta» — fecha límite que respeta el cron de recordatorios de
+    # documentos. Null = sin recordatorios automáticos para este expediente.
+    documentos_hasta: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ultimo_recordatorio_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    documentos_vencidos_avisado: Mapped[bool] = mapped_column(Boolean, default=False)
 
     candidato: Mapped[Optional[Candidato]] = relationship(foreign_keys=[candidato_id])
     postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="expediente")
@@ -1071,6 +1076,10 @@ class ConfiguracionSistema(Base):
     # Punto 13: minutos sin actividad tras los cuales, con Modo Prueba activo, el siguiente
     # mensaje del mismo WhatsApp arranca una postulación de prueba nueva (ver webhooks.py).
     modo_prueba_ventana_min: Mapped[int] = mapped_column(Integer, default=60)
+    # Fase 3 (2026-09-15): recordatorios automáticos de documentos pendientes (services/recordatorios.py):
+    # cada N días, a partir de esta hora (America/Mexico_City), mientras no pase Expediente.documentos_hasta.
+    recordatorio_documentos_dias: Mapped[int] = mapped_column(Integer, default=2)
+    recordatorio_documentos_hora: Mapped[int] = mapped_column(Integer, default=10)
 
 
 # ============================================================

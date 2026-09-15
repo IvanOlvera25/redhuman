@@ -21,7 +21,7 @@ from ..serial import entrevista_dict, nombre_empresa_candidato
 from ..services import ia
 from ..services.avatar import avatar_activo, crear_sesion_avatar, probar_avatar
 from ..services.configuracion import modo_prueba_activo
-from ..services.entrevistas import crear_entrevista_para_candidato
+from ..services.entrevistas import crear_entrevista_para_candidato, reabrir_entrevista
 from ..services.whatsapp import enviar_mensaje
 from .candidatos import _crear_candidato, guardar_mensaje, nombre_ficha, postulacion_para_vacante
 from .candidatos import _por_codigo as _postulacion_por_codigo
@@ -497,24 +497,6 @@ def reabrir(
         raise HTTPException(404, "Entrevista no encontrada")
     if e.estado not in ("evaluada", "interrumpida", "parcial", "completada", "en_curso"):
         raise HTTPException(409, "La entrevista no está cerrada ni en curso.")
-    intento = {
-        "estado": e.estado, "cierre": e.cierre, "iniciada_en": e.iniciada_en.isoformat() if e.iniciada_en else None,
-        "finalizada_en": e.finalizada_en.isoformat() if e.finalizada_en else None,
-        "transcript": list(e.transcript or []), "evaluacion": dict(e.evaluacion or {}),
-    }
-    e.intentos_previos = list(e.intentos_previos or []) + [intento]
-    e.transcript = []
-    e.evaluacion = {}
-    e.cierre = ""
-    e.motivo = ""
-    e.iniciada_en = None
-    e.finalizada_en = None
-    e.estado = "programada"
-    if p.etapa == "Evaluación":
-        p.etapa = "Entrevista IA"
-    registrar(
-        db, u.nombre, "entrevista_reabierta", "entrevista", e.codigo,
-        {"postulacion": p.codigo, "motivo": datos.motivo.strip()[:300], "intento_archivado": intento["estado"], "correo_rh": u.correo},
-    )
+    reabrir_entrevista(db, e, u.nombre, datos.motivo, {"correo_rh": u.correo})
     db.commit()
     return entrevista_dict(e)

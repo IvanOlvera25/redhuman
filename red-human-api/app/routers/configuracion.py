@@ -27,6 +27,9 @@ def _salida(db: Session, cuenta_id: int) -> dict:
     return {
         "modoPrueba": cfg.modo_prueba,
         "modoPruebaVentanaMin": cfg.modo_prueba_ventana_min,
+        # Fase 3: recordatorios automáticos de documentos
+        "recordatorioDocumentosDias": cfg.recordatorio_documentos_dias,
+        "recordatorioDocumentosHora": cfg.recordatorio_documentos_hora,
         "candidatosPrueba": candidatos_prueba,
         "postulacionesPrueba": postulaciones_prueba,
     }
@@ -40,6 +43,8 @@ def obtener(db: Session = Depends(get_db), _: Usuario = Depends(usuario_admin), 
 class ConfiguracionIn(BaseModel):
     modo_prueba: Optional[bool] = None
     modo_prueba_ventana_min: Optional[int] = None
+    recordatorio_documentos_dias: Optional[int] = None  # Fase 3: cada N días (1-30)
+    recordatorio_documentos_hora: Optional[int] = None  # Fase 3: a partir de esta hora MX (0-23)
 
 
 @router.patch("")
@@ -48,8 +53,16 @@ def actualizar(
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     cfg = cfg_service.obtener(db)
-    if datos.modo_prueba is None and datos.modo_prueba_ventana_min is None:
+    if all(v is None for v in datos.model_dump().values()):
         raise HTTPException(400, "No se enviaron cambios.")
+    if datos.recordatorio_documentos_dias is not None:
+        if not (1 <= datos.recordatorio_documentos_dias <= 30):
+            raise HTTPException(400, "Los recordatorios de documentos deben ser cada 1 a 30 días.")
+        cfg.recordatorio_documentos_dias = datos.recordatorio_documentos_dias
+    if datos.recordatorio_documentos_hora is not None:
+        if not (0 <= datos.recordatorio_documentos_hora <= 23):
+            raise HTTPException(400, "La hora de los recordatorios debe estar entre 0 y 23.")
+        cfg.recordatorio_documentos_hora = datos.recordatorio_documentos_hora
     if datos.modo_prueba is not None and datos.modo_prueba != cfg.modo_prueba:
         cfg.modo_prueba = datos.modo_prueba
         registrar(

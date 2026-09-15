@@ -1591,6 +1591,29 @@ function SeccionModoPrueba() {
     setCfg(r.data);
   }
 
+  // Fase 3: parámetros del cron de recordatorios de documentos
+  const [recDias, setRecDias] = useState("");
+  const [recHora, setRecHora] = useState("");
+  useEffect(() => {
+    if (cfg) {
+      setRecDias(String(cfg.recordatorioDocumentosDias ?? 2));
+      setRecHora(String(cfg.recordatorioDocumentosHora ?? 10));
+    }
+  }, [cfg]);
+  const recCambio = cfg ? recDias !== String(cfg.recordatorioDocumentosDias) || recHora !== String(cfg.recordatorioDocumentosHora) : false;
+  async function guardarRecordatorios() {
+    const d = parseInt(recDias, 10);
+    const h = parseInt(recHora, 10);
+    if (isNaN(d) || d < 1 || d > 30) return setError("Los recordatorios deben ser cada 1 a 30 días.");
+    if (isNaN(h) || h < 0 || h > 23) return setError("La hora debe estar entre 0 y 23.");
+    setGuardando(true);
+    setError("");
+    const r = await actualizarConfiguracion({ recordatorioDocumentosDias: d, recordatorioDocumentosHora: h });
+    setGuardando(false);
+    if (!r.ok) { setError(r.error); return; }
+    setCfg(r.data);
+  }
+
   async function confirmarBorrado() {
     setBorrando(true);
     setError("");
@@ -1666,6 +1689,32 @@ function SeccionModoPrueba() {
             {guardando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Guardar
           </Button>
           {cfg && !ventanaCambio && <span className="pb-2.5 text-[12px] text-ink-3"><Check className="mr-1 inline h-3.5 w-3.5" />{cfg.modoPruebaVentanaMin} min</span>}
+        </div>
+      </div>
+
+      {/* Fase 3: recordatorios automáticos de documentos */}
+      <div className="mt-4 rounded-xl border border-border-soft p-4">
+        <p className="text-sm font-semibold">Recordatorios automáticos de documentos</p>
+        <p className="mt-1 text-[12px] leading-relaxed text-ink-3">
+          Para cada expediente con fecha «recordar hasta» (Onboarding), el sistema manda por sí solo el recordatorio de
+          documentos pendientes con la regla de notificación de la Cuenta: cada N días, a partir de la hora indicada
+          (hora de México), y nunca después de la fecha límite.
+        </p>
+        <div className="mt-3 flex flex-wrap items-end gap-3">
+          <div>
+            <label className="mb-1 block text-[12px] font-medium text-ink-2">Cada (días)</label>
+            <input type="number" min={1} max={30} value={recDias} onChange={(e) => setRecDias(e.target.value)}
+              className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+          </div>
+          <div>
+            <label className="mb-1 block text-[12px] font-medium text-ink-2">A partir de las (hora)</label>
+            <input type="number" min={0} max={23} value={recHora} onChange={(e) => setRecHora(e.target.value)}
+              className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+          </div>
+          <Button size="sm" onClick={guardarRecordatorios} disabled={guardando || !recCambio}>
+            {guardando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Guardar
+          </Button>
+          {cfg && !recCambio && <span className="pb-2.5 text-[12px] text-ink-3"><Check className="mr-1 inline h-3.5 w-3.5" />cada {cfg.recordatorioDocumentosDias} día(s) desde las {cfg.recordatorioDocumentosHora}:00</span>}
         </div>
       </div>
 

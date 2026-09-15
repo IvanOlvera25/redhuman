@@ -247,6 +247,17 @@ function Expediente({
     onActualizado(r.data);
   }
 
+  /** Fase 3: «recordar hasta» — el cron manda recordatorios de documentos hasta esa fecha; vacío = apagado. */
+  async function guardarRecordarHasta(fecha: string) {
+    if (!live || !n.expedienteId) return exigeApi();
+    setOcupado("recordar-hasta");
+    const r = await actualizarPreparacion(n.expedienteId, { documentosHasta: fecha });
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    setAviso({ tono: "ok", texto: fecha ? `Recordatorios automáticos activos hasta el ${fecha}.` : "Recordatorios automáticos apagados para este expediente." });
+    onActualizado(r.data);
+  }
+
   async function actualizarPrep(campo: "contrato" | "altaAdministrativa" | "equipoAccesos", valor: string) {
     if (!live || !n.expedienteId) return exigeApi();
     setOcupado(`prep-${campo}`);
@@ -466,6 +477,19 @@ function Expediente({
               <Send className="h-4 w-4" />
               {ocupado === "recordatorio" ? "Enviando…" : "Enviar recordatorio"}
             </Button>
+            {/* Fase 3: recordatorios automáticos con fecha límite (el cron respeta «hasta») */}
+            <label className="flex items-center gap-2 text-[12px] text-ink-2">
+              Recordar automáticamente hasta
+              <input
+                type="date"
+                defaultValue={n.documentosHasta ? n.documentosHasta.slice(0, 10) : ""}
+                min={new Date().toISOString().slice(0, 10)}
+                disabled={Boolean(ocupado)}
+                onChange={(e) => void guardarRecordarHasta(e.target.value)}
+                className="h-8 rounded-lg border border-border-soft bg-surface px-2 text-[12px] outline-none focus:border-brand"
+              />
+              {n.ultimoRecordatorioEn && <span className="text-ink-3">· último: {n.ultimoRecordatorioEn.slice(0, 10)}</span>}
+            </label>
           </div>
         )}
       </div>

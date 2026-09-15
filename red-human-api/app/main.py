@@ -21,6 +21,7 @@ from .migraciones import asegurar_reglas_entrevistador
 from .routers import agente, auth, candidatos, capacitacion, clientes, colaboradores, configuracion, contratacion, cuentas, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
 from .seed import sembrar, sembrar_admin
 from .services.agenda import revisar_videollamadas_noshow
+from .services.recordatorios import revisar_recordatorios_documentos
 from .services.avatar import avatar_activo, estado_avatar
 from .services.ia import ia_activa
 from .services.whatsapp import proveedor as whatsapp_proveedor, whatsapp_activo
@@ -80,6 +81,12 @@ async def lifespan(app: FastAPI):
         revisar_videollamadas_noshow, "interval", minutes=5,
         id="noshow_videollamadas", replace_existing=True,
         max_instances=1, coalesce=True, misfire_grace_time=120,
+    )
+    # Fase 3 (2026-09-15): recordatorios automáticos de documentos (cada hora decide si toca).
+    scheduler.add_job(
+        revisar_recordatorios_documentos, "interval", minutes=60,
+        id="recordatorios_documentos", replace_existing=True,
+        max_instances=1, coalesce=True, misfire_grace_time=300,
     )
     scheduler.start()
     try:

@@ -653,6 +653,9 @@ def expediente_dict(e: Expediente) -> dict:
         "pendientes": e.pendientes,
         "porRevisar": e.por_revisar,
         "sinConfirmar": sin_confirmar,
+        # Fase 3: recordatorios automáticos de documentos
+        "documentosHasta": e.documentos_hasta.isoformat() if e.documentos_hasta else None,
+        "ultimoRecordatorioEn": e.ultimo_recordatorio_en.isoformat() if e.ultimo_recordatorio_en else None,
         "listoParaAlta": estado == "completo" and not sin_confirmar,
         # --- puentes hacia el módulo 1 (candidatoId = Postulación: es lo que /candidatos/{codigo} espera) ---
         "candidatoId": p.codigo if p else (c.codigo if c else ""),
