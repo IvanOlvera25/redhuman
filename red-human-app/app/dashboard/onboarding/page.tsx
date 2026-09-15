@@ -235,7 +235,16 @@ function Expediente({
     const r = await autorizarAlta(n.expedienteId, undefined, false, notificar);
     setOcupado("");
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
-    setAviso({ tono: "ok", texto: `Alta autorizada por ${yo} y registrada en la bitácora ✓ — movido a Colaboradores.` });
+    const envios = r.data.notificaciones ?? [];
+    const okEnv = envios.filter((x) => x.enviado).map((x) => `${x.destinatario} por ${x.canal}`);
+    const fallidos = envios.filter((x) => !x.enviado).map((x) => `${x.destinatario} por ${x.canal}${x.detalle ? ` (${x.detalle})` : ""}`);
+    setAviso({
+      tono: fallidos.length && !okEnv.length ? "warn" : "ok",
+      texto:
+        `Alta autorizada por ${yo} y registrada en la bitácora ✓ — movido a Colaboradores.` +
+        (okEnv.length ? ` Bienvenida e instrucciones de ingreso enviadas: ${okEnv.join(", ")}.` : "") +
+        (fallidos.length ? ` No salió: ${fallidos.join("; ")}.` : ""),
+    });
     onActualizado(r.data.expediente);
   }
 

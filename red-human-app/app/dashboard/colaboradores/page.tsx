@@ -1,27 +1,39 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Building2, CalendarClock, ExternalLink, Mail, MapPin, Phone, ShieldCheck, Users, UserSquare2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Briefcase, Building2, CalendarClock, ExternalLink, Mail, MapPin, Phone, ShieldCheck, Users, UserSquare2 } from "lucide-react";
 import { Card, Badge, Avatar, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
-import { fetchColaboradores, type Colaborador } from "@/lib/api";
+import { fetchClientesColaboradores, fetchColaboradores, type Colaborador } from "@/lib/api";
+import { usePolling } from "@/lib/use-polling";
 
 export default function Colaboradores() {
   const [datos, setDatos] = useState<Colaborador[]>([]);
   const [cargando, setCargando] = useState(true);
   const [live, setLive] = useState(false);
+  // Fase 5: filtro superior por Cliente ("" = todos; 0 = directo sin Cliente)
+  const [clientes, setClientes] = useState<{ id: number; nombre: string; colaboradores: number }[]>([]);
+  const [clienteId, setClienteId] = useState<string>("");
+
+  const recargar = useCallback(async () => {
+    const d = await fetchColaboradores(undefined, clienteId === "" ? null : Number(clienteId));
+    if (d) {
+      setDatos(d);
+      setLive(true);
+    }
+    setCargando(false);
+  }, [clienteId]);
 
   useEffect(() => {
-    fetchColaboradores().then((d) => {
-      if (d) {
-        setDatos(d);
-        setLive(true);
-      }
-      setCargando(false);
-    });
-  }, []);
+    recargar();
+  }, [recargar]);
+  useEffect(() => {
+    fetchClientesColaboradores().then((c) => setClientes(c ?? []));
+  }, [datos.length]);
+  usePolling(recargar);
 
   const activos = datos.filter((c) => c.activo).length;
+  const clienteActual = clientes.find((c) => String(c.id) === clienteId);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
@@ -38,6 +50,36 @@ export default function Colaboradores() {
           {activos} activo{activos !== 1 ? "s" : ""}
         </Badge>
       </PageHeader>
+
+      {/* Fase 5: filtro por Cliente — solo aparece cuando la Cuenta contrata para Clientes */}
+      {clientes.length > 0 && (
+        <div className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-border-soft bg-surface px-4 py-3">
+          <Briefcase className="h-4 w-4 text-ink-3" />
+          <label className="flex items-center gap-2 text-sm text-ink-2">
+            Cliente
+            <select
+              value={clienteId}
+              onChange={(e) => {
+                setCargando(true);
+                setClienteId(e.target.value);
+              }}
+              className="h-10 min-w-[220px] rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+            >
+              <option value="">Todos los clientes</option>
+              {clientes.map((c) => (
+                <option key={c.id} value={String(c.id)}>
+                  {c.nombre} ({c.colaboradores})
+                </option>
+              ))}
+            </select>
+          </label>
+          {clienteActual && (
+            <span className="text-xs text-ink-3">
+              Mostrando {datos.length} colaborador{datos.length !== 1 ? "es" : ""} de {clienteActual.nombre}.
+            </span>
+          )}
+        </div>
+      )}
 
       {cargando ? (
         <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -80,6 +122,11 @@ export default function Colaboradores() {
                 {c.empresa && (
                   <span className="inline-flex items-center gap-1.5 text-ink-2">
                     <Building2 className="h-3.5 w-3.5 text-ink-3" /> {c.empresa}
+                  </span>
+                )}
+                {c.clienteNombre && (
+                  <span className="inline-flex items-center gap-1.5 rounded-lg border border-border-soft bg-surface-2 px-2 py-1 text-ink-2">
+                    <Briefcase className="h-3.5 w-3.5 text-ink-3" /> {c.clienteNombre}
                   </span>
                 )}
                 {c.ubicacion && (

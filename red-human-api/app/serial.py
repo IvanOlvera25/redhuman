@@ -412,6 +412,7 @@ def postulacion_dict(p: Postulacion, detalle: bool = False) -> dict:
             "ubicacion": exp.ubicacion,
             "jefeDirecto": exp.jefe_directo,
             "fechaIngreso": iso(exp.fecha_ingreso),
+            "instruccionesIngreso": exp.instrucciones_ingreso or "",  # Fase 5
         }
         if exp
         else None,
@@ -712,5 +713,8 @@ def colaborador_dict(col: Colaborador) -> dict:
         "dadoDeAltaPor": col.dado_de_alta_por,
         "candidatoOrigenId": col.candidato_origen.codigo if col.candidato_origen else None,
         "expedienteId": col.expediente_id,
+        # Fase 5: Cliente para el que se contrató (filtro del tablero de Colaboradores)
+        "clienteId": col.cliente_id,
+        "clienteNombre": col.cliente.nombre if col.cliente else None,  # nombre interno (RH), no el comercial
         "creado": hace(col.creado_en),
     }

@@ -1285,7 +1285,17 @@ function ModalCandidato({
     const actualizado = await fetchCandidato(c.id);
     setOcupado("");
     if (actualizado) onCambio(actualizado);
-    setAviso({ tono: "ok", texto: "Alta registrada — el candidato se movió a Colaboradores." });
+    // Fase 5: qué salió (bienvenida + instrucciones de ingreso al candidato; aviso al Cliente)
+    const envios = r.data.notificaciones ?? [];
+    const ok = envios.filter((x) => x.enviado).map((x) => `${x.destinatario} por ${x.canal}`);
+    const fallidos = envios.filter((x) => !x.enviado).map((x) => `${x.destinatario} por ${x.canal}${x.detalle ? ` (${x.detalle})` : ""}`);
+    setAviso({
+      tono: fallidos.length && !ok.length ? "warn" : "ok",
+      texto:
+        "Alta registrada — el candidato se movió a Colaboradores." +
+        (ok.length ? ` Bienvenida enviada: ${ok.join(", ")}.` : "") +
+        (fallidos.length ? ` No salió: ${fallidos.join("; ")}.` : ""),
+    });
   }
 
   async function consentir() {
@@ -3796,6 +3806,7 @@ function PanelContratacion({
   const [fechaIngreso, setFechaIngreso] = useState(cond?.fechaIngreso ? cond.fechaIngreso.slice(0, 10) : "");
   const [ubicacion, setUbicacion] = useState(cond?.ubicacion ?? "");
   const [jefe, setJefe] = useState(cond?.jefeDirecto ?? "");
+  const [instrucciones, setInstrucciones] = useState(cond?.instruccionesIngreso ?? "");
   const [guardando, setGuardando] = useState(false);
   const [expediente, setExpediente] = useState<NuevoIngreso | null>(null);
   const [cancelando, setCancelando] = useState(false);
@@ -3820,6 +3831,7 @@ function PanelContratacion({
       fechaIngreso: fechaIngreso || undefined,
       ubicacion,
       jefeDirecto: jefe,
+      instruccionesIngreso: instrucciones,
     });
     setGuardando(false);
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
@@ -3874,6 +3886,18 @@ function PanelContratacion({
         </label>
         <CampoTexto label="Ubicación" value={ubicacion} onChange={setUbicacion} />
         <CampoTexto label="Jefe directo" value={jefe} onChange={setJefe} />
+        {/* Fase 5: se mandan por WhatsApp/correo automáticamente al dar de alta (evento instrucciones_ingreso) */}
+        <label className="flex flex-col gap-1.5 sm:col-span-2">
+          <span className="text-xs font-medium text-ink-2">Instrucciones de ingreso (primer día)</span>
+          <textarea
+            value={instrucciones}
+            onChange={(e) => setInstrucciones(e.target.value)}
+            rows={3}
+            placeholder="Ej. Preséntate el lunes a las 9:00 en recepción con INE y comprobante de domicilio; pregunta por Laura de RH."
+            className="rounded-xl border border-border-soft bg-surface px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+          />
+          <span className="text-[11px] text-ink-3">Al dar de alta, el colaborador recibe automáticamente su bienvenida con estos datos por WhatsApp y correo.</span>
+        </label>
       </div>
       {live && (
         <Button size="sm" variant="secondary" className="mt-3" onClick={guardar} disabled={guardando}>
