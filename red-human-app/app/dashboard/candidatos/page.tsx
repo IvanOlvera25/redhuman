@@ -1270,9 +1270,12 @@ function ModalCandidato({
     const r = await autorizarAlta(c.expedienteId, undefined, forzarPrueba, notificarAltaRef.current);
     if (!r.ok) {
       setOcupado("");
+      // 2026-09-15: sin documentos adjuntos el backend responde 400 y NO se puede forzar ni en Modo
+      // Prueba — no se ofrece «Continuar de todos modos», solo el aviso rojo con el motivo.
+      const sinDocumentos = /no tiene documentos adjuntos/i.test(r.error);
       return setAviso({
         tono: "error", texto: r.error,
-        reintentar: modoPrueba && !forzarPrueba ? () => darDeAltaComoColaborador(true) : undefined,
+        reintentar: modoPrueba && !forzarPrueba && !sinDocumentos ? () => darDeAltaComoColaborador(true) : undefined,
       });
     }
     const actualizado = await fetchCandidato(c.id);
@@ -1428,7 +1431,7 @@ function ModalCandidato({
           {tab === "documentos" && <PestanaDocumentos c={c} live={live} onCambio={onCambio} setAviso={setAviso} />}
           {tab === "whatsapp" && <PestanaWhatsApp c={c} live={live} onCambio={onCambio} />}
           {tab === "contratacion" && c.etapa === "Contratación" && (
-            <PanelContratacion c={c} live={live} onCambio={onCambio} setAviso={setAviso} />
+            <PanelContratacion c={c} live={live} onCambio={onCambio} setAviso={setAviso} onDocumentos={setConfirmacion} />
           )}
         </div>
 
@@ -1518,7 +1521,9 @@ function ModalCandidato({
                   </Button>
                 )}
 
-                {/* Onboarding · Zero-Touch fase 2: RH detona por WhatsApp, la IA da seguimiento */}
+                {/* Onboarding · Zero-Touch fase 2: RH detona por WhatsApp (plantilla de documentos), el
+                    candidato manda los archivos por el mismo chat y la IA da seguimiento. En Contratación
+                    los mismos botones viven en PanelContratacion (2026-09-15). */}
                 {c.etapa === "Onboarding" && (
                   <>
                     <Button variant="outline" size="sm" onClick={() => setConfirmacion("solicitar")} disabled={Boolean(ocupado)}>
@@ -3746,11 +3751,15 @@ function PanelContratacion({
   live,
   onCambio,
   setAviso,
+  onDocumentos,
 }: {
   c: Candidato;
   live: boolean;
   onCambio: (c: Candidato) => void;
   setAviso: (a: AvisoEstado) => void;
+  /** 2026-09-15: abre la confirmación «Solicitar documentos» / «Enviar recordatorio» del modal
+   * (plantilla de WhatsApp; el candidato responde mandando el archivo por el mismo chat). */
+  onDocumentos?: (que: "solicitar" | "recordatorio") => void;
 }) {
   const modoPrueba = useModoPrueba();
   const cond = c.expedienteCondiciones;
@@ -3885,6 +3894,16 @@ function PanelContratacion({
             >
               <FileText className="h-3.5 w-3.5" /> Generar carta de intención
             </a>
+          )}
+          {c.expedienteId != null && onDocumentos && (
+            <>
+              <Button size="sm" variant="outline" onClick={() => onDocumentos("solicitar")} disabled={Boolean(ocupado)}>
+                <Send className="h-4 w-4" /> Solicitar documentos
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => onDocumentos("recordatorio")} disabled={Boolean(ocupado)}>
+                <RotateCw className="h-4 w-4" /> Enviar recordatorio
+              </Button>
+            </>
           )}
           <Button size="sm" onClick={() => enviarOnboarding()} disabled={Boolean(ocupado)}>
             Enviar a Onboarding

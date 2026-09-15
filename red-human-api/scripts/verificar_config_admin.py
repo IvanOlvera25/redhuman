@@ -219,6 +219,12 @@ with TestClient(app) as client:
     db.expire_all()
     base = db.query(NotificacionEnviada).count()
     client.patch("/configuracion", json={"modo_prueba": True})  # forzar_prueba solo aplica con Modo Prueba
+    # 2026-09-15: sin NINGÚN documento adjunto el alta es 400 (ni con forzar_prueba) — se adjunta uno.
+    r = client.post(f"/contratacion/expedientes/{exp_id}/alta", json={}, params={"forzar_prueba": "true"})
+    check(r.status_code == 400 and "no tiene documentos adjuntos" in r.json()["detail"], "alta sin documentos adjuntos → 400 aun con forzar_prueba")
+    pdf = b"%PDF-1.4\n" + b"%" * 600 + b"\n%%EOF\n"
+    r = client.post(f"/contratacion/expedientes/{exp_id}/documentos", data={"tipo": "CURP"}, files={"archivo": ("curp.pdf", pdf, "application/pdf")})
+    check(r.status_code == 200, "subir un documento al expediente")
     r = client.post(f"/contratacion/expedientes/{exp_id}/alta", json={"notificar": {"candidato_whatsapp": True}}, params={"forzar_prueba": "true"})
     client.patch("/configuracion", json={"modo_prueba": False})
     check(r.status_code == 200 and [e.evento for e in enviados(base)] == ["contratacion"], "alta de colaborador con override → notifica al candidato")
@@ -250,6 +256,9 @@ with TestClient(app) as client:
     for mm in db.query(Mensaje).filter_by(candidato_id=pers.id).all():
         mm.creado_en = datetime.now(timezone.utc) - timedelta(minutes=12)
     pers.creado_en = datetime.now(timezone.utc) - timedelta(minutes=12)  # sin mensajes guardados aún (solo menú), cuenta desde el alta
+    # 2026-09-15: la frialdad se mide sobre la POSTULACIÓN (creación / última actividad / último mensaje)
+    p_ini.creado_en = datetime.now(timezone.utc) - timedelta(minutes=12)
+    p_ini.ultima_actividad_en = None
     db.commit()
     r = client.post("/webhooks/whatsapp", json=meta_texto(WA, "Hola de nuevo"))
     db.expire_all()

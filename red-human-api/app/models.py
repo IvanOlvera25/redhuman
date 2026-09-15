@@ -32,6 +32,13 @@ PLATAFORMAS = ["WhatsApp", "OCC", "LinkedIn", "Portal"]
 # nueva que RH mueve a mano sin automatización detrás.
 ETAPAS_CANDIDATO = ["Prefiltro", "Entrevista IA", "Evaluación", "Entrevista Humana", "Contratación", "Onboarding"]
 
+# 2026-09-15 (memoria de 5 días): en estas etapas la conversación de WhatsApp conserva su contexto
+# hasta CONTEXTO_WHATSAPP_HORAS sin actividad — un "sí quiero reagendar" al día 3 debe caer en la
+# postulación en curso, nunca en el menú de vacantes. Solo el Prefiltro sigue con la ventana corta
+# del Modo Prueba (ConfiguracionSistema.modo_prueba_ventana_min).
+ETAPAS_CONTEXTO_LARGO = ("Entrevista IA", "Evaluación", "Entrevista Humana", "Contratación", "Onboarding")
+CONTEXTO_WHATSAPP_HORAS = 120
+
 
 class Vacante(Base):
     __tablename__ = "vacantes"
@@ -218,7 +225,7 @@ class Candidato(Base):
 # Cómo nació la postulación — alimenta "por fuente" en /metricas.
 ORIGENES_POSTULACION = ["formulario", "whatsapp", "rh_directo", "cv_masivo", "reinicio_prueba", "migracion"]
 # Por qué se cerró (activa=False). "" mientras sigue en curso.
-MOTIVOS_CIERRE = ["descartado", "contratado", "reinicio_prueba", "prueba_expirada"]
+MOTIVOS_CIERRE = ["descartado", "contratado", "reinicio_prueba", "prueba_expirada", "sin_interes"]
 
 
 class Postulacion(Base):

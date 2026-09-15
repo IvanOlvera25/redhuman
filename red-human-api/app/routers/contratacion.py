@@ -5,6 +5,8 @@ agente recibe los documentos, los valida con IA y da seguimiento; el alta la
 autoriza siempre una persona de RH.
 """
 
+import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -190,8 +192,67 @@ async def subir_documento_interno(db: Session, e: Expediente, tipo: str, archivo
     if e.estado == "alta":
         raise HTTPException(409, "El expediente ya fue dado de alta; no admite cambios.")
     doc = _documento(e, tipo)
-
     validado = await fs.validar(archivo, f"documento «{doc.tipo}»")
+    return _registrar_documento(db, e, doc, validado, subido_por)
+
+
+async def adjuntar_documento_bytes(
+    db: Session, e: Expediente, doc: Documento, contenido: bytes, nombre: str, mime: str, subido_por: str
+) -> dict:
+    """Tercera puerta de entrada (2026-09-15): documentos que llegan por WhatsApp ya descargados de
+    Meta. Misma validación de archivo e IA que la liga pública y la subida de RH."""
+    if e.estado == "alta":
+        raise HTTPException(409, "El expediente ya fue dado de alta; no admite cambios.")
+    validado = fs.validar_bytes(contenido, nombre, f"documento «{doc.tipo}»")
+    return _registrar_documento(db, e, doc, validado, subido_por)
+
+
+def _norm(s: str) -> str:
+    return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
+
+
+# Sinónimos con los que un candidato nombra sus papeles por WhatsApp → palabra clave del tipo del
+# expediente (DOCUMENTOS_BASE). Se compara sin acentos y por subcadena.
+_SINONIMOS_DOC = [
+    (("ine", "ife", "pasaporte", "identificacion", "credencial"), "identificacion"),
+    (("curp",), "curp"),
+    (("rfc", "fiscal", "sat", "constancia"), "fiscal"),
+    (("nss", "seguro social", "imss"), "seguridad social"),
+    (("domicilio", "luz", "cfe", "agua", "telmex", "predial", "recibo"), "domicilio"),
+    (("clabe", "banco", "bancaria", "estado de cuenta", "cuenta"), "bancaria"),
+]
+
+
+def documento_para_adjunto(db: Session, e: Expediente, pie: str, nombre_archivo: str) -> Documento:
+    """A qué Documento del expediente corresponde un adjunto de WhatsApp: (1) el pie de foto o el
+    nombre del archivo mencionan un tipo ("mi INE", "comprobante de luz"); (2) si no, el primer
+    obligatorio pendiente/rechazado; (3) si no falta ninguno, el primer opcional pendiente; (4) si
+    tampoco, se agrega como documento adicional (RH lo reclasifica desde el expediente)."""
+    pista = _norm(f"{pie} {nombre_archivo}")
+    docs = sorted(e.documentos, key=lambda d: d.id)
+    if pista.strip():
+        for d in docs:
+            if _norm(d.tipo) in pista:
+                return d
+        for palabras, clave in _SINONIMOS_DOC:
+            if any(re.search(rf"\b{re.escape(w)}\b", pista) for w in palabras):
+                d = next((x for x in docs if clave in _norm(x.tipo)), None)
+                if d:
+                    return d
+    for d in docs:
+        if d.obligatorio and d.estado in ("pendiente", "rechazado"):
+            return d
+    for d in docs:
+        if d.estado in ("pendiente", "rechazado"):
+            return d
+    n = sum(1 for d in docs if d.tipo.startswith("Documento WhatsApp")) + 1
+    nuevo = Documento(expediente_id=e.id, tipo=f"Documento WhatsApp {n}", obligatorio=False)
+    db.add(nuevo)
+    db.flush()
+    return nuevo
+
+
+def _registrar_documento(db: Session, e: Expediente, doc: Documento, validado, subido_por: str) -> dict:
     titular = e.candidato.nombre if e.candidato else ""
     v, con_ia = ia.validar_documento(validado.b64, validado.extension, doc.tipo, titular)
 
@@ -418,6 +479,10 @@ async def alta(
     e = _expediente(db, exp_id, cuenta.id)
     if e.estado == "alta":
         raise HTTPException(409, f"El expediente ya fue dado de alta por {e.alta_autorizada_por}.")
+    # 2026-09-15 (bloqueo de seguridad, pedido del cliente): sin NINGÚN archivo adjunto no hay alta,
+    # ni con forzar_prueba — no es fricción de secuencia, es integridad del expediente.
+    if not any(d.archivo for d in e.documentos):
+        raise HTTPException(400, "No se puede dar de alta al colaborador: El expediente no tiene documentos adjuntos.")
     if e.progreso < 100 and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, f"El expediente está al {e.progreso}%. Faltan: {', '.join(e.pendientes)}.")
     sin_revisar = [d.tipo for d in e.obligatorios if d.estado == "recibido" and not d.revisado_por]

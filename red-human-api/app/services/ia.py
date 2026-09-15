@@ -727,6 +727,7 @@ def agenda_turno(
     *,
     db: "Session",
     candidato: "Postulacion",
+    nota: str = "",
 ) -> Tuple[TurnoPrefiltro, bool]:
     """Turno posterior a la clasificación para un candidato ya apto: pregunta disponibilidad y,
     en cuanto el candidato confirma fecha/hora, invoca agendar_videollamada (function calling),
@@ -764,6 +765,7 @@ def agenda_turno(
         "— nunca confirmes una cita sin haberla invocado; (3) después de invocarla, confirma la fecha "
         "con calidez, pero NO escribas tú la liga ni intentes transcribirla — el sistema la agrega "
         "textualmente al final del mensaje; (4) tono cálido, una sola idea por mensaje."
+        + (f"\nContexto: {nota}" if nota else "")
     )
     mensajes = [{"role": ("user" if m["rol"] == "user" else "assistant"), "content": m["texto"]} for m in historial]
 
