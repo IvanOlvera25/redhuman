@@ -154,6 +154,8 @@ export interface Candidato {
     ubicacion: string;
     jefeDirecto: string;
     fechaIngreso: string | null;
+    /** Fase 5: instrucciones del primer día (van en la bienvenida automática al alta). */
+    instruccionesIngreso?: string;
   } | null;
   entrevistaId?: string | null;
   entrevistaEstado?: string | null;

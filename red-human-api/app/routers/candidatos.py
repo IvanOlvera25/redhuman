@@ -1950,6 +1950,7 @@ class CondicionesContratacionIn(BaseModel):
     fecha_ingreso: Optional[str] = None  # ISO: 2026-09-15
     ubicacion: str = ""
     jefe_directo: str = ""
+    instrucciones_ingreso: str = ""  # Fase 5: van en la bienvenida automática al dar de alta
 
 
 @router.patch("/{codigo}/condiciones-contratacion")
@@ -1971,6 +1972,7 @@ def guardar_condiciones_contratacion(
     exp.tipo_contratacion = datos.tipo_contratacion.strip()
     exp.ubicacion = datos.ubicacion.strip()
     exp.jefe_directo = datos.jefe_directo.strip()
+    exp.instrucciones_ingreso = datos.instrucciones_ingreso.strip()
     if datos.fecha_ingreso:
         try:
             exp.fecha_ingreso = datetime.fromisoformat(datos.fecha_ingreso).replace(tzinfo=timezone.utc)

@@ -668,6 +668,9 @@ class Expediente(Base):
     # EntrevistaHumana, sigue válido hasta que el expediente llega a estado "alta".
     token: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True, nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    # Fase 5 (2026-09-15): instrucciones de ingreso que RH captura en Contratación (hora y lugar de
+    # llegada, con quién presentarse, qué llevar…). Van en el mensaje automático de bienvenida al alta.
+    instrucciones_ingreso: Mapped[str] = mapped_column(Text, default="")
     # Fase 3 (2026-09-15): «recordar hasta» — fecha límite que respeta el cron de recordatorios de
     # documentos. Null = sin recordatorios automáticos para este expediente.
     documentos_hasta: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -767,6 +770,7 @@ class Colaborador(Base):
     cliente_id: Mapped[Optional[int]] = mapped_column(ForeignKey("clientes.id"), nullable=True, index=True)
 
     candidato_origen: Mapped[Optional["Candidato"]] = relationship()
+    cliente: Mapped[Optional["Cliente"]] = relationship()  # Fase 5: filtro por Cliente
 
 
 # ============================================================
@@ -1181,6 +1185,8 @@ EVENTOS_NOTIFICACION = [
     "contratacion",
     "solicitud_documentos",
     "recordatorio_documentos",
+    # Fase 5 (2026-09-15): bienvenida + instrucciones de ingreso, automático al dar de alta (sin override).
+    "instrucciones_ingreso",
 ]
 
 # Fase 7A (2026-09-12): valores con los que NACE la regla de cada evento cuando una Cuenta no la
@@ -1195,6 +1201,7 @@ REGLAS_NOTIFICACION_DEFAULT = {
     "contratacion": {"candidato_whatsapp": True},
     "solicitud_documentos": {"candidato_whatsapp": True},
     "recordatorio_documentos": {"candidato_whatsapp": True},
+    "instrucciones_ingreso": {"candidato_correo": True, "candidato_whatsapp": True},
     # entrevista_modificada, entrevista_cancelada, recomendacion_final, candidato_apto: todo apagado.
 }
 

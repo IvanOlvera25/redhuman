@@ -376,7 +376,7 @@ export function quitarUsuarioCuenta(cuentaId: number, usuarioId: number) {
    Fase D · Notificaciones configurables por evento/destinatario/canal (solo admin)
    ============================================================ */
 
-/** Los 10 eventos configurables (puntos 22-26) — el orden importa para la grilla de
+/** Los 11 eventos configurables (puntos 22-26 + Fase 5) — el orden importa para la grilla de
  * Configuración → Notificaciones, mantenerlo igual al de `EVENTOS_NOTIFICACION` en models.py. */
 export const EVENTOS_NOTIFICACION = [
   "entrevista_agendada",
@@ -389,6 +389,7 @@ export const EVENTOS_NOTIFICACION = [
   "contratacion",
   "solicitud_documentos",
   "recordatorio_documentos",
+  "instrucciones_ingreso",
 ] as const;
 
 export type EventoNotificacion = (typeof EVENTOS_NOTIFICACION)[number];
@@ -404,6 +405,7 @@ export const NOMBRE_EVENTO_NOTIFICACION: Record<EventoNotificacion, string> = {
   contratacion: "Contratación",
   solicitud_documentos: "Solicitud de documentos",
   recordatorio_documentos: "Recordatorio de documentos",
+  instrucciones_ingreso: "Bienvenida e instrucciones de ingreso (automático al dar de alta)",
 };
 
 export interface ReglaNotificacion {
@@ -1150,7 +1152,7 @@ export function enviarEvaluacionEntrevistaHumana(
 
 export function guardarCondicionesContratacion(
   codigo: string,
-  datos: { puesto?: string; sueldo?: string; tipoContratacion?: string; fechaIngreso?: string; ubicacion?: string; jefeDirecto?: string },
+  datos: { puesto?: string; sueldo?: string; tipoContratacion?: string; fechaIngreso?: string; ubicacion?: string; jefeDirecto?: string; instruccionesIngreso?: string },
 ) {
   return patch<Candidato>(`/candidatos/${codigo}/condiciones-contratacion`, {
     puesto: datos.puesto ?? "",
@@ -1159,6 +1161,7 @@ export function guardarCondicionesContratacion(
     fecha_ingreso: datos.fechaIngreso || null,
     ubicacion: datos.ubicacion ?? "",
     jefe_directo: datos.jefeDirecto ?? "",
+    instrucciones_ingreso: datos.instruccionesIngreso ?? "",  // Fase 5: van en la bienvenida automática al alta
   });
 }
 
@@ -1643,7 +1646,7 @@ export function enviarRecordatorio(expedienteId: number, notificar?: NotificarAc
 /** `forzarPrueba` (Lote 4): inerte salvo que Modo Prueba esté activo en el servidor — el
  * bloqueo de "expediente ya dado de alta" NUNCA se salta, ni con este flag. */
 export function autorizarAlta(expedienteId: number, fechaIngreso?: string, forzarPrueba = false, notificar?: NotificarAccion) {
-  return post<{ ok: boolean; expediente: NuevoIngreso }>(
+  return post<{ ok: boolean; expediente: NuevoIngreso; notificaciones?: { destinatario: string; canal: string; destino: string; enviado: boolean; detalle?: string }[] }>(
     `/contratacion/expedientes/${expedienteId}/alta${forzarPrueba ? "?forzar_prueba=true" : ""}`,
     { fecha_ingreso: fechaIngreso ?? null, notificar: notificarSnake(notificar) },
   );
@@ -1906,12 +1909,23 @@ export interface Colaborador {
   dadoDeAltaPor: string;
   candidatoOrigenId: string | null;
   expedienteId: number | null;
+  /** Fase 5: Cliente para el que se contrató (null = directo). */
+  clienteId?: number | null;
+  clienteNombre?: string | null;
   creado: string;
 }
 
-export function fetchColaboradores(activo?: boolean) {
-  const q = activo === undefined ? "" : `?activo=${activo}`;
-  return get<Colaborador[]>(`/colaboradores${q}`);
+/** Fase 5: opciones del filtro por Cliente (solo Clientes con colaboradores; id 0 = directo). */
+export function fetchClientesColaboradores() {
+  return get<{ id: number; nombre: string; colaboradores: number }[]>("/colaboradores/clientes");
+}
+
+export function fetchColaboradores(activo?: boolean, clienteId?: number | null) {
+  const params = new URLSearchParams();
+  if (activo !== undefined) params.set("activo", String(activo));
+  if (clienteId !== undefined && clienteId !== null) params.set("cliente_id", String(clienteId));
+  const q = params.toString();
+  return get<Colaborador[]>(`/colaboradores${q ? `?${q}` : ""}`);
 }
 
 /* ============================================================

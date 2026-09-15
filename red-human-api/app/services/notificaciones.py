@@ -240,6 +240,43 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
             texto = f"El candidato {c.nombre} fue contratado para el puesto {puesto}.{ingreso}"
             return texto if canal == "whatsapp" else (f"Contratación confirmada — {puesto}", f"<p>{texto}</p>")
 
+    if evento == "instrucciones_ingreso" and audiencia == "candidato":
+        # Fase 5: bienvenida + instrucciones de ingreso, automático al dar de alta como colaborador.
+        e = c.expediente
+        empresa = extra.get("empresa") or (nombre_empresa_candidato(v) if v else "") or "la empresa"
+        fecha = extra.get("fecha_ingreso")
+        fecha_txt = _fecha_hora_legible_mx(fecha).split(" a las")[0] if fecha else "por confirmar"
+        datos = [
+            ("Puesto", extra.get("puesto") or (e.puesto if e else "") or puesto),
+            ("Empresa", empresa),
+            ("Fecha de ingreso", fecha_txt),
+            ("Lugar", (e.ubicacion if e else "") or (v.ubicacion if v else "") or "por confirmar"),
+            ("Jefe(a) directo(a)", (e.jefe_directo if e else "") or "por confirmar"),
+            ("Tipo de contratación", (e.tipo_contratacion if e else "") or "por confirmar"),
+        ]
+        instrucciones = ((e.instrucciones_ingreso if e else "") or "").strip()
+        contacto = extra.get("contacto_rh") or ""
+        if canal == "whatsapp":
+            lineas = "\n".join(f"• {k}: {val}" for k, val in datos)
+            texto = (
+                f"¡Bienvenido(a) al equipo, {primer_nombre}! 🎉 Tu alta como colaborador(a) en {empresa} ya está autorizada.\n\n"
+                f"Estos son tus datos de ingreso:\n{lineas}"
+                + (f"\n\nInstrucciones para tu primer día:\n{instrucciones}" if instrucciones else "")
+                + (f"\n\nCualquier duda, escríbenos: {contacto}" if contacto else "")
+                + "\n\n¡Nos vemos pronto! 🙌"
+            )
+            return texto
+        filas = "".join(f"<tr><td style=\"padding:6px 12px 6px 0;font-weight:bold\">{k}</td><td style=\"padding:6px 0\">{val}</td></tr>" for k, val in datos)
+        html = (
+            f"<p>¡Bienvenido(a) al equipo, <strong>{primer_nombre}</strong>! 🎉</p>"
+            f"<p>Tu alta como colaborador(a) en <strong>{empresa}</strong> ya está autorizada. Estos son tus datos de ingreso:</p>"
+            f"<table style=\"border-collapse:collapse\">{filas}</table>"
+            + (f"<p><strong>Instrucciones para tu primer día:</strong><br>{instrucciones.replace(chr(10), '<br>')}</p>" if instrucciones else "")
+            + (f"<p>Cualquier duda, escríbenos: {contacto}</p>" if contacto else "")
+            + "<p>¡Nos vemos pronto!<br>Red Human AI</p>"
+        )
+        return (f"Bienvenido(a) a {empresa} — instrucciones de ingreso", html)
+
     if evento == "solicitud_documentos":
         if audiencia == "candidato":
             texto = _texto_solicitud_documentos(liga)

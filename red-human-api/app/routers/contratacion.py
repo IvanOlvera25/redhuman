@@ -532,8 +532,28 @@ async def alta(
     if p:
         # La postulación cierra su ciclo: queda como historial "contratado" de la persona.
         p.cerrar("contratado")
+        # Fase 5 (2026-09-15): bienvenida + instrucciones de ingreso AUTOMÁTICAS al candidato (evento
+        # `instrucciones_ingreso`, regla de la Cuenta, sin override — como candidato_apto). Para no
+        # mandarle dos mensajes seguidos, el evento `contratacion` deja de escribirle al candidato
+        # cuando la bienvenida sí sale; sigue avisando al Cliente según la regla/override de RH.
+        vac = p.vacante
+        extra_ingreso = {
+            "fecha_ingreso": e.fecha_ingreso,
+            "puesto": e.puesto or (vac.titulo if vac else ""),
+            "empresa": nombre_empresa_candidato(vac) if vac else "",
+            "contacto_rh": " · ".join(x for x in [cuenta.correo_comunicacion, cuenta.whatsapp_comunicacion] if x),
+        }
+        bienvenida = await notificaciones.disparar(db, "instrucciones_ingreso", p, "sistema", extra=extra_ingreso)
+        override_contratacion = override_de(datos.notificar) or {}
+        if any(r.get("enviado") for r in bienvenida):
+            override_contratacion = {**override_contratacion, "candidato_correo": False, "candidato_whatsapp": False}
         resultados = await notificaciones.disparar(
-            db, "contratacion", p, u.nombre, extra={"fecha_ingreso": e.fecha_ingreso}, override=override_de(datos.notificar)
+            db, "contratacion", p, u.nombre, extra={"fecha_ingreso": e.fecha_ingreso}, override=override_contratacion or None
+        )
+        resultados = bienvenida + resultados
+        registrar(
+            db, "sistema", "instrucciones_ingreso_enviadas", "expediente", str(e.id),
+            {"postulacion": p.codigo, "envios": [{k: r.get(k) for k in ("canal", "destino", "enviado", "detalle")} for r in bienvenida]},
         )
 
     db.commit()
