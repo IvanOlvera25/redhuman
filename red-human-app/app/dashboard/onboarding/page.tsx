@@ -44,6 +44,7 @@ import { useNombreRH, usePuedeDecidir } from "@/components/sesion";
 import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import type { NotificarAccion } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { usePolling } from "@/lib/use-polling";
 
 const docConfig: Record<
   EstadoDoc,
@@ -84,6 +85,8 @@ export default function Onboarding() {
   useEffect(() => {
     recargar();
   }, [recargar]);
+  // Fase 4: documentos que llegan por WhatsApp / liga pública aparecen solos.
+  usePolling(recargar);
 
   /** Aplica el expediente que devuelve la API tras cualquier mutación. */
   const aplicar = useCallback((actualizado: NuevoIngreso) => {

@@ -7,7 +7,8 @@
         Vacantes, vía `slotDatosPrincipales`] → Ubicación → Modalidad → Sueldo (Desde/Hasta/Moneda/
         Periodicidad o A convenir).
      2. Guía opcional para Red Human: Descripción breve → Indispensables → Deseables → Prestaciones.
-     3. Un solo botón «Generar vacante con Red Human», ABAJO de (1) y (2).
+     3. Un solo botón «Generar vacante con Red Human», ABAJO de todo lo capturable (Fase 4, 2026-09-15:
+        se movió al final del formulario para que no parta la lista de preguntas del prefiltro).
      4. Tras generar, (2) se vuelve «Contenido generado por Red Human (editable)»: Descripción
         completa → Responsabilidades → Indispensables → Deseables → Prestaciones — mismos campos,
         siempre visibles y editables.
@@ -25,6 +26,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronUp, Sparkles, X } from "lucide-react";
 import { Button, Eyebrow } from "@/components/ui";
 import { Area, CampoSueldo, Field, ListaEditable, Selector } from "@/components/dashboard/campos";
+import { ESTADOS_MX, municipiosDe, parsearUbicacion, textoUbicacion } from "@/lib/ubicacion";
 import {
   generarVacanteIA,
   ENFOQUES_ENTREVISTA,
@@ -44,7 +46,11 @@ export interface ContenidoVacante {
   titulo: string;
   area: string;
   seniority: string;
+  /** Texto derivado «Municipio, Estado» (lo leen portal/WhatsApp/IA); se conserva libre en vacantes previas. */
   ubicacion: string;
+  /* Fase 4: ubicación estructurada — selectores anidados Estado → Municipio/Alcaldía */
+  ubicacion_estado: string;
+  ubicacion_municipio: string;
   modalidad: string;
   sueldo_desde: string; // texto numérico del input; vacío = sin dato
   sueldo_hasta: string;
@@ -57,7 +63,10 @@ export interface ContenidoVacante {
   requisitos_deseables: string[];
   beneficios: string[];
   /* --- 5. selección --- */
+  /** Preguntas del prefiltro de la POSTULACIÓN WEB (/aplicar). */
   preguntas_filtro: CriterioFiltro[];
+  /** Fase 4: preguntas del prefiltro por WHATSAPP — independientes y editables. Vacío = el agente usa las de la web. */
+  preguntas_filtro_whatsapp: CriterioFiltro[];
   /** Fase 4 (Punto 6): enfoque de la Entrevista Red Human — solo 2 niveles. */
   enfoque_entrevista: EnfoqueEntrevista;
   /* --- avanzado (los llena la IA; editables pero colapsados) --- */
@@ -74,6 +83,8 @@ export const CONTENIDO_VACIO: ContenidoVacante = {
   area: "",
   seniority: "",
   ubicacion: "",
+  ubicacion_estado: "",
+  ubicacion_municipio: "",
   modalidad: "Presencial",
   sueldo_desde: "",
   sueldo_hasta: "",
@@ -85,6 +96,7 @@ export const CONTENIDO_VACIO: ContenidoVacante = {
   requisitos_deseables: [],
   beneficios: [],
   preguntas_filtro: [],
+  preguntas_filtro_whatsapp: [],
   enfoque_entrevista: "profesional",
   resumen: "",
   perfil_ideal: "",
@@ -134,12 +146,20 @@ function unirCapturado(capturados: string[], generados: string[] | undefined, ex
 }
 
 /** Precarga TODOS los campos compartidos desde una plantilla. */
+/** Estado/Municipio guardados o, para registros previos con solo texto libre, lo que se reconozca. */
+export function ubicacionEstructurada(estado: string | undefined, municipio: string | undefined, libre: string | undefined) {
+  if (estado) return { ubicacion_estado: estado, ubicacion_municipio: municipio ?? "" };
+  const p = parsearUbicacion(libre ?? "");
+  return { ubicacion_estado: p.estado, ubicacion_municipio: p.municipio };
+}
+
 export function contenidoDesdePlantilla(p: Plantilla): ContenidoVacante {
   return {
     titulo: p.titulo,
     area: p.area,
     seniority: p.seniority ?? "",
     ubicacion: p.ubicacion ?? "",
+    ...ubicacionEstructurada(p.ubicacionEstado, p.ubicacionMunicipio, p.ubicacion),
     modalidad: p.modalidad || "Presencial",
     sueldo_desde: p.sueldoDesde ? String(p.sueldoDesde) : "",
     sueldo_hasta: p.sueldoHasta ? String(p.sueldoHasta) : "",
@@ -151,6 +171,7 @@ export function contenidoDesdePlantilla(p: Plantilla): ContenidoVacante {
     requisitos_deseables: [...(p.requisitosDeseables ?? [])],
     beneficios: [...(p.beneficios ?? [])],
     preguntas_filtro: [...(p.preguntasFiltro ?? [])],
+    preguntas_filtro_whatsapp: [...(p.preguntasFiltroWhatsapp ?? [])],
     enfoque_entrevista: p.enfoqueEntrevista ?? "profesional",
     resumen: p.resumen,
     perfil_ideal: p.perfilIdeal,
@@ -193,7 +214,7 @@ export function faltantesDatosPrincipales(c: ContenidoVacante): string[] {
   if (!c.titulo.trim()) faltan.push("Puesto");
   if (!c.area.trim()) faltan.push("Área");
   if (!c.seniority) faltan.push("Seniority");
-  if (!c.ubicacion.trim()) faltan.push("Ubicación");
+  if (!c.ubicacion_estado && !c.ubicacion.trim()) faltan.push("Ubicación (Estado y Municipio)");
   if (!c.modalidad) faltan.push("Modalidad");
   if (!c.sueldo_periodicidad) faltan.push("Periodicidad del sueldo (o «A convenir»)");
   else if (c.sueldo_periodicidad !== "a_convenir" && !c.sueldo_desde) faltan.push("Sueldo desde (o «A convenir»)");
@@ -208,7 +229,9 @@ export function contenidoComoPayload(c: ContenidoVacante) {
     titulo: c.titulo.trim(),
     area: c.area,
     seniority: c.seniority,
-    ubicacion: c.ubicacion,
+    ubicacion: textoUbicacion(c.ubicacion_estado, c.ubicacion_municipio, c.ubicacion),
+    ubicacion_estado: c.ubicacion_estado,
+    ubicacion_municipio: c.ubicacion_municipio,
     modalidad: c.modalidad,
     sueldo_desde: c.sueldo_periodicidad === "a_convenir" ? null : desde,
     sueldo_hasta: c.sueldo_periodicidad === "a_convenir" ? null : hasta,
@@ -221,6 +244,7 @@ export function contenidoComoPayload(c: ContenidoVacante) {
     requisitos_deseables: c.requisitos_deseables,
     beneficios: c.beneficios,
     preguntas_filtro: c.preguntas_filtro,
+    preguntas_filtro_whatsapp: c.preguntas_filtro_whatsapp,
     enfoque_entrevista: c.enfoque_entrevista,
     resumen: c.resumen,
     perfil_ideal: c.perfil_ideal,
@@ -240,6 +264,47 @@ export function Seccion({ titulo, children, ayuda }: { titulo: string; children:
       </div>
       {children}
     </section>
+  );
+}
+
+/** Fase 4: selectores anidados Estado → Municipio/Alcaldía (catálogo INEGI en lib/estados-municipios.json). */
+function SelectorUbicacion({
+  estado,
+  municipio,
+  libre,
+  onChange,
+}: {
+  estado: string;
+  municipio: string;
+  libre: string;
+  onChange: (estado: string, municipio: string) => void;
+}) {
+  const municipios = municipiosDe(estado);
+  const claseSelect = "h-11 w-full rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20";
+  return (
+    <div className="grid gap-4 sm:col-span-2 sm:grid-cols-2">
+      <label className="flex flex-col gap-1.5">
+        <span className="text-sm font-medium text-ink-2">Estado *</span>
+        <select value={estado} onChange={(e) => onChange(e.target.value, "")} className={claseSelect}>
+          <option value="">Elige un estado…</option>
+          {ESTADOS_MX.map((e) => (
+            <option key={e} value={e}>{e}</option>
+          ))}
+        </select>
+      </label>
+      <label className="flex flex-col gap-1.5">
+        <span className="text-sm font-medium text-ink-2">{estado === "Ciudad de México" ? "Alcaldía *" : "Municipio *"}</span>
+        <select value={municipio} onChange={(e) => onChange(estado, e.target.value)} disabled={!estado} className={claseSelect}>
+          <option value="">{estado ? "Elige…" : "Primero elige el estado"}</option>
+          {municipios.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+        {!estado && libre.trim() && (
+          <span className="text-[11px] text-ink-3">Ubicación actual (texto libre): «{libre}». Elige Estado y Municipio para estructurarla.</span>
+        )}
+      </label>
+    </div>
   );
 }
 
@@ -379,7 +444,14 @@ export function FormularioContenidoVacante({
           <Field label="Área *" value={value.area} onChange={set("area")} placeholder="Operaciones, Ventas…" />
           <Selector label="Seniority *" value={value.seniority} onChange={set("seniority")} opciones={[{ valor: "", texto: "Elige un nivel…" }, ...SENIORITIES.map((s) => ({ valor: s, texto: s }))]} />
           {slotDatosPrincipales}
-          <Field label="Ubicación *" value={value.ubicacion} onChange={set("ubicacion")} placeholder="Guadalajara, JAL" />
+          <SelectorUbicacion
+            estado={value.ubicacion_estado}
+            municipio={value.ubicacion_municipio}
+            libre={value.ubicacion}
+            onChange={(estado, municipio) =>
+              onChange({ ...value, ubicacion_estado: estado, ubicacion_municipio: municipio, ubicacion: textoUbicacion(estado, municipio, value.ubicacion) })
+            }
+          />
           <Selector label="Modalidad *" value={value.modalidad} onChange={set("modalidad")} opciones={MODALIDADES} />
           <CampoSueldo
             value={sueldo}
@@ -429,7 +501,35 @@ export function FormularioContenidoVacante({
         />
       </Seccion>
 
-      {/* 3. Botón único, ABAJO de datos principales y guía */}
+      {/* 5. Selección — Fase 4: dos listas INDEPENDIENTES (postulación web vs WhatsApp) */}
+      <Seccion titulo="Prefiltro · postulación web" ayuda="Preguntas que responde el candidato en el formulario público (/aplicar). Red Human las propone a partir de los requisitos indispensables; edita, elimina o agrega, y marca cuáles son eliminatorias.">
+        <CriteriosEditor items={value.preguntas_filtro} onChange={set("preguntas_filtro")} />
+      </Seccion>
+
+      <Seccion titulo="Prefiltro · WhatsApp" ayuda="Preguntas que Red Human hace por WhatsApp. Son independientes de las de la postulación web: puedes hacerlas más cortas o distintas. Si las dejas vacías, el agente usa las de la web.">
+        {value.preguntas_filtro_whatsapp.length === 0 && value.preguntas_filtro.length > 0 && (
+          <Button type="button" variant="outline" size="sm" className="mb-1 self-start" onClick={() => set("preguntas_filtro_whatsapp")(value.preguntas_filtro.map((q) => ({ ...q })))}>
+            Copiar las de la postulación web como base
+          </Button>
+        )}
+        <CriteriosEditor items={value.preguntas_filtro_whatsapp} onChange={set("preguntas_filtro_whatsapp")} />
+      </Seccion>
+
+      <Seccion titulo="Entrevista Red Human" ayuda="Define qué tan a fondo conversa Red Human con el candidato; cambia el guion, la entrevista y la evaluación.">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Selector
+            label="Enfoque de entrevista"
+            value={value.enfoque_entrevista}
+            onChange={(v) => set("enfoque_entrevista")(v as EnfoqueEntrevista)}
+            opciones={ENFOQUES_ENTREVISTA.map((e) => ({ valor: e.valor, texto: e.texto }))}
+          />
+          <p className="self-end pb-2 text-xs leading-relaxed text-ink-3">
+            {ENFOQUES_ENTREVISTA.find((e) => e.valor === value.enfoque_entrevista)?.detalle}
+          </p>
+        </div>
+      </Seccion>
+
+      {/* 3. Botón único de generar — AL FINAL de todo lo capturable (Fase 4): nunca parte una lista */}
       {conIA && (
         <div className="rounded-xl border border-dashed border-brand/40 bg-brand-soft/30 p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -456,25 +556,6 @@ export function FormularioContenidoVacante({
           )}
         </div>
       )}
-
-      {/* 5. Selección */}
-      <Seccion titulo="Prefiltro" ayuda="Preguntas que Red Human hace por WhatsApp, propuestas a partir de los requisitos indispensables. Edita, elimina o agrega, y marca cuáles son eliminatorias.">
-        <CriteriosEditor items={value.preguntas_filtro} onChange={set("preguntas_filtro")} />
-      </Seccion>
-
-      <Seccion titulo="Entrevista Red Human" ayuda="Define qué tan a fondo conversa Red Human con el candidato; cambia el guion, la entrevista y la evaluación.">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Selector
-            label="Enfoque de entrevista"
-            value={value.enfoque_entrevista}
-            onChange={(v) => set("enfoque_entrevista")(v as EnfoqueEntrevista)}
-            opciones={ENFOQUES_ENTREVISTA.map((e) => ({ valor: e.valor, texto: e.texto }))}
-          />
-          <p className="self-end pb-2 text-xs leading-relaxed text-ink-3">
-            {ENFOQUES_ENTREVISTA.find((e) => e.valor === value.enfoque_entrevista)?.detalle}
-          </p>
-        </div>
-      </Seccion>
 
       <section>
         <button type="button" onClick={() => setAvanzado((a) => !a)} className="flex items-center gap-1.5 text-xs font-semibold text-ink-3 hover:text-ink">

@@ -1266,10 +1266,13 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
     if p.prefiltro_completo:
         return await _procesar_turno_post_completo(db, p, texto, canal)
 
+    # Fase 4 (2026-09-15): las preguntas del prefiltro por WhatsApp son independientes de las de la
+    # postulación web; si RH no capturó ninguna, se usan las de la web (vacantes previas).
+    preguntas_wa = ((v.preguntas_filtro_whatsapp or None) or (v.preguntas_filtro or [])) if v else []
     turno, con_ia = ia.prefiltro_turno(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",
-        (v.preguntas_filtro or []) if v else [],
+        preguntas_wa,
         historial,
         empresa=nombre_empresa_candidato(v) if v else "",
         ubicacion=v.ubicacion if v else "",

@@ -65,6 +65,12 @@ class Vacante(Base):
     texto_whatsapp: Mapped[str] = mapped_column(Text, default="")
     texto_bolsa: Mapped[str] = mapped_column(Text, default="")
     preguntas_filtro: Mapped[list] = mapped_column(JSON, default=list)  # [str] (legado) o [PreguntaFiltro]
+    # Fase 4 (2026-09-15): preguntas del prefiltro por WhatsApp, INDEPENDIENTES de las de la postulación web
+    # (`preguntas_filtro`). Vacía = el agente usa las de la web (compatibilidad con vacantes previas).
+    preguntas_filtro_whatsapp: Mapped[list] = mapped_column(JSON, default=list)
+    # Fase 4: ubicación estructurada (Estado / Municipio-Alcaldía de México); `ubicacion` (texto) se deriva.
+    ubicacion_estado: Mapped[str] = mapped_column(String(60), default="")
+    ubicacion_municipio: Mapped[str] = mapped_column(String(100), default="")
     plataformas: Mapped[list] = mapped_column(JSON, default=list)
     # Fase 4 (Punto 6): qué cubre la Entrevista IA — ver ENFOQUES_ENTREVISTA. Solo 2 niveles.
     enfoque_entrevista: Mapped[str] = mapped_column(String(30), default="profesional")
@@ -876,6 +882,9 @@ class Plantilla(Base):
     seniority: Mapped[str] = mapped_column(String(40), default="")
     avisos_cumplimiento: Mapped[list] = mapped_column(JSON, default=list)
     preguntas_filtro: Mapped[list] = mapped_column(JSON, default=list)  # = "evaluaciones" (ver spec Fase B)
+    preguntas_filtro_whatsapp: Mapped[list] = mapped_column(JSON, default=list)  # Fase 4
+    ubicacion_estado: Mapped[str] = mapped_column(String(60), default="")  # Fase 4
+    ubicacion_municipio: Mapped[str] = mapped_column(String(100), default="")
     texto_whatsapp: Mapped[str] = mapped_column(Text, default="")
     texto_bolsa: Mapped[str] = mapped_column(Text, default="")
     enfoque_entrevista: Mapped[str] = mapped_column(String(30), default="profesional")  # Fase 4
@@ -897,7 +906,19 @@ CAMPOS_PLANTILLA = [
     "seniority", "avisos_cumplimiento", "preguntas_filtro", "texto_whatsapp", "texto_bolsa",
     "enfoque_entrevista",
     "sueldo_desde", "sueldo_hasta", "sueldo_moneda", "sueldo_periodicidad",  # Parte 3
+    "preguntas_filtro_whatsapp", "ubicacion_estado", "ubicacion_municipio",  # Fase 4
 ]
+
+
+def texto_ubicacion(estado: str, municipio: str, libre: str = "") -> str:
+    """Fase 4: `ubicacion` (texto que leen portal, WhatsApp, IA) se deriva de Estado/Municipio cuando
+    se capturaron; si no, se conserva el texto libre (vacantes previas)."""
+    estado, municipio = (estado or "").strip(), (municipio or "").strip()
+    if municipio and estado:
+        return municipio if municipio == estado else f"{municipio}, {estado}"
+    if estado:
+        return estado
+    return (libre or "").strip()
 
 # Parte 3 (2026-09-12): sueldo estructurado. "a_convenir" = sin montos.
 PERIODICIDADES_SUELDO = ["semanal", "quincenal", "mensual", "anual", "a_convenir"]

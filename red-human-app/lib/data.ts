@@ -280,6 +280,10 @@ export interface Vacante {
     descarta: boolean;
     opciones?: string[];
   }[];
+  /** Fase 4: prefiltro por WhatsApp independiente (vacío = usa `criterios`) y ubicación estructurada. */
+  criteriosWhatsapp?: { pregunta: string; tipo: string; valida: string; respuesta_esperada: string; descarta: boolean; opciones?: string[] }[];
+  ubicacionEstado?: string;
+  ubicacionMunicipio?: string;
   embudo?: { etapas?: Record<string, number>; estados?: Record<string, number> };
   creada?: string;
   /** Fecha ISO de primera publicación. Null si la vacante nunca se ha publicado o existia

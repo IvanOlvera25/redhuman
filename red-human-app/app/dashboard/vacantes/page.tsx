@@ -66,6 +66,7 @@ import {
 import { usePuedeDecidir } from "@/components/sesion";
 import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveedor";
 import { cn } from "@/lib/utils";
+import { usePolling } from "@/lib/use-polling";
 
 const estadoTone: Record<Vacante["estado"], "good" | "neutral" | "warn" | "bad"> = {
   Publicada: "good",
@@ -131,18 +132,10 @@ export default function Vacantes() {
     // Cargar listas para los selectores de filtros avanzados
     fetchClientes("Activo").then((c) => setClientes(c ?? []));
     fetchEntrevistadores().then((u) => setUsuarios(u ?? []));
-    // 2026-09-13: los contadores del embudo (postulaciones ACTIVAS por etapa) deben reflejar los
-    // movimientos hechos en Candidatos: se recargan al volver a la pestaña/ventana y cada 30 s.
-    const alVolver = () => document.visibilityState === "visible" && recargar();
-    document.addEventListener("visibilitychange", alVolver);
-    window.addEventListener("focus", alVolver);
-    const timer = setInterval(() => document.visibilityState === "visible" && recargar(), 30000);
-    return () => {
-      document.removeEventListener("visibilitychange", alVolver);
-      window.removeEventListener("focus", alVolver);
-      clearInterval(timer);
-    };
   }, [recargar]);
+  // 2026-09-13 / Fase 4: los contadores del embudo (postulaciones ACTIVAS por etapa) reflejan los
+  // movimientos hechos en Candidatos — revalidación con el mismo hook que el resto de los tableros.
+  usePolling(recargar);
 
   // Cerrar menú flotante al hacer click fuera
   useEffect(() => {
@@ -1111,12 +1104,12 @@ function PestanasPlataforma({ bloques, liga }: { bloques: Record<string, BloqueP
   );
 }
 
-function Criterios({ criterios }: { criterios: CriterioFiltro[] }) {
+function Criterios({ criterios, titulo = "Criterios de prefiltro · postulación web" }: { criterios: CriterioFiltro[]; titulo?: string }) {
   if (!criterios?.length) return null;
   return (
     <Card className="p-4">
       <span className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
-        Criterios de prefiltro · los usa el agente en WhatsApp
+        {titulo}
       </span>
       <ul className="mt-2.5 space-y-2">
         {criterios.map((q, i) => (
@@ -1434,6 +1427,12 @@ function DetalleVacante({
         )}
 
         {(v.criterios?.length ?? 0) > 0 && <Criterios criterios={v.criterios as CriterioFiltro[]} />}
+        {/* Fase 4: prefiltro por WhatsApp independiente; vacío = el agente usa las de la web */}
+        {(v.criteriosWhatsapp?.length ?? 0) > 0 ? (
+          <Criterios criterios={v.criteriosWhatsapp as CriterioFiltro[]} titulo="Criterios de prefiltro · WhatsApp" />
+        ) : (v.criterios?.length ?? 0) > 0 ? (
+          <p className="text-[12px] text-ink-3">Prefiltro por WhatsApp: usa las mismas preguntas de la postulación web (no se capturaron preguntas propias).</p>
+        ) : null}
 
         {live && puedeDecidir && tieneContenido && (
           <div className="rounded-xl border border-border-soft p-4">

@@ -107,6 +107,7 @@ import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveed
 import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import { LineaNotificar, useNotificarAccion } from "@/components/dashboard/linea-notificar";
 import { cn } from "@/lib/utils";
+import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
 
 const etapas: EtapaCandidato[] = [
   "Prefiltro",
@@ -299,6 +300,9 @@ function CandidatosContenido() {
     fetchClientes("Activo").then((cl) => setClientes(cl ?? []));
     fetchEntrevistadores().then((u) => setUsuarios(u ?? []));
   }, [recargar]);
+  // Fase 4: el Kanban se revalida solo (WhatsApp, IA y otros usuarios mueven tarjetas) — se pausa
+  // mientras hay una ficha abierta para no pisar lo que RH está editando.
+  usePolling(() => recargar(), INTERVALO_TABLERO_MS, sel === null);
 
   async function abrir(c: Candidato) {
     setSel(c);

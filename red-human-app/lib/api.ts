@@ -549,6 +549,9 @@ export interface DatosVacante extends SueldoEstructurado {
   area?: string;
   seniority?: string;
   ubicacion?: string;
+  /** Fase 4: ubicación estructurada (Estado / Municipio); el servidor deriva `ubicacion` de aquí. */
+  ubicacion_estado?: string;
+  ubicacion_municipio?: string;
   modalidad?: string;
   /** Legado: sueldo en texto (agente / vacantes viejas). */
   sueldo?: string;
@@ -611,6 +614,9 @@ export function crearVacante(
     avisos_cumplimiento?: string[];
     texto_whatsapp?: string;
     preguntas_filtro?: CriterioFiltro[];
+    preguntas_filtro_whatsapp?: CriterioFiltro[];
+    ubicacion_estado?: string;
+    ubicacion_municipio?: string;
     publicaciones?: Record<string, BloquePlataforma>;
     publicar?: boolean;
     plataformas?: string[];
@@ -767,6 +773,10 @@ export interface Plantilla {
   seniority: string;
   avisosCumplimiento: string[];
   preguntasFiltro: CriterioFiltro[];
+  /** Fase 4: prefiltro por WhatsApp independiente + ubicación estructurada. */
+  preguntasFiltroWhatsapp?: CriterioFiltro[];
+  ubicacionEstado?: string;
+  ubicacionMunicipio?: string;
   textoWhatsapp: string;
   textoBolsa: string;
   enfoqueEntrevista?: EnfoqueEntrevista;

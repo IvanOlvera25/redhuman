@@ -12,7 +12,7 @@ from ..services import masivo
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import (
     CAMPOS_PLANTILLA, ENFOQUES_ENTREVISTA, PERIODICIDADES_SUELDO, Cliente, Cuenta, Plantilla, Usuario, Vacante, registrar,
-    texto_sueldo,
+    texto_sueldo, texto_ubicacion,
 )
 
 router = APIRouter(prefix="/plantillas", tags=["plantillas"])
@@ -45,6 +45,9 @@ def _plantilla_dict(p: Plantilla) -> dict:
         "seniority": p.seniority,
         "avisosCumplimiento": p.avisos_cumplimiento or [],
         "preguntasFiltro": p.preguntas_filtro or [],  # = "evaluaciones" (ver spec Fase B)
+        "preguntasFiltroWhatsapp": p.preguntas_filtro_whatsapp or [],  # Fase 4
+        "ubicacionEstado": p.ubicacion_estado or "",
+        "ubicacionMunicipio": p.ubicacion_municipio or "",
         "textoWhatsapp": p.texto_whatsapp,
         "textoBolsa": p.texto_bolsa,
         "enfoqueEntrevista": p.enfoque_entrevista or "profesional",
@@ -117,6 +120,9 @@ class PlantillaIn(BaseModel):
     seniority: str = ""
     avisos_cumplimiento: List[str] = []
     preguntas_filtro: List[dict] = []
+    preguntas_filtro_whatsapp: List[dict] = []  # Fase 4
+    ubicacion_estado: str = ""  # Fase 4
+    ubicacion_municipio: str = ""
     texto_whatsapp: str = ""
     texto_bolsa: str = ""
     enfoque_entrevista: str = "profesional"
@@ -136,6 +142,7 @@ def _crear_plantilla(db: Session, cuenta: Cuenta, u: Usuario, datos: PlantillaIn
     campos["nombre"] = campos["nombre"].strip()
     if datos.sueldo_periodicidad or datos.sueldo_desde or datos.sueldo_hasta:
         campos["sueldo"] = texto_sueldo(datos.sueldo_desde, datos.sueldo_hasta, datos.sueldo_moneda, datos.sueldo_periodicidad)
+    campos["ubicacion"] = texto_ubicacion(datos.ubicacion_estado, datos.ubicacion_municipio, datos.ubicacion)
     p = Plantilla(cuenta_id=cuenta.id, creado_por=u.nombre, **campos)
     db.add(p)
     db.flush()
@@ -250,6 +257,9 @@ class ActualizarIn(BaseModel):
     seniority: Optional[str] = None
     avisos_cumplimiento: Optional[List[str]] = None
     preguntas_filtro: Optional[List[dict]] = None
+    preguntas_filtro_whatsapp: Optional[List[dict]] = None  # Fase 4
+    ubicacion_estado: Optional[str] = None  # Fase 4
+    ubicacion_municipio: Optional[str] = None
     texto_whatsapp: Optional[str] = None
     texto_bolsa: Optional[str] = None
     enfoque_entrevista: Optional[str] = None
@@ -276,6 +286,8 @@ def actualizar(
         setattr(p, campo, valor.strip() if campo == "nombre" and isinstance(valor, str) else valor)
     if any(k in cambios for k in ("sueldo_desde", "sueldo_hasta", "sueldo_moneda", "sueldo_periodicidad")):
         p.sueldo = texto_sueldo(p.sueldo_desde, p.sueldo_hasta, p.sueldo_moneda, p.sueldo_periodicidad)
+    if any(k in cambios for k in ("ubicacion_estado", "ubicacion_municipio")):
+        p.ubicacion = texto_ubicacion(p.ubicacion_estado, p.ubicacion_municipio, p.ubicacion)
 
     if cambios:
         registrar(db, u.nombre, "plantilla_editada", "plantilla", str(p.id), {"campos": sorted(cambios)})

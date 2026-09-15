@@ -116,6 +116,10 @@ def vacante_dict(
         # prefiltro
         "preguntas_filtro": texto_preguntas(v.preguntas_filtro),
         "criterios": [p for p in (v.preguntas_filtro or []) if isinstance(p, dict)],
+        # Fase 4: prefiltro por WhatsApp independiente + ubicación estructurada
+        "criteriosWhatsapp": [p for p in (v.preguntas_filtro_whatsapp or []) if isinstance(p, dict)],
+        "ubicacionEstado": v.ubicacion_estado or "",
+        "ubicacionMunicipio": v.ubicacion_municipio or "",
         # embudo de esta vacante (conecta con el pipeline de candidatos)
         "embudo": embudo or {},
         "creada": iso(v.creada_en),

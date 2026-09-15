@@ -39,6 +39,7 @@ import {
   type MetricasEntrevistas,
 } from "@/lib/api";
 import type { Candidato, Vacante } from "@/lib/data";
+import { usePolling } from "@/lib/use-polling";
 
 const proximasMock = [
   { nombre: "Luis Ángel Torres", puesto: "Desarrollador Full-Stack", tipo: "Video", hora: "Hoy · 12:30", estado: "Confirmada" },
@@ -86,14 +87,8 @@ export default function Entrevistas() {
 
   useEffect(() => {
     recargar();
-    const timer = setInterval(recargar, REFRESCO_MS);
-    const alVolver = () => document.visibilityState === "visible" && recargar();
-    document.addEventListener("visibilitychange", alVolver);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", alVolver);
-    };
   }, [recargar]);
+  usePolling(recargar, REFRESCO_MS); // Fase 4: mismo hook que el resto de los tableros
 
   const evaluada =
     (seleccionada && entrevistas.find((e) => e.id === seleccionada && e.evaluacion)) ||
