@@ -41,6 +41,7 @@ import {
   Pencil,
   XCircle,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
 import { Card, Badge, Button, Avatar, Eyebrow, Progress } from "@/components/ui";
 import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
@@ -59,6 +60,7 @@ import {
 import type { DocExpediente, NuevoIngreso } from "@/lib/phase2";
 import {
   autorizarAlta,
+  eliminarCandidato,
   cancelarEntrevistaHumana,
   cancelarExpediente,
   decidirCandidato,
@@ -1105,6 +1107,11 @@ function CandidatosContenido() {
             setSel(actualizado);
             recargar();
           }}
+          onEliminado={() => {
+            // CRUD: la persona ya no existe para el sistema → volver al tablero
+            setSel(null);
+            recargar();
+          }}
         />
       )}
     </div>
@@ -1165,14 +1172,29 @@ function ModalCandidato({
   live,
   onClose,
   onCambio,
+  onEliminado,
 }: {
   c: Candidato;
   live: boolean;
   onClose: () => void;
   onCambio: (c: Candidato) => void;
+  onEliminado?: () => void;
 }) {
   const puedeDecidir = usePuedeDecidir();
   const modoPrueba = useModoPrueba();
+  // CRUD (2026-09-15): eliminar candidato (baja lógica de la persona) con confirmación
+  const [confirmarEliminar, setConfirmarEliminar] = useState(false);
+  const [eliminando, setEliminando] = useState(false);
+  const [errorEliminar, setErrorEliminar] = useState("");
+  async function eliminarPersona() {
+    setEliminando(true);
+    setErrorEliminar("");
+    const r = await eliminarCandidato(c.id);
+    setEliminando(false);
+    if (!r.ok) return setErrorEliminar(r.error);
+    setConfirmarEliminar(false);
+    onEliminado?.();
+  }
   const [tab, setTab] = useState<TabCandidato>(() => (c.etapa === "Contratación" ? "contratacion" : "resumen"));
   // Si el candidato ENTRA a Contratación mientras el modal ya está abierto (p.ej. RH lo mueve
   // de etapa sin cerrar la ficha), salta solo a esa pestaña para que no se pierda entre las
@@ -1362,6 +1384,17 @@ function ModalCandidato({
 
           <div className="flex items-center gap-3 shrink-0">
             <EstadoBadge estado={c.estado} prefijo="Prefiltro: " />
+            {live && puedeDecidir && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-bad/40 text-bad hover:bg-bad-soft"
+                onClick={() => setConfirmarEliminar(true)}
+                disabled={eliminando}
+              >
+                <Trash2 className="h-4 w-4" /> Eliminar candidato
+              </Button>
+            )}
             <button
               onClick={onClose}
               className="grid h-9 w-9 place-items-center rounded-xl text-ink-2 hover:bg-surface-2 transition"
@@ -1371,6 +1404,35 @@ function ModalCandidato({
             </button>
           </div>
         </div>
+
+        {confirmarEliminar && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !eliminando && setConfirmarEliminar(false)}>
+            <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-start gap-3">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-bad-soft text-bad">
+                  <AlertTriangle className="h-5 w-5" />
+                </span>
+                <div>
+                  <h3 className="font-display text-lg font-bold">¿Estás seguro de que deseas eliminar a este candidato?</h3>
+                  <p className="mt-2 text-sm leading-relaxed text-ink-2">
+                    <b>{c.nombre}</b> desaparecerá del tablero y de las búsquedas; todas sus postulaciones activas se cerrarán
+                    {c.totalPostulaciones && c.totalPostulaciones > 1 ? ` (tiene ${c.totalPostulaciones})` : ""}. Nada se borra físicamente:
+                    su historial (entrevistas, expediente, mensajes) se conserva y la acción queda en la bitácora.
+                  </p>
+                  {errorEliminar && <p className="mt-2 text-sm font-semibold text-bad">{errorEliminar}</p>}
+                </div>
+              </div>
+              <div className="mt-5 flex justify-end gap-2">
+                <Button variant="outline" size="sm" onClick={() => setConfirmarEliminar(false)} disabled={eliminando}>
+                  Cancelar
+                </Button>
+                <Button size="sm" className="bg-bad text-white hover:bg-bad/90" onClick={eliminarPersona} disabled={eliminando}>
+                  <Trash2 className="h-4 w-4" /> {eliminando ? "Eliminando…" : "Sí, eliminar candidato"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Barra de Pestañas Principales (4 base + Contratación condicional) */}
         <div className="border-b border-border-soft bg-surface-2/70 px-6 pt-3">

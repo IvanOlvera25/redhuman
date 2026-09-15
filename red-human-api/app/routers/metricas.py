@@ -75,7 +75,7 @@ def pipeline(db: Session = Depends(get_db), cuenta: Cuenta = Depends(cuenta_actu
     hace_7d = datetime.now(timezone.utc) - timedelta(days=7)
     return {
         "vacantes": {
-            "total": db.query(Vacante).filter(Vacante.cuenta_id == cuenta.id).count(),
+            "total": db.query(Vacante).filter(Vacante.cuenta_id == cuenta.id, Vacante.estado != "Eliminada").count(),
             "publicadas": db.query(Vacante).filter(Vacante.estado == "Publicada", Vacante.cuenta_id == cuenta.id).count(),
             "borradores": db.query(Vacante).filter(Vacante.estado == "Borrador", Vacante.cuenta_id == cuenta.id).count(),
         },

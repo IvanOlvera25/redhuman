@@ -32,6 +32,7 @@ from ..models import (
     Archivo,
     Candidato,
     ClienteContacto,
+    Colaborador,
     Cuenta,
     Documento,
     Entrevista,
@@ -73,10 +74,10 @@ def _por_codigo(db: Session, codigo: str, cuenta_id: int) -> Postulacion:
     última que tuvo. Una persona sin postulaciones no es una tarjeta: 404."""
     if codigo.startswith("P-"):
         p = db.query(Postulacion).filter(Postulacion.codigo == codigo, Postulacion.cuenta_id == cuenta_id).first()
-        if not p:
+        if not p or (p.candidato and p.candidato.eliminado_en):
             raise HTTPException(404, "Postulación no encontrada")
         return p
-    c = db.query(Candidato).filter(Candidato.codigo == codigo, Candidato.cuenta_id == cuenta_id).first()
+    c = db.query(Candidato).filter(Candidato.codigo == codigo, Candidato.cuenta_id == cuenta_id, Candidato.eliminado_en.is_(None)).first()
     if not c:
         raise HTTPException(404, "Candidato no encontrado")
     p = _postulacion_principal(c)
@@ -226,7 +227,7 @@ def _duplicado(db: Session, telefono: str, correo: str, cuenta_id: int, excluir:
     """Busca a la PERSONA por teléfono o correo (identidad, no proceso). Nunca empareja contra
     un candidato de Modo Prueba (`es_prueba=True`); tampoco cruza Cuentas — dos empresas
     reclutadoras distintas en la plataforma no deben verse como 'el mismo candidato'."""
-    q = db.query(Candidato).filter(Candidato.es_prueba.is_(False), Candidato.cuenta_id == cuenta_id)
+    q = db.query(Candidato).filter(Candidato.es_prueba.is_(False), Candidato.cuenta_id == cuenta_id, Candidato.eliminado_en.is_(None))
     if excluir:
         q = q.filter(Candidato.id != excluir)
     if telefono:
@@ -335,7 +336,7 @@ def listar(
     q = (
         db.query(Postulacion)
         .join(Candidato, Postulacion.candidato_id == Candidato.id)
-        .filter(Postulacion.cuenta_id == cuenta.id)
+        .filter(Postulacion.cuenta_id == cuenta.id, Candidato.eliminado_en.is_(None))  # CRUD: personas eliminadas nunca salen
         .order_by(Postulacion.id.desc())
     )
     # B4 (decisión 2026-09-11): las cerradas (descartado/contratado/reinicio) se ocultan salvo
@@ -1427,6 +1428,38 @@ async def decision(
 class EtapaIn(BaseModel):
     etapa: str
     comentario: str = ""
+
+
+@router.delete("/{codigo}")
+def eliminar_candidato(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """CRUD (2026-09-15): baja LÓGICA de la PERSONA (se acepta P-#### o C-####: siempre se elimina el
+    candidato dueño). Todas sus postulaciones activas se cierran con motivo `eliminado`, sus
+    entrevistas/expedientes/mensajes se conservan como historial y la persona desaparece del Kanban,
+    de las búsquedas y de la deduplicación (si vuelve a escribir por WhatsApp nace una persona nueva).
+    Nada se borra físicamente; queda en bitácora (LFPDPPP)."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    c = p.candidato
+    if c is None:
+        raise HTTPException(404, "Candidato no encontrado")
+    if any(col.activo for col in db.query(Colaborador).filter(Colaborador.candidato_origen_id == c.id).all()):
+        raise HTTPException(409, "Esta persona ya es colaborador(a) activo(a); da de baja al colaborador antes de eliminar al candidato.")
+    cerradas = []
+    for post in c.postulaciones:
+        if post.activa:
+            post.cerrar("eliminado")
+            cerradas.append(post.codigo)
+    c.eliminado_en = datetime.now(timezone.utc)
+    c.eliminado_por = u.nombre
+    c.postulacion_conversacion_id = None
+    registrar(
+        db, u.nombre, "candidato_eliminado", "candidato", c.codigo,
+        {"nombre": c.nombre, "postulaciones_cerradas": cerradas, "desde": codigo, "correo_rh": u.correo},
+    )
+    db.commit()
+    return {"ok": True, "candidato": c.codigo, "postulacionesCerradas": cerradas}
 
 
 def _abrir_expediente(db: Session, p: Postulacion, u: Usuario) -> Expediente:

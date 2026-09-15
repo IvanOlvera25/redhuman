@@ -122,6 +122,8 @@ def vacante_dict(
         "ubicacionMunicipio": v.ubicacion_municipio or "",
         # embudo de esta vacante (conecta con el pipeline de candidatos)
         "embudo": embudo or {},
+        "eliminadaEn": iso(v.eliminada_en),
+        "eliminadaPor": v.eliminada_por or "",
         "creada": iso(v.creada_en),
         # Fase C: fecha de primera publicación (ISO string, null si nunca se publicó)
         "publicadaEn": iso(v.publicada_en),

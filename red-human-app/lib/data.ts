@@ -253,7 +253,7 @@ export interface Vacante {
   sueldoHasta?: number | null;
   sueldoMoneda?: string;
   sueldoPeriodicidad?: string;
-  estado: "Publicada" | "Borrador" | "En revisión" | "Cerrada";
+  estado: "Publicada" | "Borrador" | "En revisión" | "Cerrada" | "Eliminada";
   candidatos: number;
   nuevos: number;
   publicada: string;
@@ -286,6 +286,9 @@ export interface Vacante {
   criteriosWhatsapp?: { pregunta: string; tipo: string; valida: string; respuesta_esperada: string; descarta: boolean; opciones?: string[] }[];
   ubicacionEstado?: string;
   ubicacionMunicipio?: string;
+  /** CRUD: baja lógica */
+  eliminadaEn?: string | null;
+  eliminadaPor?: string;
   embudo?: { etapas?: Record<string, number>; estados?: Record<string, number> };
   creada?: string;
   /** Fecha ISO de primera publicación. Null si la vacante nunca se ha publicado o existia
