@@ -27,6 +27,7 @@ import { ChevronDown, ChevronUp, Sparkles, X } from "lucide-react";
 import { Button, Eyebrow } from "@/components/ui";
 import { Area, CampoSueldo, Field, ListaEditable, Selector } from "@/components/dashboard/campos";
 import { ESTADOS_MX, municipiosDe, parsearUbicacion, textoUbicacion } from "@/lib/ubicacion";
+import type { Vacante } from "@/lib/data";
 import {
   generarVacanteIA,
   ENFOQUES_ENTREVISTA,
@@ -179,6 +180,37 @@ export function contenidoDesdePlantilla(p: Plantilla): ContenidoVacante {
     avisos_cumplimiento: [...(p.avisosCumplimiento ?? [])],
     texto_whatsapp: p.textoWhatsapp,
     texto_bolsa: p.textoBolsa,
+  };
+}
+
+/** CRUD (2026-09-15): el formulario compartido en MODO EDICIÓN — se puebla con la vacante existente
+ * (todos los campos, incluidos prefiltro web/WhatsApp y ubicación estructurada). */
+export function contenidoDesdeVacante(v: Vacante): ContenidoVacante {
+  return {
+    titulo: v.titulo,
+    area: v.area ?? "",
+    seniority: v.seniority ?? "",
+    ubicacion: v.ubicacion ?? "",
+    ...ubicacionEstructurada(v.ubicacionEstado, v.ubicacionMunicipio, v.ubicacion),
+    modalidad: v.modalidad || "Presencial",
+    sueldo_desde: v.sueldoDesde ? String(v.sueldoDesde) : "",
+    sueldo_hasta: v.sueldoHasta ? String(v.sueldoHasta) : "",
+    sueldo_moneda: v.sueldoMoneda || "MXN",
+    sueldo_periodicidad: (v.sueldoPeriodicidad as PeriodicidadSueldo | undefined) ?? "",
+    descripcion: v.descripcion ?? "",
+    responsabilidades: [...(v.responsabilidades ?? [])],
+    requisitos: requisitosLista(v.requisitos),
+    requisitos_deseables: [...(v.requisitosDeseables ?? [])],
+    beneficios: [...(v.beneficios ?? [])],
+    preguntas_filtro: [...((v.criterios ?? []) as CriterioFiltro[])],
+    preguntas_filtro_whatsapp: [...((v.criteriosWhatsapp ?? []) as CriterioFiltro[])],
+    enfoque_entrevista: v.enfoqueEntrevista ?? "profesional",
+    resumen: v.resumen ?? "",
+    perfil_ideal: v.perfilIdeal ?? "",
+    palabras_clave: [...(v.palabrasClave ?? [])],
+    avisos_cumplimiento: [...(v.avisosCumplimiento ?? [])],
+    texto_whatsapp: v.textoWhatsapp ?? "",
+    texto_bolsa: v.textoBolsa ?? "",
   };
 }
 

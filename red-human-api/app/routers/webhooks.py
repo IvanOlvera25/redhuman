@@ -173,7 +173,7 @@ def _buscar_o_crear_candidato(db: Session, wa_id: str, nombre: str, cuenta_id: i
         condiciones.append(Candidato.telefono == tel)
     existente = (
         db.query(Candidato)
-        .filter(or_(*condiciones), Candidato.cuenta_id == cuenta_id)
+        .filter(or_(*condiciones), Candidato.cuenta_id == cuenta_id, Candidato.eliminado_en.is_(None))  # CRUD: eliminados no se reutilizan
         .order_by(Candidato.id.desc())
         .first()
     )

@@ -59,7 +59,11 @@ class Vacante(Base):
     sueldo_hasta: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     sueldo_moneda: Mapped[str] = mapped_column(String(5), default="MXN")
     sueldo_periodicidad: Mapped[str] = mapped_column(String(15), default="")  # ver PERIODICIDADES_SUELDO
-    estado: Mapped[str] = mapped_column(String(30), default="Borrador")  # Publicada | Borrador | En revisión | Cerrada
+    estado: Mapped[str] = mapped_column(String(30), default="Borrador")  # Publicada | Borrador | En revisión | Cerrada | Eliminada
+    # CRUD (2026-09-15): baja LÓGICA — la fila y sus postulaciones/entrevistas/expedientes se conservan;
+    # deja de aparecer en listados, portal, menú de WhatsApp y métricas.
+    eliminada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    eliminada_por: Mapped[str] = mapped_column(String(150), default="")
     requisitos: Mapped[str] = mapped_column(Text, default="")
     descripcion: Mapped[str] = mapped_column(Text, default="")
     texto_whatsapp: Mapped[str] = mapped_column(Text, default="")
@@ -152,6 +156,10 @@ class Candidato(Base):
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
     # Modo Prueba (solo admin, ver ConfiguracionSistema): nunca aparece en listados/reportes de RH.
     es_prueba: Mapped[bool] = mapped_column(Boolean, default=False)
+    # CRUD (2026-09-15): baja LÓGICA de la persona (LFPDPPP: derecho de cancelación con rastro en
+    # bitácora). Sus postulaciones se cierran (motivo `eliminado`); nada se borra físicamente.
+    eliminado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    eliminado_por: Mapped[str] = mapped_column(String(150), default="")
     # Cuenta (Fase A multi-cuenta).
     cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
     # Postulación con la que está conversando por WhatsApp ahora mismo (ver docstring).
@@ -231,7 +239,7 @@ class Candidato(Base):
 # Cómo nació la postulación — alimenta "por fuente" en /metricas.
 ORIGENES_POSTULACION = ["formulario", "whatsapp", "rh_directo", "cv_masivo", "reinicio_prueba", "migracion"]
 # Por qué se cerró (activa=False). "" mientras sigue en curso.
-MOTIVOS_CIERRE = ["descartado", "contratado", "reinicio_prueba", "prueba_expirada", "sin_interes"]
+MOTIVOS_CIERRE = ["descartado", "contratado", "reinicio_prueba", "prueba_expirada", "sin_interes", "vacante_eliminada", "eliminado"]
 
 
 class Postulacion(Base):

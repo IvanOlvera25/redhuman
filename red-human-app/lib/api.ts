@@ -654,6 +654,22 @@ export function actualizarVacante(codigo: string, cambios: Record<string, unknow
   return patch<Vacante>(`/vacantes/${codigo}`, cambios);
 }
 
+/** CRUD (2026-09-15): baja LÓGICA — la vacante pasa a «Eliminada», se retira de portal/WhatsApp y de los
+ * tableros; sus postulaciones activas se cierran (motivo vacante_eliminada). Reversible con restaurarVacante. */
+export function eliminarVacante(codigo: string) {
+  return eliminar<{ ok: boolean; vacante: Vacante; postulacionesCerradas: number }>(`/vacantes/${codigo}`);
+}
+
+export function restaurarVacante(codigo: string) {
+  return post<Vacante>(`/vacantes/${codigo}/restaurar`);
+}
+
+/** CRUD (2026-09-15): baja LÓGICA de la PERSONA (acepta P-#### o C-####): todas sus postulaciones
+ * activas se cierran y desaparece del Kanban, búsquedas y deduplicación. Nada se borra físicamente. */
+export function eliminarCandidato(codigo: string) {
+  return eliminar<{ ok: boolean; candidato: string; postulacionesCerradas: string[] }>(`/candidatos/${codigo}`);
+}
+
 /** Cómo verá el candidato esta vacante — funciona aunque siga en Borrador. */
 export function fetchVistaPreviaVacante(codigo: string) {
   return get<Vacante>(`/vacantes/${codigo}/vista-previa`);

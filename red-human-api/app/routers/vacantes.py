@@ -25,13 +25,21 @@ from ..services import ia
 
 router = APIRouter(prefix="/vacantes", tags=["vacantes"])
 
-ESTADOS = ["Borrador", "En revisión", "Publicada", "Cerrada"]
+ESTADOS = ["Borrador", "En revisión", "Publicada", "Cerrada"]  # «Eliminada» solo vía DELETE (baja lógica)
 
 
 def _por_codigo(db: Session, codigo: str, cuenta_id: int) -> Vacante:
     v = db.query(Vacante).filter(Vacante.codigo == codigo, Vacante.cuenta_id == cuenta_id).first()
     if not v:
         raise HTTPException(404, "Vacante no encontrada")
+    return v
+
+
+def _no_eliminada(v: Vacante) -> Vacante:
+    """Las acciones de escritura (editar, publicar, cerrar, regenerar) no aplican a una vacante con
+    baja lógica; leerla (GET /{codigo}) sí, para que la ficha explique que fue eliminada."""
+    if v.estado == "Eliminada":
+        raise HTTPException(409, "Esta vacante fue eliminada; restáurala antes de modificarla.")
     return v
 
 
@@ -131,6 +139,7 @@ def _validar_relaciones(
 @router.get("")
 def listar(
     estado: Optional[str] = None,
+    incluir_eliminadas: bool = False,  # CRUD: baja lógica oculta salvo petición explícita (o estado=Eliminada)
     # --- Fase C: filtros adicionales ---
     busqueda: Optional[str] = None,          # LIKE sobre titulo (case-insensitive)
     cliente_id: Optional[int] = None,
@@ -144,6 +153,8 @@ def listar(
     q = db.query(Vacante).filter(Vacante.cuenta_id == cuenta.id).order_by(Vacante.id.desc())
     if estado:
         q = q.filter(Vacante.estado == estado)
+    elif not incluir_eliminadas:
+        q = q.filter(Vacante.estado != "Eliminada")  # CRUD: las eliminadas no salen en tableros activos
     if busqueda:
         q = q.filter(Vacante.titulo.ilike(f"%{busqueda.strip()}%"))
     if cliente_id is not None:
@@ -487,6 +498,8 @@ class ActualizarIn(BaseModel):
     palabras_clave: Optional[List[str]] = None
     seniority: Optional[str] = None
     texto_whatsapp: Optional[str] = None
+    texto_bolsa: Optional[str] = None  # CRUD: el formulario de edición manda el contenido completo
+    avisos_cumplimiento: Optional[List[str]] = None
     preguntas_filtro: Optional[List[dict]] = None
     preguntas_filtro_whatsapp: Optional[List[dict]] = None  # Fase 4
     ubicacion_estado: Optional[str] = None  # Fase 4
@@ -507,7 +520,7 @@ def actualizar(
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Edición manual de RH sobre lo que generó la IA (el agente propone, RH dispone)."""
-    v = _por_codigo(db, codigo, cuenta.id)
+    v = _no_eliminada(_por_codigo(db, codigo, cuenta.id))
     colaboradores_validos = _validar_relaciones(
         db, cuenta, datos.cliente_id, datos.responsable_id, datos.colaboradores_ids, None
     )
@@ -555,7 +568,7 @@ def regenerar(
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Vuelve a generar todo el contenido de una vacante existente con los datos ya capturados."""
-    v = _por_codigo(db, codigo, cuenta.id)
+    v = _no_eliminada(_por_codigo(db, codigo, cuenta.id))
     ficha = ia.FichaVacante(
         titulo=v.titulo, area=v.area, seniority=v.seniority or "", ubicacion=v.ubicacion, modalidad=v.modalidad,
         sueldo_texto=v.sueldo or "", empresa=v.empresa or nombre_empresa_candidato(v),
@@ -587,7 +600,7 @@ def publicar(
     codigo: str, datos: PublicarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    v = _por_codigo(db, codigo, cuenta.id)
+    v = _no_eliminada(_por_codigo(db, codigo, cuenta.id))
     plataformas = [p for p in datos.plataformas if p in PLATAFORMAS]
     if not plataformas:
         raise HTTPException(400, f"Elige al menos una plataforma válida: {', '.join(PLATAFORMAS)}")
@@ -612,10 +625,56 @@ def cerrar(
     codigo: str, datos: PublicarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    v = _por_codigo(db, codigo, cuenta.id)
+    v = _no_eliminada(_por_codigo(db, codigo, cuenta.id))
     v.estado = "Cerrada"
     v.plataformas = []
     registrar(db, u.nombre, "vacante_cerrada", "vacante", v.codigo, {})
+    db.commit()
+    return _salida(db, v)
+
+
+@router.delete("/{codigo}")
+def eliminar(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """CRUD (2026-09-15): baja LÓGICA. La vacante pasa a «Eliminada» (fecha y quién), se retira de
+    portal/WhatsApp/plataformas y deja de aparecer en tableros y métricas. Nada se borra: sus
+    postulaciones, entrevistas y expedientes siguen ligados (historial); las postulaciones que
+    seguían ACTIVAS se cierran con motivo `vacante_eliminada` para que no queden huérfanas en el
+    Kanban. Reversible con POST /{codigo}/restaurar (queda en Borrador)."""
+    v = _por_codigo(db, codigo, cuenta.id)
+    if v.estado == "Eliminada":
+        raise HTTPException(409, "Esta vacante ya está eliminada.")
+    activas = [p for p in v.postulaciones if p.activa]
+    for p in activas:
+        p.cerrar("vacante_eliminada")
+    v.estado = "Eliminada"
+    v.plataformas = []
+    v.eliminada_en = datetime.now(timezone.utc)
+    v.eliminada_por = u.nombre
+    registrar(
+        db, u.nombre, "vacante_eliminada", "vacante", v.codigo,
+        {"titulo": v.titulo, "postulaciones_cerradas": [p.codigo for p in activas], "correo_rh": u.correo},
+    )
+    db.commit()
+    return {"ok": True, "vacante": _salida(db, v), "postulacionesCerradas": len(activas)}
+
+
+@router.post("/{codigo}/restaurar")
+def restaurar(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Deshace la baja lógica: vuelve como Borrador (RH decide si la republica). Las postulaciones
+    cerradas por la eliminación NO se reabren solas — RH las mueve de etapa si hace falta."""
+    v = _por_codigo(db, codigo, cuenta.id)
+    if v.estado != "Eliminada":
+        raise HTTPException(409, "Esta vacante no está eliminada.")
+    v.estado = "Borrador"
+    v.eliminada_en = None
+    v.eliminada_por = ""
+    registrar(db, u.nombre, "vacante_restaurada", "vacante", v.codigo, {"correo_rh": u.correo})
     db.commit()
     return _salida(db, v)
 

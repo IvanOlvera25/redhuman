@@ -18,6 +18,9 @@ import {
   Sparkles,
   FileEdit,
   Eye,
+  Pencil,
+  Trash2,
+  AlertTriangle,
   Building2,
   LayoutGrid,
   List,
@@ -34,6 +37,7 @@ import {
   FormularioContenidoVacante,
   contenidoComoPayload,
   contenidoDesdePlantilla,
+  contenidoDesdeVacante,
   faltantesDatosPrincipales,
   tieneContenidoManual,
   type ContenidoVacante,
@@ -45,6 +49,7 @@ import { useRouter } from "next/navigation";
 import {
   crearVacante,
   actualizarVacante,
+  eliminarVacante,
   fetchVacantes,
   fetchVistaPreviaVacante,
   publicarVacante,
@@ -73,6 +78,7 @@ const estadoTone: Record<Vacante["estado"], "good" | "neutral" | "warn" | "bad">
   Borrador: "neutral",
   "En revisión": "warn",
   Cerrada: "bad",
+  Eliminada: "bad",
 };
 
 const filtros = ["Todas", "Publicada", "Borrador", "En revisión"] as const;
@@ -607,11 +613,110 @@ export default function Vacantes() {
           onClose={() => setSel(null)}
           onCambio={recargar}
           onVerPrevia={() => setVerPrevia(sel.id)}
+          onEliminada={() => {
+            // CRUD: al eliminar se vuelve a la lista (la eliminada ya no aparece en el tablero)
+            setSel(null);
+            recargar();
+          }}
         />
       )}
 
       {verPrevia && <VistaPreviaVacante codigo={verPrevia} onClose={() => setVerPrevia(null)} />}
 
+    </div>
+  );
+}
+
+/* ============================================================
+   CRUD (2026-09-15): editar vacante — el MISMO formulario de «Nueva vacante» en modo edición
+   ============================================================ */
+function EditarVacante({ v, onClose, onGuardada }: { v: Vacante; onClose: () => void; onGuardada: () => void }) {
+  const [contenido, setContenido] = useState<ContenidoVacante>(() => contenidoDesdeVacante(v));
+  const [guardando, setGuardando] = useState(false);
+  const [error, setError] = useState("");
+
+  async function guardar() {
+    const faltan = faltantesDatosPrincipales(contenido);
+    if (faltan.length) return setError(`Faltan datos principales: ${faltan.join(", ")}.`);
+    setGuardando(true);
+    setError("");
+    // PATCH /vacantes/{codigo}: mismo payload que el alta; el servidor deriva sueldo/ubicación y respeta el resto.
+    const r = await actualizarVacante(v.id, contenidoComoPayload(contenido));
+    setGuardando(false);
+    if (!r.ok) return setError(r.error);
+    onGuardada();
+  }
+
+  return (
+    <Panel titulo={`Editar: ${v.titulo}`} eyebrow={v.id} onClose={onClose} ancho="max-w-3xl">
+      <div className="flex flex-col gap-6 p-6">
+        <Aviso tono="info">
+          Corrige cualquier campo (puesto, sueldo, ubicación, preguntas de prefiltro, entrevista…). Los cambios aplican de inmediato en
+          portal, WhatsApp y la IA; lo ya publicado por plataforma se conserva hasta que regeneres.
+        </Aviso>
+        <FormularioContenidoVacante
+          value={contenido}
+          onChange={setContenido}
+          clienteId={v.clienteId ?? null}
+          mostrarCliente={v.mostrarClienteCandidato ?? true}
+        />
+        {error && <Aviso tono="error" onCerrar={() => setError("")}>{error}</Aviso>}
+        <div className="flex items-center gap-3 border-t border-border-faint pt-5">
+          <Button variant="outline" className="flex-1" onClick={onClose} disabled={guardando}>
+            Cancelar
+          </Button>
+          <Button className="flex-1" onClick={guardar} disabled={guardando}>
+            {guardando ? "Guardando…" : "Guardar cambios"}
+          </Button>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+/* Modal de confirmación de baja lógica: advierte lo que pasa con las postulaciones activas. */
+function ConfirmarEliminarVacante({
+  v,
+  ocupado,
+  onCancelar,
+  onConfirmar,
+}: {
+  v: Vacante;
+  ocupado: boolean;
+  onCancelar: () => void;
+  onConfirmar: () => void;
+}) {
+  const activas = Object.values(v.embudo?.etapas ?? {}).reduce((a, b) => a + b, 0);
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onCancelar}>
+      <Card className="w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start gap-3">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-bad-soft text-bad">
+            <AlertTriangle className="h-5 w-5" />
+          </span>
+          <div>
+            <h2 className="font-display text-lg font-bold">¿Eliminar la vacante «{v.titulo}»?</h2>
+            <p className="mt-2 text-sm leading-relaxed text-ink-2">
+              Dejará de aparecer en los tableros, en el portal público y en el menú de WhatsApp.
+              {activas > 0 && (
+                <>
+                  {" "}
+                  <b className="text-bad">{activas} postulación{activas !== 1 ? "es" : ""} activa{activas !== 1 ? "s" : ""}</b> se cerrarán con motivo «vacante eliminada».
+                </>
+              )}{" "}
+              Nada se borra: el historial (candidatos, entrevistas, expedientes) se conserva y la vacante se puede restaurar.
+            </p>
+          </div>
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={onCancelar} disabled={ocupado}>
+            Cancelar
+          </Button>
+          <Button size="sm" className="bg-bad text-white hover:bg-bad/90" onClick={onConfirmar} disabled={ocupado}>
+            <Trash2 className="h-4 w-4" /> {ocupado ? "Eliminando…" : "Sí, eliminar vacante"}
+          </Button>
+        </div>
+      </Card>
     </div>
   );
 }
@@ -1270,16 +1375,30 @@ function DetalleVacante({
   onClose,
   onCambio,
   onVerPrevia,
+  onEliminada,
 }: {
   v: Vacante;
   live: boolean;
   onClose: () => void;
   onCambio: (codigo?: string) => void;
   onVerPrevia: () => void;
+  onEliminada?: () => void;
 }) {
   const [ocupado, setOcupado] = useState("");
   const [aviso, setAviso] = useState<{ tono: "ok" | "error"; texto: string } | null>(null);
   const puedeDecidir = usePuedeDecidir();
+  // CRUD (2026-09-15): editar (formulario compartido en modo edición) y eliminar (baja lógica con confirmación)
+  const [editando, setEditando] = useState(false);
+  const [confirmarEliminar, setConfirmarEliminar] = useState(false);
+
+  async function eliminar() {
+    setOcupado("eliminar");
+    const r = await eliminarVacante(v.id);
+    setOcupado("");
+    setConfirmarEliminar(false);
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    onEliminada?.();
+  }
   const [destinos, setDestinos] = useState<string[]>(v.plataformas.length ? v.plataformas : ["WhatsApp", "Portal"]);
 
   const liga = v.slug && typeof window !== "undefined" ? `${window.location.origin}/aplicar/${v.slug}` : "";
@@ -1361,6 +1480,30 @@ function DetalleVacante({
             {v.area} · {v.ubicacion} · <span className="font-mono text-brand">{v.sueldo}</span>
           </span>
         </div>
+
+        {v.estado === "Eliminada" && (
+          <Aviso tono="warn">
+            Esta vacante fue eliminada{v.eliminadaPor ? ` por ${v.eliminadaPor}` : ""}{v.eliminadaEn ? ` el ${new Date(v.eliminadaEn).toLocaleDateString("es-MX")}` : ""}.
+            No aparece en tableros, portal ni WhatsApp; su historial se conserva.
+          </Aviso>
+        )}
+
+        {live && puedeDecidir && v.estado !== "Eliminada" && (
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setEditando(true)} disabled={Boolean(ocupado)}>
+              <Pencil className="h-4 w-4" /> Editar vacante
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-bad/40 text-bad hover:bg-bad-soft"
+              onClick={() => setConfirmarEliminar(true)}
+              disabled={Boolean(ocupado)}
+            >
+              <Trash2 className="h-4 w-4" /> Eliminar vacante
+            </Button>
+          </div>
+        )}
 
         {/* Embudo de esta vacante — conecta con el pipeline de candidatos */}
         <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
@@ -1550,6 +1693,25 @@ function DetalleVacante({
           </div>
         )}
       </div>
+      {editando && (
+        <EditarVacante
+          v={v}
+          onClose={() => setEditando(false)}
+          onGuardada={() => {
+            setEditando(false);
+            setAviso({ tono: "ok", texto: "Vacante actualizada." });
+            onCambio(v.id);
+          }}
+        />
+      )}
+      {confirmarEliminar && (
+        <ConfirmarEliminarVacante
+          v={v}
+          ocupado={ocupado === "eliminar"}
+          onCancelar={() => setConfirmarEliminar(false)}
+          onConfirmar={eliminar}
+        />
+      )}
     </Panel>
   );
 }
