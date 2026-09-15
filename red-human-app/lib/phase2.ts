@@ -44,6 +44,9 @@ export interface NuevoIngreso {
   expedienteId?: number;
   estado?: "integracion" | "completo" | "alta" | string;
   fechaIngreso?: string | null;
+  /* Fase 3: recordatorios automáticos de documentos (null = apagados para este expediente) */
+  documentosHasta?: string | null;
+  ultimoRecordatorioEn?: string | null;
   /* --- condiciones finales de contratación, capturadas en la etapa Contratación --- */
   sueldo?: string;
   tipoContratacion?: string;

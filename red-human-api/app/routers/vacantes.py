@@ -18,7 +18,7 @@ from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import (
     ENFOQUES_ENTREVISTA, MONEDAS_SUELDO, PERIODICIDADES_SUELDO, PLATAFORMAS, Cliente, Cuenta, Plantilla, Postulacion,
-    Usuario, UsuarioCuenta, Vacante, registrar, slugificar, texto_sueldo,
+    Usuario, UsuarioCuenta, Vacante, registrar, slugificar, texto_sueldo, texto_ubicacion,
 )
 from ..serial import nombre_empresa, nombre_empresa_candidato, vacante_dict
 from ..services import ia
@@ -49,9 +49,12 @@ def _embudo(db: Session, vacante_id: int) -> dict:
     """Conteo por etapa y por clasificación del agente — alimenta la tarjeta de la vacante."""
     # 2026-09-13: el embudo cuenta SOLO postulaciones ACTIVAS (una descartada/contratada/cerrada ya
     # no está "en" ninguna etapa) — mismo criterio que el Kanban (B4).
+    # 2026-09-15 (Fase 1): las de Modo Prueba TAMBIÉN cuentan — el Kanban las muestra y la ficha de
+    # la vacante marcaba 0 en todas las etapas cuando la demo corre con Modo Prueba. Las métricas
+    # globales (/metricas) siguen excluyéndolas.
     filas = (
         db.query(Postulacion.etapa, Postulacion.estado, func.count(Postulacion.id))
-        .filter(Postulacion.vacante_id == vacante_id, Postulacion.es_prueba.is_(False), Postulacion.activa.is_(True))
+        .filter(Postulacion.vacante_id == vacante_id, Postulacion.activa.is_(True))
         .group_by(Postulacion.etapa, Postulacion.estado)
         .all()
     )
@@ -64,10 +67,10 @@ def _embudo(db: Session, vacante_id: int) -> dict:
 
 
 def _conteos(db: Session, v: Vacante):
-    total = db.query(Postulacion).filter(Postulacion.vacante_id == v.id, Postulacion.es_prueba.is_(False)).count()
+    total = db.query(Postulacion).filter(Postulacion.vacante_id == v.id).count()
     hace_24h = datetime.now(timezone.utc) - timedelta(days=1)
     nuevos = db.query(Postulacion).filter(
-        Postulacion.vacante_id == v.id, Postulacion.creado_en >= hace_24h, Postulacion.es_prueba.is_(False)
+        Postulacion.vacante_id == v.id, Postulacion.creado_en >= hace_24h
     ).count()
     return total, nuevos
 
@@ -179,6 +182,9 @@ class GenerarIn(BaseModel):
     area: str = ""
     seniority: str = ""
     ubicacion: str = ""
+    # Fase 4: ubicación estructurada (Estado / Municipio); si vienen, `ubicacion` se deriva de ellas
+    ubicacion_estado: str = ""
+    ubicacion_municipio: str = ""
     modalidad: str = "Presencial"
     # sueldo estructurado; `sueldo` (texto) se acepta por compatibilidad (agente, vacantes viejas)
     sueldo: str = ""
@@ -198,6 +204,9 @@ class GenerarIn(BaseModel):
     empresa: str = ""
     cliente_id: Optional[int] = None
     mostrar_cliente_candidato: bool = True
+
+    def ubicacion_texto(self) -> str:
+        return texto_ubicacion(self.ubicacion_estado, self.ubicacion_municipio, self.ubicacion)
 
     def indispensables(self) -> List[str]:
         vistos = set()
@@ -243,7 +252,7 @@ def _empresa_resuelta(db: Session, cuenta: Cuenta, cliente_id: Optional[int], mo
 
 def _ficha(datos: GenerarIn, empresa: str) -> ia.FichaVacante:
     return ia.FichaVacante(
-        titulo=datos.titulo.strip(), area=datos.area, seniority=datos.seniority, ubicacion=datos.ubicacion,
+        titulo=datos.titulo.strip(), area=datos.area, seniority=datos.seniority, ubicacion=datos.ubicacion_texto(),
         modalidad=datos.modalidad, sueldo_texto=datos.sueldo_texto(), empresa=empresa,
         descripcion_breve=datos.descripcion, requisitos_indispensables=datos.indispensables(),
         requisitos_deseables=[x for x in datos.requisitos_deseables if x.strip()],
@@ -305,6 +314,7 @@ class CrearIn(GenerarIn):
     texto_whatsapp: str = ""
     texto_bolsa: str = ""
     preguntas_filtro: List[dict] = []
+    preguntas_filtro_whatsapp: List[dict] = []  # Fase 4: independientes de las de la web
     publicaciones: Dict[str, dict] = {}
     resumen: str = ""
     perfil_ideal: str = ""
@@ -359,7 +369,9 @@ def crear(
         area=datos.area,
         empresa="",  # se fija abajo con la regla (Punto 1): nunca texto libre
         enfoque_entrevista=datos.enfoque_entrevista,
-        ubicacion=datos.ubicacion,
+        ubicacion=datos.ubicacion_texto(),
+        ubicacion_estado=datos.ubicacion_estado.strip(),
+        ubicacion_municipio=datos.ubicacion_municipio.strip(),
         modalidad=datos.modalidad,
         # Parte 3: el texto del sueldo es DERIVADO del estructurado (o el legado; nunca inventado)
         sueldo=datos.sueldo_texto() or "A convenir",
@@ -373,6 +385,7 @@ def crear(
         texto_whatsapp=datos.texto_whatsapp,
         texto_bolsa=datos.texto_bolsa,
         preguntas_filtro=datos.preguntas_filtro,
+        preguntas_filtro_whatsapp=datos.preguntas_filtro_whatsapp,
         plataformas=plataformas if datos.publicar else [],
         resumen=datos.resumen,
         perfil_ideal=datos.perfil_ideal,
@@ -475,6 +488,9 @@ class ActualizarIn(BaseModel):
     seniority: Optional[str] = None
     texto_whatsapp: Optional[str] = None
     preguntas_filtro: Optional[List[dict]] = None
+    preguntas_filtro_whatsapp: Optional[List[dict]] = None  # Fase 4
+    ubicacion_estado: Optional[str] = None  # Fase 4
+    ubicacion_municipio: Optional[str] = None
     publicaciones: Optional[Dict[str, dict]] = None
     estado: Optional[str] = None
     # --- Fase B: Cliente/Responsable/Colaboradores/visibilidad (punto 8/10) ---
@@ -510,6 +526,9 @@ def actualizar(
 
     for campo, valor in cambios.items():
         setattr(v, campo, valor)
+    # Fase 4: si tocó Estado/Municipio, el texto de ubicación se deriva
+    if any(k in cambios for k in ("ubicacion_estado", "ubicacion_municipio")):
+        v.ubicacion = texto_ubicacion(v.ubicacion_estado, v.ubicacion_municipio, v.ubicacion)
     # Parte 3: si tocó el sueldo estructurado, el texto se deriva (nunca se edita por separado)
     if any(k in cambios for k in ("sueldo_desde", "sueldo_hasta", "sueldo_moneda", "sueldo_periodicidad")):
         v.sueldo = texto_sueldo(v.sueldo_desde, v.sueldo_hasta, v.sueldo_moneda, v.sueldo_periodicidad)

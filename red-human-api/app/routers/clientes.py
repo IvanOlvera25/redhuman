@@ -4,11 +4,12 @@ notificaciones de Cliente configuradas en Fase D (services/notificaciones.py).""
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..services import masivo
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import Cliente, ClienteContacto, Cuenta, Usuario, registrar
 from .auth import CORREO_RE
@@ -88,13 +89,8 @@ class CrearIn(BaseModel):
     estado: str = "Activo"
 
 
-@router.post("", status_code=201)
-def crear(
-    datos: CrearIn,
-    db: Session = Depends(get_db),
-    u: Usuario = Depends(usuario_decisor),
-    cuenta: Cuenta = Depends(cuenta_actual),
-):
+def _crear_cliente(db: Session, cuenta: Cuenta, u: Usuario, datos: CrearIn) -> Cliente:
+    """Validaciones de POST /clientes — compartidas con la carga masiva (Fase 2). No hace commit."""
     nombre = datos.nombre.strip()
     if not nombre:
         raise HTTPException(400, "El nombre del Cliente es obligatorio.")
@@ -111,8 +107,70 @@ def crear(
     db.add(c)
     db.flush()
     registrar(db, u.nombre, "cliente_creado", "cliente", str(c.id), {"nombre": c.nombre, "correo_rh": u.correo})
+    return c
+
+
+@router.post("", status_code=201)
+def crear(
+    datos: CrearIn,
+    db: Session = Depends(get_db),
+    u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    c = _crear_cliente(db, cuenta, u, datos)
     db.commit()
     return _cliente_dict(c, detalle=True)
+
+
+@router.post("/masivo", status_code=201)
+async def crear_masivo(
+    archivo: UploadFile = File(...), db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Fase 2 (2026-09-15) — alta masiva de Clientes desde CSV/Excel. Columnas: nombre, razon_social,
+    nombre_comercial, estado y, opcionalmente, un primer contacto (contacto_nombre, contacto_apellidos,
+    contacto_puesto, contacto_correo, contacto_telefono). Mismas reglas que POST /clientes; las filas
+    con error se reportan y el resto se crea."""
+    filas = await masivo.leer_tabla(archivo)
+    resultado = masivo.Resultado()
+    for numero, fila in filas:
+        if not fila.get("nombre"):
+            continue
+        sp = db.begin_nested()
+        try:
+            estado = fila.get("estado") or "Activo"
+            estado = "Inactivo" if estado.strip().lower().startswith("inact") else "Activo"
+            c = _crear_cliente(db, cuenta, u, CrearIn(
+                nombre=fila["nombre"], razon_social=fila.get("razon_social", ""),
+                nombre_comercial=fila.get("nombre_comercial", ""), estado=estado,
+            ))
+            contacto_nombre = fila.get("contacto_nombre", "")
+            if contacto_nombre:
+                if not (fila.get("contacto_correo") or fila.get("contacto_telefono")):
+                    raise HTTPException(400, "El contacto necesita correo o teléfono.")
+                db.add(ClienteContacto(
+                    cliente_id=c.id, nombre=contacto_nombre, apellidos=fila.get("contacto_apellidos", ""),
+                    puesto=fila.get("contacto_puesto", ""), correo=fila.get("contacto_correo", "").lower(),
+                    telefono=fila.get("contacto_telefono", ""),
+                ))
+                db.flush()
+            sp.commit()
+            resultado.ok(numero, {"id": c.id, "nombre": c.nombre, "contacto": bool(contacto_nombre)})
+        except HTTPException as ex:
+            sp.rollback()
+            resultado.error(numero, str(ex.detail), fila.get("nombre", ""))
+    registrar(db, u.nombre, "clientes_carga_masiva", "cuenta", str(cuenta.id), {"archivo": archivo.filename, **resultado.resumen()})
+    db.commit()
+    return resultado.dict()
+
+
+@router.get("/masivo/plantilla")
+def plantilla_masivo_clientes(_: Usuario = Depends(usuario_actual)):
+    return masivo.csv_plantilla(
+        "clientes",
+        ["nombre", "razon_social", "nombre_comercial", "estado", "contacto_nombre", "contacto_apellidos", "contacto_puesto", "contacto_correo", "contacto_telefono"],
+        [["Tiendas Sol", "Tiendas Sol SA de CV", "Sol Retail", "Activo", "Ana", "Pérez", "Gerente RH", "ana@sol.mx", "5512345678"]],
+    )
 
 
 class ActualizarIn(BaseModel):

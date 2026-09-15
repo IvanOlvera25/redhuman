@@ -68,6 +68,10 @@ def cuenta_actual(request: Request, db: Session = Depends(get_db), u: Usuario = 
         return cuentas[0]
     solicitada = request.headers.get(CABECERA_CUENTA)
     if not solicitada:
+        # Fase 2 (2026-09-15): sin cabecera, la Cuenta predeterminada del usuario (si sigue activa).
+        pred = next((c for c in cuentas if c.id == u.cuenta_predeterminada_id), None)
+        if pred:
+            return pred
         raise HTTPException(400, f"Tienes acceso a varias Cuentas: manda la cabecera {CABECERA_CUENTA}.")
     for c in cuentas:
         if str(c.id) == solicitada:

@@ -17,9 +17,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .database import Base, SessionLocal, engine
 from .migraciones import candidatos_sin_postulacion, sincronizar
+from .migraciones import asegurar_reglas_entrevistador
 from .routers import agente, auth, candidatos, capacitacion, clientes, colaboradores, configuracion, contratacion, cuentas, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
 from .seed import sembrar, sembrar_admin
 from .services.agenda import revisar_videollamadas_noshow
+from .services.recordatorios import revisar_recordatorios_documentos
 from .services.avatar import avatar_activo, estado_avatar
 from .services.ia import ia_activa
 from .services.whatsapp import proveedor as whatsapp_proveedor, whatsapp_activo
@@ -37,6 +39,11 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         sembrar(db)
         sembrar_admin(db)
+        # 2026-09-15 (Fase 1): «solo le llega al candidato» — Cuentas cuya regla de entrevista_agendada
+        # nació apagada para el entrevistador antes de 7A y que nadie editó a mano: se encienden.
+        rescatadas = asegurar_reglas_entrevistador(db)
+        if rescatadas:
+            print(f"[notificaciones] regla entrevista_agendada: entrevistador encendido en {rescatadas} Cuenta(s)", flush=True)
         # Fase 2: la migración de DATOS es manual por convención del proyecto (script con
         # confirmación, nunca automática). Garantía de despliegue: si hay candidatos sin
         # postulación, la API NO arranca — el código nuevo jamás sirve peticiones sobre una base
@@ -63,10 +70,23 @@ async def lifespan(app: FastAPI):
     # max_instances=1 + coalesce: si una corrida se alarga (Meta lento) la siguiente NO se encola
     # encima ni se acumulan disparos perdidos — junto con la reclamación del flag en
     # services/agenda.py evita el aviso de reagendar duplicado (2026-09-15).
+    if settings.whatsapp_provider == "meta" and not settings.meta_plantilla_aviso:
+        print(
+            "[whatsapp] ⚠️ META_PLANTILLA_AVISO sin configurar: los WhatsApp a números que no han escrito a la "
+            "empresa (entrevistadores, contactos del Cliente) serán rechazados por Meta (131047).",
+            flush=True,
+        )
+
     scheduler.add_job(
         revisar_videollamadas_noshow, "interval", minutes=5,
         id="noshow_videollamadas", replace_existing=True,
         max_instances=1, coalesce=True, misfire_grace_time=120,
+    )
+    # Fase 3 (2026-09-15): recordatorios automáticos de documentos (cada hora decide si toca).
+    scheduler.add_job(
+        revisar_recordatorios_documentos, "interval", minutes=60,
+        id="recordatorios_documentos", replace_existing=True,
+        max_instances=1, coalesce=True, misfire_grace_time=300,
     )
     scheduler.start()
     try:

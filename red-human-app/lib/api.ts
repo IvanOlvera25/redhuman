@@ -137,6 +137,8 @@ export interface UsuarioRH {
   /** Lista de Cuentas activas a las que tiene acceso este usuario.
    * Cuando solo hay una, el frontend no muestra ningún selector (regla Fase A). */
   cuentas: { id: number; nombre: string; nombreComercial: string }[];
+  /** Fase 2: Cuenta con la que arranca la sesión (null = la primera vinculada). */
+  cuentaPredeterminadaId?: number | null;
 }
 
 export function login(correo: string, password: string) {
@@ -185,6 +187,9 @@ export interface ConfiguracionSistema {
   modoPrueba: boolean;
   /** Punto 13: minutos sin actividad para que una conversación de prueba arranque una sesión nueva. */
   modoPruebaVentanaMin: number;
+  /** Fase 3: recordatorios automáticos de documentos — cada N días, a partir de esta hora (México). */
+  recordatorioDocumentosDias: number;
+  recordatorioDocumentosHora: number;
   candidatosPrueba: number;
   postulacionesPrueba: number;
 }
@@ -193,10 +198,17 @@ export function fetchConfiguracion() {
   return get<ConfiguracionSistema>("/configuracion");
 }
 
-export function actualizarConfiguracion(cambios: { modoPrueba?: boolean; modoPruebaVentanaMin?: number }) {
+export function actualizarConfiguracion(cambios: {
+  modoPrueba?: boolean;
+  modoPruebaVentanaMin?: number;
+  recordatorioDocumentosDias?: number;
+  recordatorioDocumentosHora?: number;
+}) {
   return patch<ConfiguracionSistema>("/configuracion", {
     modo_prueba: cambios.modoPrueba,
     modo_prueba_ventana_min: cambios.modoPruebaVentanaMin,
+    recordatorio_documentos_dias: cambios.recordatorioDocumentosDias,
+    recordatorio_documentos_hora: cambios.recordatorioDocumentosHora,
   });
 }
 
@@ -232,8 +244,11 @@ export interface DatosCuenta {
   contactoNombre: string;
   correoComunicacion: string;
   whatsappComunicacion: string;
-  estado: "Activa" | "Inactiva";
+  estado: "Activa" | "Inactiva" | "Eliminada";
   esActual: boolean;
+  /** Fase 2: Cuenta con la que arranca la sesión de ESTE usuario (por usuario, no global). */
+  esPredeterminada?: boolean;
+  eliminadaEn?: string | null;
   usuarios: number;
   clientes: number;
 }
@@ -280,8 +295,50 @@ export function subirLogoCuenta(archivo: File) {
 }
 
 /** Solo las Cuentas a las que el admin está vinculado (nunca todas las del sistema). */
-export function fetchCuentas() {
-  return get<DatosCuenta[]>("/cuentas");
+export function fetchCuentas(incluirEliminadas = false) {
+  return get<DatosCuenta[]>(`/cuentas${incluirEliminadas ? "?incluir_eliminadas=true" : ""}`);
+}
+
+/** Fase 2: baja lógica (nada se borra; se puede restaurar). No admite la Cuenta actual ni la última activa. */
+export function eliminarCuenta(id: number) {
+  return eliminar<{ ok: boolean; cuenta: DatosCuenta }>(`/cuentas/${id}`);
+}
+
+export function restaurarCuenta(id: number) {
+  return post<DatosCuenta>(`/cuentas/${id}/restaurar`);
+}
+
+export function marcarCuentaPredeterminada(id: number) {
+  return post<{ ok: boolean; cuentaPredeterminadaId: number }>(`/cuentas/${id}/predeterminada`);
+}
+
+/* ---------- Fase 2: cargas masivas (CSV/Excel) ---------- */
+
+export type TipoCargaMasiva = "usuarios" | "clientes" | "plantillas";
+
+export interface ResultadoCargaMasiva {
+  total: number;
+  creados: number;
+  errores: number;
+  filas: ({ fila: number } & Record<string, unknown>)[];
+  fallas: { fila: number; referencia: string; error: string }[];
+}
+
+const RUTAS_MASIVO: Record<TipoCargaMasiva, string> = {
+  usuarios: "/auth/usuarios/masivo",
+  clientes: "/clientes/masivo",
+  plantillas: "/plantillas/masivo",
+};
+
+export function cargaMasiva(tipo: TipoCargaMasiva, archivo: File) {
+  const form = new FormData();
+  form.append("archivo", archivo);
+  return subir<ResultadoCargaMasiva>(RUTAS_MASIVO[tipo], form);
+}
+
+/** CSV de ejemplo con las columnas exactas (autenticado por cookie, como urlArchivo). */
+export function urlPlantillaCargaMasiva(tipo: TipoCargaMasiva) {
+  return urlArchivo(`${RUTAS_MASIVO[tipo]}/plantilla`);
 }
 
 export function crearCuenta(datos: CamposCuenta & { nombre: string }) {
@@ -492,6 +549,9 @@ export interface DatosVacante extends SueldoEstructurado {
   area?: string;
   seniority?: string;
   ubicacion?: string;
+  /** Fase 4: ubicación estructurada (Estado / Municipio); el servidor deriva `ubicacion` de aquí. */
+  ubicacion_estado?: string;
+  ubicacion_municipio?: string;
   modalidad?: string;
   /** Legado: sueldo en texto (agente / vacantes viejas). */
   sueldo?: string;
@@ -554,6 +614,9 @@ export function crearVacante(
     avisos_cumplimiento?: string[];
     texto_whatsapp?: string;
     preguntas_filtro?: CriterioFiltro[];
+    preguntas_filtro_whatsapp?: CriterioFiltro[];
+    ubicacion_estado?: string;
+    ubicacion_municipio?: string;
     publicaciones?: Record<string, BloquePlataforma>;
     publicar?: boolean;
     plataformas?: string[];
@@ -710,6 +773,10 @@ export interface Plantilla {
   seniority: string;
   avisosCumplimiento: string[];
   preguntasFiltro: CriterioFiltro[];
+  /** Fase 4: prefiltro por WhatsApp independiente + ubicación estructurada. */
+  preguntasFiltroWhatsapp?: CriterioFiltro[];
+  ubicacionEstado?: string;
+  ubicacionMunicipio?: string;
   textoWhatsapp: string;
   textoBolsa: string;
   enfoqueEntrevista?: EnfoqueEntrevista;
@@ -1626,10 +1693,11 @@ export function subirDocumentoPublico(token: string, tipo: string, archivo: File
 /** Onboarding · Bloque 4 (Preparación de ingreso) — contrato, alta administrativa, equipo/accesos. */
 export function actualizarPreparacion(
   expedienteId: number,
-  datos: { contrato?: string; altaAdministrativa?: string; equipoAccesos?: string },
+  datos: { contrato?: string; altaAdministrativa?: string; equipoAccesos?: string; documentosHasta?: string },
 ) {
   return patch<NuevoIngreso>(`/contratacion/expedientes/${expedienteId}/preparacion`, {
     contrato: datos.contrato,
+    documentos_hasta: datos.documentosHasta,
     alta_administrativa: datos.altaAdministrativa,
     equipo_accesos: datos.equipoAccesos,
   });

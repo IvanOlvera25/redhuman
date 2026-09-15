@@ -116,6 +116,10 @@ def vacante_dict(
         # prefiltro
         "preguntas_filtro": texto_preguntas(v.preguntas_filtro),
         "criterios": [p for p in (v.preguntas_filtro or []) if isinstance(p, dict)],
+        # Fase 4: prefiltro por WhatsApp independiente + ubicación estructurada
+        "criteriosWhatsapp": [p for p in (v.preguntas_filtro_whatsapp or []) if isinstance(p, dict)],
+        "ubicacionEstado": v.ubicacion_estado or "",
+        "ubicacionMunicipio": v.ubicacion_municipio or "",
         # embudo de esta vacante (conecta con el pipeline de candidatos)
         "embudo": embudo or {},
         "creada": iso(v.creada_en),
@@ -627,7 +631,7 @@ def expediente_dict(e: Expediente) -> dict:
     # 'alta' es el único estado que persiste; el resto se deriva del avance real de los documentos
     estado = "alta" if e.estado == "alta" else ("completo" if e.progreso == 100 else "integracion")
     # documentos que la IA aprobó pero que nadie de RH ha confirmado todavía (bloquean el alta)
-    sin_confirmar = [d.tipo for d in e.obligatorios if d.estado == "recibido" and not d.revisado_por]
+    sin_confirmar = e.sin_confirmar  # 2026-09-15: incluye digitales en revisión (cuentan para el %)
     return {
         "id": f"N-{500 + e.id}",
         "expedienteId": e.id,
@@ -653,6 +657,9 @@ def expediente_dict(e: Expediente) -> dict:
         "pendientes": e.pendientes,
         "porRevisar": e.por_revisar,
         "sinConfirmar": sin_confirmar,
+        # Fase 3: recordatorios automáticos de documentos
+        "documentosHasta": e.documentos_hasta.isoformat() if e.documentos_hasta else None,
+        "ultimoRecordatorioEn": e.ultimo_recordatorio_en.isoformat() if e.ultimo_recordatorio_en else None,
         "listoParaAlta": estado == "completo" and not sin_confirmar,
         # --- puentes hacia el módulo 1 (candidatoId = Postulación: es lo que /candidatos/{codigo} espera) ---
         "candidatoId": p.codigo if p else (c.codigo if c else ""),

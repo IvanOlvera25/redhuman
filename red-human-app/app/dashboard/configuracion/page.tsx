@@ -35,6 +35,7 @@ import {
   type ContenidoVacante,
 } from "@/components/dashboard/vacantes/formulario-contenido";
 import { invalidarReglasNotificacion } from "@/components/dashboard/linea-notificar";
+import { BotonCargaMasiva } from "@/components/dashboard/carga-masiva";
 import {
   actualizarCliente,
   actualizarConfiguracion,
@@ -58,6 +59,9 @@ import {
   fetchConfiguracion,
   fetchCuenta,
   fetchCuentas,
+  eliminarCuenta,
+  restaurarCuenta,
+  marcarCuentaPredeterminada,
   fetchIntegracionTeams,
   fetchPlantillas,
   fetchReglasNotificacion,
@@ -317,7 +321,7 @@ const cuentaAForm = (c?: DatosCuenta | null): FormCuentaState => ({
   contactoNombre: c?.contactoNombre ?? "",
   correo: c?.correoComunicacion ?? "",
   whatsapp: c?.whatsappComunicacion ?? "",
-  estado: c?.estado ?? "Activa",
+  estado: c?.estado === "Inactiva" ? "Inactiva" : "Activa",
 });
 
 const formACampos = (f: FormCuentaState): CamposCuenta & { nombre: string } => ({
@@ -345,21 +349,57 @@ function CamposCuentaForm({ f, set }: { f: FormCuentaState; set: (k: keyof FormC
 }
 
 function SeccionCuentas() {
-  const { cuentaActualId } = useSesion();
+  const { cuentaActualId, refrescar } = useSesion();
   const [cuentas, setCuentas] = useState<DatosCuenta[]>([]);
   const [cargando, setCargando] = useState(true);
   const [nueva, setNueva] = useState(false);
   const [fichaId, setFichaId] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const [ok, setOk] = useState("");
+  const [verEliminadas, setVerEliminadas] = useState(false);
+  const [ocupada, setOcupada] = useState<number | null>(null);
 
   const recargar = useCallback(async () => {
-    const c = await fetchCuentas();
+    const c = await fetchCuentas(verEliminadas);
     setCuentas(c ?? []);
     setCargando(false);
-  }, []);
+  }, [verEliminadas]);
   useEffect(() => {
     recargar();
   }, [recargar]);
+
+  // Fase 2: baja lógica / restaurar / predeterminada — el backend valida (Cuenta actual, última activa…)
+  async function eliminar(c: DatosCuenta) {
+    if (!window.confirm(`¿Eliminar la Cuenta «${c.nombre}»? No se borra nada: deja de aparecer y se puede restaurar después.`)) return;
+    setOcupada(c.id);
+    setError("");
+    const r = await eliminarCuenta(c.id);
+    setOcupada(null);
+    if (!r.ok) return setError(r.error);
+    setOk(`Cuenta «${c.nombre}» eliminada (se puede restaurar desde «Ver eliminadas»).`);
+    await recargar();
+    await refrescar();
+  }
+  async function restaurar(c: DatosCuenta) {
+    setOcupada(c.id);
+    setError("");
+    const r = await restaurarCuenta(c.id);
+    setOcupada(null);
+    if (!r.ok) return setError(r.error);
+    setOk(`Cuenta «${c.nombre}» restaurada.`);
+    await recargar();
+    await refrescar();
+  }
+  async function predeterminada(c: DatosCuenta) {
+    setOcupada(c.id);
+    setError("");
+    const r = await marcarCuentaPredeterminada(c.id);
+    setOcupada(null);
+    if (!r.ok) return setError(r.error);
+    setOk(`«${c.nombre}» es ahora tu Cuenta predeterminada: con ella arranca tu sesión.`);
+    await recargar();
+    await refrescar();
+  }
 
   return (
     <Card className="mt-6 p-5">
@@ -369,12 +409,18 @@ function SeccionCuentas() {
           titulo="Cuentas"
           subtitulo="Empresas reclutadoras que usan Red Human. Solo ves las Cuentas a las que tienes acceso; los datos de una nunca se mezclan con otra."
         />
-        <Button size="sm" onClick={() => setNueva(true)}>
-          <Plus className="h-4 w-4" /> Nueva cuenta
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button size="sm" variant="ghost" onClick={() => setVerEliminadas((v) => !v)}>
+            {verEliminadas ? "Ocultar eliminadas" : "Ver eliminadas"}
+          </Button>
+          <Button size="sm" onClick={() => setNueva(true)}>
+            <Plus className="h-4 w-4" /> Nueva cuenta
+          </Button>
+        </div>
       </div>
 
       {error && <div className="mb-3"><Aviso tono="error" onCerrar={() => setError("")}>{error}</Aviso></div>}
+      {ok && <div className="mb-3"><Aviso tono="ok" onCerrar={() => setOk("")}>{ok}</Aviso></div>}
 
       {cargando ? (
         <Loader2 className="h-5 w-5 animate-spin text-ink-3" />
@@ -388,20 +434,45 @@ function SeccionCuentas() {
                 <p className="truncate text-sm font-medium text-ink hover:text-brand">
                   {c.nombre}
                   {c.id === cuentaActualId && <Badge tone="brand" className="ml-2">Actual</Badge>}
+                  {c.esPredeterminada && <Badge tone="good" className="ml-2">Predeterminada</Badge>}
                 </p>
                 <p className="truncate text-[12px] text-ink-3">
                   {c.nombreComercial} · {c.usuarios} usuario(s) · {c.clientes} cliente(s)
+                  {c.estado === "Eliminada" && c.eliminadaEn ? ` · eliminada el ${fechaCorta(c.eliminadaEn)}` : ""}
                 </p>
               </button>
-              <Badge tone={c.estado === "Activa" ? "good" : "neutral"} dot>{c.estado}</Badge>
-              <button
-                type="button"
-                onClick={() => setFichaId(c.id)}
-                className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ink-3 hover:bg-surface-2 hover:text-brand"
-                aria-label={`Abrir ficha de ${c.nombre}`}
-              >
-                <Pencil className="h-3.5 w-3.5" />
-              </button>
+              <Badge tone={c.estado === "Activa" ? "good" : c.estado === "Eliminada" ? "bad" : "neutral"} dot>{c.estado}</Badge>
+              {c.estado === "Eliminada" ? (
+                <Button size="sm" variant="outline" onClick={() => restaurar(c)} disabled={ocupada === c.id}>
+                  <RotateCw className="h-3.5 w-3.5" /> Restaurar
+                </Button>
+              ) : (
+                <>
+                  {c.estado === "Activa" && !c.esPredeterminada && (
+                    <Button size="sm" variant="ghost" onClick={() => predeterminada(c)} disabled={ocupada === c.id} title="Con esta Cuenta arrancará tu sesión">
+                      <Check className="h-3.5 w-3.5" /> Predeterminar
+                    </Button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setFichaId(c.id)}
+                    className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ink-3 hover:bg-surface-2 hover:text-brand"
+                    aria-label={`Abrir ficha de ${c.nombre}`}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => eliminar(c)}
+                    disabled={ocupada === c.id || c.id === cuentaActualId}
+                    className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ink-3 hover:bg-bad-soft hover:text-bad disabled:opacity-40"
+                    aria-label={`Eliminar ${c.nombre}`}
+                    title={c.id === cuentaActualId ? "No puedes eliminar la Cuenta con la que estás operando" : "Eliminar (baja lógica)"}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </>
+              )}
             </li>
           ))}
         </ul>
@@ -759,9 +830,12 @@ function SeccionUsuarios() {
           titulo="Usuarios y permisos"
           subtitulo="Personas de RH con acceso a la Cuenta actual. Para dar acceso a otra Cuenta usa su ficha en «Cuentas»."
         />
-        <Button size="sm" onClick={() => { setMostrarForm(true); setEditando(null); }}>
-          <Plus className="h-4 w-4" /> Agregar
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <BotonCargaMasiva tipo="usuarios" onTerminado={() => fetchUsuarios().then((u) => setUsuarios(u ?? []))} />
+          <Button size="sm" onClick={() => { setMostrarForm(true); setEditando(null); }}>
+            <Plus className="h-4 w-4" /> Agregar
+          </Button>
+        </div>
       </div>
 
       {error && <div className="mb-3"><Aviso tono="error">{error}</Aviso></div>}
@@ -928,9 +1002,12 @@ function SeccionClientes() {
           titulo="Clientes y contactos"
           subtitulo="Empresas para las que recluta tu Cuenta y sus personas de contacto (reciben las notificaciones de Cliente). Se eligen al crear una vacante; si no hay ninguno, ese selector no aparece."
         />
-        <Button size="sm" onClick={() => setNuevo(true)}>
-          <Plus className="h-4 w-4" /> Nuevo cliente
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <BotonCargaMasiva tipo="clientes" onTerminado={recargar} />
+          <Button size="sm" onClick={() => setNuevo(true)}>
+            <Plus className="h-4 w-4" /> Nuevo cliente
+          </Button>
+        </div>
       </div>
 
       {cargando ? (
@@ -1217,9 +1294,12 @@ function SeccionPlantillas() {
           titulo="Plantillas"
           subtitulo="Contenido reutilizable para crear vacantes en un clic. Mismo formulario que «Nueva vacante»; desde una vacante existente también puedes «Guardar como plantilla»."
         />
-        <Button size="sm" onClick={() => setEditor({ plantilla: null })}>
-          <Plus className="h-4 w-4" /> Nueva plantilla
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <BotonCargaMasiva tipo="plantillas" onTerminado={recargar} />
+          <Button size="sm" onClick={() => setEditor({ plantilla: null })}>
+            <Plus className="h-4 w-4" /> Nueva plantilla
+          </Button>
+        </div>
       </div>
 
       {msg && <div className="mb-3"><Aviso tono={msg.tono} onCerrar={() => setMsg(null)}>{msg.texto}</Aviso></div>}
@@ -1511,6 +1591,29 @@ function SeccionModoPrueba() {
     setCfg(r.data);
   }
 
+  // Fase 3: parámetros del cron de recordatorios de documentos
+  const [recDias, setRecDias] = useState("");
+  const [recHora, setRecHora] = useState("");
+  useEffect(() => {
+    if (cfg) {
+      setRecDias(String(cfg.recordatorioDocumentosDias ?? 2));
+      setRecHora(String(cfg.recordatorioDocumentosHora ?? 10));
+    }
+  }, [cfg]);
+  const recCambio = cfg ? recDias !== String(cfg.recordatorioDocumentosDias) || recHora !== String(cfg.recordatorioDocumentosHora) : false;
+  async function guardarRecordatorios() {
+    const d = parseInt(recDias, 10);
+    const h = parseInt(recHora, 10);
+    if (isNaN(d) || d < 1 || d > 30) return setError("Los recordatorios deben ser cada 1 a 30 días.");
+    if (isNaN(h) || h < 0 || h > 23) return setError("La hora debe estar entre 0 y 23.");
+    setGuardando(true);
+    setError("");
+    const r = await actualizarConfiguracion({ recordatorioDocumentosDias: d, recordatorioDocumentosHora: h });
+    setGuardando(false);
+    if (!r.ok) { setError(r.error); return; }
+    setCfg(r.data);
+  }
+
   async function confirmarBorrado() {
     setBorrando(true);
     setError("");
@@ -1586,6 +1689,32 @@ function SeccionModoPrueba() {
             {guardando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Guardar
           </Button>
           {cfg && !ventanaCambio && <span className="pb-2.5 text-[12px] text-ink-3"><Check className="mr-1 inline h-3.5 w-3.5" />{cfg.modoPruebaVentanaMin} min</span>}
+        </div>
+      </div>
+
+      {/* Fase 3: recordatorios automáticos de documentos */}
+      <div className="mt-4 rounded-xl border border-border-soft p-4">
+        <p className="text-sm font-semibold">Recordatorios automáticos de documentos</p>
+        <p className="mt-1 text-[12px] leading-relaxed text-ink-3">
+          Para cada expediente con fecha «recordar hasta» (Onboarding), el sistema manda por sí solo el recordatorio de
+          documentos pendientes con la regla de notificación de la Cuenta: cada N días, a partir de la hora indicada
+          (hora de México), y nunca después de la fecha límite.
+        </p>
+        <div className="mt-3 flex flex-wrap items-end gap-3">
+          <div>
+            <label className="mb-1 block text-[12px] font-medium text-ink-2">Cada (días)</label>
+            <input type="number" min={1} max={30} value={recDias} onChange={(e) => setRecDias(e.target.value)}
+              className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+          </div>
+          <div>
+            <label className="mb-1 block text-[12px] font-medium text-ink-2">A partir de las (hora)</label>
+            <input type="number" min={0} max={23} value={recHora} onChange={(e) => setRecHora(e.target.value)}
+              className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+          </div>
+          <Button size="sm" onClick={guardarRecordatorios} disabled={guardando || !recCambio}>
+            {guardando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Guardar
+          </Button>
+          {cfg && !recCambio && <span className="pb-2.5 text-[12px] text-ink-3"><Check className="mr-1 inline h-3.5 w-3.5" />cada {cfg.recordatorioDocumentosDias} día(s) desde las {cfg.recordatorioDocumentosHora}:00</span>}
         </div>
       </div>
 

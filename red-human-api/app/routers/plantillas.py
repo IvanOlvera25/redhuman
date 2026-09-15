@@ -3,15 +3,16 @@ nivel intermedio (Fase B, reestructuración multi-cuenta, punto 11)."""
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..services import masivo
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import (
     CAMPOS_PLANTILLA, ENFOQUES_ENTREVISTA, PERIODICIDADES_SUELDO, Cliente, Cuenta, Plantilla, Usuario, Vacante, registrar,
-    texto_sueldo,
+    texto_sueldo, texto_ubicacion,
 )
 
 router = APIRouter(prefix="/plantillas", tags=["plantillas"])
@@ -44,6 +45,9 @@ def _plantilla_dict(p: Plantilla) -> dict:
         "seniority": p.seniority,
         "avisosCumplimiento": p.avisos_cumplimiento or [],
         "preguntasFiltro": p.preguntas_filtro or [],  # = "evaluaciones" (ver spec Fase B)
+        "preguntasFiltroWhatsapp": p.preguntas_filtro_whatsapp or [],  # Fase 4
+        "ubicacionEstado": p.ubicacion_estado or "",
+        "ubicacionMunicipio": p.ubicacion_municipio or "",
         "textoWhatsapp": p.texto_whatsapp,
         "textoBolsa": p.texto_bolsa,
         "enfoqueEntrevista": p.enfoque_entrevista or "profesional",
@@ -116,18 +120,16 @@ class PlantillaIn(BaseModel):
     seniority: str = ""
     avisos_cumplimiento: List[str] = []
     preguntas_filtro: List[dict] = []
+    preguntas_filtro_whatsapp: List[dict] = []  # Fase 4
+    ubicacion_estado: str = ""  # Fase 4
+    ubicacion_municipio: str = ""
     texto_whatsapp: str = ""
     texto_bolsa: str = ""
     enfoque_entrevista: str = "profesional"
 
 
-@router.post("", status_code=201)
-def crear(
-    datos: PlantillaIn,
-    db: Session = Depends(get_db),
-    u: Usuario = Depends(usuario_decisor),
-    cuenta: Cuenta = Depends(cuenta_actual),
-):
+def _crear_plantilla(db: Session, cuenta: Cuenta, u: Usuario, datos: PlantillaIn) -> Plantilla:
+    """Validaciones de POST /plantillas — compartidas con la carga masiva (Fase 2). No hace commit."""
     if not datos.nombre.strip():
         raise HTTPException(400, "El nombre de la plantilla es obligatorio.")
     _validar_cliente(db, cuenta.id, datos.cliente_id)
@@ -140,6 +142,7 @@ def crear(
     campos["nombre"] = campos["nombre"].strip()
     if datos.sueldo_periodicidad or datos.sueldo_desde or datos.sueldo_hasta:
         campos["sueldo"] = texto_sueldo(datos.sueldo_desde, datos.sueldo_hasta, datos.sueldo_moneda, datos.sueldo_periodicidad)
+    campos["ubicacion"] = texto_ubicacion(datos.ubicacion_estado, datos.ubicacion_municipio, datos.ubicacion)
     p = Plantilla(cuenta_id=cuenta.id, creado_por=u.nombre, **campos)
     db.add(p)
     db.flush()
@@ -147,8 +150,87 @@ def crear(
         db, u.nombre, "plantilla_creada", "plantilla", str(p.id),
         {"nombre": p.nombre, "cliente_id": p.cliente_id},
     )
+    return p
+
+
+@router.post("", status_code=201)
+def crear(
+    datos: PlantillaIn,
+    db: Session = Depends(get_db),
+    u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    p = _crear_plantilla(db, cuenta, u, datos)
     db.commit()
     return _plantilla_dict(p)
+
+
+# Columnas de lista en la carga masiva: valores separados por « | » o «;».
+_COLUMNAS_LISTA = ("responsabilidades", "requisitos_deseables", "beneficios", "palabras_clave", "avisos_cumplimiento")
+
+
+@router.post("/masivo", status_code=201)
+async def crear_masivo(
+    archivo: UploadFile = File(...), db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Fase 2 (2026-09-15) — alta masiva de Plantillas desde CSV/Excel. Columnas = CAMPOS_PLANTILLA en
+    snake_case + `nombre` + `cliente` (nombre del Cliente de la Cuenta; vacío = General). Listas
+    separadas por « | »; sueldo estructurado (sueldo_desde/hasta/moneda/periodicidad) → el texto se
+    deriva con texto_sueldo, nunca se captura aparte. Mismas reglas que POST /plantillas."""
+    filas = await masivo.leer_tabla(archivo)
+    resultado = masivo.Resultado()
+    clientes = {c.nombre.strip().lower(): c.id for c in db.query(Cliente).filter(Cliente.cuenta_id == cuenta.id).all()}
+    for numero, fila in filas:
+        if not fila.get("nombre"):
+            continue
+        sp = db.begin_nested()
+        try:
+            cliente_id = None
+            nombre_cliente = fila.get("cliente", "").strip()
+            if nombre_cliente:
+                cliente_id = clientes.get(nombre_cliente.lower())
+                if cliente_id is None:
+                    raise HTTPException(400, f"El Cliente «{nombre_cliente}» no existe en esta Cuenta.")
+            campos = {k: fila.get(k, "") for k in ("titulo", "area", "ubicacion", "requisitos", "descripcion", "resumen", "perfil_ideal", "seniority", "texto_whatsapp", "texto_bolsa")}
+            campos = {k: v for k, v in campos.items() if v}
+            for k in _COLUMNAS_LISTA:
+                if fila.get(k):
+                    campos[k] = masivo.lista(fila[k])
+            for k in ("sueldo_desde", "sueldo_hasta"):
+                if fila.get(k):
+                    campos[k] = masivo.entero(fila[k], k)
+            if fila.get("modalidad"):
+                campos["modalidad"] = fila["modalidad"]
+            if fila.get("sueldo_moneda"):
+                campos["sueldo_moneda"] = fila["sueldo_moneda"].upper()
+            if fila.get("sueldo_periodicidad"):
+                campos["sueldo_periodicidad"] = fila["sueldo_periodicidad"].lower()
+            if fila.get("enfoque_entrevista"):
+                campos["enfoque_entrevista"] = fila["enfoque_entrevista"].lower()
+            p = _crear_plantilla(db, cuenta, u, PlantillaIn(nombre=fila["nombre"], cliente_id=cliente_id, **campos))
+            sp.commit()
+            resultado.ok(numero, {"id": p.id, "nombre": p.nombre, "cliente_id": p.cliente_id})
+        except HTTPException as ex:
+            sp.rollback()
+            resultado.error(numero, str(ex.detail), fila.get("nombre", ""))
+        except (ValueError, TypeError) as ex:  # pydantic: tipo inválido en alguna columna
+            sp.rollback()
+            resultado.error(numero, f"dato inválido: {str(ex)[:160]}", fila.get("nombre", ""))
+    registrar(db, u.nombre, "plantillas_carga_masiva", "cuenta", str(cuenta.id), {"archivo": archivo.filename, **resultado.resumen()})
+    db.commit()
+    return resultado.dict()
+
+
+@router.get("/masivo/plantilla")
+def plantilla_masivo_plantillas(_: Usuario = Depends(usuario_actual)):
+    return masivo.csv_plantilla(
+        "plantillas",
+        ["nombre", "cliente", "titulo", "area", "ubicacion", "modalidad", "sueldo_desde", "sueldo_hasta", "sueldo_moneda", "sueldo_periodicidad",
+         "seniority", "requisitos", "requisitos_deseables", "responsabilidades", "beneficios", "descripcion", "enfoque_entrevista"],
+        [["Cajero base", "", "Cajero(a) de sucursal", "Operaciones", "Ciudad de México", "Presencial", "9000", "11000", "MXN", "mensual",
+          "Junior", "Secundaria terminada · Manejo de efectivo", "Experiencia en retail | Inglés básico", "Cobro en caja | Arqueo diario", "Vales de despensa | Seguro de vida", "Atención en caja de sucursal.", "profesional"]],
+    )
 
 
 class ActualizarIn(BaseModel):
@@ -175,6 +257,9 @@ class ActualizarIn(BaseModel):
     seniority: Optional[str] = None
     avisos_cumplimiento: Optional[List[str]] = None
     preguntas_filtro: Optional[List[dict]] = None
+    preguntas_filtro_whatsapp: Optional[List[dict]] = None  # Fase 4
+    ubicacion_estado: Optional[str] = None  # Fase 4
+    ubicacion_municipio: Optional[str] = None
     texto_whatsapp: Optional[str] = None
     texto_bolsa: Optional[str] = None
     enfoque_entrevista: Optional[str] = None
@@ -201,6 +286,8 @@ def actualizar(
         setattr(p, campo, valor.strip() if campo == "nombre" and isinstance(valor, str) else valor)
     if any(k in cambios for k in ("sueldo_desde", "sueldo_hasta", "sueldo_moneda", "sueldo_periodicidad")):
         p.sueldo = texto_sueldo(p.sueldo_desde, p.sueldo_hasta, p.sueldo_moneda, p.sueldo_periodicidad)
+    if any(k in cambios for k in ("ubicacion_estado", "ubicacion_municipio")):
+        p.ubicacion = texto_ubicacion(p.ubicacion_estado, p.ubicacion_municipio, p.ubicacion)
 
     if cambios:
         registrar(db, u.nombre, "plantilla_editada", "plantilla", str(p.id), {"campos": sorted(cambios)})

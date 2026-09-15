@@ -1168,6 +1168,45 @@ async def _reabrir_agenda(db: Session, p: Postulacion, historial: List[dict], ca
     ))
 
 
+# Fase 3 (2026-09-15) — Entrevista IA interrumpida/parcial: el candidato la reanuda desde WhatsApp.
+ESTADOS_ENTREVISTA_FALLIDA = ("interrumpida", "parcial")
+
+
+def _entrevista_ia_fallida(p: Postulacion):
+    """Última Entrevista IA de la postulación si quedó interrumpida o parcial (falló / se cortó)."""
+    if not p.entrevistas:
+        return None
+    e = max(p.entrevistas, key=lambda x: x.id)
+    return e if e.estado in ESTADOS_ENTREVISTA_FALLIDA else None
+
+
+async def _reanudar_entrevista_ia(db: Session, p: Postulacion, e, texto: str, historial: List[dict], canal: str) -> dict:
+    """El candidato escribe con su Entrevista IA interrumpida/parcial:
+    - si pide otra fecha («reagendar», «no pude», «otro día»…) → se suelta la cita y el agente de
+      agenda coordina una nueva (genera liga nueva; la fallida queda como historial);
+    - cualquier otro mensaje → se REABRE la misma entrevista (mismo token, intento archivado) y se
+      le manda la liga de nuevo. Antes solo RH podía reabrirla y el candidato recibía «ya tienes tu
+      videollamada agendada» o nada."""
+    t = _norm_txt(texto)
+    if _RE_REAGENDAR.search(t):
+        return await _reabrir_agenda(db, p, historial, canal)
+    from ..services.entrevistas import reabrir_entrevista  # import local: entrevistas ↔ candidatos
+
+    reabrir_entrevista(db, e, "candidato-whatsapp", "el candidato pidió reanudar por WhatsApp", {"texto": texto[:200], "canal": canal})
+    liga = f"{settings.app_url}/entrevista/{e.token}"
+    nombre = nombre_ficha(p).split(" ")[0] if nombre_ficha(p) else ""
+    respuesta = (
+        f"{('Hola ' + nombre + '. ') if nombre else ''}Vi que tu entrevista con Red Human quedó "
+        f"{'incompleta' if e.estado == 'parcial' else 'interrumpida'}. Ya la reabrí: entra cuando estés listo(a) y la "
+        f"retomamos desde el inicio 🙂\n\n{liga}\n\nSi prefieres otra fecha u horario, dime cuándo y lo reagendamos."
+    )
+    envio = await _enviar_whatsapp(p, respuesta, canal)
+    guardar_mensaje(db, p, "assistant", respuesta, canal, envio)
+    _actualizar_ultima_actividad(p)
+    db.commit()
+    return {"respuesta": respuesta, "clasificacion": None, "ia": False, "whatsapp": envio, "entrevista_reabierta": e.codigo}
+
+
 async def _procesar_turno_post_completo(db: Session, p: Postulacion, texto: str, canal: str) -> dict:
     """No queda nada pendiente que la IA deba coordinar (no_cumple ya avisado, o cumple con
     videollamada ya agendada) — se responde con un mensaje fijo, sin volver a llamar al modelo."""
@@ -1211,6 +1250,13 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
     if p.prefiltro_completo and p.estado == "cumple" and not p.videollamada_agendada_en:
         return await _procesar_turno_agenda(db, p, historial, canal)
 
+    # Fase 3 (2026-09-15): Entrevista IA interrumpida/parcial → el candidato la reanuda (misma liga)
+    # o la reagenda escribiendo por WhatsApp. Va ANTES de reagendar/post-completo a propósito.
+    if p.etapa == "Entrevista IA" and p.prefiltro_completo and p.estado == "cumple":
+        fallida = _entrevista_ia_fallida(p)
+        if fallida is not None:
+            return await _reanudar_entrevista_ia(db, p, fallida, texto, historial, canal)
+
     # 2026-09-15: con cita agendada, "quiero reagendar" / "sí" tras el aviso de no-show → se reabre
     # la coordinación en esta misma postulación (nunca al menú de vacantes ni respuesta fija).
     if p.prefiltro_completo and p.estado == "cumple" and _quiere_reagendar(p, texto):
@@ -1220,10 +1266,13 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
     if p.prefiltro_completo:
         return await _procesar_turno_post_completo(db, p, texto, canal)
 
+    # Fase 4 (2026-09-15): las preguntas del prefiltro por WhatsApp son independientes de las de la
+    # postulación web; si RH no capturó ninguna, se usan las de la web (vacantes previas).
+    preguntas_wa = ((v.preguntas_filtro_whatsapp or None) or (v.preguntas_filtro or [])) if v else []
     turno, con_ia = ia.prefiltro_turno(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",
-        (v.preguntas_filtro or []) if v else [],
+        preguntas_wa,
         historial,
         empresa=nombre_empresa_candidato(v) if v else "",
         ubicacion=v.ubicacion if v else "",

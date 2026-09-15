@@ -145,3 +145,32 @@ def migrar_postulaciones(db) -> dict:
     db.flush()
     db.expire_all()
     return conteo
+
+
+def asegurar_reglas_entrevistador(db) -> int:
+    """2026-09-15 (Fase 1). Bug reportado: al agendar Entrevista Humana solo le llegaba al candidato.
+    Causa: la regla `entrevista_agendada` de Cuentas creadas antes de 7A nació con el entrevistador
+    apagado (siembra de Fase D: solo correo; o todo apagado) y 7A decidió no tocar reglas guardadas.
+    Aquí se enciende correo+WhatsApp al entrevistador SOLO si ningún admin editó esa regla a mano
+    (no hay `regla_notificacion_actualizada` en bitácora para ese evento). Idempotente."""
+    from sqlalchemy import func as _f
+
+    from .models import Bitacora, ReglaNotificacion
+
+    editadas = {
+        int(b.entidad_id)
+        for b in db.query(Bitacora)
+        .filter(Bitacora.accion == "regla_notificacion_actualizada", Bitacora.entidad == "cuenta")
+        .all()
+        if (b.detalle or {}).get("evento") == "entrevista_agendada" and str(b.entidad_id).isdigit()
+    }
+    n = 0
+    for r in db.query(ReglaNotificacion).filter(ReglaNotificacion.evento == "entrevista_agendada").all():
+        if r.cuenta_id in editadas or (r.entrevistador_correo and r.entrevistador_whatsapp):
+            continue
+        r.entrevistador_correo = True
+        r.entrevistador_whatsapp = True
+        n += 1
+    if n:
+        db.commit()
+    return n

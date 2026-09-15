@@ -52,6 +52,11 @@ def verificar(password: str, guardado: str) -> bool:
     return hmac.compare_digest(dk.hex(), hash_hex)
 
 
+def password_temporal() -> str:
+    """Contraseña temporal que cumple validar_fortaleza (la persona la cambia en su primer acceso)."""
+    return secrets.token_hex(5) + "Aa1!"
+
+
 def validar_fortaleza(password: str) -> Optional[str]:
     """Regresa el motivo del rechazo, o None si la contraseña es aceptable."""
     if len(password) < 10:

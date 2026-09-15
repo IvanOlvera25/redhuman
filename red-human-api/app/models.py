@@ -65,6 +65,12 @@ class Vacante(Base):
     texto_whatsapp: Mapped[str] = mapped_column(Text, default="")
     texto_bolsa: Mapped[str] = mapped_column(Text, default="")
     preguntas_filtro: Mapped[list] = mapped_column(JSON, default=list)  # [str] (legado) o [PreguntaFiltro]
+    # Fase 4 (2026-09-15): preguntas del prefiltro por WhatsApp, INDEPENDIENTES de las de la postulación web
+    # (`preguntas_filtro`). Vacía = el agente usa las de la web (compatibilidad con vacantes previas).
+    preguntas_filtro_whatsapp: Mapped[list] = mapped_column(JSON, default=list)
+    # Fase 4: ubicación estructurada (Estado / Municipio-Alcaldía de México); `ubicacion` (texto) se deriva.
+    ubicacion_estado: Mapped[str] = mapped_column(String(60), default="")
+    ubicacion_municipio: Mapped[str] = mapped_column(String(100), default="")
     plataformas: Mapped[list] = mapped_column(JSON, default=list)
     # Fase 4 (Punto 6): qué cubre la Entrevista IA — ver ENFOQUES_ENTREVISTA. Solo 2 niveles.
     enfoque_entrevista: Mapped[str] = mapped_column(String(30), default="profesional")
@@ -662,6 +668,11 @@ class Expediente(Base):
     # EntrevistaHumana, sigue válido hasta que el expediente llega a estado "alta".
     token: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True, nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    # Fase 3 (2026-09-15): «recordar hasta» — fecha límite que respeta el cron de recordatorios de
+    # documentos. Null = sin recordatorios automáticos para este expediente.
+    documentos_hasta: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ultimo_recordatorio_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    documentos_vencidos_avisado: Mapped[bool] = mapped_column(Boolean, default=False)
 
     candidato: Mapped[Optional[Candidato]] = relationship(foreign_keys=[candidato_id])
     postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="expediente")
@@ -675,12 +686,15 @@ class Expediente(Base):
 
     @property
     def progreso(self) -> int:
-        """% de documentos OBLIGATORIOS ya recibidos — es lo que habilita el alta."""
+        """% de documentos OBLIGATORIOS ya entregados — es lo que habilita el alta.
+        2026-09-15 (Fase 1): un documento digital SUBIDO cuenta desde que llega (estado `recibido`
+        o `revision` con archivo); antes solo contaba `recibido`, así que en modo demo / con la IA
+        en duda el porcentaje se quedaba en 0 hasta que RH lo marcaba «recibido físicamente»."""
         docs = self.obligatorios
         if not docs:
             return 0
-        recibidos = sum(1 for d in docs if d.estado == "recibido")
-        return round(recibidos / len(docs) * 100)
+        entregados = sum(1 for d in docs if d.entregado)
+        return round(entregados / len(docs) * 100)
 
     @property
     def pendientes(self) -> List[str]:
@@ -689,6 +703,11 @@ class Expediente(Base):
     @property
     def por_revisar(self) -> List[str]:
         return [d.tipo for d in self.documentos if d.estado == "revision"]
+
+    @property
+    def sin_confirmar(self) -> List[str]:
+        """Obligatorios entregados que ninguna persona de RH ha confirmado todavía (HITL del alta)."""
+        return [d.tipo for d in self.obligatorios if d.entregado and not d.revisado_por]
 
 
 class Documento(Base):
@@ -708,6 +727,11 @@ class Documento(Base):
     revisado_por: Mapped[str] = mapped_column(String(150), default="")
     subido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+    @property
+    def entregado(self) -> bool:
+        """Cuenta para el porcentaje: recibido (físico o confirmado) o digital subido pendiente de revisión."""
+        return self.estado == "recibido" or (self.estado == "revision" and bool(self.archivo))
 
     expediente: Mapped[Expediente] = relationship(back_populates="documentos")
 
@@ -767,9 +791,13 @@ class Cuenta(Base):
     contacto_nombre: Mapped[str] = mapped_column(String(150), default="")
     correo_comunicacion: Mapped[str] = mapped_column(String(200), default="")
     whatsapp_comunicacion: Mapped[str] = mapped_column(String(30), default="")
-    estado: Mapped[str] = mapped_column(String(20), default="Activa")  # Activa | Inactiva
+    estado: Mapped[str] = mapped_column(String(20), default="Activa")  # Activa | Inactiva | Eliminada
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
     actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+    # Fase 2 (2026-09-15): baja lógica. Una Cuenta eliminada conserva TODO (vacantes, postulaciones,
+    # bitácora) pero deja de aparecer en listados/selector y el webhook de WhatsApp no la usa.
+    eliminada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    eliminada_por: Mapped[str] = mapped_column(String(150), default="")
 
     clientes: Mapped[List["Cliente"]] = relationship(back_populates="cuenta")
     usuarios: Mapped[List["UsuarioCuenta"]] = relationship(back_populates="cuenta")
@@ -854,6 +882,9 @@ class Plantilla(Base):
     seniority: Mapped[str] = mapped_column(String(40), default="")
     avisos_cumplimiento: Mapped[list] = mapped_column(JSON, default=list)
     preguntas_filtro: Mapped[list] = mapped_column(JSON, default=list)  # = "evaluaciones" (ver spec Fase B)
+    preguntas_filtro_whatsapp: Mapped[list] = mapped_column(JSON, default=list)  # Fase 4
+    ubicacion_estado: Mapped[str] = mapped_column(String(60), default="")  # Fase 4
+    ubicacion_municipio: Mapped[str] = mapped_column(String(100), default="")
     texto_whatsapp: Mapped[str] = mapped_column(Text, default="")
     texto_bolsa: Mapped[str] = mapped_column(Text, default="")
     enfoque_entrevista: Mapped[str] = mapped_column(String(30), default="profesional")  # Fase 4
@@ -875,7 +906,19 @@ CAMPOS_PLANTILLA = [
     "seniority", "avisos_cumplimiento", "preguntas_filtro", "texto_whatsapp", "texto_bolsa",
     "enfoque_entrevista",
     "sueldo_desde", "sueldo_hasta", "sueldo_moneda", "sueldo_periodicidad",  # Parte 3
+    "preguntas_filtro_whatsapp", "ubicacion_estado", "ubicacion_municipio",  # Fase 4
 ]
+
+
+def texto_ubicacion(estado: str, municipio: str, libre: str = "") -> str:
+    """Fase 4: `ubicacion` (texto que leen portal, WhatsApp, IA) se deriva de Estado/Municipio cuando
+    se capturaron; si no, se conserva el texto libre (vacantes previas)."""
+    estado, municipio = (estado or "").strip(), (municipio or "").strip()
+    if municipio and estado:
+        return municipio if municipio == estado else f"{municipio}, {estado}"
+    if estado:
+        return estado
+    return (libre or "").strip()
 
 # Parte 3 (2026-09-12): sueldo estructurado. "a_convenir" = sin montos.
 PERIODICIDADES_SUELDO = ["semanal", "quincenal", "mensual", "anual", "a_convenir"]
@@ -947,6 +990,9 @@ class Usuario(Base):
     # Visibilidad automática (Fase A): si puede alternar Mío/Mi equipo, y a quién reporta.
     ve_equipo: Mapped[bool] = mapped_column(Boolean, default=False)
     reporta_a_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
+    # Fase 2 (2026-09-15): Cuenta con la que arranca la sesión cuando el usuario tiene varias
+    # (POST /cuentas/{id}/predeterminada). Null = la primera vinculada, como siempre.
+    cuenta_predeterminada_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True)
 
     sesiones: Mapped[List["Sesion"]] = relationship(back_populates="usuario", cascade="all, delete-orphan")
     cuentas: Mapped[List["UsuarioCuenta"]] = relationship(back_populates="usuario", cascade="all, delete-orphan")
@@ -1051,6 +1097,10 @@ class ConfiguracionSistema(Base):
     # Punto 13: minutos sin actividad tras los cuales, con Modo Prueba activo, el siguiente
     # mensaje del mismo WhatsApp arranca una postulación de prueba nueva (ver webhooks.py).
     modo_prueba_ventana_min: Mapped[int] = mapped_column(Integer, default=60)
+    # Fase 3 (2026-09-15): recordatorios automáticos de documentos pendientes (services/recordatorios.py):
+    # cada N días, a partir de esta hora (America/Mexico_City), mientras no pase Expediente.documentos_hasta.
+    recordatorio_documentos_dias: Mapped[int] = mapped_column(Integer, default=2)
+    recordatorio_documentos_hora: Mapped[int] = mapped_column(Integer, default=10)
 
 
 # ============================================================

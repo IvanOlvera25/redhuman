@@ -56,7 +56,11 @@ function _resolverCuentaId(usuario: UsuarioRH): number | null {
   const guardado = typeof window !== "undefined" ? window.localStorage.getItem(CLAVE_STORAGE) : null;
   const guardadoNum = guardado ? parseInt(guardado, 10) : null;
   const valido = guardadoNum !== null && usuario.cuentas.some((c) => c.id === guardadoNum);
-  return valido ? guardadoNum : usuario.cuentas[0].id;
+  if (valido) return guardadoNum;
+  // Fase 2: sin selección guardada, la Cuenta predeterminada del usuario (si sigue activa).
+  const pred = usuario.cuentaPredeterminadaId ?? null;
+  if (pred !== null && usuario.cuentas.some((c) => c.id === pred)) return pred;
+  return usuario.cuentas[0].id;
 }
 
 export function ProveedorSesion({ children }: { children: React.ReactNode }) {
