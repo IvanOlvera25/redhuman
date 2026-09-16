@@ -719,4 +719,31 @@ def colaborador_dict(col: Colaborador) -> dict:
         "clienteId": col.cliente_id,
         "clienteNombre": col.cliente.nombre if col.cliente else None,  # nombre interno (RH), no el comercial
         "creado": hace(col.creado_en),
+        # baja / eliminación lógica (2026-09-15)
+        "bajaEn": iso(col.baja_en),
+        "bajaMotivo": col.baja_motivo or "",
+        "bajaPor": col.baja_por or "",
+        "eliminadoEn": iso(col.eliminado_en),
+    }
+
+
+def colaborador_detalle_dict(col: Colaborador) -> dict:
+    """Perfil completo (panel de Colaboradores): datos + expediente con sus documentos + origen."""
+    exp = col.expediente
+    c = col.candidato_origen
+    return {
+        **colaborador_dict(col),
+        "tipoContratacion": exp.tipo_contratacion if exp else "",
+        "instruccionesIngreso": (exp.instrucciones_ingreso if exp else "") or "",
+        "altaAutorizadaPor": (exp.alta_autorizada_por if exp else "") or col.dado_de_alta_por,
+        "altaFecha": iso(exp.alta_fecha) if exp else None,
+        "expediente": expediente_dict(exp) if exp else None,
+        "candidatoOrigen": {
+            "codigo": c.codigo, "nombre": c.nombre, "fuente": c.fuente, "correo": c.correo, "telefono": c.telefono,
+            "eliminado": bool(c.eliminado_en),
+        } if c else None,
+        "vacante": (
+            {"codigo": exp.postulacion.vacante.codigo, "titulo": exp.postulacion.vacante.titulo}
+            if exp and exp.postulacion and exp.postulacion.vacante else None
+        ),
     }

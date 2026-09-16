@@ -6,6 +6,8 @@ import { Card, Badge, Avatar, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
 import { fetchClientesColaboradores, fetchColaboradores, type Colaborador } from "@/lib/api";
 import { usePolling } from "@/lib/use-polling";
+import { PerfilColaborador } from "@/components/dashboard/perfil-colaborador";
+import { usePuedeDecidir } from "@/components/sesion";
 
 export default function Colaboradores() {
   const [datos, setDatos] = useState<Colaborador[]>([]);
@@ -14,6 +16,9 @@ export default function Colaboradores() {
   // Fase 5: filtro superior por Cliente ("" = todos; 0 = directo sin Cliente)
   const [clientes, setClientes] = useState<{ id: number; nombre: string; colaboradores: number }[]>([]);
   const [clienteId, setClienteId] = useState<string>("");
+  // 2026-09-15: tarjeta clickeable → perfil detallado con Baja / Eliminar
+  const [sel, setSel] = useState<Colaborador | null>(null);
+  const puedeDecidir = usePuedeDecidir();
 
   const recargar = useCallback(async () => {
     const d = await fetchColaboradores(undefined, clienteId === "" ? null : Number(clienteId));
@@ -30,7 +35,7 @@ export default function Colaboradores() {
   useEffect(() => {
     fetchClientesColaboradores().then((c) => setClientes(c ?? []));
   }, [datos.length]);
-  usePolling(recargar);
+  usePolling(recargar, undefined, sel === null);
 
   const activos = datos.filter((c) => c.activo).length;
   const clienteActual = clientes.find((c) => String(c.id) === clienteId);
@@ -99,7 +104,15 @@ export default function Colaboradores() {
       ) : (
         <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {datos.map((c) => (
-            <Card key={c.id} hover className="flex flex-col gap-3.5 p-5">
+            <Card
+              key={c.id}
+              hover
+              className="flex cursor-pointer flex-col gap-3.5 p-5"
+              onClick={() => setSel(c)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => e.key === "Enter" && setSel(c)}
+            >
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-center gap-3 min-w-0">
                   <Avatar name={c.nombre} />
@@ -170,6 +183,7 @@ export default function Colaboradores() {
               {c.candidatoOrigenId && (
                 <a
                   href="/dashboard/candidatos"
+                  onClick={(e) => e.stopPropagation()}
                   className="flex items-center gap-1 self-start text-[11px] text-brand transition hover:underline"
                 >
                   <ExternalLink className="h-3 w-3" /> Candidato de origen: {c.candidatoOrigenId}
@@ -178,6 +192,21 @@ export default function Colaboradores() {
             </Card>
           ))}
         </div>
+      )}
+
+      {sel && (
+        <PerfilColaborador
+          colaborador={sel}
+          puedeDecidir={puedeDecidir}
+          onClose={() => setSel(null)}
+          onCambio={(actualizado) => {
+            setDatos((prev) => prev.map((x) => (x.id === actualizado.id ? { ...x, ...actualizado } : x)));
+          }}
+          onEliminado={() => {
+            setSel(null);
+            recargar();
+          }}
+        />
       )}
     </div>
   );

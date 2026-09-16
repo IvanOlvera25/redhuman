@@ -23,6 +23,7 @@ os.environ["DATABASE_URL"] = "sqlite:///" + str(Path(_dir) / "form.db").replace(
 for k in ("OPENAI_API_KEY", "WHATSAPP_PROVIDER", "META_WHATSAPP_TOKEN", "META_PHONE_NUMBER_ID", "ANAM_API_KEY", "ANAM_LLM_ID"):
     os.environ[k] = ""
 os.environ["ADMIN_PASSWORD"] = "prueba-form"
+os.environ["SEMBRAR_DEMO"] = "true"  # los scripts de verificación sí usan los datos de ejemplo
 
 from fastapi.testclient import TestClient  # noqa: E402
 

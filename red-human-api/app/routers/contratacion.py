@@ -13,11 +13,12 @@ from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import Candidato, Colaborador, Cuenta, Documento, Expediente, Usuario, registrar
+from ..models import Candidato, Colaborador, Cuenta, Documento, Expediente, Postulacion, Usuario, registrar
 from ..serial import colaborador_dict, expediente_dict, nombre_empresa_candidato
 from ..services import archivos as fs
 from ..services import ia
@@ -65,10 +66,18 @@ def listar(
     _: Usuario = Depends(usuario_actual),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
+    # 2026-09-15: el tablero de Onboarding solo muestra expedientes VIVOS — nunca de personas eliminadas
+    # (baja lógica) ni de postulaciones cerradas (descartado, vacante eliminada, etc.); los ya dados de
+    # alta (postulación cerrada como `contratado`) sí se conservan para ver «Alta completada».
     q = (
         db.query(Expediente)
         .join(Candidato, Expediente.candidato_id == Candidato.id)
-        .filter(Candidato.cuenta_id == cuenta.id)
+        .outerjoin(Postulacion, Expediente.postulacion_id == Postulacion.id)
+        .filter(
+            Candidato.cuenta_id == cuenta.id,
+            Candidato.eliminado_en.is_(None),
+            or_(Postulacion.id.is_(None), Postulacion.activa.is_(True), Postulacion.motivo_cierre == "contratado"),
+        )
         .order_by(Expediente.id)
     )
     if estado:

@@ -14,7 +14,7 @@ import base64
 import re
 import secrets
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
@@ -1425,6 +1425,32 @@ async def decision(
     return postulacion_dict(p, detalle=True)
 
 
+@router.get("/agente/actividad")
+def actividad_agente(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Contador REAL del sidebar («Prefiltrando N candidatos por WhatsApp»): postulaciones activas en
+    Prefiltro sin terminar, de personas con WhatsApp (wa_id) y con mensaje en las últimas 24 h (ventana
+    de sesión de Meta). Antes era un número quemado (3)."""
+    corte = datetime.now(timezone.utc) - timedelta(hours=24)
+    filas = (
+        db.query(Postulacion)
+        .join(Candidato, Postulacion.candidato_id == Candidato.id)
+        .filter(
+            Postulacion.cuenta_id == cuenta.id, Postulacion.activa.is_(True), Postulacion.etapa == "Prefiltro",
+            Postulacion.prefiltro_completo.is_(False), Candidato.eliminado_en.is_(None), Candidato.wa_id != "",
+        )
+        .all()
+    )
+    prefiltrando = 0
+    for p in filas:
+        ultimo = max((m.creado_en for m in p.mensajes if m.canal == "whatsapp"), default=None)
+        if ultimo is not None:
+            if ultimo.tzinfo is None:
+                ultimo = ultimo.replace(tzinfo=timezone.utc)
+            if ultimo >= corte:
+                prefiltrando += 1
+    return {"prefiltrando": prefiltrando, "enPrefiltro": len(filas)}
+
+
 class EtapaIn(BaseModel):
     etapa: str
     comentario: str = ""
@@ -1444,7 +1470,7 @@ def eliminar_candidato(
     c = p.candidato
     if c is None:
         raise HTTPException(404, "Candidato no encontrado")
-    if any(col.activo for col in db.query(Colaborador).filter(Colaborador.candidato_origen_id == c.id).all()):
+    if any(col.activo and not col.eliminado_en for col in db.query(Colaborador).filter(Colaborador.candidato_origen_id == c.id).all()):
         raise HTTPException(409, "Esta persona ya es colaborador(a) activo(a); da de baja al colaborador antes de eliminar al candidato.")
     cerradas = []
     for post in c.postulaciones:

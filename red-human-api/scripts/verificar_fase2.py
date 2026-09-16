@@ -26,6 +26,7 @@ os.environ["META_WHATSAPP_TOKEN"] = ""
 os.environ["META_PHONE_NUMBER_ID"] = ""
 os.environ["ANAM_API_KEY"] = ""
 os.environ["ADMIN_PASSWORD"] = "prueba-fase2"
+os.environ["SEMBRAR_DEMO"] = "true"  # los scripts de verificación sí usan los datos de ejemplo
 
 from fastapi.testclient import TestClient  # noqa: E402
 

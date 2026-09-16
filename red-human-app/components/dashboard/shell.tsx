@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -31,6 +31,8 @@ import { Logo, Avatar, Button } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 import { useSesion } from "@/components/sesion";
+import { fetchActividadAgente } from "@/lib/api";
+import { usePolling } from "@/lib/use-polling";
 import { BarraAgente } from "@/components/dashboard/agente/barra";
 import { PanelAgente } from "@/components/dashboard/agente/panel";
 
@@ -198,6 +200,28 @@ function SelectorCuenta({ variant = "sidebar" }: { variant?: "sidebar" | "topbar
 
 /* ---------------- Sidebar content ---------------- */
 
+/** 2026-09-15: dato REAL (antes «3» quemado): postulaciones en Prefiltro con sesión de WhatsApp activa
+ * (mensaje en las últimas 24 h). Se revalida con el mismo hook que los tableros. */
+function ContadorAgente() {
+  const [act, setAct] = useState<{ prefiltrando: number; enPrefiltro: number } | null>(null);
+  const { cuentaActualId } = useSesion();
+  const cargar = useCallback(async () => {
+    const a = await fetchActividadAgente();
+    if (a) setAct(a);
+  }, []);
+  useEffect(() => {
+    cargar();
+  }, [cargar, cuentaActualId]);
+  usePolling(cargar, 30000);
+  if (!act) return <>Conectando con el agente de WhatsApp…</>;
+  if (act.prefiltrando === 0) {
+    return act.enPrefiltro > 0
+      ? <>{act.enPrefiltro} candidato{act.enPrefiltro !== 1 ? "s" : ""} en Prefiltro, sin conversación activa por WhatsApp ahora mismo.</>
+      : <>Sin conversaciones de prefiltro activas por WhatsApp en este momento.</>;
+  }
+  return <>Prefiltrando {act.prefiltrando} candidato{act.prefiltrando !== 1 ? "s" : ""} en este momento por WhatsApp.</>;
+}
+
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const { usuario } = useSesion();
   return (
@@ -251,7 +275,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           <span className="ml-auto h-2 w-2 rounded-full bg-good pulse-ring" />
         </div>
         <p className="mt-2 text-xs leading-relaxed text-ink-2">
-          Prefiltrando 3 candidatos en este momento por WhatsApp.
+          <ContadorAgente />
         </p>
       </div>
 

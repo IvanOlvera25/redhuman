@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
+from .config import settings
 from .models import Candidato, Documento, Expediente, Mensaje, Vacante, registrar, slugificar
 
 
@@ -13,8 +14,12 @@ def _hace(**kw) -> datetime:
 
 
 def sembrar(db: Session) -> None:
+    """Datos de EJEMPLO (6 vacantes, 11 candidatos). Desde 2026-09-15 SOLO con SEMBRAR_DEMO=true: una
+    instalación en vivo arranca con la lista de vacantes 100% vacía."""
     if db.query(Vacante).count() > 0:
         _rellenar_slugs(db)
+        return
+    if not settings.sembrar_demo:
         return
 
     vacantes = [

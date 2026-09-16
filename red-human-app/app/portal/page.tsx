@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { parsearUbicacion } from "@/lib/ubicacion";
 import {
   MapPin,
   Building2,
@@ -42,7 +43,10 @@ function sueldoMaximo(sueldo?: string): number | null {
 export default function Portal() {
   const [vacantes, setVacantes] = useState<Vacante[]>([]);
   const [cargando, setCargando] = useState(true);
-  const [ubicacion, setUbicacion] = useState("");
+  // 2026-09-15: ubicación por Estado → Municipio (formato real de las vacantes); las vacantes previas
+  // con texto libre se reconocen con parsearUbicacion.
+  const [estado, setEstado] = useState("");
+  const [municipio, setMunicipio] = useState("");
   const [area, setArea] = useState("");
   const [modalidades, setModalidades] = useState<string[]>([]);
   const [sueldoMin, setSueldoMin] = useState(0);
@@ -54,15 +58,37 @@ export default function Portal() {
     });
   }, []);
 
-  const ubicaciones = useMemo(
-    () => Array.from(new Set(vacantes.map((v) => v.ubicacion).filter(Boolean))).sort(),
-    [vacantes],
+  /** Estado/Municipio de cada vacante: estructurado si lo trae; si no, lo que se reconozca del texto. */
+  const ubicacionDe = useCallback((v: Vacante) => {
+    if (v.ubicacionEstado) return { estado: v.ubicacionEstado, municipio: v.ubicacionMunicipio ?? "" };
+    return parsearUbicacion(v.ubicacion ?? "");
+  }, []);
+
+  const estados = useMemo(
+    () => Array.from(new Set(vacantes.map((v) => ubicacionDe(v).estado).filter(Boolean))).sort((a, b) => a.localeCompare(b, "es")),
+    [vacantes, ubicacionDe],
+  );
+  const municipios = useMemo(
+    () =>
+      Array.from(
+        new Set(vacantes.filter((v) => ubicacionDe(v).estado === estado).map((v) => ubicacionDe(v).municipio).filter(Boolean)),
+      ).sort((a, b) => a.localeCompare(b, "es")),
+    [vacantes, estado, ubicacionDe],
   );
 
-  const areas = useMemo(
-    () => Array.from(new Set(vacantes.map((v) => v.area).filter(Boolean))).sort(),
-    [vacantes],
-  );
+  /** Áreas deduplicadas sin importar mayúsculas, acentos ni espacios («Operaciones» = «operaciones » = «OPERACIONES»);
+   * se muestra la primera forma capturada. */
+  const areas = useMemo(() => {
+    const vistas = new Map<string, string>();
+    for (const v of vacantes) {
+      const a = (v.area ?? "").trim();
+      if (!a) continue;
+      const clave = a.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ");
+      if (!vistas.has(clave)) vistas.set(clave, a);
+    }
+    return Array.from(vistas.values()).sort((a, b) => a.localeCompare(b, "es"));
+  }, [vacantes]);
+  const claveArea = (a: string) => a.trim().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ");
 
   /** Techo del slider: el sueldo más alto entre las vacantes activas, redondeado a $5,000 (mínimo $60,000). */
   const sueldoTope = useMemo(() => {
@@ -74,8 +100,12 @@ export default function Portal() {
   const filtradas = useMemo(
     () =>
       vacantes.filter((v) => {
-        if (ubicacion && v.ubicacion !== ubicacion) return false;
-        if (area && v.area !== area) return false;
+        if (estado || municipio) {
+          const u = ubicacionDe(v);
+          if (estado && u.estado !== estado) return false;
+          if (municipio && u.municipio !== municipio) return false;
+        }
+        if (area && claveArea(v.area ?? "") !== claveArea(area)) return false;
         if (modalidades.length && !modalidades.includes(v.modalidad)) return false;
         if (sueldoMin > 0) {
           const max = sueldoMaximo(v.sueldo);
@@ -83,7 +113,7 @@ export default function Portal() {
         }
         return true;
       }),
-    [vacantes, ubicacion, area, modalidades, sueldoMin],
+    [vacantes, estado, municipio, area, modalidades, sueldoMin, ubicacionDe],
   );
 
   function toggleModalidad(m: string) {
@@ -91,13 +121,14 @@ export default function Portal() {
   }
 
   function limpiar() {
-    setUbicacion("");
+    setEstado("");
+    setMunicipio("");
     setArea("");
     setModalidades([]);
     setSueldoMin(0);
   }
 
-  const hayFiltros = Boolean(ubicacion) || Boolean(area) || modalidades.length > 0 || sueldoMin > 0;
+  const hayFiltros = Boolean(estado) || Boolean(municipio) || Boolean(area) || modalidades.length > 0 || sueldoMin > 0;
 
   return (
     <main className="min-h-svh bg-bg">
@@ -163,20 +194,40 @@ export default function Portal() {
               </div>
 
               <div className="mt-5 flex flex-col gap-1.5">
-                <Eyebrow className="text-[10px] text-ink-3">Ubicación</Eyebrow>
+                <Eyebrow className="text-[10px] text-ink-3">Estado</Eyebrow>
                 <select
-                  value={ubicacion}
-                  onChange={(e) => setUbicacion(e.target.value)}
+                  value={estado}
+                  onChange={(e) => {
+                    setEstado(e.target.value);
+                    setMunicipio("");
+                  }}
                   className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
                 >
-                  <option value="">Todas</option>
-                  {ubicaciones.map((u) => (
+                  <option value="">Todos</option>
+                  {estados.map((u) => (
                     <option key={u} value={u}>
                       {u}
                     </option>
                   ))}
                 </select>
               </div>
+              {estado && municipios.length > 0 && (
+                <div className="mt-3 flex flex-col gap-1.5">
+                  <Eyebrow className="text-[10px] text-ink-3">{estado === "Ciudad de México" ? "Alcaldía" : "Municipio"}</Eyebrow>
+                  <select
+                    value={municipio}
+                    onChange={(e) => setMunicipio(e.target.value)}
+                    className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+                  >
+                    <option value="">Todos</option>
+                    {municipios.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               <div className="mt-5 flex flex-col gap-1.5">
                 <Eyebrow className="text-[10px] text-ink-3">Área / Departamento</Eyebrow>

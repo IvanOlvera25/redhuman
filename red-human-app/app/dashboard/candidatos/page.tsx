@@ -48,7 +48,6 @@ import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts
 import { PerfilProfundoVista } from "@/components/dashboard/perfil-profundo";
 import { Aviso, Dropzone, pesoLegible } from "@/components/dashboard/subida";
 import {
-  candidatos as candidatosDemo,
   type Candidato,
   type EntrevistaHumana,
   type EtapaCandidato,
@@ -222,7 +221,10 @@ function CandidatosContenido() {
   useAnunciarContextoAgente(
     sel ? { pantalla: "candidato", entidad: { tipo: "candidato", codigo: sel.id } } : { pantalla: "candidatos" },
   );
-  const [datos, setDatos] = useState<Candidato[]>(candidatosDemo);
+  // 2026-09-15 (arranque en vivo): el tablero NUNCA arranca con datos de ejemplo — antes se pintaban
+  // las tarjetas demo un instante («flasheo») hasta que llegaba la respuesta real.
+  const [datos, setDatos] = useState<Candidato[]>([]);
+  const [cargando, setCargando] = useState(true);
   const [vacantes, setVacantes] = useState<Vacante[]>([]);
   const [clientes, setClientes] = useState<Cliente[]>([]);
   const [usuarios, setUsuarios] = useState<{ id: number; nombre: string }[]>([]);
@@ -283,17 +285,15 @@ function CandidatosContenido() {
       ...(filtroVacante ? { vacante: filtroVacante } : {}),
       ...(mostrarCerradas ? { mostrar_cerradas: true } : {}),
     });
-    if (c && c.length) {
+    if (c) {
       setDatos(c);
       setLive(true);
-      if (abrirCodigo) {
+      if (abrirCodigo && c.length) {
         const detalle = await fetchCandidato(abrirCodigo);
         if (detalle) setSel(detalle);
       }
-    } else if (c && c.length === 0) {
-      setDatos([]);
-      setLive(true);
     }
+    setCargando(false);
   }, [filtroVacante, mostrarCerradas]);
 
   useEffect(() => {
@@ -784,8 +784,20 @@ function CandidatosContenido() {
         </div>
       )}
 
+      {/* Estado de carga: esqueleto neutro (nunca tarjetas de ejemplo) hasta la primera respuesta real */}
+      {cargando && (
+        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6" aria-busy="true">
+          {etapas.map((etapa) => (
+            <div key={etapa} className="rounded-2xl border border-border-soft bg-surface p-3">
+              <div className="h-4 w-24 animate-pulse rounded bg-surface-2" />
+              <div className="mt-3 h-20 animate-pulse rounded-xl bg-surface-2/60" />
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* VISTA 1: PIPELINE (Kanban) */}
-      {vista === "pipeline" && (
+      {!cargando && vista === "pipeline" && (
         <div className="mt-6 grid gap-4 overflow-x-auto sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           {etapas.map((etapa) => {
             const cols = datosFiltrados.filter((c) => c.etapa === etapa);
@@ -955,7 +967,7 @@ function CandidatosContenido() {
       )}
 
       {/* VISTA 2: LISTA (Fase C) */}
-      {vista === "lista" && (
+      {!cargando && vista === "lista" && (
         <div className="mt-6 overflow-x-auto rounded-xl border border-border-soft bg-surface">
           <table className="w-full text-sm">
             <thead>

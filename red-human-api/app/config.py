@@ -6,6 +6,11 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./redhuman.db"
 
+    # 2026-09-15 (arranque en vivo): las vacantes/candidatos de EJEMPLO ya no se siembran solos en una
+    # base vacía. Solo con SEMBRAR_DEMO=true (demos, scripts de verificación). Para una base que ya los
+    # tiene: `scripts/limpiar_datos_demo.py --forzar` (baja lógica, conserva historial).
+    sembrar_demo: bool = False
+
     # IA (OpenAI)
     openai_api_key: str = ""
     openai_model: str = "gpt-5.6-luna"

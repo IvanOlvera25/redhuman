@@ -1929,6 +1929,45 @@ export interface Colaborador {
   clienteId?: number | null;
   clienteNombre?: string | null;
   creado: string;
+  /** baja / eliminación lógica (2026-09-15) */
+  bajaEn?: string | null;
+  bajaMotivo?: string;
+  bajaPor?: string;
+  eliminadoEn?: string | null;
+}
+
+/** 2026-09-15: contador real del sidebar («Agente activo»). */
+export function fetchActividadAgente() {
+  return get<{ prefiltrando: number; enPrefiltro: number }>("/candidatos/agente/actividad");
+}
+
+/** Perfil completo del colaborador (panel de Colaboradores). */
+export interface ColaboradorDetalle extends Colaborador {
+  tipoContratacion: string;
+  instruccionesIngreso: string;
+  altaAutorizadaPor: string;
+  altaFecha: string | null;
+  expediente: NuevoIngreso | null;
+  candidatoOrigen: { codigo: string; nombre: string; fuente: string; correo: string; telefono: string; eliminado: boolean } | null;
+  vacante: { codigo: string; titulo: string } | null;
+}
+
+export function fetchColaborador(codigo: string) {
+  return get<ColaboradorDetalle>(`/colaboradores/${codigo}`);
+}
+
+/** Baja: activo=false conservando historial (reversible con reactivarColaborador). */
+export function darDeBajaColaborador(codigo: string, motivo: string) {
+  return post<ColaboradorDetalle>(`/colaboradores/${codigo}/baja`, { motivo });
+}
+
+export function reactivarColaborador(codigo: string) {
+  return post<ColaboradorDetalle>(`/colaboradores/${codigo}/reactivar`);
+}
+
+/** Eliminación LÓGICA total (limpieza de pruebas): desaparece de listados y conteos; la fila se conserva. */
+export function eliminarColaborador(codigo: string) {
+  return eliminar<{ ok: boolean; colaborador: string }>(`/colaboradores/${codigo}`);
 }
 
 /** Fase 5: opciones del filtro por Cliente (solo Clientes con colaboradores; id 0 = directo). */
