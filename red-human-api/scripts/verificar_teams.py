@@ -22,6 +22,7 @@ for k in ("OPENAI_API_KEY", "WHATSAPP_PROVIDER", "META_WHATSAPP_TOKEN", "META_PH
           "TEAMS_CLIENT_ID", "TEAMS_TENANT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_REDIRECT_URI"):
     os.environ[k] = ""
 os.environ["ADMIN_PASSWORD"] = "prueba-teams"
+os.environ["SEMBRAR_DEMO"] = "true"  # los scripts de verificación sí usan los datos de ejemplo
 os.environ["APP_URL"] = "http://localhost:3000"
 
 from fastapi.testclient import TestClient  # noqa: E402

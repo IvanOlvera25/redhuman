@@ -777,8 +777,16 @@ class Colaborador(Base):
     cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
     cliente_id: Mapped[Optional[int]] = mapped_column(ForeignKey("clientes.id"), nullable=True, index=True)
 
+    # 2026-09-15: baja (activo=False, conserva historial) y eliminación LÓGICA (limpieza de pruebas).
+    baja_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    baja_motivo: Mapped[str] = mapped_column(String(300), default="")
+    baja_por: Mapped[str] = mapped_column(String(150), default="")
+    eliminado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    eliminado_por: Mapped[str] = mapped_column(String(150), default="")
+
     candidato_origen: Mapped[Optional["Candidato"]] = relationship()
     cliente: Mapped[Optional["Cliente"]] = relationship()  # Fase 5: filtro por Cliente
+    expediente: Mapped[Optional["Expediente"]] = relationship()
 
 
 # ============================================================

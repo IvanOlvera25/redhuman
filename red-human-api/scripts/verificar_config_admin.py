@@ -24,6 +24,7 @@ os.environ["DATABASE_URL"] = "sqlite:///" + str(Path(_dir) / "cfg.db").replace("
 for k in ("OPENAI_API_KEY", "WHATSAPP_PROVIDER", "META_WHATSAPP_TOKEN", "META_PHONE_NUMBER_ID", "ANAM_API_KEY"):
     os.environ[k] = ""
 os.environ["ADMIN_PASSWORD"] = "prueba-cfg"
+os.environ["SEMBRAR_DEMO"] = "true"  # los scripts de verificación sí usan los datos de ejemplo
 
 from fastapi.testclient import TestClient  # noqa: E402
 

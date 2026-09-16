@@ -24,7 +24,7 @@ import {
 import { Card, Badge, Button, Avatar, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
 import { Aviso, Dropzone, pesoLegible } from "@/components/dashboard/subida";
-import { nuevosIngresos, type DocExpediente, type EstadoDoc, type NuevoIngreso } from "@/lib/phase2";
+import type { DocExpediente, EstadoDoc, NuevoIngreso } from "@/lib/phase2";
 import type { Candidato } from "@/lib/data";
 import {
   actualizarPreparacion,
@@ -66,20 +66,23 @@ const iconoFondo: Record<EstadoDoc, string> = {
 type AvisoEstado = { tono: "ok" | "error" | "warn" | "info"; texto: string } | null;
 
 export default function Onboarding() {
-  const [datos, setDatos] = useState<NuevoIngreso[]>(nuevosIngresos);
-  const [selId, setSelId] = useState<string>(nuevosIngresos[0].id);
+  // 2026-09-15 (arranque en vivo): sin expedientes de ejemplo — solo lo que regresa la API.
+  const [datos, setDatos] = useState<NuevoIngreso[]>([]);
+  const [selId, setSelId] = useState<string>("");
+  const [cargando, setCargando] = useState(true);
   const [live, setLive] = useState(false);
   const [aviso, setAviso] = useState<AvisoEstado>(null);
 
-  const sel = datos.find((d) => d.id === selId) ?? datos[0];
+  const sel: NuevoIngreso | undefined = datos.find((d) => d.id === selId) ?? datos[0];
 
   const recargar = useCallback(async () => {
     const e = await fetchExpedientes();
-    if (e && e.length) {
+    if (e) {
       setDatos(e);
       setLive(true);
-      setSelId((actual) => (e.some((x) => x.id === actual) ? actual : e[0].id));
+      setSelId((actual) => (e.some((x) => x.id === actual) ? actual : e[0]?.id ?? ""));
     }
+    setCargando(false);
   }, []);
 
   useEffect(() => {
@@ -117,6 +120,22 @@ export default function Onboarding() {
         </Badge>
       </PageHeader>
 
+      {cargando && (
+        <div className="mt-6 grid gap-4 lg:grid-cols-[360px_1fr]" aria-busy="true">
+          <div className="flex flex-col gap-3">
+            {[0, 1].map((i) => <div key={i} className="h-24 animate-pulse rounded-2xl border border-border-soft bg-surface-2/60" />)}
+          </div>
+          <div className="h-80 animate-pulse rounded-2xl border border-border-soft bg-surface-2/60" />
+        </div>
+      )}
+      {!cargando && !sel && (
+        <Card className="mt-6 flex flex-col items-center gap-2 p-12 text-center">
+          <UserCheck className="h-8 w-8 text-ink-3" />
+          <p className="text-sm font-medium text-ink-2">No hay expedientes en Onboarding.</p>
+          <p className="max-w-sm text-xs text-ink-3">Aparecen aquí cuando una postulación entra a Contratación u Onboarding. Los cerrados, descartados o de personas eliminadas no se muestran.</p>
+        </Card>
+      )}
+      {!cargando && sel && (
       <div className="mt-6 grid gap-4 lg:grid-cols-[360px_1fr]">
         {/* Lista */}
         <div className="flex flex-col gap-3">
@@ -166,6 +185,7 @@ export default function Onboarding() {
           onRecargar={recargar}
         />
       </div>
+      )}
     </div>
   );
 }

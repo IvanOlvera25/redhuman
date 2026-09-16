@@ -44,7 +44,7 @@ import {
 } from "@/components/dashboard/vacantes/formulario-contenido";
 import { PageHeader } from "@/components/dashboard/parts";
 import { Aviso, BotonCopiar } from "@/components/dashboard/subida";
-import { vacantes as vacantesDemo, type Vacante } from "@/lib/data";
+import type { Vacante } from "@/lib/data";
 import { useRouter } from "next/navigation";
 import {
   crearVacante,
@@ -101,7 +101,10 @@ export default function Vacantes() {
     sel ? { pantalla: "vacante", entidad: { tipo: "vacante", codigo: sel.id } } : { pantalla: "vacantes" },
   );
   const [verPrevia, setVerPrevia] = useState<string | null>(null);
-  const [datos, setDatos] = useState<Vacante[]>(vacantesDemo);
+  // 2026-09-15 (arranque en vivo): la lista arranca VACÍA y solo muestra lo que regresa la API — antes
+  // se pintaban 6 vacantes de ejemplo hasta (y si) la API regresaba algo.
+  const [datos, setDatos] = useState<Vacante[]>([]);
+  const [cargando, setCargando] = useState(true);
   const [live, setLive] = useState(false);
   const [cambiandoEstatus, setCambiandoEstatus] = useState("");
   // --- Fase C: vista, buscador y filtros avanzados ---
@@ -121,11 +124,12 @@ export default function Vacantes() {
   const recargar = useCallback(
     async (seleccionar?: string) => {
       const v = await fetchVacantes();
-      if (v && v.length) {
+      if (v) {
         setDatos(v);
         setLive(true);
         if (seleccionar) setSel(v.find((x) => x.id === seleccionar) ?? null);
       }
+      setCargando(false);
     },
     [],
   );
@@ -383,7 +387,21 @@ export default function Vacantes() {
       )}
 
       {/* Vista Tarjetas */}
-      {vista === "tarjetas" && (
+      {cargando && (
+        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3" aria-busy="true">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="h-44 animate-pulse rounded-2xl border border-border-soft bg-surface-2/60" />
+          ))}
+        </div>
+      )}
+      {!cargando && vista === "tarjetas" && lista.length === 0 && (
+        <Card className="mt-5 flex flex-col items-center gap-2 p-12 text-center">
+          <Briefcase className="h-8 w-8 text-ink-3" />
+          <p className="text-sm font-medium text-ink-2">{datos.length === 0 ? "Aún no hay vacantes." : "Sin vacantes con estos filtros."}</p>
+          {datos.length === 0 && <p className="max-w-sm text-xs text-ink-3">Crea la primera con «Nueva vacante»: se genera con Red Human a partir de los datos que captures.</p>}
+        </Card>
+      )}
+      {!cargando && vista === "tarjetas" && (
         <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {lista.map((v) => (
             <Card key={v.id} hover className="flex cursor-pointer flex-col p-5" onClick={() => setSel(v)}>
@@ -507,7 +525,7 @@ export default function Vacantes() {
       )}
 
       {/* Fase C: Vista Lista */}
-      {vista === "lista" && (
+      {!cargando && vista === "lista" && (
         <div className="mt-5 overflow-x-auto rounded-xl border border-border-soft">
           <table className="w-full text-sm">
             <thead>
