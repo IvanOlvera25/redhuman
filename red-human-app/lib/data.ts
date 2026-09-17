@@ -179,6 +179,10 @@ export interface Candidato {
    * calculada al vuelo en cada lectura del detalle — nunca se persiste, siempre está al día. --- */
   /** Prefiltro = SOLO status de entrada (cumple / no_cumple); no participa en la evaluación integral. */
   prefiltroResumen?: { cumple: number; total: number; incumplidos: string[]; resultado?: "cumple" | "no_cumple" | null } | null;
+  /** 2026-09-16: prefiltro dual y control manual */
+  respuestasWeb?: { pregunta: string; respuesta: string }[];
+  inconsistencias?: { criterio: string; pregunta: string; web: string; whatsapp: string; detectada_en: string; aclarada: boolean; aclaracion: string }[];
+  actividadesOmitidas?: { actividad: string; etapa: string; usuario: string; fecha: string; motivo: string; hacia: string }[];
   /** 2026-09-13: status de la Entrevista Red Human (bloque propio). */
   entrevistaStatus?: {
     codigo: string;

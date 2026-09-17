@@ -271,9 +271,13 @@ class Postulacion(Base):
     estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # cumple | revision | no_cumple | pendiente
     score: Mapped[int] = mapped_column(Integer, default=0)
     evidencia: Mapped[str] = mapped_column(Text, default="")
-    # detalle del match del CV contra la vacante + respuestas_prefiltro + flags de conversación
+    # detalle del match del CV contra la vacante + respuestas_prefiltro + respuestas_web + inconsistencias
+    # (Web vs WhatsApp, 2026-09-16) + flags de conversación
     analisis: Mapped[dict] = mapped_column(JSON, default=dict)
     prefiltro_completo: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 2026-09-16 (control manual de RH): actividades que RH saltó al mover de etapa —
+    # [{actividad, etapa, usuario, fecha, motivo}] — registro interno, nunca bloquea.
+    actividades_omitidas: Mapped[list] = mapped_column(JSON, default=list)
     # Fase C: resultado vigente ("el más reciente gana"), ver candidatos._recalcular_resultado_apto.
     resultado_apto: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     ultima_actividad_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

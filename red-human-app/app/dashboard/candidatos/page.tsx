@@ -42,6 +42,7 @@ import {
   XCircle,
   RefreshCw,
   Trash2,
+  ArrowRightLeft,
 } from "lucide-react";
 import { Card, Badge, Button, Avatar, Eyebrow, Progress } from "@/components/ui";
 import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
@@ -107,6 +108,7 @@ import { usePuedeDecidir, useModoPrueba } from "@/components/sesion";
 import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveedor";
 import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import { LineaNotificar, useNotificarAccion } from "@/components/dashboard/linea-notificar";
+import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import { cn } from "@/lib/utils";
 import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
 
@@ -1281,6 +1283,20 @@ function ModalCandidato({
   // Punto 12: cada acción que notifica pasa por una confirmación ligera con la línea
   // "Notificar: … · Editar"; el ajuste viaja como `notificar` solo para esa acción.
   const [confirmacion, setConfirmacion] = useState<null | "solicitar" | "recordatorio" | "alta">(null);
+  // 2026-09-16 (control manual de RH): «Mover a otra etapa» — selector simple + motivo opcional
+  const [moverA, setMoverA] = useState<null | { etapa: EtapaCandidato | ""; motivo: string }>(null);
+  async function moverManual() {
+    if (!moverA?.etapa) return;
+    if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
+    setOcupado("mover");
+    const r = await moverEtapaCandidato(c.id, moverA.etapa, moverA.motivo, false, true);
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    const omitidas = (r.data.actividadesOmitidas ?? []).filter((o) => o.hacia === moverA.etapa).map((o) => nombreEtapa(o.actividad));
+    setMoverA(null);
+    onCambio(r.data);
+    setAviso({ tono: "ok", texto: `Movido a ${nombreEtapa(moverA.etapa)}.${omitidas.length ? ` Omitido manualmente: ${omitidas.join(", ")}.` : ""}` });
+  }
   const notificarAltaRef = useRef<NotificarAccion | undefined>(undefined);
 
   /** Onboarding · Zero-Touch fase 2 — RH detona, la IA da seguimiento por WhatsApp. */
@@ -1579,55 +1595,20 @@ function ModalCandidato({
                 className="h-10 w-full rounded-xl border border-border-soft bg-bg px-3.5 text-xs sm:text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
               />
 
-              <div className="flex flex-wrap items-center gap-2">
-                {c.expedienteId == null && (
+              {/* Regla de UI (2026-09-16): UNA acción principal = la siguiente esperada; todo lo demás en «…»
+                  («Mover a otra etapa» abre un selector simple sin bloqueos de secuencia). */}
+              <div className="flex items-center gap-2">
+                {siguientesEtapas[0] && (
                   <Button
-                    variant="outline"
                     size="sm"
-                    onClick={descartar}
-                    disabled={Boolean(ocupado)}
-                    className="border-bad/30 text-bad hover:bg-bad-soft"
-                  >
-                    <ThumbsDown className="h-4 w-4" /> Descartar
-                  </Button>
-                )}
-
-                {/* Botones explícitos de avance: cada uno dice a dónde manda la tarjeta.
-                    "Entrevista Humana" abre el modal de agenda en vez de mover directo. */}
-                {siguientesEtapas.map((etapa) => (
-                  <Button
-                    key={etapa}
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => (etapa === "Entrevista Humana" ? setModalEntrevista(true) : enviarAEtapa(etapa))}
+                    className="flex-1"
+                    onClick={() => (siguientesEtapas[0] === "Entrevista Humana" ? setModalEntrevista(true) : enviarAEtapa(siguientesEtapas[0]))}
                     disabled={Boolean(ocupado)}
                   >
-                    <ThumbsUp className="h-4 w-4" /> Enviar a {nombreEtapa(etapa)}
-                  </Button>
-                ))}
-
-                {/* Etapa Entrevista Humana: agendar una segunda ronda sin mover la tarjeta. */}
-                {c.etapa === "Entrevista Humana" && (
-                  <Button variant="outline" size="sm" onClick={() => setModalEntrevista(true)} disabled={Boolean(ocupado)}>
-                    <CalendarClock className="h-4 w-4" /> Agendar otra Entrevista Humana
+                    <ThumbsUp className="h-4 w-4" /> Enviar a {nombreEtapa(siguientesEtapas[0])}
                   </Button>
                 )}
-
-                {/* Onboarding · Zero-Touch fase 2: RH detona por WhatsApp (plantilla de documentos), el
-                    candidato manda los archivos por el mismo chat y la IA da seguimiento. En Contratación
-                    los mismos botones viven en PanelContratacion (2026-09-15). */}
-                {c.etapa === "Onboarding" && (
-                  <>
-                    <Button variant="outline" size="sm" onClick={() => setConfirmacion("solicitar")} disabled={Boolean(ocupado)}>
-                      <Send className="h-4 w-4" /> Solicitar documentos
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => setConfirmacion("recordatorio")} disabled={Boolean(ocupado)}>
-                      <RotateCw className="h-4 w-4" /> Enviar recordatorio
-                    </Button>
-                  </>
-                )}
-
-                {c.expedienteId != null && (
+                {c.expedienteId != null && c.etapa !== "Onboarding" && (
                   <a
                     href="/dashboard/onboarding"
                     className="flex items-center gap-1.5 rounded-xl border border-good/30 bg-good-soft px-3 py-2 text-xs font-semibold text-good transition hover:brightness-105"
@@ -1635,6 +1616,30 @@ function ModalCandidato({
                     <UserCheck className="h-4 w-4" /> Expediente ({c.expedienteProgreso ?? 0}%)
                   </a>
                 )}
+                <MenuAcciones
+                  etiqueta="Más acciones"
+                  acciones={[
+                    ...siguientesEtapas.slice(1).map((etapa) => ({
+                      etiqueta: `Enviar a ${nombreEtapa(etapa)}`,
+                      icono: <ThumbsUp />,
+                      onClick: () => (etapa === "Entrevista Humana" ? setModalEntrevista(true) : enviarAEtapa(etapa)),
+                      disabled: Boolean(ocupado),
+                    })),
+                    { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
+                    ...(c.etapa === "Entrevista Humana"
+                      ? [{ etiqueta: "Agendar otra Entrevista Humana", icono: <CalendarClock />, onClick: () => setModalEntrevista(true), disabled: Boolean(ocupado) }]
+                      : []),
+                    ...(c.etapa === "Onboarding"
+                      ? [
+                          { etiqueta: "Solicitar documentos", icono: <Send />, onClick: () => setConfirmacion("solicitar"), disabled: Boolean(ocupado) },
+                          { etiqueta: "Enviar recordatorio", icono: <RotateCw />, onClick: () => setConfirmacion("recordatorio"), disabled: Boolean(ocupado) },
+                        ]
+                      : []),
+                    ...(c.expedienteId == null
+                      ? [{ etiqueta: "Descartar", icono: <ThumbsDown />, peligrosa: true, onClick: descartar, disabled: Boolean(ocupado) }]
+                      : []),
+                  ]}
+                />
               </div>
 
               {/* 2026-09-15 (Fase 1): el error del alta se muestra AQUÍ, pegado al botón — antes solo
@@ -1680,7 +1685,47 @@ function ModalCandidato({
         )}
       </div>
 
-      {confirmacion === "solicitar" && (
+      {moverA && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !ocupado && setMoverA(null)}>
+            <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <h3 className="font-display text-lg font-bold">Mover a otra etapa</h3>
+              <p className="mt-1 text-sm text-ink-2">
+                RH decide: el candidato se mueve aunque WhatsApp o el correo fallen. Lo que se salte queda registrado como «Omitida manualmente».
+              </p>
+              <label className="mt-4 flex flex-col gap-1.5">
+                <span className="text-xs font-medium text-ink-2">Etapa destino</span>
+                <select
+                  value={moverA.etapa}
+                  onChange={(e) => setMoverA({ ...moverA, etapa: e.target.value as EtapaCandidato | "" })}
+                  className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                >
+                  <option value="">Elige…</option>
+                  {(["Prefiltro", "Entrevista IA", "Evaluación", "Entrevista Humana", "Contratación", "Onboarding"] as EtapaCandidato[])
+                    .filter((e) => e !== c.etapa)
+                    .map((e) => (
+                      <option key={e} value={e}>{nombreEtapa(e)}</option>
+                    ))}
+                </select>
+              </label>
+              <label className="mt-3 flex flex-col gap-1.5">
+                <span className="text-xs font-medium text-ink-2">Motivo (opcional)</span>
+                <input
+                  value={moverA.motivo}
+                  onChange={(e) => setMoverA({ ...moverA, motivo: e.target.value })}
+                  placeholder="Ej. el candidato ya fue entrevistado por el cliente"
+                  className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                />
+              </label>
+              <div className="mt-5 flex justify-end gap-2">
+                <Button variant="outline" size="sm" onClick={() => setMoverA(null)} disabled={ocupado === "mover"}>Cancelar</Button>
+                <Button size="sm" onClick={moverManual} disabled={!moverA.etapa || ocupado === "mover"}>
+                  {ocupado === "mover" ? "Moviendo…" : "Mover"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+        {confirmacion === "solicitar" && (
           <ConfirmacionAccion
             titulo="Solicitar documentos"
             texto={`Se le pedirá a ${c.nombre.split(" ")[0]} que suba sus documentos con la liga pública del expediente.`}
@@ -1959,8 +2004,27 @@ function PestanaResumen({
             </p>
           )}
           <p className="mt-1.5 text-[11px] text-ink-3">Filtro básico de entrada; no forma parte de la evaluación integral.</p>
+          {(c.inconsistencias?.length ?? 0) > 0 && (
+            <div className="mt-3 rounded-xl border border-warn/40 bg-warn-soft/40 p-3">
+              <p className="text-xs font-semibold text-warn">Respuestas distintas entre el formulario web y WhatsApp — RH decide (no se descartó automáticamente):</p>
+              <ul className="mt-1.5 space-y-1">
+                {c.inconsistencias!.map((i, k) => (
+                  <li key={k} className="text-xs leading-relaxed text-ink-2">
+                    <b>{i.criterio}</b>: web «{i.web}» · WhatsApp «{i.whatsapp}»
+                    {i.aclarada ? <span className="text-good"> · aclaró: «{i.aclaracion}»</span> : <span className="text-ink-3"> · pendiente de aclarar</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </Card>
       </div>
+
+      {(c.actividadesOmitidas?.length ?? 0) > 0 && (
+        <p className="text-[11px] text-ink-3">
+          Omitido manualmente: {c.actividadesOmitidas!.map((o) => `${nombreEtapa(o.actividad)} (${o.usuario}, ${fechaCorta(o.fecha)}${o.motivo ? `: ${o.motivo}` : ""})`).join(" · ")}
+        </p>
+      )}
 
       {/* C2. Status de la Entrevista Red Human (2026-09-13) */}
       {c.entrevistaStatus && (

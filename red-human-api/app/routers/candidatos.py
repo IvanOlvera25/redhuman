@@ -11,6 +11,7 @@ expediente de ESA postulación y arranca la solicitud de documentos.
 """
 
 import base64
+import json
 import re
 import secrets
 import unicodedata
@@ -779,6 +780,13 @@ async def postular(
 
     # Reaplicar (decisión 2026-09-11): activa para esta vacante → se reutiliza; cerrada → nueva.
     p, nueva_postulacion = postulacion_para_vacante(db, c, vac, vac.cuenta_id, "formulario", consentimiento=True)
+    # 2026-09-16 (prefiltro dual): las respuestas del formulario web se guardan para compararlas después
+    # con lo que la persona diga por WhatsApp (antes se recibían y se tiraban).
+    respuestas_web = _parsear_respuestas_web(respuestas)
+    if respuestas_web:
+        analisis_p = dict(p.analisis or {})
+        analisis_p["respuestas_web"] = respuestas_web
+        p.analisis = analisis_p
     registrar(
         db, c.codigo, "consentimiento_otorgado", "postulacion", p.codigo,
         {"candidato": c.codigo, "medio": "portal", "vacante": vac.codigo, "aviso_privacidad": "aceptado en /aplicar"},
@@ -1227,6 +1235,90 @@ async def _procesar_turno_post_completo(db: Session, p: Postulacion, texto: str,
     return {"respuesta": respuesta, "clasificacion": None, "ia": False, "whatsapp": envio}
 
 
+def _parsear_respuestas_web(crudo: str) -> List[dict]:
+    try:
+        datos = json.loads(crudo) if crudo else []
+    except (ValueError, TypeError):
+        return []
+    salida = []
+    for x in datos if isinstance(datos, list) else []:
+        if isinstance(x, dict) and str(x.get("pregunta", "")).strip():
+            salida.append({"pregunta": str(x.get("pregunta", "")).strip()[:300], "respuesta": str(x.get("respuesta", "")).strip()[:300]})
+    return salida[:30]
+
+
+def _norm_resp(s: str) -> str:
+    return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower().strip()
+
+
+def _si_no(s: str) -> Optional[bool]:
+    t = _norm_resp(s)
+    if t in ("si", "sí", "yes", "claro", "por supuesto") or t.startswith("si,") or t.startswith("si "):
+        return True
+    if t in ("no", "nel", "negativo") or t.startswith("no,") or t.startswith("no "):
+        return False
+    return None
+
+
+def _mismo_criterio(web_pregunta: str, wa: dict, preguntas_vac: list) -> bool:
+    """La pregunta web y el criterio de WhatsApp hablan del mismo requisito: mismo texto, o la
+    pregunta web pertenece a un criterio cuyo `valida` coincide con el de WhatsApp."""
+    w = _norm_resp(web_pregunta)
+    c = _norm_resp(wa.get("criterio", ""))
+    q = _norm_resp(wa.get("pregunta", ""))
+    if w and (w == c or w == q or (len(w) > 20 and (w in q or q in w))):
+        return True
+    for pv in preguntas_vac:
+        if isinstance(pv, dict) and _norm_resp(pv.get("pregunta", "")) == w and pv.get("valida"):
+            if _norm_resp(pv["valida"]) == c or _norm_resp(pv["valida"]) in q:
+                return True
+    return False
+
+
+def comparar_web_vs_whatsapp(analisis: dict, preguntas_vac: list) -> List[dict]:
+    """Prefiltro dual (2026-09-16): compara lo que la persona contestó en el formulario web con lo que
+    dijo por WhatsApp sobre el MISMO criterio. Regresa las contradicciones nuevas (sí/no opuestos, o
+    respuesta de opción distinta). Nunca descarta: solo registra para que la IA pregunte y RH decida."""
+    web = analisis.get("respuestas_web") or []
+    wa = analisis.get("respuestas_prefiltro") or []
+    previas = {(i.get("criterio"), i.get("web"), i.get("whatsapp")) for i in (analisis.get("inconsistencias") or [])}
+    nuevas: List[dict] = []
+    for rw in web:
+        for ra in wa:
+            if not _mismo_criterio(rw.get("pregunta", ""), ra, preguntas_vac):
+                continue
+            web_bool = _si_no(rw.get("respuesta", ""))
+            wa_bool = ra.get("cumple")
+            wa_txt_bool = _si_no(ra.get("respuesta", ""))
+            contradice = False
+            if web_bool is not None and wa_txt_bool is not None and web_bool != wa_txt_bool:
+                contradice = True
+            elif web_bool is not None and wa_bool is not None and web_bool != wa_bool and wa_txt_bool is None:
+                contradice = True
+            elif web_bool is None and wa_txt_bool is None and rw.get("respuesta") and ra.get("respuesta") \
+                    and _norm_resp(rw["respuesta"]) != _norm_resp(ra["respuesta"]) and len(_norm_resp(rw["respuesta"])) < 40 \
+                    and _norm_resp(rw["respuesta"]) not in _norm_resp(ra["respuesta"]):
+                contradice = True
+            if contradice:
+                clave = (ra.get("criterio") or rw.get("pregunta"), rw.get("respuesta"), ra.get("respuesta"))
+                if clave in previas:
+                    continue
+                nuevas.append({
+                    "criterio": ra.get("criterio") or rw.get("pregunta"), "pregunta": rw.get("pregunta"),
+                    "web": rw.get("respuesta"), "whatsapp": ra.get("respuesta"),
+                    "detectada_en": datetime.now(timezone.utc).isoformat(), "aclarada": False, "aclaracion": "",
+                })
+    return nuevas
+
+
+def _texto_aclaracion(nombre: str, inc: dict) -> str:
+    n = (nombre or "").split(" ")[0]
+    return (
+        f"{('Gracias, ' + n + '. ') if n else ''}Una duda para no equivocarme: en el formulario indicaste «{inc.get('web')}» "
+        f"sobre {inc.get('criterio') or 'este punto'}, y por aquí me comentas «{inc.get('whatsapp')}». ¿Cuál es la correcta? 🙂"
+    )
+
+
 async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str, wa_id: str = "") -> dict:
     """Registra el mensaje del candidato en ESTA postulación, corre un turno del agente y
     responde. El historial que ve el modelo es solo el de esta postulación: las preguntas de
@@ -1270,6 +1362,17 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
     # Fase 4 (2026-09-15): las preguntas del prefiltro por WhatsApp son independientes de las de la
     # postulación web; si RH no capturó ninguna, se usan las de la web (vacantes previas).
     preguntas_wa = ((v.preguntas_filtro_whatsapp or None) or (v.preguntas_filtro or [])) if v else []
+    # 2026-09-16 (prefiltro dual): si el turno anterior pidió aclarar una contradicción Web vs WhatsApp,
+    # el modelo registra la aclaración y sigue; la contradicción queda documentada para RH.
+    analisis_previo = dict(p.analisis or {})
+    pendiente = next((i for i in (analisis_previo.get("inconsistencias") or []) if not i.get("aclarada")), None)
+    nota_aclaracion = ""
+    if pendiente and analisis_previo.get("aclaracion_pendiente"):
+        nota_aclaracion = (
+            f"El candidato contestó distinto en el formulario web («{pendiente.get('web')}») y por WhatsApp "
+            f"(«{pendiente.get('whatsapp')}») sobre {pendiente.get('criterio')}. Su último mensaje aclara ese punto: "
+            "toma la aclaración como válida en respuestas_extraidas, agradece y continúa. NO lo descartes por la contradicción."
+        )
     turno, con_ia = ia.prefiltro_turno(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",
@@ -1282,13 +1385,41 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
         beneficios=(v.beneficios or []) if v else [],
         perfil_ideal=v.perfil_ideal if v else "",
         nombre_candidato=nombre_ficha(p),
+        nota=nota_aclaracion,
     )
 
     analisis_actual = dict(p.analisis or {})
     if turno.respuestas_extraidas:
         analisis_actual["respuestas_prefiltro"] = [r.model_dump() for r in turno.respuestas_extraidas]
+    if pendiente and analisis_actual.get("aclaracion_pendiente"):
+        # el candidato ya respondió a la pregunta de aclaración: se cierra esa contradicción con su texto
+        for inc in analisis_actual.get("inconsistencias") or []:
+            if not inc.get("aclarada"):
+                inc["aclarada"] = True
+                inc["aclaracion"] = texto[:300]
+        analisis_actual["aclaracion_pendiente"] = False
+        registrar(db, "agente-ia", "prefiltro_inconsistencia_aclarada", "postulacion", p.codigo, {"criterio": pendiente.get("criterio"), "aclaracion": texto[:200]})
+
+    # Comparación automática Web vs WhatsApp: si hay contradicción nueva, la IA pregunta para aclarar
+    # (un solo mensaje) en vez de clasificar; nunca se descarta por esto.
+    nuevas = comparar_web_vs_whatsapp(analisis_actual, list(preguntas_wa) + list((v.preguntas_filtro or []) if v else []))
+    if nuevas:
+        analisis_actual["inconsistencias"] = list(analisis_actual.get("inconsistencias") or []) + nuevas
+        analisis_actual["aclaracion_pendiente"] = True
+        registrar(db, "agente-ia", "prefiltro_inconsistencia_detectada", "postulacion", p.codigo, {"inconsistencias": nuevas})
+        p.analisis = analisis_actual
+        aclaracion = _texto_aclaracion(nombre_ficha(p), nuevas[0])
+        envio = await _enviar_whatsapp(p, aclaracion, canal)
+        guardar_mensaje(db, p, "assistant", aclaracion, canal, envio)
+        _actualizar_ultima_actividad(p)
+        db.commit()
+        return {"respuesta": aclaracion, "clasificacion": None, "ia": con_ia, "whatsapp": envio, "inconsistencias": nuevas}
 
     cierra_prefiltro = turno.clasificacion_lista and turno.estado and not p.prefiltro_completo
+    # Con contradicciones registradas (aclaradas o no) la IA NUNCA descarta sola: el caso queda en
+    # revisión para RH, con la evidencia y las contradicciones a la vista.
+    if cierra_prefiltro and turno.estado == "no_cumple" and (analisis_actual.get("inconsistencias") or []):
+        turno.estado = "revision"  # type: ignore[assignment]
 
     if cierra_prefiltro:
         # Turno de cierre: turno.respuesta es el mensaje genérico ("gracias, RH revisará") — nunca
@@ -1307,7 +1438,18 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
             db, "agente-ia", "prefiltro_clasificado", "postulacion", p.codigo,
             {"ia": con_ia, "estado_ia": turno.estado, "evidencia": turno.evidencia or ""},
         )
-        resultado_cierre = await _auto_decision_zero_touch(db, p, turno.estado)
+        if turno.estado == "revision":
+            p.estado = "revision"
+            respuesta_rev = (
+                f"¡Gracias por tus respuestas, {nombre_ficha(p).split(' ')[0]}! Tu información quedó registrada y una persona "
+                "del equipo de RH la revisará con calma. Te contactamos por este medio. 😊"
+            )
+            envio_rev = await _enviar_whatsapp(p, respuesta_rev, canal)
+            guardar_mensaje(db, p, "assistant", respuesta_rev, canal, envio_rev)
+            registrar(db, "agente-ia", "prefiltro_en_revision_por_inconsistencia", "postulacion", p.codigo, {"evidencia": turno.evidencia or ""})
+            resultado_cierre = {"respuesta": respuesta_rev, "whatsapp": envio_rev}
+        else:
+            resultado_cierre = await _auto_decision_zero_touch(db, p, turno.estado)
         clasificacion = {"estado": p.estado, "evidencia": turno.evidencia or ""}
         respuesta_final = resultado_cierre["respuesta"]
         envio = resultado_cierre["whatsapp"]
@@ -1454,6 +1596,25 @@ def actividad_agente(db: Session = Depends(get_db), _: Usuario = Depends(usuario
 class EtapaIn(BaseModel):
     etapa: str
     comentario: str = ""
+    # 2026-09-16 (control manual de RH): «Mover a otra etapa» — sin bloqueos de secuencia; lo que se salta
+    # queda como «Omitida manualmente» (usuario, fecha, motivo = comentario).
+    manual: bool = False
+
+
+# Actividad esperada en cada etapa y cómo saber si YA se hizo (para marcar «Omitida manualmente»).
+def _actividades_pendientes(p: Postulacion, desde: str, hasta: str) -> List[str]:
+    orden = ETAPAS_CANDIDATO
+    if desde not in orden or hasta not in orden or orden.index(hasta) <= orden.index(desde):
+        return []
+    hechas = {
+        "Prefiltro": bool(p.prefiltro_completo),
+        "Entrevista IA": any(e.estado == "evaluada" for e in p.entrevistas),
+        "Evaluación": bool(p.resultado_apto is not None or any(e.estado == "evaluada" for e in p.entrevistas)),
+        "Entrevista Humana": any(eh.realizada for eh in p.entrevistas_humanas),
+        "Contratación": bool(p.expediente and p.expediente.progreso == 100),
+    }
+    saltadas = orden[orden.index(desde): orden.index(hasta)]
+    return [e for e in saltadas if e in hechas and not hechas[e]]
 
 
 @router.delete("/{codigo}")
@@ -1529,23 +1690,42 @@ async def mover_etapa(
     p = _por_codigo(db, codigo, cuenta.id)
     if datos.etapa not in ETAPAS_CANDIDATO:
         raise HTTPException(400, f"Etapa inválida. Usa una de: {', '.join(ETAPAS_CANDIDATO)}")
-    if datos.etapa == "Entrevista Humana":
+    libre = datos.manual or puede_forzar_prueba(db, forzar_prueba)
+    if datos.etapa == p.etapa:
+        raise HTTPException(409, f"La postulación ya está en {datos.etapa}.")
+    if datos.etapa == "Entrevista Humana" and not datos.manual:
         raise HTTPException(409, "Para programar la Entrevista Humana usa POST /candidatos/{codigo}/entrevista-humana.")
     if datos.etapa == "Onboarding":
-        if p.etapa != "Contratación" and not puede_forzar_prueba(db, forzar_prueba):
+        if p.etapa != "Contratación" and not libre:
             raise HTTPException(409, "Solo se puede enviar a Onboarding desde la etapa de Contratación.")
-    elif p.etapa == "Onboarding" and not puede_forzar_prueba(db, forzar_prueba):
+    elif p.etapa == "Onboarding" and not libre:
         raise HTTPException(409, "El candidato ya está en Onboarding; gestiona su expediente desde ese módulo.")
 
+    # 2026-09-16 (control manual): lo que se salta queda como «Omitida manualmente» — registro interno.
+    omitidas = _actividades_pendientes(p, p.etapa, datos.etapa) if datos.manual else []
+    if omitidas:
+        ahora_iso = datetime.now(timezone.utc).isoformat()
+        p.actividades_omitidas = list(p.actividades_omitidas or []) + [
+            {"actividad": e, "etapa": e, "usuario": u.nombre, "fecha": ahora_iso, "motivo": datos.comentario.strip()[:300], "hacia": datos.etapa}
+            for e in omitidas
+        ]
+        registrar(db, u.nombre, "actividades_omitidas_manualmente", "postulacion", p.codigo, {"actividades": omitidas, "hacia": datos.etapa, "motivo": datos.comentario[:300], "correo_rh": u.correo})
+
     if datos.etapa == "Entrevista IA":
-        if p.etapa != "Prefiltro":
+        if p.etapa != "Prefiltro" and not libre:
             raise HTTPException(409, "Solo se puede forzar Entrevista IA desde la etapa de Prefiltro.")
-        if not p.telefono and not puede_forzar_prueba(db, forzar_prueba):
+        if not p.telefono and not libre:
             raise HTTPException(409, "El candidato no tiene WhatsApp registrado; no se puede iniciar el agendamiento.")
         p.estado = "cumple"
         p.prefiltro_completo = True
-        envio = await _avisar_apto_e_iniciar_agenda(db, p)
+        # Una falla de WhatsApp/Meta NUNCA bloquea el movimiento: se registra y RH sigue.
+        try:
+            envio = await _avisar_apto_e_iniciar_agenda(db, p)
+        except Exception as ex:  # noqa: BLE001
+            envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)[:200]}
         registrar(db, u.nombre, "entrevista_ia_forzada", "postulacion", p.codigo, {"whatsapp": envio, "correo_rh": u.correo})
+    if datos.etapa == "Onboarding" and not p.expediente and p.consentimiento:
+        _abrir_expediente(db, p, u)  # movimiento manual directo a Onboarding: el expediente nace aquí
 
     if datos.etapa == "Contratación" and not p.expediente:
         if not p.consentimiento:
@@ -1563,11 +1743,19 @@ async def mover_etapa(
         p.motivo_cierre = ""
         p.cerrada_en = None
     p.etapa = datos.etapa
+    # La relación Candidato-Vacante nunca se pierde en WhatsApp: si la persona no tiene conversación
+    # fijada, esta postulación pasa a serlo (no se pisa una conversación en curso sobre otra vacante).
+    if p.candidato and p.candidato.postulacion_conversacion_id is None:
+        fijar_conversacion(p)
     _actualizar_ultima_actividad(p)
-    await _recalcular_resultado_apto_y_notificar(db, p, u.nombre)
+    try:
+        await _recalcular_resultado_apto_y_notificar(db, p, u.nombre)
+    except Exception as ex:  # noqa: BLE001 — correo/WhatsApp caídos no bloquean a RH
+        registrar(db, "sistema", "notificacion_fallida_al_mover", "postulacion", p.codigo, {"error": str(ex)[:200]})
     registrar(
         db, u.nombre, "etapa_movida", "postulacion", p.codigo,
-        {"candidato": p.candidato.codigo, "de": anterior, "a": datos.etapa, "comentario": datos.comentario, "reabierta": reabierta, "correo_rh": u.correo},
+        {"candidato": p.candidato.codigo, "de": anterior, "a": datos.etapa, "comentario": datos.comentario, "reabierta": reabierta,
+         "manual": datos.manual, "omitidas": omitidas, "correo_rh": u.correo},
     )
     db.commit()
     return postulacion_dict(p, detalle=True)

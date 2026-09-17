@@ -227,6 +227,7 @@ export function contenidoDesdeGenerado(base: ContenidoVacante, g: VacanteGenerad
     requisitos_deseables: unirCapturado(base.requisitos_deseables, g.requisitos_deseables, base.requisitos),
     beneficios: base.beneficios, // regla 4: solo lo capturado por RH
     preguntas_filtro: base.preguntas_filtro.length ? base.preguntas_filtro : g.preguntas_filtro ?? [],
+    preguntas_filtro_whatsapp: base.preguntas_filtro_whatsapp.length ? base.preguntas_filtro_whatsapp : g.preguntas_filtro_whatsapp ?? [],
     resumen: base.resumen || g.resumen,
     perfil_ideal: base.perfil_ideal || g.perfil_ideal,
     palabras_clave: base.palabras_clave.length ? base.palabras_clave : g.palabras_clave ?? [],

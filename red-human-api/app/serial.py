@@ -305,6 +305,10 @@ def _sintesis_global(p: Postulacion) -> dict:
 
     return {
         "prefiltroResumen": prefiltro_resumen,
+        # 2026-09-16: prefiltro dual — respuestas del formulario web y contradicciones Web vs WhatsApp
+        "respuestasWeb": a.get("respuestas_web") or [],
+        "inconsistencias": a.get("inconsistencias") or [],
+        "actividadesOmitidas": p.actividades_omitidas or [],
         "entrevistaStatus": entrevista_status,
         "evaluacionIntegral": bool(match_ia is not None or (score and hay_cv and entrevista_valida)),
         "afinidadGlobal": afinidad,

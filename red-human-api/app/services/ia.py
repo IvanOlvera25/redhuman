@@ -97,6 +97,15 @@ class VacanteGenerada(BaseModel):
     linkedin: BloquePlataforma = Field(description="Publicación para LinkedIn.")
     portal: BloquePlataforma = Field(description="Publicación para el portal propio de Red Human.")
     preguntas_filtro: List[PreguntaFiltro] = Field(description="4 a 6 preguntas de prefiltro ligadas a los requisitos indispensables.")
+    # 2026-09-16 (prefiltro dual): la IA elige SOLO los puntos críticos que vale la pena confirmar por chat.
+    preguntas_filtro_whatsapp: List[PreguntaFiltro] = Field(
+        default_factory=list,
+        description=(
+            "2 a 3 preguntas para WhatsApp que CONFIRMAN solo los puntos críticos (experiencia, ubicación/"
+            "traslado, disponibilidad o el requisito eliminatorio principal), en tono conversacional; nunca "
+            "repiten toda la lista web."
+        ),
+    )
 
 
 _PLANTILLAS = (
@@ -141,7 +150,9 @@ _REGLAS = (
     "4. Usa lenguaje incluyente con la forma «(a)» del español mexicano (Cajero(a), Repartidor(a)).\n"
     "5. Las preguntas de prefiltro salen PRINCIPALMENTE de los requisitos indispensables (primero los capturados "
     "por RH); deben responderse en una línea y marcar descarta=true SOLO cuando el requisito sea realmente "
-    "indispensable.\n"
+    "indispensable. Además, en `preguntas_filtro_whatsapp` elige SOLO 2 o 3 puntos críticos (experiencia, "
+    "ubicación/traslado, disponibilidad o el requisito eliminatorio principal) redactados como se preguntan "
+    "en una conversación de WhatsApp; el prefiltro web ya cubre el resto.\n"
     "6. Cada plataforma tiene su propio tono y formato: no repitas el mismo texto en las tres.\n"
     "7. Todo lo que escribas en `copy` y `page` lo lee el candidato. Nunca uses etiquetas internas como "
     "«indicado por RH», «según RH» o «no especificado»: escribe el sueldo directo («$10,500 mensuales») solo "
@@ -211,9 +222,32 @@ def _asegurar_capturado(salida: VacanteGenerada, ficha: FichaVacante) -> Vacante
     if not ficha.ubicacion:
         avisos.append("Ubicación no capturada: RH debe confirmarla antes de publicar.")
     salida.avisos_cumplimiento = avisos
-    for p in salida.preguntas_filtro:
+    for p in [*salida.preguntas_filtro, *salida.preguntas_filtro_whatsapp]:
         if p.tipo == "numero" and not p.opciones:
             p.opciones = _RANGO_ANOS_GENERICO
+    if not salida.preguntas_filtro_whatsapp:
+        salida.preguntas_filtro_whatsapp = puntos_criticos_whatsapp(salida.preguntas_filtro)
+    return salida
+
+
+def puntos_criticos_whatsapp(web: List[PreguntaFiltro]) -> List[PreguntaFiltro]:
+    """Prefiltro de WhatsApp derivado del web cuando la IA no lo entregó (o en modo demo): experiencia
+    (tipo numero) + hasta 2 eliminatorias, en tono de chat. Máximo 3."""
+    salida: List[PreguntaFiltro] = []
+    exp = next((p for p in web if p.tipo == "numero"), None)
+    if exp:
+        salida.append(PreguntaFiltro(
+            pregunta="Cuéntame, ¿cuánto tiempo llevas haciendo algo parecido a este puesto?",
+            tipo="numero", valida=exp.valida, respuesta_esperada=exp.respuesta_esperada, descarta=exp.descarta, opciones=exp.opciones,
+        ))
+    for p in web:
+        if len(salida) >= 3:
+            break
+        if p.descarta and p.tipo != "numero":
+            salida.append(PreguntaFiltro(
+                pregunta=p.pregunta if p.pregunta.endswith("?") else p.pregunta + "?",
+                tipo=p.tipo, valida=p.valida, respuesta_esperada=p.respuesta_esperada, descarta=True, opciones=p.opciones,
+            ))
     return salida
 
 
@@ -577,8 +611,10 @@ def prefiltro_turno(
     beneficios: Optional[List[str]] = None,
     perfil_ideal: str = "",
     nombre_candidato: str = "",
+    nota: str = "",
 ) -> Tuple[TurnoPrefiltro, bool]:
-    """historial: [{"rol": "user"|"assistant", "texto": str}, ...] — el último es del candidato."""
+    """historial: [{"rol": "user"|"assistant", "texto": str}, ...] — el último es del candidato.
+    `nota` (2026-09-16): contexto extra, p. ej. una inconsistencia Web vs WhatsApp que hay que aclarar."""
     client = _client()
     if client is None:
         n_agente = sum(1 for m in historial if m["rol"] == "assistant")
@@ -647,6 +683,7 @@ def prefiltro_turno(
             "(10) en tu PRIMER mensaje de la conversación (revisa el historial: si no hay turnos tuyos "
             "previos, es el primero), preséntate como «Red Human» — nunca como «asistente virtual» ni "
             "«asistente de reclutamiento» — y menciona el título de la vacante a la que se postula."
+            + (f"\nContexto adicional: {nota}" if nota else "")
         ),
         input=mensajes,
         text_format=TurnoPrefiltro,

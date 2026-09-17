@@ -307,6 +307,7 @@ def _aplicar_generado(v: Vacante, g: ia.VacanteGenerada) -> None:
     v.texto_whatsapp = v.texto_whatsapp or g.texto_whatsapp
     v.texto_bolsa = v.texto_bolsa or g.occ.page  # compatibilidad con la forma anterior
     v.preguntas_filtro = v.preguntas_filtro or [p.model_dump() for p in g.preguntas_filtro]
+    v.preguntas_filtro_whatsapp = v.preguntas_filtro_whatsapp or [p.model_dump() for p in g.preguntas_filtro_whatsapp]
     v.publicaciones = {
         "whatsapp": {"titulo": v.titulo, "copy": v.texto_whatsapp, "page": v.texto_whatsapp, "etiquetas": []},
         "occ": g.occ.bloque(),

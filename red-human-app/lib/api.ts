@@ -521,6 +521,8 @@ export interface VacanteGenerada {
   linkedin: BloquePlataforma;
   portal: BloquePlataforma;
   preguntas_filtro: CriterioFiltro[];
+  /** 2026-09-16 (prefiltro dual): 2-3 puntos críticos que la IA confirma por WhatsApp. */
+  preguntas_filtro_whatsapp?: CriterioFiltro[];
 }
 
 /** Parte 3 (2026-09-12): sueldo estructurado. "a_convenir" = sin montos. El texto que se muestra
@@ -969,8 +971,10 @@ export function decidirCandidato(codigo: string, accion: "descartar", comentario
 
 /** Botones explícitos del Kanban ("Enviar a X") — mueve la tarjeta a una etapa exacta.
  * `forzarPrueba` (Lote 4): inerte salvo que Modo Prueba esté activo en el servidor. */
-export function moverEtapaCandidato(codigo: string, etapa: string, comentario = "", forzarPrueba = false) {
-  return patch<Candidato>(`/candidatos/${codigo}/etapa${forzarPrueba ? "?forzar_prueba=true" : ""}`, { etapa, comentario });
+export function moverEtapaCandidato(codigo: string, etapa: string, comentario = "", forzarPrueba = false, manual = false) {
+  // `manual` (2026-09-16): «Mover a otra etapa» — sin bloqueos de secuencia; lo que se salte queda
+  // registrado como «Omitida manualmente» (usuario, fecha, motivo = comentario).
+  return patch<Candidato>(`/candidatos/${codigo}/etapa${forzarPrueba ? "?forzar_prueba=true" : ""}`, { etapa, comentario, manual });
 }
 
 /** Un resultado de envío por destinatario/canal (Fase D) — ver `resultados` en las respuestas
