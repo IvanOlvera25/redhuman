@@ -47,6 +47,11 @@ export interface NuevoIngreso {
   /* Fase 3: recordatorios automáticos de documentos (null = apagados para este expediente) */
   documentosHasta?: string | null;
   ultimoRecordatorioEn?: string | null;
+  /** 2026-09-17: recordatorios en 3 niveles (1 ligero, 2 intermedio, 3 definitivo). */
+  recordatoriosEnviados?: number;
+  nivelRecordatorio?: 1 | 2 | 3;
+  tonoRecordatorio?: "ligero" | "intermedio" | "definitivo";
+  recordatoriosAgotados?: boolean;
   /* --- condiciones finales de contratación, capturadas en la etapa Contratación --- */
   sueldo?: string;
   tipoContratacion?: string;

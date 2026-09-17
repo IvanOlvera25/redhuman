@@ -43,7 +43,7 @@ import {
 import { useNombreRH, usePuedeDecidir } from "@/components/sesion";
 import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import type { NotificarAccion } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { cn, etiquetaRecordatorio } from "@/lib/utils";
 import { usePolling } from "@/lib/use-polling";
 
 const docConfig: Record<
@@ -505,10 +505,21 @@ function Expediente({
               <MessageCircle className="h-4 w-4" />
               {ocupado === "solicitar" ? "Enviando…" : "Solicitar documentos faltantes"}
             </Button>
-            <Button variant="outline" size="sm" onClick={() => setConfirmacion("recordatorio")} disabled={Boolean(ocupado)}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmacion("recordatorio")}
+              disabled={Boolean(ocupado)}
+              title={etiquetaRecordatorio(n.nivelRecordatorio, n.recordatoriosEnviados).tono.descripcion}
+            >
               <Send className="h-4 w-4" />
-              {ocupado === "recordatorio" ? "Enviando…" : "Enviar recordatorio"}
+              {ocupado === "recordatorio" ? "Enviando…" : etiquetaRecordatorio(n.nivelRecordatorio, n.recordatoriosEnviados).texto}
             </Button>
+            {n.recordatoriosAgotados && (
+              <span title="Ya se envió el recordatorio definitivo; los automáticos se detuvieron. Toca a RH dar seguimiento personal.">
+                <Badge tone="warn" dot>Recordatorios automáticos agotados · seguimiento de RH</Badge>
+              </span>
+            )}
             {/* Fase 3: recordatorios automáticos con fecha límite (el cron respeta «hasta») */}
             <label className="flex items-center gap-2 text-[12px] text-ink-2">
               Recordar automáticamente hasta
@@ -590,8 +601,8 @@ function Expediente({
         )}
         {confirmacion === "recordatorio" && (
           <ConfirmacionAccion
-            titulo="Enviar recordatorio de documentos"
-            texto="Se enviará con el detalle de los documentos pendientes o rechazados."
+            titulo={`Enviar recordatorio de documentos · nivel ${etiquetaRecordatorio(n.nivelRecordatorio, n.recordatoriosEnviados).nivel} de 3 (${etiquetaRecordatorio(n.nivelRecordatorio, n.recordatoriosEnviados).tono.nombre})`}
+            texto={`${etiquetaRecordatorio(n.nivelRecordatorio, n.recordatoriosEnviados).tono.descripcion} Incluye los documentos pendientes o rechazados.`}
             evento="recordatorio_documentos"
             hayEntrevistador={false}
             etiquetaConfirmar="Enviar"

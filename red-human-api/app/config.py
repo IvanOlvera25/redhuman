@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # Si la plantilla falla (no aprobada, nombre distinto) o está vacía, sale el texto libre de siempre.
     meta_plantilla_documentos: str = "solicitud_documentos_rh"
     meta_plantilla_documentos_params: str = "nombre,documentos,liga"
+    # 2026-09-17: recordatorios en 3 niveles. El texto de una plantilla de Meta es fijo, así que el tono
+    # por nivel va en el texto libre (ventana de 24 h abierta) y en el correo; si registras plantillas
+    # con tono intermedio/definitivo en Meta, pon aquí su nombre (mismas variables/orden que la base).
+    # Vacías → se usa META_PLANTILLA_DOCUMENTOS para todos los niveles.
+    meta_plantilla_recordatorio_2: str = ""
+    meta_plantilla_recordatorio_3: str = ""
 
     # --- Gateway propio (alternativa sin costo por mensaje) ---
     waha_url: str = "http://localhost:3001"

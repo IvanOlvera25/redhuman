@@ -110,7 +110,7 @@ import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveed
 import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import { LineaNotificar, useNotificarAccion } from "@/components/dashboard/linea-notificar";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
-import { cn } from "@/lib/utils";
+import { cn, etiquetaRecordatorio } from "@/lib/utils";
 import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
 
 const etapas: EtapaCandidato[] = [
@@ -1645,7 +1645,7 @@ function ModalCandidato({
                     ...(c.etapa === "Onboarding"
                       ? [
                           { etiqueta: "Solicitar documentos", icono: <Send />, onClick: () => setConfirmacion("solicitar"), disabled: Boolean(ocupado) },
-                          { etiqueta: "Enviar recordatorio", icono: <RotateCw />, onClick: () => setConfirmacion("recordatorio"), disabled: Boolean(ocupado) },
+                          { etiqueta: etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).texto, icono: <RotateCw />, onClick: () => setConfirmacion("recordatorio"), disabled: Boolean(ocupado) },
                         ]
                       : []),
                     { etiqueta: "Descartar candidato…", icono: <ThumbsDown />, peligrosa: true, onClick: descartar, disabled: Boolean(ocupado) },
@@ -1786,8 +1786,8 @@ function ModalCandidato({
         )}
         {confirmacion === "recordatorio" && (
           <ConfirmacionAccion
-            titulo="Enviar recordatorio de documentos"
-            texto="Recordatorio de los documentos que siguen pendientes en el expediente."
+            titulo={`Enviar recordatorio de documentos · nivel ${etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).nivel} de 3 (${etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).tono.nombre})`}
+            texto={`${etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).tono.descripcion} Incluye los documentos que siguen pendientes en el expediente.`}
             evento="recordatorio_documentos"
             hayEntrevistador={false}
             hayCliente={Boolean(c.clienteVacante)}
@@ -4178,8 +4178,8 @@ function PanelContratacion({
               <Button size="sm" variant="outline" onClick={() => onDocumentos("solicitar")} disabled={Boolean(ocupado)}>
                 <Send className="h-4 w-4" /> Solicitar documentos
               </Button>
-              <Button size="sm" variant="outline" onClick={() => onDocumentos("recordatorio")} disabled={Boolean(ocupado)}>
-                <RotateCw className="h-4 w-4" /> Enviar recordatorio
+              <Button size="sm" variant="outline" onClick={() => onDocumentos("recordatorio")} disabled={Boolean(ocupado)} title={etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).tono.descripcion}>
+                <RotateCw className="h-4 w-4" /> {etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).texto}
               </Button>
             </>
           )}

@@ -239,6 +239,9 @@ class Candidato(Base):
         return [p for p in self.postulaciones if p.activa]
 
 
+# Recordatorios de documentos en 3 niveles (2026-09-17): tono progresivo, nunca agresivo.
+NIVELES_RECORDATORIO = {1: "ligero", 2: "intermedio", 3: "definitivo"}
+
 # Cómo nació la postulación — alimenta "por fuente" en /metricas.
 ORIGENES_POSTULACION = ["formulario", "whatsapp", "rh_directo", "cv_masivo", "reinicio_prueba", "migracion"]
 # Por qué se cerró (activa=False). "" mientras sigue en curso.
@@ -695,6 +698,10 @@ class Expediente(Base):
     documentos_hasta: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     ultimo_recordatorio_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     documentos_vencidos_avisado: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 2026-09-17: recordatorios en 3 niveles progresivos (ligero → intermedio → definitivo). Cuenta los
+    # enviados (automáticos y manuales); el nivel del SIGUIENTE es min(enviados+1, 3). Tras el
+    # definitivo no salen más automáticos: RH da seguimiento (bitácora `recordatorios_agotados`).
+    recordatorios_enviados: Mapped[int] = mapped_column(Integer, default=0)
 
     candidato: Mapped[Optional[Candidato]] = relationship(foreign_keys=[candidato_id])
     postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="expediente")
@@ -721,6 +728,15 @@ class Expediente(Base):
     @property
     def pendientes(self) -> List[str]:
         return [d.tipo for d in self.obligatorios if d.estado in ("pendiente", "rechazado")]
+
+    @property
+    def nivel_recordatorio(self) -> int:
+        """Nivel (1-3) del PRÓXIMO recordatorio — ver NIVELES_RECORDATORIO."""
+        return min((self.recordatorios_enviados or 0) + 1, 3)
+
+    @property
+    def recordatorios_agotados(self) -> bool:
+        return (self.recordatorios_enviados or 0) >= 3
 
     @property
     def por_revisar(self) -> List[str]:

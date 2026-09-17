@@ -2297,11 +2297,22 @@ async def _disparar_mensaje_onboarding(
     if p.etapa not in ("Contratación", "Onboarding"):
         raise HTTPException(409, "Esta acción es solo para postulaciones en Contratación u Onboarding.")
     override = override_de(notificar)
-    resultados = await notificaciones.disparar(db, evento, p, u.nombre, liga=liga, override=override)
-    registrar(db, u.nombre, accion, "postulacion", p.codigo, {"notificaciones": resultados, "correo_rh": u.correo, "notificar_override": override})
+    extra: dict = {}
+    e = p.expediente
+    if evento == "recordatorio_documentos" and e:
+        # 2026-09-17: mismo contador de niveles que el recordatorio del expediente y el job automático.
+        extra = {"nivel": e.nivel_recordatorio, "pendientes": e.pendientes or None, "puesto": e.puesto or "tu nuevo puesto", "fecha_limite": e.documentos_hasta}
+    resultados = await notificaciones.disparar(db, evento, p, u.nombre, liga=liga, override=override, extra=extra)
+    if evento == "recordatorio_documentos" and e:
+        from ..services.recordatorios import registrar_recordatorio_enviado  # import local: recordatorios ↔ candidatos
+
+        registrar_recordatorio_enviado(db, e, extra["nivel"], u.nombre, resultados)
+        e.ultimo_recordatorio_en = datetime.now(timezone.utc)
+    else:
+        registrar(db, u.nombre, accion, "postulacion", p.codigo, {"notificaciones": resultados, "correo_rh": u.correo, "notificar_override": override})
     _actualizar_ultima_actividad(p)
     db.commit()
-    return {"resultados": resultados, "candidato": postulacion_dict(p, detalle=True)}
+    return {"resultados": resultados, "nivel": extra.get("nivel"), "candidato": postulacion_dict(p, detalle=True)}
 
 
 def _liga_documentos(p: Postulacion) -> str:
