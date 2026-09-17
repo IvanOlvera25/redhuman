@@ -19,7 +19,20 @@ export interface AccionMenu {
 
 export function MenuAcciones({ acciones, etiqueta = "Más acciones", className }: { acciones: AccionMenu[]; etiqueta?: string; className?: string }) {
   const [abierto, setAbierto] = useState(false);
+  // 2026-09-17: en el footer de la ficha del candidato (modal con overflow-hidden) el menú abría hacia
+  // abajo y quedaba recortado fuera del modal — parecía que «…» no hacía nada. Si no hay espacio
+  // debajo, abre hacia arriba.
+  const [arriba, setArriba] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+
+  function alternar() {
+    if (!abierto && ref.current) {
+      const r = ref.current.getBoundingClientRect();
+      const alto = Math.min(44 * acciones.length + 8, 320);
+      setArriba(window.innerHeight - r.bottom < alto && r.top > alto);
+    }
+    setAbierto((a) => !a);
+  }
 
   useEffect(() => {
     if (!abierto) return;
@@ -41,7 +54,7 @@ export function MenuAcciones({ acciones, etiqueta = "Más acciones", className }
     <div ref={ref} className={cn("relative shrink-0", className)} onClick={(e) => e.stopPropagation()}>
       <button
         type="button"
-        onClick={() => setAbierto((a) => !a)}
+        onClick={alternar}
         className="grid h-8 w-8 place-items-center rounded-lg text-ink-3 transition hover:bg-surface-2 hover:text-ink"
         aria-label={etiqueta}
         aria-haspopup="menu"
@@ -51,7 +64,13 @@ export function MenuAcciones({ acciones, etiqueta = "Más acciones", className }
         <MoreHorizontal className="h-4 w-4" />
       </button>
       {abierto && (
-        <div role="menu" className="absolute right-0 z-30 mt-1 min-w-[190px] overflow-hidden rounded-xl border border-border-soft bg-bg py-1 shadow-xl">
+        <div
+          role="menu"
+          className={cn(
+            "absolute right-0 z-50 min-w-[190px] overflow-hidden rounded-xl border border-border-soft bg-bg py-1 shadow-xl",
+            arriba ? "bottom-full mb-1" : "top-full mt-1",
+          )}
+        >
           {acciones.map((a) => (
             <button
               key={a.etiqueta}

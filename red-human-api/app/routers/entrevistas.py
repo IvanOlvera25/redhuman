@@ -6,7 +6,7 @@ texto (modo demo) → al terminar, la IA evalúa y deja una RECOMENDACIÓN;
 la decisión de avanzar/descartar sigue siendo humana (LFPDPPP).
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -285,6 +285,7 @@ async def sesion(token: str, datos: Optional[SesionIn] = None, db: Session = Dep
     if e.estado != "en_curso":
         e.estado = "en_curso"
         e.iniciada_en = datetime.now(timezone.utc)
+        e.ultima_actividad_en = e.iniciada_en
 
     ses = None
     # `motivo` viaja al navegador (solo texto descriptivo, sin claves) para que en consola se vea POR QUÉ
@@ -329,6 +330,7 @@ def turno(token: str, datos: TurnoIn, db: Session = Depends(get_db)):
     historial = list(e.transcript or []) + [{"rol": "user", "texto": datos.texto}]
     t, con_ia = ia.entrevista_turno(_system_prompt(e), historial)
     e.transcript = historial + [{"rol": "assistant", "texto": t.respuesta}]
+    e.ultima_actividad_en = datetime.now(timezone.utc)
     db.commit()
     return {"respuesta": t.respuesta, "terminada": t.terminada, "ia": con_ia}
 
@@ -376,6 +378,46 @@ def _cierre_verificado(e: Entrevista, cierre_declarado: str) -> str:
     return cierre_declarado
 
 
+class TranscriptIn(BaseModel):
+    transcript: List[dict] = []
+
+
+def _normalizar_transcript(transcript: List[dict]) -> List[dict]:
+    return [
+        {"rol": ("assistant" if m.get("rol") == "assistant" else "user"), "texto": str(m.get("texto", ""))[:2000]}
+        for m in (transcript or [])[:400]
+    ]
+
+
+@router.post("/publica/{token}/transcript")
+def sincronizar_transcript(token: str, datos: TranscriptIn, db: Session = Depends(get_db)):
+    """2026-09-17 — persistencia incremental del transcript en modo avatar. El navegador lo manda en
+    cada `MESSAGE_HISTORY_UPDATED` (con debounce); así el servidor SIEMPRE tiene lo dicho aunque la
+    pestaña se cierre, falle la red o el SDK vacíe el historial al parar el stream. Nunca acorta lo
+    ya guardado (un historial vacío tardío no borra nada). Solo mientras está en curso."""
+    e = _por_token(db, token)
+    if e.estado != "en_curso":
+        return {"ok": False, "estado": e.estado, "turnos": len(e.transcript or [])}
+    nuevo = _normalizar_transcript(datos.transcript)
+    actual = e.transcript or []
+    if len(nuevo) >= len(actual):
+        e.transcript = nuevo
+    e.ultima_actividad_en = datetime.now(timezone.utc)
+    db.commit()
+    return {"ok": True, "estado": e.estado, "turnos": len(e.transcript or [])}
+
+
+def _transcript_mas_completo(e: Entrevista, recibido: Optional[List[dict]]) -> Optional[List[dict]]:
+    """El transcript que se evalúa es el MÁS LARGO entre lo que manda el navegador y lo que ya
+    sincronizó (2026-09-17): si el cliente llega vacío o recortado (stopStreaming vació el historial),
+    se usa el del servidor. Regresa None si no hay nada nuevo que escribir."""
+    guardado = e.transcript or []
+    nuevo = _normalizar_transcript(recibido) if recibido else []
+    if len(nuevo) >= len(guardado):
+        return nuevo or None
+    return None
+
+
 @router.post("/publica/{token}/finalizar")
 async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db)):
     """Cierra la entrevista DE VERDAD (Punto 4): registra cómo cerró (verificado), guarda el
@@ -389,13 +431,18 @@ async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db
         raise HTTPException(409, "La entrevista no está en curso; no hay nada que cerrar.")
     if not e.consentimiento:
         raise HTTPException(403, "La entrevista no tiene consentimiento del candidato.")
+    return await finalizar_entrevista(db, e, _transcript_mas_completo(e, datos.transcript), datos.cierre)
 
-    if datos.transcript:
+
+async def finalizar_entrevista(db: Session, e: Entrevista, transcript: Optional[List[dict]], cierre: str) -> dict:
+    """Cierre + evaluación (compartido por /finalizar y por el job de inactividad, 2026-09-17).
+    `transcript`: None = conservar el ya guardado en `e.transcript`."""
+    if transcript:
         e.transcript = [
             {"rol": ("assistant" if m.get("rol") == "assistant" else "user"), "texto": str(m.get("texto", ""))[:2000]}
-            for m in datos.transcript[:400]
+            for m in transcript[:400]
         ]
-    e.cierre = _cierre_verificado(e, datos.cierre)
+    e.cierre = _cierre_verificado(e, cierre)
     e.finalizada_en = datetime.now(timezone.utc)
     turnos_candidato = sum(1 for m in (e.transcript or []) if m.get("rol") == "user")
     turnos_utiles, _chars = ia.texto_util_candidato(e.transcript or [])
@@ -422,6 +469,12 @@ async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db
             )
         faltante = suf.temas_faltantes
 
+    return await _evaluar_y_cerrar(db, e, p, v, empresa, temas, faltante, turnos_candidato)
+
+
+async def _evaluar_y_cerrar(db: Session, e: Entrevista, p, v, empresa: str, temas: List[str], faltante: List[str], turnos_candidato: int, forzada_por: str = "") -> dict:
+    """Evaluación IA + cierre `evaluada` + Kanban a Evaluación + aviso al candidato. Compartida por
+    el cierre normal y por «Evaluar con lo que hay» (RH, 2026-09-17)."""
     e.estado = "completada"
     e.motivo = ""
     ev, con_ia = ia.evaluar_entrevista(
@@ -443,8 +496,9 @@ async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db
     # candidatos._aplicar_cv) — NUNCA se tocan aquí. El resultado del avatar vive completo y
     # aparte en Entrevista.evaluacion (match_perfil, evidencia, recomendación, perfil profundo).
     registrar(
-        db, "agente-ia", "entrevista_evaluada", "entrevista", e.codigo,
-        {"ia": con_ia, "recomendacion": ev.recomendacion, "match": ev.match_perfil, "cierre": e.cierre, "turnos_candidato": turnos_candidato},
+        db, forzada_por or "agente-ia", "entrevista_evaluada", "entrevista", e.codigo,
+        {"ia": con_ia, "recomendacion": ev.recomendacion, "match": ev.match_perfil, "cierre": e.cierre, "turnos_candidato": turnos_candidato,
+         **({"forzada_por_rh": True} if forzada_por else {})},
     )
 
     # Zero-Touch: mueve el Kanban a Evaluación — NO toca p.estado, la recomendación de la IA
@@ -474,6 +528,33 @@ async def finalizar(token: str, datos: FinalizarIn, db: Session = Depends(get_db
     return entrevista_dict(e)
 
 
+
+
+@router.post("/{codigo}/evaluar")
+async def evaluar_con_lo_que_hay(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """2026-09-17 — «Evaluar con lo que hay»: una entrevista `interrumpida`/`parcial` que SÍ tiene
+    respuestas del candidato se evalúa por decisión explícita de RH (queda en bitácora con su nombre),
+    sin esperar a que el candidato la repita. Sin ninguna respuesta útil no hay nada que evaluar (409)."""
+    e = _por_codigo(db, codigo)
+    p = e.postulacion
+    if not p or p.cuenta_id != cuenta.id:
+        raise HTTPException(404, "Entrevista no encontrada")
+    if e.estado not in ("interrumpida", "parcial"):
+        raise HTTPException(409, "Solo se puede forzar la evaluación de una entrevista interrumpida o parcial.")
+    turnos_utiles, _ = ia.texto_util_candidato(e.transcript or [])
+    if turnos_utiles == 0:
+        raise HTTPException(409, "La entrevista no tiene respuestas del candidato; hay que reintentarla.")
+    _p, v, empresa = _contexto(e)
+    temas = ia.temas_de_guion(e.guion or {})
+    faltante = list(((e.evaluacion or {}).get("faltante")) or [])
+    turnos_candidato = sum(1 for m in (e.transcript or []) if m.get("rol") == "user")
+    registrar(db, u.nombre, "entrevista_evaluacion_forzada", "entrevista", e.codigo, {"estado_previo": e.estado, "turnos_utiles": turnos_utiles, "correo_rh": u.correo})
+    return await _evaluar_y_cerrar(db, e, p, v, empresa, temas, faltante, turnos_candidato, forzada_por=u.nombre)
+
+
 # ------------------------------------------------------------
 # Reapertura explícita (RH) — Fase 4, Punto 4
 # ------------------------------------------------------------
@@ -500,3 +581,47 @@ def reabrir(
     reabrir_entrevista(db, e, u.nombre, datos.motivo, {"correo_rh": u.correo})
     db.commit()
     return entrevista_dict(e)
+
+
+# ------------------------------------------------------------
+# Job (2026-09-17): entrevistas en curso abandonadas → se cierran y evalúan con lo que hay
+# ------------------------------------------------------------
+
+# Minutos sin sincronización del transcript (ni turno de texto) para dar por abandonada la sesión.
+INACTIVIDAD_ENTREVISTA_MIN = 15
+
+
+async def cerrar_entrevistas_inactivas() -> int:
+    """Una entrevista `en_curso` cuya pestaña se cerró (o cayó la red) sin `/finalizar` se quedaba
+    así para siempre: la postulación en «Entrevista IA», sin evaluación y sin aviso. Ahora, pasados
+    INACTIVIDAD_ENTREVISTA_MIN sin actividad, se cierra con cierre `desconexion` usando el transcript
+    sincronizado: con respuestas suficientes se EVALÚA (misma lógica que /finalizar); con pocas queda
+    `interrumpida`/`parcial` para que RH la reabra. Regresa cuántas cerró."""
+    from ..database import SessionLocal
+
+    corte = datetime.now(timezone.utc) - timedelta(minutes=INACTIVIDAD_ENTREVISTA_MIN)
+    cerradas = 0
+    with SessionLocal() as db:
+        abiertas = db.query(Entrevista).filter(Entrevista.estado == "en_curso").all()
+        for e in abiertas:
+            ultima = e.ultima_actividad_en or e.iniciada_en or e.creada_en
+            if ultima is not None and ultima.tzinfo is None:
+                ultima = ultima.replace(tzinfo=timezone.utc)
+            if ultima is None or ultima > corte:
+                continue
+            if not e.consentimiento:
+                continue
+            try:
+                await finalizar_entrevista(db, e, None, "desconexion")
+                registrar(
+                    db, "sistema", "entrevista_cerrada_por_inactividad", "entrevista", e.codigo,
+                    {"estado": e.estado, "ultima_actividad": ultima.isoformat(), "turnos": len(e.transcript or [])},
+                )
+                db.commit()
+                cerradas += 1
+            except Exception as ex:  # una entrevista rota no debe frenar a las demás
+                db.rollback()
+                print(f"[entrevistas] ⚠️ no se pudo cerrar {e.codigo} por inactividad: {ex}", flush=True)
+    if cerradas:
+        print(f"[entrevistas] {cerradas} entrevista(s) cerradas por inactividad.", flush=True)
+    return cerradas

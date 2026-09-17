@@ -196,6 +196,7 @@ export interface Candidato {
     motivoIa: string;
     intentosPrevios: number;
     accionSiguiente: "reintentar" | null;
+    turnosUtiles?: number;
   } | null;
   /** true solo cuando la Evaluación Integral (CV + Entrevista Red Human válida) existe. */
   evaluacionIntegral?: boolean;
@@ -295,6 +296,10 @@ export interface Vacante {
   /** Capacitación universal: curso que se asigna como filtro al quedar apto */
   cursoFiltroId?: string | null;
   cursoFiltroTitulo?: string | null;
+  /** 2026-09-17: Cuenta dueña (portal por Cuenta) y homónimas publicadas en otras Cuentas (detalle). */
+  cuentaId?: number | null;
+  cuentaSlug?: string;
+  homonimasOtrasCuentas?: { codigo: string; cuenta: string; cuentaId: number }[];
   /** CRUD: baja lógica */
   eliminadaEn?: string | null;
   eliminadaPor?: string;

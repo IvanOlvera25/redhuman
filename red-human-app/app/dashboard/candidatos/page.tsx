@@ -69,6 +69,7 @@ import {
   fetchCandidatos,
   fetchClientes,
   fetchEntrevistadores,
+  evaluarEntrevistaConLoQueHay,
   fetchExpediente,
   fetchMensajes,
   fetchVacantes,
@@ -1239,13 +1240,23 @@ function ModalCandidato({
     return r.data;
   }
 
-  async function descartar() {
+  /** 2026-09-17: Descartar pasa SIEMPRE por confirmación con motivo (HITL, queda en bitácora). Con
+   * expediente abierto (Contratación/Onboarding) el backend lo cancela en la misma decisión. */
+  const [confirmarDescartar, setConfirmarDescartar] = useState<null | { motivo: string }>(null);
+
+  function descartar() {
     if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
+    setConfirmarDescartar({ motivo: comentario });
+  }
+
+  async function descartarConfirmado() {
+    if (!confirmarDescartar) return;
     setOcupado("descartar");
-    const r = await decidirCandidato(c.id, "descartar", comentario);
+    const r = await decidirCandidato(c.id, "descartar", confirmarDescartar.motivo.trim());
     const data = resolver(r, "Candidato descartado.");
     if (data) {
       setComentario("");
+      setConfirmarDescartar(null);
       onCambio(data);
     }
   }
@@ -1475,8 +1486,10 @@ function ModalCandidato({
                 { id: "evaluaciones", label: "Evaluaciones", icon: Sparkles, tone: "human" },
                 { id: "documentos", label: "CV y documentos", icon: FileText, tone: "brand" },
                 { id: "whatsapp", label: "WhatsApp", icon: MessageCircle, tone: "good", badge: c.mensajes },
-                ...(c.etapa === "Contratación"
-                  ? [{ id: "contratacion", label: "Contratación", icon: Briefcase, tone: "warn" }]
+                // 2026-09-17: la pestaña del expediente (checklist de documentos) vive en Contratación Y
+                // Onboarding — antes desaparecía al pasar a Onboarding y RH ya no veía qué faltaba.
+                ...(c.etapa === "Contratación" || c.etapa === "Onboarding"
+                  ? [{ id: "contratacion", label: c.etapa === "Onboarding" ? "Expediente" : "Contratación", icon: Briefcase, tone: "warn" }]
                   : []),
               ] as { id: TabCandidato; label: string; icon: typeof User; tone: string; badge?: number }[]
             ).map((t) => (
@@ -1535,11 +1548,11 @@ function ModalCandidato({
           {c.etapa === "Entrevista Humana" && <PanelEntrevistaHumana c={c} live={live} onCambio={onCambio} />}
 
           {tab === "resumen" && <PestanaResumen c={c} live={live} onCambio={onCambio} setTab={setTab} />}
-          {tab === "evaluaciones" && <PestanaEvaluaciones c={c} />}
+          {tab === "evaluaciones" && <PestanaEvaluaciones c={c} live={live} onCambio={onCambio} />}
           {tab === "documentos" && <PestanaDocumentos c={c} live={live} onCambio={onCambio} setAviso={setAviso} />}
           {tab === "whatsapp" && <PestanaWhatsApp c={c} live={live} onCambio={onCambio} />}
-          {tab === "contratacion" && c.etapa === "Contratación" && (
-            <PanelContratacion c={c} live={live} onCambio={onCambio} setAviso={setAviso} onDocumentos={setConfirmacion} />
+          {tab === "contratacion" && (c.etapa === "Contratación" || c.etapa === "Onboarding") && (
+            <PanelContratacion c={c} live={live} onCambio={onCambio} setAviso={setAviso} onDocumentos={setConfirmacion} onDescartar={descartar} />
           )}
         </div>
 
@@ -1635,9 +1648,7 @@ function ModalCandidato({
                           { etiqueta: "Enviar recordatorio", icono: <RotateCw />, onClick: () => setConfirmacion("recordatorio"), disabled: Boolean(ocupado) },
                         ]
                       : []),
-                    ...(c.expedienteId == null
-                      ? [{ etiqueta: "Descartar", icono: <ThumbsDown />, peligrosa: true, onClick: descartar, disabled: Boolean(ocupado) }]
-                      : []),
+                    { etiqueta: "Descartar candidato…", icono: <ThumbsDown />, peligrosa: true, onClick: descartar, disabled: Boolean(ocupado) },
                   ]}
                 />
               </div>
@@ -1685,6 +1696,38 @@ function ModalCandidato({
         )}
       </div>
 
+      {confirmarDescartar && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !ocupado && setConfirmarDescartar(null)}>
+            <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <h3 className="font-display text-lg font-bold text-bad">Descartar candidato</h3>
+              <p className="mt-1 text-sm text-ink-2">
+                La postulación de <b className="text-ink">{c.nombre}</b> se cierra como descartada y queda en el historial con tu nombre.
+                {c.expedienteId != null ? " Su expediente de contratación se cancela." : ""}
+              </p>
+              <label className="mt-4 flex flex-col gap-1.5">
+                <span className="text-xs font-medium text-ink-2">Motivo{c.expedienteId != null ? " (obligatorio)" : ""}</span>
+                <input
+                  autoFocus
+                  value={confirmarDescartar.motivo}
+                  onChange={(e) => setConfirmarDescartar({ motivo: e.target.value })}
+                  placeholder="Ej. no cumple el requisito de disponibilidad"
+                  className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                />
+              </label>
+              <div className="mt-5 flex justify-end gap-2">
+                <Button variant="outline" size="sm" onClick={() => setConfirmarDescartar(null)} disabled={ocupado === "descartar"}>Cancelar</Button>
+                <Button
+                  size="sm"
+                  className="bg-bad text-white hover:bg-bad/90"
+                  onClick={descartarConfirmado}
+                  disabled={ocupado === "descartar" || (c.expedienteId != null && !confirmarDescartar.motivo.trim())}
+                >
+                  <ThumbsDown className="h-4 w-4" /> {ocupado === "descartar" ? "Descartando…" : "Sí, descartar"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       {moverA && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !ocupado && setMoverA(null)}>
             <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -2165,7 +2208,21 @@ function PestanaResumen({
 /* ============================================================
    PESTAÑA 2: Evaluaciones (Luna, avatar, requisitos/brechas, prefiltro, entrevista humana)
    ============================================================ */
-function PestanaEvaluaciones({ c }: { c: Candidato }) {
+function PestanaEvaluaciones({ c, live, onCambio }: { c: Candidato; live?: boolean; onCambio?: (c: Candidato) => void }) {
+  const puedeDecidir = usePuedeDecidir();
+  const [evaluando, setEvaluando] = useState(false);
+  const [errorEval, setErrorEval] = useState("");
+  /** 2026-09-17: entrevista interrumpida/parcial CON respuestas → RH puede evaluarla con lo que hay. */
+  async function evaluarConLoQueHay() {
+    if (!c.entrevistaStatus) return;
+    setEvaluando(true);
+    setErrorEval("");
+    const r = await evaluarEntrevistaConLoQueHay(c.entrevistaStatus.codigo);
+    setEvaluando(false);
+    if (!r.ok) return setErrorEval(r.error);
+    const ficha = await fetchCandidato(c.id);
+    if (ficha && onCambio) onCambio(ficha);
+  }
   const a = c.analisis ?? {};
   const hayCv = Boolean(a.requisitos_cumplidos?.length || a.brechas?.length || a.fortalezas_cv?.length || c.cvDatos?.resumen_profesional);
   const ultimaEntrevista = c.entrevistas?.[c.entrevistas.length - 1];
@@ -2248,6 +2305,14 @@ function PestanaEvaluaciones({ c }: { c: Candidato }) {
                   {c.entrevistaStatus.intentosPrevios ? ` · ${c.entrevistaStatus.intentosPrevios} intento(s) previo(s)` : ""}
                   {c.entrevistaStatus.accionSiguiente === "reintentar" ? " · Acción siguiente: Reintentar Entrevista Red Human (tablero de Entrevistas → «Reintentar»)." : ""}
                 </p>
+                {puedeDecidir && live && c.entrevistaStatus.accionSiguiente === "reintentar" && (c.entrevistaStatus.turnosUtiles ?? 0) > 0 && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <Button size="sm" variant="outline" onClick={evaluarConLoQueHay} disabled={evaluando}>
+                      <Sparkles className="h-4 w-4" /> {evaluando ? "Evaluando…" : `Evaluar con lo que hay (${c.entrevistaStatus.turnosUtiles} respuestas)`}
+                    </Button>
+                    {errorEval && <span className="text-xs text-bad">{errorEval}</span>}
+                  </div>
+                )}
               </>
             );
           })()
@@ -3948,6 +4013,7 @@ function PanelContratacion({
   onCambio,
   setAviso,
   onDocumentos,
+  onDescartar,
 }: {
   c: Candidato;
   live: boolean;
@@ -3956,6 +4022,8 @@ function PanelContratacion({
   /** 2026-09-15: abre la confirmación «Solicitar documentos» / «Enviar recordatorio» del modal
    * (plantilla de WhatsApp; el candidato responde mandando el archivo por el mismo chat). */
   onDocumentos?: (que: "solicitar" | "recordatorio") => void;
+  /** 2026-09-17: «Descartar candidato…» también desde Contratación/Onboarding (menú «…»). */
+  onDescartar?: () => void;
 }) {
   const modoPrueba = useModoPrueba();
   const cond = c.expedienteCondiciones;
@@ -4115,9 +4183,14 @@ function PanelContratacion({
               </Button>
             </>
           )}
-          <Button size="sm" onClick={() => enviarOnboarding()} disabled={Boolean(ocupado)}>
-            Enviar a Onboarding
-          </Button>
+          {c.etapa === "Contratación" && (
+            <Button size="sm" onClick={() => enviarOnboarding()} disabled={Boolean(ocupado)}>
+              Enviar a Onboarding
+            </Button>
+          )}
+          {onDescartar && (
+            <MenuAcciones acciones={[{ etiqueta: "Descartar candidato…", icono: <ThumbsDown />, peligrosa: true, onClick: onDescartar, disabled: Boolean(ocupado) }]} />
+          )}
         </div>
       )}
 

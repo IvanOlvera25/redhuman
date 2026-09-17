@@ -1,12 +1,13 @@
 """Semilla de datos de demostración (misma información que el frontend usa en modo mock)."""
 
 import secrets
+from typing import Optional
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .models import Candidato, Documento, Expediente, Mensaje, Vacante, registrar, slugificar
+from .models import Candidato, Cuenta, Documento, Expediente, Mensaje, Vacante, registrar, slugificar
 
 
 def _hace(**kw) -> datetime:
@@ -238,3 +239,26 @@ def _rellenar_slugs(db: Session) -> None:
         v.slug = base if base not in usados else f"{base}-{v.id}"
         usados.add(v.slug)
     db.commit()
+
+
+def slug_cuenta_unico(db: Session, nombre: str, cuenta_id: Optional[int] = None) -> str:
+    """Slug público de una Cuenta (2026-09-17), único entre Cuentas."""
+    base = slugificar(nombre or "") or "cuenta"
+    usados = {sl for (sl,) in db.query(Cuenta.slug).filter(Cuenta.slug != "", Cuenta.id != (cuenta_id or 0)).all()}
+    if base not in usados:
+        return base
+    n = 2
+    while f"{base}-{n}" in usados:
+        n += 1
+    return f"{base}-{n}"
+
+
+def rellenar_slugs_cuentas(db: Session) -> int:
+    """Bases anteriores a `Cuenta.slug`: genera el que falte (portal por Cuenta)."""
+    faltantes = db.query(Cuenta).filter((Cuenta.slug == "") | (Cuenta.slug.is_(None))).order_by(Cuenta.id).all()
+    for cu in faltantes:
+        cu.slug = slug_cuenta_unico(db, cu.nombre_comercial or cu.nombre, cu.id)
+        db.flush()
+    if faltantes:
+        db.commit()
+    return len(faltantes)

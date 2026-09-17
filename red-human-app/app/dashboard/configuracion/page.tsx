@@ -436,6 +436,11 @@ function SeccionCuentas() {
                   {c.nombreComercial} · {c.usuarios} usuario(s) · {c.clientes} cliente(s)
                   {c.estado === "Eliminada" && c.eliminadaEn ? ` · eliminada el ${fechaCorta(c.eliminadaEn)}` : ""}
                 </p>
+                {c.portalUrl && c.estado === "Activa" && (
+                  <p className="truncate text-[12px] text-ink-3" title="Bolsa de trabajo pública de esta Cuenta">
+                    Portal: <span className="font-mono text-brand">{c.portalUrl}</span>
+                  </p>
+                )}
               </button>
               <Badge tone={c.estado === "Activa" ? "good" : c.estado === "Eliminada" ? "bad" : "neutral"} dot>{c.estado}</Badge>
               {/* Regla de UI: las acciones secundarias viven en «…»; solo quedan visibles los indicadores */}

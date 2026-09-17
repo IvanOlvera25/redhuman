@@ -6,7 +6,7 @@ from typing import List, Optional
 from .config import settings
 from .models import AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
 from .services.avatar import avatar_activo
-from .services.ia import texto_preguntas
+from .services.ia import texto_preguntas, texto_util_candidato
 
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
@@ -237,6 +237,8 @@ def _sintesis_global(p: Postulacion) -> dict:
             "faltante": list(ev_raw.get("faltante") or []), "motivoIa": ev_raw.get("motivo_ia") or "",
             "intentosPrevios": len(ultima_ent.intentos_previos or []),
             "accionSiguiente": "reintentar" if ultima_ent.estado in ("interrumpida", "parcial") else None,
+            # 2026-09-17: respuestas con contenido real → habilita «Evaluar con lo que hay» (RH)
+            "turnosUtiles": texto_util_candidato(ultima_ent.transcript or [])[0],
         }
 
     # --- D. Afinidad (EVALUACIÓN INTEGRAL): Análisis de CV + Entrevista Red Human válida,
@@ -521,6 +523,7 @@ def entrevista_dict(e: Entrevista) -> dict:
         "motivo": e.motivo or "",  # sin_respuestas | desconexion | parcial | "" (ver MOTIVOS_ENTREVISTA)
         "iniciadaEn": iso(e.iniciada_en),
         "finalizadaEn": iso(e.finalizada_en),
+        "ultimaActividadEn": iso(e.ultima_actividad_en),
         "intentosPrevios": len(e.intentos_previos or []),
         "tono": (c.id if c else 0) % 4,
         "ligaMeet": e.liga_meet or "",

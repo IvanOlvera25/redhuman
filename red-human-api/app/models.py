@@ -490,6 +490,10 @@ class Entrevista(Base):
     motivo: Mapped[str] = mapped_column(String(30), default="")  # ver MOTIVOS_ENTREVISTA
     iniciada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     finalizada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 2026-09-17: última vez que el navegador sincronizó el transcript (modo avatar) o hubo turno de
+    # texto. Con ella el job `cerrar_entrevistas_inactivas` cierra y evalúa entrevistas cuya pestaña
+    # se cerró sin /finalizar — antes se quedaban `en_curso` para siempre y RH no veía nada.
+    ultima_actividad_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Reapertura explícita por RH: cada intento anterior se archiva aquí ({transcript, evaluacion,
     # cierre, finalizada_en}) — nunca se pisa ni se borra.
     intentos_previos: Mapped[list] = mapped_column(JSON, default=list)
@@ -813,6 +817,9 @@ class Cuenta(Base):
     # las cuentas previas → en lecturas se resuelve `nombre or nombre_comercial` (ver nombre_visible).
     nombre: Mapped[str] = mapped_column(String(200), default="")
     nombre_comercial: Mapped[str] = mapped_column(String(200))  # lo que ven candidatos/portal
+    # 2026-09-17: identificador público de la Cuenta para el portal por Cuenta (/portal?cuenta=<slug>).
+    # Se genera del nombre comercial al arrancar (seed.rellenar_slugs_cuentas) y al crear la Cuenta.
+    slug: Mapped[str] = mapped_column(String(120), default="", index=True)
     razon_social: Mapped[str] = mapped_column(String(200), default="")
     logo: Mapped[str] = mapped_column(String(400), default="")  # ruta en disco
     contacto_nombre: Mapped[str] = mapped_column(String(150), default="")
