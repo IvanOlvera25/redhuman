@@ -313,7 +313,7 @@ function fechaCorta(iso: string) {
 /* 1. Cuentas (Punto 9)                                                */
 /* ================================================================== */
 
-type FormCuentaState = { nombre: string; nombreComercial: string; razonSocial: string; contactoNombre: string; correo: string; whatsapp: string; estado: "Activa" | "Inactiva" };
+type FormCuentaState = { nombre: string; nombreComercial: string; razonSocial: string; contactoNombre: string; correo: string; whatsapp: string; whatsappExclusivo: boolean; estado: "Activa" | "Inactiva" };
 
 const cuentaAForm = (c?: DatosCuenta | null): FormCuentaState => ({
   nombre: c?.nombre ?? "",
@@ -322,6 +322,7 @@ const cuentaAForm = (c?: DatosCuenta | null): FormCuentaState => ({
   contactoNombre: c?.contactoNombre ?? "",
   correo: c?.correoComunicacion ?? "",
   whatsapp: c?.whatsappComunicacion ?? "",
+  whatsappExclusivo: Boolean(c?.whatsappExclusivo),
   estado: c?.estado === "Inactiva" ? "Inactiva" : "Activa",
 });
 
@@ -332,10 +333,11 @@ const formACampos = (f: FormCuentaState): CamposCuenta & { nombre: string } => (
   contacto_nombre: f.contactoNombre,
   correo_comunicacion: f.correo,
   whatsapp_comunicacion: f.whatsapp,
+  whatsapp_exclusivo: f.whatsappExclusivo,
   estado: f.estado,
 });
 
-function CamposCuentaForm({ f, set }: { f: FormCuentaState; set: (k: keyof FormCuentaState, v: string) => void }) {
+function CamposCuentaForm({ f, set }: { f: FormCuentaState; set: (k: keyof FormCuentaState, v: string | boolean) => void }) {
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       <Entrada label="Nombre de la cuenta" value={f.nombre} onChange={(v) => set("nombre", v)} placeholder="Ej. Grupo Carbe (identificador interno)" className="sm:col-span-2" />
@@ -345,6 +347,22 @@ function CamposCuentaForm({ f, set }: { f: FormCuentaState; set: (k: keyof FormC
       <Entrada label="Teléfono / WhatsApp" value={f.whatsapp} onChange={(v) => set("whatsapp", v)} placeholder="52 55 1234 5678" />
       <Entrada label="Nombre de contacto" value={f.contactoNombre} onChange={(v) => set("contactoNombre", v)} placeholder="Ej. Ana García" />
       <Selector label="Estatus" value={f.estado} onChange={(v) => set("estado", v)} opciones={["Activa", "Inactiva"]} />
+      {/* 2026-09-17 (WhatsApp multi-tenant): por defecto el número maestro de WhatsApp atiende a TODAS las
+          Cuentas (el candidato elige la vacante y su postulación queda en la Cuenta correcta). Premium:
+          un número propio conectado en Meta se reserva para esta Cuenta. */}
+      <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border-soft bg-surface-2/50 p-3 sm:col-span-2">
+        <input
+          type="checkbox"
+          checked={f.whatsappExclusivo}
+          onChange={(e) => set("whatsappExclusivo", e.target.checked)}
+          className="mt-0.5 h-4 w-4 accent-[var(--brand)]"
+        />
+        <span className="text-[13px] leading-relaxed text-ink-2">
+          <b className="text-ink">Número de WhatsApp exclusivo de esta Cuenta</b> (Premium). Los mensajes que lleguen al número capturado
+          arriba verán solo las vacantes de esta Cuenta. Desmarcado, el número maestro es compartido: el candidato ve las vacantes de
+          todas las Cuentas activas y su postulación queda en la Cuenta de la vacante que elija.
+        </span>
+      </label>
     </div>
   );
 }
@@ -501,7 +519,7 @@ function FormNuevaCuenta({ onClose, onCreada }: { onClose: () => void; onCreada:
   const [logo, setLogo] = useState<File | null>(null);
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState("");
-  const set = (k: keyof FormCuentaState, v: string) => setF((p) => ({ ...p, [k]: v }));
+  const set = (k: keyof FormCuentaState, v: string | boolean) => setF((p) => ({ ...p, [k]: v }));
 
   async function guardar() {
     setGuardando(true);
@@ -575,14 +593,14 @@ function FichaCuentaModal({ cuentaId, onClose }: { cuentaId: number; onClose: ()
         <Loader2 className="h-5 w-5 animate-spin text-ink-3" />
       ) : (
         <>
-          <div className="mb-4 flex flex-wrap gap-1 border-b border-border-soft">
+          <div className="scroll-x mb-4 gap-1 border-b border-border-soft">
             {TABS.map((t) => (
               <button
                 key={t.id}
                 type="button"
                 onClick={() => setTab(t.id)}
                 className={cn(
-                  "-mb-px border-b-2 px-3 py-2 text-[13px] font-semibold transition",
+                  "-mb-px shrink-0 whitespace-nowrap border-b-2 px-3 py-2 text-[13px] font-semibold transition",
                   tab === t.id ? "border-brand text-brand" : "border-transparent text-ink-3 hover:text-ink",
                 )}
               >
@@ -634,7 +652,7 @@ function TabDatosCuenta({ ficha, onCambio }: { ficha: FichaCuenta; onCambio: (f:
   const [f, setF] = useState<FormCuentaState>(cuentaAForm(ficha));
   const [guardando, setGuardando] = useState(false);
   const [msg, setMsg] = useState<{ tono: "ok" | "error"; texto: string } | null>(null);
-  const set = (k: keyof FormCuentaState, v: string) => setF((p) => ({ ...p, [k]: v }));
+  const set = (k: keyof FormCuentaState, v: string | boolean) => setF((p) => ({ ...p, [k]: v }));
 
   async function guardar() {
     setGuardando(true);

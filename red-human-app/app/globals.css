@@ -121,6 +121,27 @@ body {
   color: var(--brand-ink);
 }
 
+/* Menús horizontales en móvil (2026-09-17): pestañas, chips de filtro y barras de acciones se
+   deslizan con el dedo sin romper el layout; la barra de scroll queda oculta. */
+.scroll-x {
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scroll-x::-webkit-scrollbar {
+  display: none;
+}
+.scroll-x > * {
+  flex-shrink: 0;
+  scroll-snap-align: start;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 10px;

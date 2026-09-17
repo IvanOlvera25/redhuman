@@ -165,6 +165,7 @@ with TestClient(app) as client:
     # ================= 6. Ruteo por número sigue mandando =================
     print("\n--- 6. whatsapp_comunicacion capturado → enruta por número ---")
     ca.whatsapp_comunicacion = "5533001122"
+    ca.whatsapp_exclusivo = True  # 2026-09-17: sin la marca el número es compartido (multi-tenant)
     db.commit()
     r = webhook(client, "5215512340005", "Hola", receptor="525533001122")
     check(r["accion"] == "menu_vacantes" and "no tenemos vacantes abiertas" in ultimo(), "mensaje al número de la Cuenta original (sin vacantes) → se respeta el ruteo por número")

@@ -168,7 +168,7 @@ function NuevoCurso({ onClose, onGenerado }: { onClose: () => void; onGenerado: 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !generando && onClose()}>
-      <Card className="w-full max-w-lg p-6" onClick={(e) => e.stopPropagation()}>
+      <Card className="max-h-[92dvh] w-full max-w-lg overflow-y-auto p-5 sm:p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="font-display text-lg font-bold">Nuevo curso</h2>

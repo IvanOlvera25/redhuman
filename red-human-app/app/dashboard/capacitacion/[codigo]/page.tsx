@@ -262,8 +262,8 @@ function AsignarCurso({ curso, onClose, onAsignado }: { curso: Curso; onClose: (
   const inputCls = "h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !ocupado && onClose()}>
-      <Card className="flex max-h-[90vh] w-full max-w-2xl flex-col p-6" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4" onClick={() => !ocupado && onClose()}>
+      <Card className="flex h-[100dvh] w-full max-w-2xl flex-col overflow-y-auto rounded-none p-4 sm:h-auto sm:max-h-[90vh] sm:rounded-2xl sm:p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="font-display text-lg font-bold">Asignar «{curso.titulo}»</h2>
@@ -379,8 +379,8 @@ function EditarCurso({ curso, que, onClose, onGuardado }: { curso: Curso; que: "
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !guardando && onClose()}>
-      <Card className="flex max-h-[90vh] w-full max-w-2xl flex-col p-6" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4" onClick={() => !guardando && onClose()}>
+      <Card className="flex h-[100dvh] w-full max-w-2xl flex-col overflow-y-auto rounded-none p-4 sm:h-auto sm:max-h-[90vh] sm:rounded-2xl sm:p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-3">
           <h2 className="font-display text-lg font-bold">{que === "objetivo" ? "Objetivo y mínimo aprobatorio" : que === "modulos" ? "Módulos" : "Evaluación final"}</h2>
           <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-ink-3 hover:bg-surface-2" aria-label="Cerrar"><X className="h-4 w-4" /></button>

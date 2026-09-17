@@ -1782,7 +1782,7 @@ function Panel({
           ancho,
         )}
       >
-        <div className="glass sticky top-0 z-10 flex items-center justify-between border-b border-border-soft px-6 py-4">
+        <div className="glass sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border-soft px-4 py-3 sm:px-6 sm:py-4">
           <div className="min-w-0">
             <Eyebrow>{eyebrow}</Eyebrow>
             <h2 className="font-display truncate text-xl font-bold">{titulo}</h2>
