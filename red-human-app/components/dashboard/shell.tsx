@@ -43,17 +43,18 @@ type NavItem = {
   badge?: string;
 };
 
+// 2026-09-17: sin contadores quemados («24», «1.8k», «12», «3») — eran datos de maqueta en producción.
 const navOperacion: NavItem[] = [
   { href: "/dashboard", label: "Tablero de control", icon: LayoutDashboard },
   // { href: "/dashboard/requisiciones", label: "Requisiciones", icon: ClipboardList }, // Oculto temporalmente
-  { href: "/dashboard/vacantes", label: "Vacantes", icon: Briefcase, badge: "24" },
-  { href: "/dashboard/candidatos", label: "Candidatos", icon: Users, badge: "1.8k" },
-  { href: "/dashboard/entrevistas", label: "Entrevistas", icon: Video, badge: "12" },
+  { href: "/dashboard/vacantes", label: "Vacantes", icon: Briefcase },
+  { href: "/dashboard/candidatos", label: "Candidatos", icon: Users },
+  { href: "/dashboard/entrevistas", label: "Entrevistas", icon: Video },
 ];
 
 const navColaborador: NavItem[] = [
   { href: "/dashboard/colaboradores", label: "Colaboradores", icon: UserSquare2 },
-  { href: "/dashboard/onboarding", label: "Onboarding", icon: ClipboardCheck, badge: "3" },
+  { href: "/dashboard/onboarding", label: "Onboarding", icon: ClipboardCheck },
   { href: "/dashboard/capacitacion", label: "Capacitación", icon: GraduationCap },
   { href: "/dashboard/desempeno", label: "Desempeño", icon: Target },
   { href: "/dashboard/clima", label: "Clima", icon: HeartPulse },
@@ -225,7 +226,7 @@ function ContadorAgente() {
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const { usuario } = useSesion();
   return (
-    <div className="flex h-full flex-col gap-6 p-4">
+    <div className="flex min-h-full flex-col gap-5 p-4 lg:h-full lg:gap-6">
       <div className="px-2 pt-1">
         <Link href="/" onClick={onNavigate}>
           <Logo />
@@ -248,7 +249,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         <ExternalLink className="h-3.5 w-3.5 text-ink-3 transition group-hover:text-brand" />
       </Link>
 
-      <div className="flex-1 space-y-5 overflow-y-auto">
+      <div className="flex-1 space-y-5 lg:overflow-y-auto">
         <div>
           <p className="px-3 pb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-ink-3">Reclutamiento</p>
           <NavList items={navOperacion} onNavigate={onNavigate} />
@@ -286,6 +287,28 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
+  const path = usePathname();
+
+  // 2026-09-17 (móvil): el cajón se cierra al navegar, con Escape y al pasar a escritorio; mientras
+  // está abierto se bloquea el scroll del fondo (antes el contenido seguía desplazándose detrás).
+  useEffect(() => {
+    setOpen(false);
+  }, [path]);
+  useEffect(() => {
+    if (!open) return;
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const alCambiar = () => mq.matches && setOpen(false);
+    document.addEventListener("keydown", esc);
+    mq.addEventListener("change", alCambiar);
+    const overflowPrevio = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", esc);
+      mq.removeEventListener("change", alCambiar);
+      document.body.style.overflow = overflowPrevio;
+    };
+  }, [open]);
 
   return (
     <div className="min-h-svh bg-bg">
@@ -294,45 +317,59 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
         <SidebarContent />
       </aside>
 
-      {/* Mobile drawer */}
-      {open && (
-        <div className="fixed inset-0 z-50 lg:hidden">
-          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setOpen(false)} />
-          <div className="absolute inset-y-0 left-0 w-72 border-r border-border-soft bg-surface">
-            <button
-              onClick={() => setOpen(false)}
-              className="absolute right-3 top-3 grid h-9 w-9 place-items-center rounded-xl text-ink-2 hover:bg-surface-2"
-              aria-label="Cerrar"
-            >
-              <X className="h-5 w-5" />
-            </button>
-            <SidebarContent onNavigate={() => setOpen(false)} />
-          </div>
+      {/* Mobile drawer (hamburguesa) — cajón deslizable con fondo oscurecido; todo el contenido hace scroll
+          dentro del cajón para pantallas bajas. */}
+      <div className={cn("fixed inset-0 z-50 lg:hidden", open ? "pointer-events-auto" : "pointer-events-none")} aria-hidden={!open}>
+        <div
+          className={cn("absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity duration-200", open ? "opacity-100" : "opacity-0")}
+          onClick={() => setOpen(false)}
+        />
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Menú de navegación"
+          className={cn(
+            "absolute inset-y-0 left-0 flex w-[min(20rem,88vw)] flex-col overflow-y-auto border-r border-border-soft bg-surface shadow-2xl transition-transform duration-200 ease-out",
+            "pb-[env(safe-area-inset-bottom)]",
+            open ? "translate-x-0" : "-translate-x-full",
+          )}
+        >
+          <button
+            onClick={() => setOpen(false)}
+            className="absolute right-3 top-3 z-10 grid h-10 w-10 place-items-center rounded-xl text-ink-2 hover:bg-surface-2"
+            aria-label="Cerrar menú"
+          >
+            <X className="h-5 w-5" />
+          </button>
+          {open && <SidebarContent onNavigate={() => setOpen(false)} />}
         </div>
-      )}
+      </div>
 
       {/* Topbar */}
       <header className="glass fixed inset-x-0 top-0 z-30 border-b border-border-soft lg:left-64">
-        <div className="flex h-16 items-center gap-3 px-4 sm:px-6">
+        <div className="flex h-16 items-center gap-2 px-3 sm:gap-3 sm:px-6">
           <button
             onClick={() => setOpen(true)}
-            className="grid h-10 w-10 place-items-center rounded-xl text-ink-2 hover:bg-surface-2 lg:hidden"
-            aria-label="Menú"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl text-ink-2 hover:bg-surface-2 lg:hidden"
+            aria-label="Abrir menú"
+            aria-expanded={open}
           >
             <Menu className="h-5 w-5" />
           </button>
+          <Link href="/dashboard" className="shrink-0 lg:hidden" aria-label="Tablero de control">
+            <Logo size="sm" />
+          </Link>
 
           {/* Fase F, punto 29: barra permanente "Pregunta a Red Human" — sustituye el buscador
               decorativo, no es un módulo aparte. */}
           <BarraAgente />
 
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
             {/* Selector de Cuenta en topbar (solo si el usuario tiene más de una) */}
             <SelectorCuenta variant="topbar" />
             <ThemeToggle />
-            <button className="relative grid h-10 w-10 place-items-center rounded-xl text-ink-2 hover:bg-surface-2" aria-label="Notificaciones">
+            <button className="relative hidden h-10 w-10 place-items-center rounded-xl text-ink-2 hover:bg-surface-2 sm:grid" aria-label="Notificaciones">
               <Bell className="h-5 w-5" />
-              <span className="absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-human" />
             </button>
             <UsuarioBarra />
           </div>
