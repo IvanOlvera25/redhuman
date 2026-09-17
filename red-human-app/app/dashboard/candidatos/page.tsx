@@ -541,7 +541,7 @@ function CandidatosContenido() {
           </div>
 
           {/* Barra de filtro por estado */}
-          <div className="flex flex-wrap items-center gap-1 rounded-xl border border-border-soft bg-surface-2/60 p-1">
+          <div className="scroll-x max-w-full items-center gap-1 rounded-xl border border-border-soft bg-surface-2/60 p-1">
             {FILTROS_ESTADO.map((f) => (
               <button
                 key={f.key}
@@ -805,7 +805,7 @@ function CandidatosContenido() {
 
       {/* VISTA 1: PIPELINE (Kanban) */}
       {!cargando && vista === "pipeline" && (
-        <div className="mt-6 grid gap-4 overflow-x-auto sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           {etapas.map((etapa) => {
             const cols = datosFiltrados.filter((c) => c.etapa === etapa);
             const esResaltada = columnaResaltada === etapa;
@@ -1376,13 +1376,13 @@ function ModalCandidato({
   const siguientesEtapas = SIGUIENTE_ETAPA_MANUAL[c.etapa] ?? [];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-md animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-0 backdrop-blur-md animate-in fade-in duration-200 sm:p-6">
       <div
-        className="relative flex flex-col w-full max-w-4xl max-h-[92vh] rounded-3xl border border-border-soft bg-bg shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200"
+        className="relative flex h-[100dvh] w-full max-w-4xl flex-col overflow-hidden border border-border-soft bg-bg shadow-2xl animate-in zoom-in-95 duration-200 sm:h-auto sm:max-h-[92vh] sm:rounded-3xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header Modal */}
-        <div className="glass sticky top-0 z-10 flex items-center justify-between border-b border-border-soft px-6 py-4">
+        <div className="glass sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border-soft px-4 py-3 sm:px-6 sm:py-4">
           <div className="flex items-center gap-3.5 min-w-0">
             <Avatar name={c.nombre} tone={c.tono} />
             <div className="min-w-0">
@@ -1478,8 +1478,9 @@ function ModalCandidato({
         )}
 
         {/* Barra de Pestañas Principales (4 base + Contratación condicional) */}
-        <div className="border-b border-border-soft bg-surface-2/70 px-6 pt-3">
-          <div className="flex gap-2">
+        <div className="border-b border-border-soft bg-surface-2/70 pt-3">
+          {/* 2026-09-17 (móvil): las pestañas se deslizan con el dedo (scroll-x) en vez de recortarse */}
+          <div className="scroll-x gap-2 px-4 sm:px-6">
             {(
               [
                 { id: "resumen", label: "Resumen", icon: User, tone: "brand" },
@@ -1497,7 +1498,7 @@ function ModalCandidato({
                 key={t.id}
                 onClick={() => setTab(t.id)}
                 className={cn(
-                  "flex items-center gap-2 rounded-t-xl px-4 py-2.5 text-sm font-semibold transition border-b-2",
+                  "flex shrink-0 items-center gap-2 whitespace-nowrap rounded-t-xl px-3 py-2.5 text-sm font-semibold transition border-b-2 sm:px-4",
                   tab === t.id ? TAB_TONE_ACTIVA[t.tone] : "border-transparent text-ink-3 hover:text-ink hover:bg-surface/50",
                 )}
               >
@@ -1514,7 +1515,7 @@ function ModalCandidato({
         </div>
 
         {/* Cuerpo Scrolleable */}
-        <div className="flex-1 overflow-y-auto p-5 sm:p-6 flex flex-col gap-5">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 flex flex-col gap-5">
           {aviso && (
             <Aviso tono={aviso.tono} onCerrar={() => setAviso(null)}>
               {aviso.texto}
@@ -1578,7 +1579,7 @@ function ModalCandidato({
         {/* Etapa Prefiltro: solo Descartar — el paso a Entrevista IA es zero-touch, lo dispara
             la IA sola por WhatsApp al completar el prefiltro (no hay botón manual). */}
         {puedeDecidir && c.etapa === "Prefiltro" && (
-          <div className="border-t border-border-soft bg-surface px-6 py-4">
+          <div className="border-t border-border-soft bg-surface px-4 py-3 sm:px-6 sm:py-4">
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant="outline"
@@ -1599,7 +1600,7 @@ function ModalCandidato({
           c.etapa !== "Prefiltro" &&
           c.etapa !== "Contratación" &&
           (c.etapa !== "Entrevista Humana" || c.entrevistaHumana?.realizada) && (
-          <div className="border-t border-border-soft bg-surface px-6 py-4">
+          <div className="border-t border-border-soft bg-surface px-4 py-3 sm:px-6 sm:py-4">
             <div className="flex flex-col gap-3">
               <input
                 value={comentario}
@@ -2844,9 +2845,9 @@ function CargarCVs({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md">
-      <div className="relative flex flex-col w-full max-w-2xl max-h-[90vh] rounded-3xl border border-border-soft bg-bg shadow-2xl overflow-hidden">
-        <div className="glass sticky top-0 z-10 flex items-center justify-between border-b border-border-soft px-6 py-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-0 backdrop-blur-md sm:p-4">
+      <div className="relative flex h-[100dvh] w-full max-w-2xl flex-col overflow-hidden border border-border-soft bg-bg shadow-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-3xl">
+        <div className="glass sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border-soft px-4 py-3 sm:px-6 sm:py-4">
           <div>
             <Eyebrow>Ingesta de prospectos</Eyebrow>
             <h2 className="font-display text-lg font-bold text-ink">Cargar CVs con Extracción de IA</h2>

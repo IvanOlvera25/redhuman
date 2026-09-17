@@ -313,7 +313,7 @@ with TestClient(app) as client:
     db.commit()
 
     # Causa A: segunda Cuenta activa (Configuración → Cuentas) — antes: 500 en todo mensaje entrante
-    cuenta_b = Cuenta(nombre="Cuenta B", nombre_comercial="Empresa B", estado="Activa", whatsapp_comunicacion="5511112222")
+    cuenta_b = Cuenta(nombre="Cuenta B", nombre_comercial="Empresa B", estado="Activa", whatsapp_comunicacion="5511112222", whatsapp_exclusivo=True)  # 2026-09-17: el ruteo por número exige la marca Premium
     db.add(cuenta_b)
     db.commit()
     r = client.post("/webhooks/whatsapp", json=meta_boton_plantilla(WA3, "Sí, empezar ahora"))

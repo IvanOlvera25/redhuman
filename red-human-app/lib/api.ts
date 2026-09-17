@@ -244,6 +244,7 @@ export interface DatosCuenta {
   contactoNombre: string;
   correoComunicacion: string;
   whatsappComunicacion: string;
+  whatsappExclusivo?: boolean;
   /** 2026-09-17: portal por Cuenta. */
   slug?: string;
   portalUrl?: string;
@@ -280,6 +281,8 @@ export type CamposCuenta = {
   contacto_nombre?: string;
   correo_comunicacion?: string;
   whatsapp_comunicacion?: string;
+  /** 2026-09-17: número de WhatsApp dedicado a esta Cuenta (Premium); por defecto el número es compartido. */
+  whatsapp_exclusivo?: boolean;
   estado?: "Activa" | "Inactiva";
 };
 

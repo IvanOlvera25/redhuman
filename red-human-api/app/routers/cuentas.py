@@ -40,6 +40,7 @@ def _cuenta_dict(cu: Cuenta, actual_id: Optional[int] = None) -> dict:
         "contactoNombre": cu.contacto_nombre,
         "correoComunicacion": cu.correo_comunicacion,
         "whatsappComunicacion": cu.whatsapp_comunicacion,
+        "whatsappExclusivo": bool(cu.whatsapp_exclusivo),  # 2026-09-17: número dedicado (Premium)
         "slug": cu.slug or "",
         "portalUrl": f"{settings.app_url}/portal?cuenta={cu.slug}" if cu.slug else f"{settings.app_url}/portal",  # 2026-09-17
         "estado": cu.estado,
@@ -180,6 +181,7 @@ class CrearCuentaIn(BaseModel):
     contacto_nombre: str = ""
     correo_comunicacion: str = ""
     whatsapp_comunicacion: str = ""
+    whatsapp_exclusivo: bool = False
     estado: str = "Activa"
 
 
@@ -205,6 +207,7 @@ def crear(
         contacto_nombre=datos.contacto_nombre.strip(),
         correo_comunicacion=correo,
         whatsapp_comunicacion=datos.whatsapp_comunicacion.strip(),
+        whatsapp_exclusivo=bool(datos.whatsapp_exclusivo),
         estado=datos.estado,
     )
     db.add(nueva)
@@ -230,6 +233,7 @@ class ActualizarCuentaIn(BaseModel):
     contacto_nombre: Optional[str] = None
     correo_comunicacion: Optional[str] = None
     whatsapp_comunicacion: Optional[str] = None
+    whatsapp_exclusivo: Optional[bool] = None
     estado: Optional[str] = None
 
 

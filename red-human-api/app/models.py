@@ -841,6 +841,12 @@ class Cuenta(Base):
     contacto_nombre: Mapped[str] = mapped_column(String(150), default="")
     correo_comunicacion: Mapped[str] = mapped_column(String(200), default="")
     whatsapp_comunicacion: Mapped[str] = mapped_column(String(30), default="")
+    # 2026-09-17 (WhatsApp multi-tenant): por defecto TODAS las Cuentas activas comparten el número
+    # maestro de WhatsApp (el candidato ve las vacantes de todas y su postulación queda amarrada a la
+    # Cuenta de la vacante que elija). `whatsapp_exclusivo=True` (Premium) reserva el número capturado
+    # en `whatsapp_comunicacion` para ESTA Cuenta: los mensajes que lleguen a ese número solo ven sus
+    # vacantes y sus personas (ruteo dedicado, comportamiento anterior).
+    whatsapp_exclusivo: Mapped[bool] = mapped_column(Boolean, default=False)
     estado: Mapped[str] = mapped_column(String(20), default="Activa")  # Activa | Inactiva | Eliminada
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
     actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)

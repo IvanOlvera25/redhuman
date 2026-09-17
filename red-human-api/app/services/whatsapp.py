@@ -424,6 +424,7 @@ async def enviar_lista_interactiva(
     cuerpo: str,
     boton: str,
     opciones: list,
+    secciones: Optional[list] = None,
 ) -> dict:
     """Mensaje interactivo tipo lista (Meta Cloud API).
 
@@ -432,12 +433,39 @@ async def enviar_lista_interactiva(
     el título, y el webhook detecta el código VAC-XXXX en una segunda pasada.
 
     Meta limita: encabezado 60, cuerpo 1024, botón 20, título de fila 24,
-    descripción 72 y un máximo de 10 filas por sección.
+    descripción 72, máximo 10 secciones y 10 filas EN TOTAL.
+
+    `secciones` (2026-09-17, número compartido): [{"titulo": "Grupo CARBE", "opciones": [...]}] agrupa
+    las filas por empresa; si se manda, `opciones` se ignora.
     """
     if proveedor() != "meta":
         return _resultado(False, "Las listas interactivas solo existen en Meta Cloud API")
-    if not opciones:
+    if secciones:
+        secciones = [sec for sec in secciones if sec.get("opciones")]
+    if not opciones and not secciones:
         return _resultado(False, "No hay opciones que mostrar")
+
+    def _filas(lista: list) -> list:
+        return [
+            {
+                "id": str(o["id"])[:200],
+                "title": str(o["titulo"])[:24],
+                "description": str(o.get("descripcion") or "")[:72],
+            }
+            for o in lista
+        ]
+
+    if secciones:
+        cupo = 10
+        bloques = []
+        for sec in secciones[:10]:
+            if cupo <= 0:
+                break
+            filas = _filas(sec["opciones"][:cupo])
+            cupo -= len(filas)
+            bloques.append({"title": str(sec.get("titulo") or "Vacantes")[:24], "rows": filas})
+    else:
+        bloques = [{"title": "Vacantes", "rows": _filas(opciones[:10])}]
 
     return await _meta_post(
         {
@@ -451,19 +479,7 @@ async def enviar_lista_interactiva(
                 "body": {"text": cuerpo[:1024]},
                 "action": {
                     "button": boton[:20],
-                    "sections": [
-                        {
-                            "title": "Vacantes",
-                            "rows": [
-                                {
-                                    "id": str(o["id"])[:200],
-                                    "title": str(o["titulo"])[:24],
-                                    "description": str(o.get("descripcion") or "")[:72],
-                                }
-                                for o in opciones[:10]
-                            ],
-                        }
-                    ],
+                    "sections": bloques,
                 },
             },
         }
