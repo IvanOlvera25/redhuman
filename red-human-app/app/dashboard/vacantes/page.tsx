@@ -1588,6 +1588,12 @@ function DetalleVacante({
             No aparece en tableros, portal ni WhatsApp; su historial se conserva.
           </Aviso>
         )}
+        {Boolean(v.homonimasOtrasCuentas?.length) && (
+          <Aviso tono="info">
+            Hay otra vacante publicada con este mismo título en {v.homonimasOtrasCuentas!.map((h) => `${h.cuenta} (${h.codigo})`).join(", ")}.
+            El portal general muestra las vacantes de todas las Cuentas; esa sigue visible aunque esta se elimine.
+          </Aviso>
+        )}
 
         {/* Embudo de esta vacante — conecta con el pipeline de candidatos */}
         <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">

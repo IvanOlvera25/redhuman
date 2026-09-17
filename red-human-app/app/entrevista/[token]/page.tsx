@@ -25,6 +25,8 @@ import {
   iniciarEntrevista,
   turnoEntrevista,
   finalizarEntrevista,
+  finalizarEntrevistaBeacon,
+  sincronizarTranscript,
   type CierreEntrevista,
   type EntrevistaPublica,
 } from "@/lib/api";
@@ -89,6 +91,9 @@ export default function SalaEntrevista() {
   // evita finalizar dos veces: el clic manual en "Terminar" también dispara CONNECTION_CLOSED
   // como efecto de stopStreaming(), así que ambos caminos se guardan con la misma bandera.
   const finalizadoRef = useRef(false);
+  // 2026-09-17: el transcript se sincroniza al servidor conforme avanza (debounce) — antes vivía solo
+  // aquí hasta /finalizar y una pestaña cerrada / un historial vaciado por stopStreaming lo perdía todo.
+  const syncRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; enviados: number }>({ timer: null, enviados: 0 });
   const nombreRef = useRef("");
   const silencioRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; avisos: number; hablando: boolean }>({ timer: null, avisos: 0, hablando: false });
   const [errorTexto, setErrorTexto] = useState("");
@@ -148,16 +153,33 @@ export default function SalaEntrevista() {
       finalizadoRef.current = true;
       if (silencioRef.current.timer) clearTimeout(silencioRef.current.timer);
       setFase("finalizando");
+      // Snapshot ANTES de parar el stream: el SDK puede emitir un MESSAGE_HISTORY_UPDATED vacío al
+      // cerrar y dejaba el transcript en cero → «sin respuestas» aunque la entrevista fue completa.
+      const transcript = [...transcriptRef.current];
+      if (syncRef.current.timer) clearTimeout(syncRef.current.timer);
       try {
         await anamRef.current?.stopStreaming?.();
       } catch {}
       microfonoRef.current?.getTracks().forEach((t) => t.stop());
       microfonoRef.current = null;
-      const r = await finalizarEntrevista(token, conTranscript ? transcriptRef.current : undefined, cierre);
+      const r = await finalizarEntrevista(token, conTranscript ? transcript : undefined, cierre);
       setFase(r.ok && r.data.estado === "interrumpida" ? "interrumpida" : "fin");
     },
     [token],
   );
+
+  /** Sincroniza el transcript al servidor (debounce 1.5 s). Nunca bloquea ni falla la sala. */
+  const sincronizar = useCallback(() => {
+    const st = syncRef.current;
+    if (st.timer) clearTimeout(st.timer);
+    st.timer = setTimeout(() => {
+      if (finalizadoRef.current) return;
+      const t = transcriptRef.current;
+      if (t.length <= st.enviados) return;
+      st.enviados = t.length;
+      void sincronizarTranscript(token, t);
+    }, 1500);
+  }, [token]);
 
   /** Silencio (avatar): si la persona no habla, Red Human repite el aviso (ia.AVISO_SILENCIO); máximo 2 veces.
    * Antes del primer turno del candidato vuelve a preguntar «¿Comenzamos?»; después, pide repetir la respuesta. */
@@ -183,6 +205,20 @@ export default function SalaEntrevista() {
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
   }, [mensajes, pensando]);
+
+  /** Pestaña cerrada / navegación a mitad de la entrevista: se manda el cierre con sendBeacon
+   * (sobrevive al unload). El servidor lo trata como `desconexion`; si no llega, el job de
+   * inactividad cierra la entrevista con el transcript ya sincronizado. */
+  useEffect(() => {
+    const alSalir = () => {
+      if (finalizadoRef.current || modo !== "avatar") return;
+      if (!transcriptRef.current.some((m) => m.rol === "user")) return;
+      finalizadoRef.current = true;
+      finalizarEntrevistaBeacon(token, transcriptRef.current, "desconexion");
+    };
+    window.addEventListener("pagehide", alSalir);
+    return () => window.removeEventListener("pagehide", alSalir);
+  }, [token, modo]);
 
   /** Modo texto como red de seguridad: se pide al servidor una sesión de texto y se entra a la sala. */
   const entrarTexto = useCallback(
@@ -292,11 +328,15 @@ export default function SalaEntrevista() {
         };
 
         anam.addListener(AnamEvent.MESSAGE_HISTORY_UPDATED, (historial: { role: string; content: string }[]) => {
-          transcriptRef.current = historial.map((m) => ({
-            rol: m.role === "persona" ? "assistant" : "user",
+          const nuevo = (historial ?? []).map((m) => ({
+            rol: (m.role === "persona" ? "assistant" : "user") as Msg["rol"],
             texto: m.content,
           }));
+          // un historial más corto (p. ej. vacío al cerrar el stream) nunca pisa lo ya capturado
+          if (nuevo.length < transcriptRef.current.length) return;
+          transcriptRef.current = nuevo;
           setMensajes(transcriptRef.current.slice(-4));
+          sincronizar();
           // Cierre automático (Fase 4, Punto 4 — fallback "marcador"): la entrevistadora se despide con una frase
           // fija; el servidor verifica que esté en el transcript antes de aceptar el cierre.
           const ultimo = transcriptRef.current[transcriptRef.current.length - 1];
@@ -383,7 +423,7 @@ export default function SalaEntrevista() {
       setErrorAvatar("El backend dijo modo=avatar pero session_token llegó VACÍO.");
     }
     await entrarTexto(s);
-  }, [token, cerrar, programarAvisoSilencio, rechazoSesion, entrarTexto, bitacora]);
+  }, [token, cerrar, programarAvisoSilencio, rechazoSesion, entrarTexto, bitacora, sincronizar]);
 
   const enviar = useCallback(async () => {
     const t = texto.trim();

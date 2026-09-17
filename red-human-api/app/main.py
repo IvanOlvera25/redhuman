@@ -19,9 +19,10 @@ from .database import Base, SessionLocal, engine
 from .migraciones import candidatos_sin_postulacion, sincronizar
 from .migraciones import asegurar_reglas_entrevistador
 from .routers import agente, auth, candidatos, capacitacion, clientes, colaboradores, configuracion, contratacion, cuentas, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
-from .seed import sembrar, sembrar_admin
+from .seed import rellenar_slugs_cuentas, sembrar, sembrar_admin
 from .services.agenda import revisar_videollamadas_noshow
 from .services.recordatorios import revisar_recordatorios_documentos
+from .routers.entrevistas import cerrar_entrevistas_inactivas
 from .services.avatar import avatar_activo, estado_avatar
 from .services.ia import ia_activa
 from .services.whatsapp import proveedor as whatsapp_proveedor, whatsapp_activo
@@ -39,6 +40,8 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         sembrar(db)
         sembrar_admin(db)
+        if rellenar_slugs_cuentas(db):  # 2026-09-17: portal por Cuenta
+            print("[cuentas] slugs generados para el portal por Cuenta", flush=True)
         # 2026-09-15 (Fase 1): «solo le llega al candidato» — Cuentas cuya regla de entrevista_agendada
         # nació apagada para el entrevistador antes de 7A y que nadie editó a mano: se encienden.
         rescatadas = asegurar_reglas_entrevistador(db)
@@ -87,6 +90,12 @@ async def lifespan(app: FastAPI):
         revisar_recordatorios_documentos, "interval", minutes=60,
         id="recordatorios_documentos", replace_existing=True,
         max_instances=1, coalesce=True, misfire_grace_time=300,
+    )
+    # 2026-09-17: entrevistas IA abandonadas (pestaña cerrada sin /finalizar) se cierran y evalúan.
+    scheduler.add_job(
+        cerrar_entrevistas_inactivas, "interval", minutes=5,
+        id="entrevistas_inactivas", replace_existing=True,
+        max_instances=1, coalesce=True, misfire_grace_time=120,
     )
     scheduler.start()
     try:

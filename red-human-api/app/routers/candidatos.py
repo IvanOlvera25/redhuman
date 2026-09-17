@@ -1091,6 +1091,19 @@ def _parsear_fecha_cita(valor: str) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+_RE_URL = re.compile(r"https?://\S+")
+
+
+def _sin_ligas(texto: str) -> str:
+    """Quita cualquier URL que el modelo haya escrito en su respuesta (2026-09-17): aunque el prompt
+    le pide no transcribir la liga, la copia del resultado de la herramienta y el candidato recibía
+    DOS ligas (la del modelo + la real que anexa el sistema). La única liga que sale es la real."""
+    limpio = _RE_URL.sub("", texto or "")
+    limpio = re.sub(r"[ \t]+\n", "\n", limpio)
+    limpio = re.sub(r"\n{3,}", "\n\n", limpio)
+    return limpio.strip()
+
+
 async def _procesar_turno_agenda(db: Session, p: Postulacion, historial: List[dict], canal: str, nota: str = "") -> dict:
     """Turno posterior a la clasificación: coordina la videollamada con la herramienta
     agendar_videollamada (function calling) — ver ia.agenda_turno. `nota` (2026-09-15): contexto
@@ -1112,7 +1125,7 @@ async def _procesar_turno_agenda(db: Session, p: Postulacion, historial: List[di
         )
         # La liga real se agrega aquí, textual — nunca se manda la que el modelo haya escrito
         # dentro de turno.respuesta: un token de 32+ caracteres es fácil de transcribir mal.
-        respuesta_final = f"{turno.respuesta}\n\n{turno.cita_liga}"
+        respuesta_final = f"{_sin_ligas(turno.respuesta)}\n\n{turno.cita_liga}"  # una sola liga (2026-09-17)
 
     envio = await _enviar_whatsapp(p, respuesta_final, canal)
     guardar_mensaje(db, p, "assistant", respuesta_final, canal, envio)
@@ -1564,13 +1577,26 @@ async def decision(
     p = _por_codigo(db, codigo, cuenta.id)
     if datos.accion != "descartar":
         raise HTTPException(400, "Acción inválida. Para mover de etapa usa PATCH /candidatos/{codigo}/etapa.")
+    # 2026-09-17: descartar SÍ se permite con expediente abierto (Contratación / Onboarding) — RH lo
+    # pedía desde el menú «…» y antes recibía 409. El expediente se cancela en la misma transacción
+    # (mismo efecto que «Cancelar contratación»); solo un expediente ya dado de alta lo impide.
+    expediente_cancelado = None
     if p.expediente:
-        raise HTTPException(
-            409,
-            "La postulación ya tiene expediente de contratación abierto. Cancélalo desde el módulo de contratación antes de descartarla.",
+        if p.expediente.estado == "alta":
+            raise HTTPException(409, "Esta persona ya fue dada de alta como colaborador(a); no se puede descartar la postulación.")
+        if not datos.comentario.strip():
+            raise HTTPException(400, "Para descartar a un candidato con expediente abierto indica el motivo.")
+        exp = p.expediente
+        expediente_cancelado = exp.id
+        registrar(
+            db, u.nombre, "expediente_cancelado", "expediente", str(exp.id),
+            {"motivo": f"Candidato descartado: {datos.comentario.strip()}", "postulacion": p.codigo, "etapa": p.etapa},
         )
+        db.delete(exp)
+        p.expediente = None
+        db.flush()
 
-    recomendacion_ia = {"estado": p.estado, "score": p.score}
+    recomendacion_ia = {"estado": p.estado, "score": p.score, "etapa": p.etapa, "expediente_cancelado": expediente_cancelado}
     p.etapa = "Prefiltro"
     p.estado = "no_cumple"
     p.cerrar("descartado")  # queda como historial; si la persona reaplica se abre una nueva (decisión 2026-09-11)

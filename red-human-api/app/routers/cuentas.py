@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
+from ..seed import slug_cuenta_unico
 from ..deps import cuenta_actual, usuario_admin
 from ..models import ROLES, Cliente, Cuenta, Usuario, UsuarioCuenta, registrar
 from .auth import CORREO_RE, crear_usuario_basico
@@ -39,6 +40,8 @@ def _cuenta_dict(cu: Cuenta, actual_id: Optional[int] = None) -> dict:
         "contactoNombre": cu.contacto_nombre,
         "correoComunicacion": cu.correo_comunicacion,
         "whatsappComunicacion": cu.whatsapp_comunicacion,
+        "slug": cu.slug or "",
+        "portalUrl": f"{settings.app_url}/portal?cuenta={cu.slug}" if cu.slug else f"{settings.app_url}/portal",  # 2026-09-17
         "estado": cu.estado,
         "esActual": cu.id == actual_id,
         "eliminadaEn": cu.eliminada_en.isoformat() if cu.eliminada_en else None,
@@ -207,6 +210,7 @@ def crear(
     db.add(nueva)
     db.flush()
     # Quien la crea queda vinculado: si no, la cuenta nacería sin nadie que pudiera verla.
+    nueva.slug = slug_cuenta_unico(db, nueva.nombre_comercial or nueva.nombre, nueva.id)  # 2026-09-17
     db.add(UsuarioCuenta(usuario_id=admin.id, cuenta_id=nueva.id))
     registrar(db, admin.nombre, "cuenta_creada", "cuenta", str(nueva.id), {"nombre": nombre, "correo_rh": admin.correo})
     db.commit()

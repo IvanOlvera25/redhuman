@@ -244,6 +244,9 @@ export interface DatosCuenta {
   contactoNombre: string;
   correoComunicacion: string;
   whatsappComunicacion: string;
+  /** 2026-09-17: portal por Cuenta. */
+  slug?: string;
+  portalUrl?: string;
   estado: "Activa" | "Inactiva" | "Eliminada";
   esActual: boolean;
   /** Fase 2: Cuenta con la que arranca la sesión de ESTE usuario (por usuario, no global). */
@@ -589,8 +592,13 @@ export function fetchVacantes(filtros?: {
 }
 
 /** Bolsa de trabajo pública (/portal): solo vacantes en estado "Publicada", sin sesión. */
-export function fetchVacantesPublicas() {
-  return get<Vacante[]>("/vacantes/publicas");
+/** 2026-09-17: `cuenta` (slug o id) aísla el portal a una Cuenta; sin él es la bolsa global. */
+export function fetchVacantesPublicas(cuenta = "") {
+  return get<Vacante[]>(`/vacantes/publicas${cuenta ? `?cuenta=${encodeURIComponent(cuenta)}` : ""}`);
+}
+
+export function fetchCuentaPublica(cuenta: string) {
+  return get<{ id: number; slug: string; nombre: string; logoUrl: string }>(`/vacantes/publicas/cuenta?cuenta=${encodeURIComponent(cuenta)}`);
 }
 
 export function fetchVacante(codigo: string) {
@@ -1429,6 +1437,34 @@ export function turnoEntrevista(token: string, texto: string) {
  * transcript (una despedida declarada sin la frase fija se degrada a `manual`). */
 export function finalizarEntrevista(token: string, transcript?: { rol: string; texto: string }[], cierre: CierreEntrevista = "manual") {
   return post<Entrevista>(`/entrevistas/publica/${token}/finalizar`, { transcript: transcript ?? null, cierre });
+}
+
+/** 2026-09-17: sincronización incremental del transcript en modo avatar — el servidor siempre tiene lo dicho. */
+export function sincronizarTranscript(token: string, transcript: { rol: string; texto: string }[]) {
+  return post<{ ok: boolean; estado: string; turnos: number }>(`/entrevistas/publica/${token}/transcript`, { transcript });
+}
+
+/** Cierre de emergencia al cerrar la pestaña: `fetch` con `keepalive` sobrevive al unload
+ * (sendBeacon no permite JSON cross-origin). Si no llega, el job de inactividad del servidor cierra
+ * la entrevista con el transcript ya sincronizado. */
+export function finalizarEntrevistaBeacon(token: string, transcript: { rol: string; texto: string }[], cierre: CierreEntrevista) {
+  try {
+    void fetch(`${API}/entrevistas/publica/${token}/finalizar`, {
+      method: "POST",
+      keepalive: true,
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcript, cierre }),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** RH: evaluar una entrevista interrumpida/parcial con las respuestas que sí hubo (2026-09-17). */
+export function evaluarEntrevistaConLoQueHay(codigo: string) {
+  return post<Entrevista>(`/entrevistas/${codigo}/evaluar`, {});
 }
 
 /* ============================================================

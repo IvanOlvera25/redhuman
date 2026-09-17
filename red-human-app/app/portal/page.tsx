@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { Logo, Card, Badge, Button, Eyebrow } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { fetchVacantesPublicas } from "@/lib/api";
+import { fetchCuentaPublica, fetchVacantesPublicas, urlArchivo } from "@/lib/api";
 import type { Vacante } from "@/lib/data";
 import { cn } from "@/lib/utils";
 
@@ -43,6 +43,10 @@ function sueldoMaximo(sueldo?: string): number | null {
 export default function Portal() {
   const [vacantes, setVacantes] = useState<Vacante[]>([]);
   const [cargando, setCargando] = useState(true);
+  // 2026-09-17: portal por Cuenta (/portal?cuenta=<slug>) — sin parámetro, bolsa global.
+  const [cuentaParam, setCuentaParam] = useState("");
+  const [cuentaPortal, setCuentaPortal] = useState<{ nombre: string; logoUrl: string } | null>(null);
+  const [portalNoEncontrado, setPortalNoEncontrado] = useState(false);
   // 2026-09-15: ubicación por Estado → Municipio (formato real de las vacantes); las vacantes previas
   // con texto libre se reconocen con parsearUbicacion.
   const [estado, setEstado] = useState("");
@@ -52,10 +56,22 @@ export default function Portal() {
   const [sueldoMin, setSueldoMin] = useState(0);
 
   useEffect(() => {
-    fetchVacantesPublicas().then((v) => {
+    const cuenta = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("cuenta") ?? "";
+    setCuentaParam(cuenta);
+    void (async () => {
+      if (cuenta) {
+        const cu = await fetchCuentaPublica(cuenta);
+        if (!cu) {
+          setPortalNoEncontrado(true);
+          setCargando(false);
+          return;
+        }
+        setCuentaPortal({ nombre: cu.nombre, logoUrl: cu.logoUrl });
+      }
+      const v = await fetchVacantesPublicas(cuenta);
       setVacantes(v ?? []);
       setCargando(false);
-    });
+    })();
   }, []);
 
   /** Estado/Municipio de cada vacante: estructurado si lo trae; si no, lo que se reconozca del texto. */
@@ -146,8 +162,17 @@ export default function Portal() {
 
         <div className="relative mx-auto max-w-4xl px-5 py-16 text-center sm:py-24">
           <Badge tone="brand" dot className="mx-auto">
-            <Sparkles className="h-3 w-3" /> Bolsa de trabajo · Red Human AI
+            <Sparkles className="h-3 w-3" /> Bolsa de trabajo · {cuentaPortal ? cuentaPortal.nombre : "Red Human AI"}
           </Badge>
+          {cuentaPortal?.logoUrl && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={urlArchivo(cuentaPortal.logoUrl)} alt={cuentaPortal.nombre} className="mx-auto mt-5 h-14 w-auto max-w-[220px] object-contain" />
+          )}
+          {portalNoEncontrado && (
+            <p className="mx-auto mt-5 max-w-md rounded-xl border border-warn/30 bg-warn-soft/40 px-4 py-2 text-sm text-warn">
+              No encontramos la bolsa de trabajo «{cuentaParam}». Revisa la liga o consulta la bolsa general.
+            </p>
+          )}
 
           <h1 className="font-display mt-5 text-4xl font-extrabold leading-[1.05] tracking-tight sm:text-5xl lg:text-6xl">
             Encuentra tu <span className="brand-gradient-text">próxima oportunidad</span>

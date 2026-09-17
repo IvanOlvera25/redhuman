@@ -95,7 +95,12 @@ def _con_logo(db: Session, salida: dict, v: Vacante) -> dict:
     """Agrega el logo de la Cuenta al payload candidato-visible (Fase B, punto 12: la vista
     previa/portal público hereda la apariencia mínima de la Cuenta — logo + nombre comercial;
     el nombre ya lo resuelve `nombre_empresa_candidato` dentro de `vacante_dict`)."""
-    return {**salida, "logoUrl": v.cuenta.logo if v.cuenta else ""}
+    return {
+        **salida,
+        "logoUrl": v.cuenta.logo if v.cuenta else "",
+        "cuentaId": v.cuenta_id,
+        "cuentaSlug": (v.cuenta.slug if v.cuenta else "") or "",
+    }
 
 
 def _validar_relaciones(
@@ -448,22 +453,73 @@ def por_slug(slug: str, db: Session = Depends(get_db)):
     return _con_logo(db, _salida(db, v), v)
 
 
+def _cuenta_publica(db: Session, cuenta: str) -> Optional[Cuenta]:
+    """`?cuenta=` del portal: slug o id numérico. Solo Cuentas activas."""
+    q = db.query(Cuenta).filter(Cuenta.estado == "Activa")
+    if cuenta.isdigit():
+        return q.filter(Cuenta.id == int(cuenta)).first()
+    return q.filter(Cuenta.slug == cuenta.strip().lower()).first()
+
+
 @router.get("/publicas")
-def listar_publicas(db: Session = Depends(get_db)):
+def listar_publicas(cuenta: str = "", db: Session = Depends(get_db)):
     """Bolsa de trabajo pública (/portal) — solo vacantes Publicadas, sin sesión.
+
+    2026-09-17: `?cuenta=<slug|id>` aísla el portal a UNA Cuenta (bolsa propia de cada cliente de
+    la plataforma). Sin parámetro sigue siendo la bolsa global (todas las Cuentas activas) — por eso
+    una vacante «eliminada» en el dashboard (que solo ve la Cuenta actual) puede seguir viéndose en
+    el portal global: es otra vacante homónima de OTRA Cuenta. Cada fila trae `cuentaId`/`cuentaSlug`.
+    Una Cuenta eliminada (baja lógica) nunca publica.
 
     Debe declararse antes de GET /{codigo} para que 'publicas' no se interprete
     como un código de vacante.
     """
-    q = db.query(Vacante).filter(Vacante.estado == "Publicada").order_by(Vacante.id.desc())
+    q = (
+        db.query(Vacante)
+        .join(Cuenta, Cuenta.id == Vacante.cuenta_id)
+        .filter(Vacante.estado == "Publicada", Cuenta.estado == "Activa")
+        .order_by(Vacante.id.desc())
+    )
+    if cuenta:
+        cu = _cuenta_publica(db, cuenta)
+        if not cu:
+            raise HTTPException(404, "Portal no encontrado.")
+        q = q.filter(Vacante.cuenta_id == cu.id)
     return [_con_logo(db, _salida(db, v), v) for v in q.all()]
+
+
+@router.get("/publicas/cuenta")
+def cuenta_publica(cuenta: str, db: Session = Depends(get_db)):
+    """Encabezado del portal por Cuenta (nombre comercial + logo), sin sesión."""
+    cu = _cuenta_publica(db, cuenta)
+    if not cu:
+        raise HTTPException(404, "Portal no encontrado.")
+    return {"id": cu.id, "slug": cu.slug, "nombre": cu.nombre_comercial or cu.nombre, "logoUrl": cu.logo or ""}
+
+
+def _homonimas_otras_cuentas(db: Session, v: Vacante) -> List[dict]:
+    """Vacantes PUBLICADAS con el mismo título en OTRAS Cuentas activas (2026-09-17): explica por qué
+    «sigue en el portal» una vacante que esta Cuenta ya eliminó."""
+    if not v.titulo:
+        return []
+    filas = (
+        db.query(Vacante, Cuenta)
+        .join(Cuenta, Cuenta.id == Vacante.cuenta_id)
+        .filter(
+            func.lower(Vacante.titulo) == v.titulo.strip().lower(), Vacante.estado == "Publicada",
+            Vacante.cuenta_id != v.cuenta_id, Cuenta.estado == "Activa",
+        )
+        .all()
+    )
+    return [{"codigo": x.codigo, "cuenta": cu.nombre_visible, "cuentaId": cu.id} for x, cu in filas]
 
 
 @router.get("/{codigo}")
 def detalle(
     codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
 ):
-    return _salida(db, _por_codigo(db, codigo, cuenta.id))
+    v = _por_codigo(db, codigo, cuenta.id)
+    return {**_salida(db, v), "homonimasOtrasCuentas": _homonimas_otras_cuentas(db, v)}
 
 
 @router.get("/{codigo}/vista-previa")
