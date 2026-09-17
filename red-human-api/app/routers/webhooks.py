@@ -88,12 +88,26 @@ def _normalizar_telefono(wa_id: str) -> str:
 
 
 def _vacantes_publicadas(db: Session, cuenta_id: int) -> list:
+    """Vacantes que el agente ofrece por WhatsApp: SOLO las «Publicada» de esa Cuenta, leídas de la
+    base en cada turno (nunca se cachean: una vacante recién creada o recién eliminada se refleja en
+    el siguiente mensaje). Borrador / Cerrada / Eliminada nunca salen."""
     return (
         db.query(Vacante)
         .filter(Vacante.estado == "Publicada", Vacante.cuenta_id == cuenta_id)
         .order_by(Vacante.id.desc())
         .limit(10)
         .all()
+    )
+
+
+def _vacante_por_codigo(db: Session, cuenta_id: int, codigo: str) -> Optional[Vacante]:
+    """Selección por código (lista interactiva o «VAC-####» escrito) restringida a vacantes
+    PUBLICADAS: el candidato puede tocar una lista vieja cuya vacante ya se eliminó o cerró y eso no
+    debe abrirle una postulación en una vacante que ya no existe para RH."""
+    return (
+        db.query(Vacante)
+        .filter(func.lower(Vacante.codigo) == codigo.lower(), Vacante.cuenta_id == cuenta_id, Vacante.estado == "Publicada")
+        .first()
     )
 
 
@@ -104,15 +118,14 @@ def _detectar_vacante(texto: str, db: Session, cuenta_id: int, id_seleccionado: 
     # 1. Búsqueda por código exacto o regex VAC-XXXX
     for s in candidatos_cod:
         s_clean = s.strip()
-        # Coincidencia directa por código
-        v = db.query(Vacante).filter(func.lower(Vacante.codigo) == s_clean.lower(), Vacante.cuenta_id == cuenta_id).first()
+        # Coincidencia directa por código (solo publicadas)
+        v = _vacante_por_codigo(db, cuenta_id, s_clean)
         if v:
             return v
         # Regex VAC-####
         m = _RE_VAC.search(s_clean)
         if m:
-            cod = f"VAC-{m.group(1)}"
-            v = db.query(Vacante).filter(func.lower(Vacante.codigo) == cod.lower(), Vacante.cuenta_id == cuenta_id).first()
+            v = _vacante_por_codigo(db, cuenta_id, f"VAC-{m.group(1)}")
             if v:
                 return v
 
@@ -149,12 +162,12 @@ def _vacante_explicita(db: Session, cuenta_id: int, texto: str, id_seleccionado:
         s = (s or "").strip()
         if not s:
             continue
-        v = db.query(Vacante).filter(func.lower(Vacante.codigo) == s.lower(), Vacante.cuenta_id == cuenta_id).first()
+        v = _vacante_por_codigo(db, cuenta_id, s)
         if v:
             return v
         m = _RE_VAC.search(s)
         if m:
-            v = db.query(Vacante).filter(func.lower(Vacante.codigo) == f"vac-{m.group(1).lower()}", Vacante.cuenta_id == cuenta_id).first()
+            v = _vacante_por_codigo(db, cuenta_id, f"VAC-{m.group(1)}")
             if v:
                 return v
     return None
@@ -358,16 +371,20 @@ async def _recibir_documento_whatsapp(db: Session, p: Postulacion, msg: dict, te
     return {"documento": doc.tipo, "estado": estado, "pendientes": pendientes, "whatsapp": envio}
 
 
-def _cuenta_whatsapp(db: Session, numero_receptor: str) -> Cuenta:
+def _cuenta_whatsapp(db: Session, numero_receptor: str, wa_id: str = "") -> Cuenta:
     """Cuenta a la que pertenece un mensaje entrante (el webhook no tiene sesión).
 
     1. Ruteo por número: la Cuenta cuyo `whatsapp_comunicacion` coincide con el número de
        WhatsApp Business que RECIBIÓ el mensaje (`metadata.display_phone_number` de Meta).
-    2. Si ninguna coincide y hay exactamente una Cuenta activa, es esa (comportamiento de siempre).
-    3. Si hay varias activas y ninguna coincide, se usa la más antigua (la Cuenta original de la
-       plataforma) y se deja rastro en el log: hoy existe UN solo WABA, y crear una segunda Cuenta
-       desde Configuración → Cuentas no puede dejar mudo al agente de WhatsApp (antes: 500 a Meta
-       en TODOS los mensajes entrantes, el candidato no recibía nada)."""
+    2. Si hay exactamente una Cuenta activa, es esa (comportamiento de siempre).
+    3. Varias activas y ninguna con el número (hoy existe UN solo WABA compartido):
+       a) la Cuenta donde esta persona (wa_id / teléfono) ya tiene una postulación ACTIVA con
+          vacante — su proceso en curso no se le cambia de Cuenta;
+       b) si no, la Cuenta que SÍ tiene vacantes publicadas (consulta en vivo). 2026-09-16: antes se
+          tomaba siempre la Cuenta más antigua, así que al eliminar sus vacantes y crear la nueva
+          desde otra Cuenta (la predeterminada del usuario) el agente contestaba «no tenemos
+          vacantes abiertas» aunque la vacante nueva estuviera Publicada;
+       c) si ninguna las tiene, la más antigua (y se deja rastro en el log)."""
     activas = db.query(Cuenta).filter(Cuenta.estado == "Activa").order_by(Cuenta.id).all()
     if not activas:
         raise HTTPException(500, "El webhook de WhatsApp no tiene ninguna Cuenta activa a la que asignar el mensaje.")
@@ -376,13 +393,47 @@ def _cuenta_whatsapp(db: Session, numero_receptor: str) -> Cuenta:
         por_numero = [c for c in activas if _normalizar_telefono(c.whatsapp_comunicacion or "") == receptor]
         if len(por_numero) == 1:
             return por_numero[0]
-    if len(activas) > 1:
-        print(
-            f"[webhook] ⚠️ {len(activas)} Cuentas activas y ninguna con whatsapp_comunicacion = {receptor or '?'}; "
-            f"el mensaje se asigna a la Cuenta {activas[0].id} «{activas[0].nombre or activas[0].nombre_comercial}». Captura el número de WhatsApp "
-            "en cada Cuenta (Configuración → Cuentas) para enrutar por número."
+    if len(activas) == 1:
+        return activas[0]
+
+    ids_activas = [c.id for c in activas]
+
+    # a) proceso en curso de esta persona
+    if wa_id:
+        tel = _normalizar_telefono(wa_id)
+        condiciones = [Candidato.wa_id == wa_id]
+        if tel:
+            condiciones.append(Candidato.telefono == tel)
+        en_proceso = (
+            db.query(Postulacion.cuenta_id)
+            .join(Candidato, Candidato.id == Postulacion.candidato_id)
+            .filter(
+                or_(*condiciones), Candidato.eliminado_en.is_(None), Postulacion.activa.is_(True),
+                Postulacion.vacante_id.isnot(None),  # una postulación vacía (solo saludó y no había vacantes) no ancla
+                Postulacion.cuenta_id.in_(ids_activas),
+            )
+            .order_by(Postulacion.id.desc())
+            .first()
         )
-    return activas[0]
+        if en_proceso:
+            return next(c for c in activas if c.id == en_proceso[0])
+
+    # b) Cuentas con vacantes publicadas AHORA
+    con_vacantes = {
+        cid for (cid,) in db.query(Vacante.cuenta_id)
+        .filter(Vacante.estado == "Publicada", Vacante.cuenta_id.in_(ids_activas))
+        .distinct()
+        .all()
+    }
+    candidatas = [c for c in activas if c.id in con_vacantes] or activas
+    elegida = candidatas[0]
+    print(
+        f"[webhook] ⚠️ {len(activas)} Cuentas activas y ninguna con whatsapp_comunicacion = {receptor or '?'}; "
+        f"el mensaje se asigna a la Cuenta {elegida.id} «{elegida.nombre or elegida.nombre_comercial}» "
+        f"({'con vacantes publicadas' if elegida.id in con_vacantes else 'sin vacantes publicadas'}). Captura el número de WhatsApp "
+        "en cada Cuenta (Configuración → Cuentas) para enrutar por número."
+    )
+    return elegida
 
 
 def _texto_aviso_privacidad(nombre: str, vacante: Optional[Vacante]) -> str:
@@ -448,7 +499,7 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
 
     print(f"[agente] Procesando mensaje de {nombre_wa} ({telefono}): '{texto}' (id_sel='{id_seleccionado}')")
 
-    cuenta = _cuenta_whatsapp(db, msg.get("numero_receptor", ""))
+    cuenta = _cuenta_whatsapp(db, msg.get("numero_receptor", ""), telefono)
     prueba = modo_prueba_activo(db)
 
     # ── 1. Persona y postulación en conversación ──────────────────────────────
