@@ -7,8 +7,9 @@
         Vacantes, vía `slotDatosPrincipales`] → Ubicación → Modalidad → Sueldo (Desde/Hasta/Moneda/
         Periodicidad o A convenir).
      2. Guía opcional para Red Human: Descripción breve → Indispensables → Deseables → Prestaciones.
-     3. Un solo botón «Generar vacante con Red Human», ABAJO de todo lo capturable (Fase 4, 2026-09-15:
-        se movió al final del formulario para que no parta la lista de preguntas del prefiltro).
+     3. Un solo botón «Generar vacante con Red Human», ABAJO de lo capturable. 2026-09-16: lo que la IA
+        genera (responsabilidades, prefiltros web/WhatsApp, perfil ideal, textos) vive en el acordeón
+        «Configuración avanzada», CERRADO por defecto — si no lo abren, la IA genera todo al presionar.
      4. Tras generar, (2) se vuelve «Contenido generado por Red Human (editable)»: Descripción
         completa → Responsabilidades → Indispensables → Deseables → Prestaciones — mismos campos,
         siempre visibles y editables.
@@ -467,10 +468,21 @@ export function FormularioContenidoVacante({
 
   const sueldo = { desde: value.sueldo_desde, hasta: value.sueldo_hasta, moneda: value.sueldo_moneda, periodicidad: value.sueldo_periodicidad };
 
+  const nPrefiltro = value.preguntas_filtro.length + value.preguntas_filtro_whatsapp.length;
+  const resumenAvanzado = generado
+    ? [
+        value.responsabilidades.length ? `${value.responsabilidades.length} responsabilidades` : "",
+        nPrefiltro ? `${nPrefiltro} preguntas de prefiltro` : "",
+        value.perfil_ideal ? "perfil ideal" : "",
+        value.texto_whatsapp || value.texto_bolsa ? "textos de publicación" : "",
+      ].filter(Boolean).join(" · ")
+    : "Red Human genera todo esto al presionar el botón; ábrelo solo si quieres ajustarlo a mano.";
+
   return (
     <div className="flex flex-col gap-6">
-      {/* 1. Datos principales */}
-      <Seccion titulo="Datos principales" ayuda="Se capturan antes de generar. Son la única fuente de condiciones reales: Red Human nunca las inventa.">
+      {/* 1. Datos principales — condiciones reales que la IA nunca inventa (Puesto, Cliente, ubicación,
+          modalidad, sueldo). Se mantienen arriba porque sin ellas no se puede generar ni publicar. */}
+      <Seccion titulo="Datos principales">
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Puesto *" value={value.titulo} onChange={set("titulo")} placeholder="Ej. Cajero(a) de sucursal" full />
           <Field label="Área *" value={value.area} onChange={set("area")} placeholder="Operaciones, Ventas…" />
@@ -492,62 +504,23 @@ export function FormularioContenidoVacante({
             }
             periodicidades={PERIODICIDADES_SUELDO}
             monedas={MONEDAS_SUELDO}
-            ayuda="Desde / Hasta / Moneda / Periodicidad (semanal, quincenal, mensual o anual), o «A convenir». Lo que se muestra al candidato se deriva de aquí."
           />
         </div>
       </Seccion>
 
-      {/* 2 → 4. Guía opcional / Contenido generado (mismos campos, siempre visibles y editables) */}
-      <Seccion
-        titulo={generado ? "Contenido generado por Red Human (editable)" : "Guía opcional para Red Human"}
-        ayuda={
-          generado
-            ? "Revisa y corrige: lo que capturaste se conservó tal cual (indispensable sigue indispensable, deseable sigue deseable); Red Human solo complementó lo vacío."
-            : "Todo es opcional. Lo que captures aquí se respeta literal al generar: Red Human solo complementa lo que dejes vacío."
-        }
-      >
+      {/* 2. Lo que RH captura (regla 2026-09-16): descripción breve, indispensables, deseables, prestaciones y
+          enfoque de entrevista. Lo capturado se respeta literal; Red Human solo complementa lo vacío. */}
+      <Seccion titulo="Sobre la vacante">
         <Area
-          label={generado ? "Descripción del puesto" : "Descripción breve (opcional)"}
+          label="Descripción breve"
           value={value.descripcion}
           onChange={set("descripcion")}
-          rows={generado ? 5 : 3}
-          placeholder={generado ? "" : "Una o dos líneas: qué hace el puesto y para quién. Red Human la expande."}
+          rows={generado ? 4 : 3}
+          placeholder="Una o dos líneas: qué hace el puesto y para quién. Red Human la expande."
         />
-        {generado && (
-          <ListaEditable label="Responsabilidades principales" items={value.responsabilidades} onChange={set("responsabilidades")} placeholder="Una responsabilidad por renglón" />
-        )}
-        <ListaEditable
-          label={generado ? "Requisitos indispensables" : "Requisitos indispensables (opcional)"}
-          items={value.requisitos}
-          onChange={set("requisitos")}
-          placeholder="Ej. Carrera técnica concluida"
-          ayuda="Los indispensables alimentan el prefiltro por WhatsApp."
-        />
-        <ListaEditable label={generado ? "Requisitos deseables" : "Requisitos deseables (opcional)"} items={value.requisitos_deseables} onChange={set("requisitos_deseables")} placeholder="Ej. Inglés básico" />
-        <ListaEditable
-          label={generado ? "Prestaciones" : "Prestaciones (opcional)"}
-          items={value.beneficios}
-          onChange={set("beneficios")}
-          placeholder="Ej. Vales de despensa"
-          ayuda="Solo se publican las que captures aquí; Red Human no agrega ninguna por su cuenta."
-        />
-      </Seccion>
-
-      {/* 5. Selección — Fase 4: dos listas INDEPENDIENTES (postulación web vs WhatsApp) */}
-      <Seccion titulo="Prefiltro · postulación web" ayuda="Preguntas que responde el candidato en el formulario público (/aplicar). Red Human las propone a partir de los requisitos indispensables; edita, elimina o agrega, y marca cuáles son eliminatorias.">
-        <CriteriosEditor items={value.preguntas_filtro} onChange={set("preguntas_filtro")} />
-      </Seccion>
-
-      <Seccion titulo="Prefiltro · WhatsApp" ayuda="Preguntas que Red Human hace por WhatsApp. Son independientes de las de la postulación web: puedes hacerlas más cortas o distintas. Si las dejas vacías, el agente usa las de la web.">
-        {value.preguntas_filtro_whatsapp.length === 0 && value.preguntas_filtro.length > 0 && (
-          <Button type="button" variant="outline" size="sm" className="mb-1 self-start" onClick={() => set("preguntas_filtro_whatsapp")(value.preguntas_filtro.map((q) => ({ ...q })))}>
-            Copiar las de la postulación web como base
-          </Button>
-        )}
-        <CriteriosEditor items={value.preguntas_filtro_whatsapp} onChange={set("preguntas_filtro_whatsapp")} />
-      </Seccion>
-
-      <Seccion titulo="Entrevista Red Human" ayuda="Define qué tan a fondo conversa Red Human con el candidato; cambia el guion, la entrevista y la evaluación.">
+        <ListaEditable label="Requisitos indispensables" items={value.requisitos} onChange={set("requisitos")} placeholder="Ej. Carrera técnica concluida" />
+        <ListaEditable label="Requisitos deseables" items={value.requisitos_deseables} onChange={set("requisitos_deseables")} placeholder="Ej. Inglés básico" />
+        <ListaEditable label="Prestaciones" items={value.beneficios} onChange={set("beneficios")} placeholder="Ej. Vales de despensa" ayuda="Solo se publican las que captures aquí." />
         <div className="grid gap-4 sm:grid-cols-2">
           <Selector
             label="Enfoque de entrevista"
@@ -561,14 +534,13 @@ export function FormularioContenidoVacante({
         </div>
       </Seccion>
 
-      {/* 3. Botón único de generar — AL FINAL de todo lo capturable (Fase 4): nunca parte una lista */}
+      {/* 3. Única acción principal */}
       {conIA && (
         <div className="rounded-xl border border-dashed border-brand/40 bg-brand-soft/30 p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="text-sm text-ink-2">
-              <span className="font-semibold text-ink">{generado ? "Volver a generar" : "Generar vacante con Red Human"}</span> — completa descripción,
-              responsabilidades, requisitos, perfil ideal, palabras clave, prefiltro, entrevista y textos de publicación.
-            </div>
+            <p className="text-sm text-ink-2">
+              {generado ? "Vuelve a generar si cambiaste algo arriba." : "Red Human completa descripción, responsabilidades, prefiltros, entrevista y textos de publicación."}
+            </p>
             <Button type="button" onClick={generar} disabled={generando}>
               <Sparkles className="h-4 w-4" /> {generando ? "Generando…" : generado ? "Volver a generar" : "Generar vacante con Red Human"}
             </Button>
@@ -576,7 +548,7 @@ export function FormularioContenidoVacante({
           {errorIA && <p className="mt-2 text-xs text-bad">{errorIA}</p>}
           {empresaIA && !errorIA && (
             <p className="mt-2 text-xs text-ink-3">
-              Contenido generado a nombre de <b className="text-ink">{empresaIA}</b> (según el Cliente y “mostrar cliente al candidato”).
+              Contenido generado a nombre de <b className="text-ink">{empresaIA}</b>.
             </p>
           )}
           {generado && value.avisos_cumplimiento.length > 0 && (
@@ -589,18 +561,38 @@ export function FormularioContenidoVacante({
         </div>
       )}
 
-      <section>
-        <button type="button" onClick={() => setAvanzado((a) => !a)} className="flex items-center gap-1.5 text-xs font-semibold text-ink-3 hover:text-ink">
-          {avanzado ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-          Avanzado (resumen, perfil ideal, palabras clave, textos de publicación)
+      {/* 4. Configuración avanzada — acordeón CERRADO por defecto: todo lo que la IA genera sola */}
+      <section className="rounded-xl border border-border-soft">
+        <button
+          type="button"
+          onClick={() => setAvanzado((a) => !a)}
+          aria-expanded={avanzado}
+          className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+        >
+          <span>
+            <span className="text-sm font-semibold text-ink">Configuración avanzada</span>
+            <span className="block text-xs text-ink-3">{resumenAvanzado}</span>
+          </span>
+          {avanzado ? <ChevronUp className="h-4 w-4 shrink-0 text-ink-3" /> : <ChevronDown className="h-4 w-4 shrink-0 text-ink-3" />}
         </button>
-        <div className={cn("mt-3 flex flex-col gap-4", !avanzado && "hidden")}>
-          <Area label="Resumen (portal)" value={value.resumen} onChange={set("resumen")} rows={2} />
-          <Area label="Perfil ideal" value={value.perfil_ideal} onChange={set("perfil_ideal")} rows={3} />
-          <ListaEditable label="Palabras clave" items={value.palabras_clave} onChange={set("palabras_clave")} />
-          <ListaEditable label="Avisos de cumplimiento" items={value.avisos_cumplimiento} onChange={set("avisos_cumplimiento")} />
-          <Area label="Texto para WhatsApp" value={value.texto_whatsapp} onChange={set("texto_whatsapp")} rows={3} />
-          <Area label="Texto para bolsa de trabajo" value={value.texto_bolsa} onChange={set("texto_bolsa")} rows={4} />
+        <div className={cn("flex flex-col gap-6 border-t border-border-faint px-4 py-4", !avanzado && "hidden")}>
+          <Seccion titulo="Contenido generado">
+            <ListaEditable label="Responsabilidades principales" items={value.responsabilidades} onChange={set("responsabilidades")} placeholder="Una responsabilidad por renglón" />
+            <Area label="Resumen (portal)" value={value.resumen} onChange={set("resumen")} rows={2} />
+            <Area label="Perfil ideal" value={value.perfil_ideal} onChange={set("perfil_ideal")} rows={3} />
+            <ListaEditable label="Palabras clave" items={value.palabras_clave} onChange={set("palabras_clave")} />
+          </Seccion>
+          <Seccion titulo="Prefiltro · postulación web" ayuda="Preguntas del formulario público; Red Human las propone desde los requisitos indispensables.">
+            <CriteriosEditor items={value.preguntas_filtro} onChange={set("preguntas_filtro")} />
+          </Seccion>
+          <Seccion titulo="Prefiltro · WhatsApp" ayuda="Puntos críticos que Red Human confirma por chat (experiencia, ubicación…). Vacío = el agente usa las de la web.">
+            <CriteriosEditor items={value.preguntas_filtro_whatsapp} onChange={set("preguntas_filtro_whatsapp")} />
+          </Seccion>
+          <Seccion titulo="Textos de publicación">
+            <Area label="Texto para WhatsApp" value={value.texto_whatsapp} onChange={set("texto_whatsapp")} rows={3} />
+            <Area label="Texto para bolsa de trabajo" value={value.texto_bolsa} onChange={set("texto_bolsa")} rows={4} />
+            <ListaEditable label="Avisos de cumplimiento" items={value.avisos_cumplimiento} onChange={set("avisos_cumplimiento")} />
+          </Seccion>
         </div>
       </section>
     </div>

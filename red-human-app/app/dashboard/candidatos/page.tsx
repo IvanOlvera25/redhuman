@@ -215,6 +215,7 @@ function coincideEstado(c: Candidato, filtro: FiltroEstado): boolean {
 
 function CandidatosContenido() {
   const puedeDecidir = usePuedeDecidir();
+  const modoPrueba = useModoPrueba();
   const searchParams = useSearchParams();
 
   const [sel, setSel] = useState<Candidato | null>(null);
@@ -313,10 +314,13 @@ function CandidatosContenido() {
     if (detalle) setSel(detalle);
   }
 
-  // Detección de duplicados en el conjunto cargado (por teléfono normalizado a 10 dígitos o correo)
+  // Detección de duplicados en el conjunto cargado (por teléfono normalizado a 10 dígitos o correo).
+  // 2026-09-16 (Modo Prueba flexible): con Modo Prueba activo repetir teléfono/correo es lo esperado
+  // (cada alta es una persona independiente), así que no se marca nada como «Duplicado».
   const duplicadosSet = useMemo(() => {
     const telMap = new Map<string, number>();
     const emailMap = new Map<string, number>();
+    if (modoPrueba) return new Set<string>();
 
     for (const c of datos) {
       const t = c.telefono ? c.telefono.replace(/\D/g, "").slice(-10) : "";
@@ -334,7 +338,7 @@ function CandidatosContenido() {
       }
     }
     return dups;
-  }, [datos]);
+  }, [datos, modoPrueba]);
 
   const sinConsentimiento = datos.filter((c) => c.consentimiento === false).length;
 

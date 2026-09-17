@@ -36,6 +36,7 @@ import {
 } from "@/components/dashboard/vacantes/formulario-contenido";
 import { invalidarReglasNotificacion } from "@/components/dashboard/linea-notificar";
 import { BotonCargaMasiva } from "@/components/dashboard/carga-masiva";
+import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import {
   actualizarCliente,
   actualizarConfiguracion,
@@ -409,14 +410,9 @@ function SeccionCuentas() {
           titulo="Cuentas"
           subtitulo="Empresas reclutadoras que usan Red Human. Solo ves las Cuentas a las que tienes acceso; los datos de una nunca se mezclan con otra."
         />
-        <div className="flex shrink-0 items-center gap-2">
-          <Button size="sm" variant="ghost" onClick={() => setVerEliminadas((v) => !v)}>
-            {verEliminadas ? "Ocultar eliminadas" : "Ver eliminadas"}
-          </Button>
-          <Button size="sm" onClick={() => setNueva(true)}>
-            <Plus className="h-4 w-4" /> Nueva cuenta
-          </Button>
-        </div>
+        <Button size="sm" onClick={() => setNueva(true)}>
+          <Plus className="h-4 w-4" /> Nueva cuenta
+        </Button>
       </div>
 
       {error && <div className="mb-3"><Aviso tono="error" onCerrar={() => setError("")}>{error}</Aviso></div>}
@@ -442,41 +438,35 @@ function SeccionCuentas() {
                 </p>
               </button>
               <Badge tone={c.estado === "Activa" ? "good" : c.estado === "Eliminada" ? "bad" : "neutral"} dot>{c.estado}</Badge>
-              {c.estado === "Eliminada" ? (
-                <Button size="sm" variant="outline" onClick={() => restaurar(c)} disabled={ocupada === c.id}>
-                  <RotateCw className="h-3.5 w-3.5" /> Restaurar
-                </Button>
-              ) : (
-                <>
-                  {c.estado === "Activa" && !c.esPredeterminada && (
-                    <Button size="sm" variant="ghost" onClick={() => predeterminada(c)} disabled={ocupada === c.id} title="Con esta Cuenta arrancará tu sesión">
-                      <Check className="h-3.5 w-3.5" /> Predeterminar
-                    </Button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => setFichaId(c.id)}
-                    className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ink-3 hover:bg-surface-2 hover:text-brand"
-                    aria-label={`Abrir ficha de ${c.nombre}`}
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => eliminar(c)}
-                    disabled={ocupada === c.id || c.id === cuentaActualId}
-                    className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ink-3 hover:bg-bad-soft hover:text-bad disabled:opacity-40"
-                    aria-label={`Eliminar ${c.nombre}`}
-                    title={c.id === cuentaActualId ? "No puedes eliminar la Cuenta con la que estás operando" : "Eliminar (baja lógica)"}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </>
-              )}
+              {/* Regla de UI: las acciones secundarias viven en «…»; solo quedan visibles los indicadores */}
+              <MenuAcciones
+                etiqueta={`Acciones de ${c.nombre}`}
+                acciones={
+                  c.estado === "Eliminada"
+                    ? [{ etiqueta: "Restaurar", icono: <RotateCw />, onClick: () => restaurar(c), disabled: ocupada === c.id }]
+                    : [
+                        { etiqueta: "Editar", icono: <Pencil />, onClick: () => setFichaId(c.id) },
+                        ...(c.estado === "Activa" && !c.esPredeterminada
+                          ? [{ etiqueta: "Predeterminar", icono: <Check />, onClick: () => predeterminada(c), disabled: ocupada === c.id, title: "Con esta Cuenta arrancará tu sesión" }]
+                          : []),
+                        {
+                          etiqueta: "Eliminar",
+                          icono: <Trash2 />,
+                          peligrosa: true,
+                          onClick: () => eliminar(c),
+                          disabled: ocupada === c.id || c.id === cuentaActualId,
+                          title: c.id === cuentaActualId ? "No puedes eliminar la Cuenta con la que estás operando" : "Eliminar (baja lógica)",
+                        },
+                      ]
+                }
+              />
             </li>
           ))}
         </ul>
       )}
+      <button type="button" onClick={() => setVerEliminadas((v) => !v)} className="mt-3 text-[12px] text-ink-3 hover:text-ink hover:underline">
+        {verEliminadas ? "Ocultar cuentas eliminadas" : "Ver cuentas eliminadas"}
+      </button>
 
       {nueva && (
         <FormNuevaCuenta
@@ -869,13 +859,10 @@ function SeccionUsuarios() {
               </div>
               <Badge tone={u.rol === "Administrador" ? "brand" : "neutral"}>{u.rol}</Badge>
               <Badge tone={u.activo ? "good" : "neutral"} dot>{u.activo ? "Activo" : "Inactivo"}</Badge>
-              <button
-                onClick={() => { setEditando(u); setMostrarForm(true); setError(""); }}
-                className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ink-3 hover:bg-surface-2 hover:text-brand"
-                aria-label={`Editar ${u.nombre}`}
-              >
-                <Pencil className="h-3.5 w-3.5" />
-              </button>
+              <MenuAcciones
+                etiqueta={`Acciones de ${u.nombre}`}
+                acciones={[{ etiqueta: "Editar", icono: <Pencil />, onClick: () => { setEditando(u); setMostrarForm(true); setError(""); } }]}
+              />
             </li>
           ))}
         </ul>
@@ -1023,6 +1010,7 @@ function SeccionClientes() {
                 <th className="py-2 pr-3 font-medium">Nombre comercial</th>
                 <th className="py-2 pr-3 text-center font-medium">Contactos</th>
                 <th className="py-2 font-medium">Estatus</th>
+                <th className="py-2" />
               </tr>
             </thead>
             <tbody>
@@ -1034,6 +1022,9 @@ function SeccionClientes() {
                   <td className="py-2.5 pr-3 text-ink-2">{c.nombreComercial || "—"}</td>
                   <td className="py-2.5 pr-3 text-center text-ink-2">{c.contactos}</td>
                   <td className="py-2.5"><Badge tone={c.estado === "Activo" ? "good" : "neutral"} dot>{c.estado}</Badge></td>
+                  <td className="py-2.5 text-right">
+                    <MenuAcciones etiqueta={`Acciones de ${c.nombre}`} acciones={[{ etiqueta: "Editar", icono: <Pencil />, onClick: () => setFichaId(c.id) }]} />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -1330,9 +1321,14 @@ function SeccionPlantillas() {
                   <td className="py-2.5 pr-3 text-ink-2">{fechaCorta(p.actualizada)}</td>
                   <td className="py-2.5 text-right">
                     <div className="inline-flex items-center gap-1">
-                      <button type="button" onClick={() => setEditor({ plantilla: p })} className="rounded-lg p-1.5 text-ink-3 hover:bg-surface-2 hover:text-brand" title="Editar"><Pencil className="h-4 w-4" /></button>
-                      <button type="button" onClick={() => duplicar(p)} disabled={ocupado === p.id} className="rounded-lg p-1.5 text-ink-3 hover:bg-surface-2 hover:text-brand" title="Duplicar"><Copy className="h-4 w-4" /></button>
-                      <BotonEliminar onClick={() => eliminar(p)} />
+                      <MenuAcciones
+                        etiqueta={`Acciones de ${p.nombre}`}
+                        acciones={[
+                          { etiqueta: "Editar", icono: <Pencil />, onClick: () => setEditor({ plantilla: p }) },
+                          { etiqueta: "Duplicar", icono: <Copy />, onClick: () => duplicar(p), disabled: ocupado === p.id },
+                          { etiqueta: "Eliminar", icono: <Trash2 />, peligrosa: true, onClick: () => eliminar(p), disabled: ocupado === p.id },
+                        ]}
+                      />
                     </div>
                   </td>
                 </tr>

@@ -49,7 +49,7 @@ from ..serial import archivo_dict, expediente_dict, nombre_empresa_candidato, po
 from ..services import archivos as fs
 from ..services import ia
 from ..services import notificaciones
-from ..services.configuracion import modo_prueba_activo, puede_forzar_prueba
+from ..services.configuracion import modo_prueba_activo, permite_duplicados, puede_forzar_prueba
 from ..services.notificaciones import RE_CORREO, TZ_MEXICO, NotificarIn, override_de
 from ..services.whatsapp import enviar_mensaje, enviar_plantilla
 from ..services import teams as teams_srv
@@ -477,8 +477,8 @@ def ingresar(
     prueba = modo_prueba_activo(db)
 
     # dedup por teléfono o correo (módulo 3.6): la PERSONA se reutiliza; lo que se crea es una
-    # postulación nueva. Con Modo Prueba activo se salta siempre: cada alta es independiente.
-    c = None if prueba else _duplicado(db, telefono, datos.correo, cuenta.id)
+    # postulación nueva. Con Modo Prueba activo (permite_duplicados) se salta: cada alta es independiente.
+    c = None if permite_duplicados(db) else _duplicado(db, telefono, datos.correo, cuenta.id)
     nuevo_candidato = c is None
     if c is None:
         c = _crear_candidato(
@@ -600,7 +600,7 @@ async def _procesar_cv(
     avisos: List[str] = []
     prueba = modo_prueba_activo(db)
     if datos is not None:
-        if c is None and not prueba:
+        if c is None and not permite_duplicados(db):
             telefono = _telefono(datos.telefono)
             c = _duplicado(db, telefono, datos.correo or "", cuenta_id)
             duplicado = c is not None
@@ -763,9 +763,9 @@ async def postular(
     tel = _telefono(telefono)
     prueba = modo_prueba_activo(db)
 
-    # Con Modo Prueba activo, `c` siempre queda en None aquí: cada llamada es una persona nueva
-    # e independiente, sin importar cuánto pasó desde la anterior.
-    c = None if prueba else _duplicado(db, tel, correo, vac.cuenta_id)
+    # Con Modo Prueba activo (permite_duplicados), `c` siempre queda en None aquí: cada llamada es una
+    # persona nueva e independiente, sin importar cuánto pasó desde la anterior.
+    c = None if permite_duplicados(db) else _duplicado(db, tel, correo, vac.cuenta_id)
     nuevo_candidato = c is None
     if c is None:
         c = _crear_candidato(db, vac.cuenta_id, nombre.strip(), "Formulario", prueba, telefono=tel, correo=correo.strip())
