@@ -760,6 +760,8 @@ async def postular(
         vac = db.query(Vacante).filter(func.lower(Vacante.titulo) == vacante.replace("-", " ").lower()).first()
     if not vac:
         raise HTTPException(404, f"Vacante '{vacante}' no encontrada")
+    if vac.estado != "Publicada":  # 2026-09-16: una liga vieja a una vacante eliminada/cerrada no abre postulaciones
+        raise HTTPException(410, "Esta vacante ya no está disponible.")
 
     tel = _telefono(telefono)
     prueba = modo_prueba_activo(db)
