@@ -97,6 +97,15 @@ class VacanteGenerada(BaseModel):
     linkedin: BloquePlataforma = Field(description="Publicación para LinkedIn.")
     portal: BloquePlataforma = Field(description="Publicación para el portal propio de Red Human.")
     preguntas_filtro: List[PreguntaFiltro] = Field(description="4 a 6 preguntas de prefiltro ligadas a los requisitos indispensables.")
+    # 2026-09-16 (prefiltro dual): la IA elige SOLO los puntos críticos que vale la pena confirmar por chat.
+    preguntas_filtro_whatsapp: List[PreguntaFiltro] = Field(
+        default_factory=list,
+        description=(
+            "2 a 3 preguntas para WhatsApp que CONFIRMAN solo los puntos críticos (experiencia, ubicación/"
+            "traslado, disponibilidad o el requisito eliminatorio principal), en tono conversacional; nunca "
+            "repiten toda la lista web."
+        ),
+    )
 
 
 _PLANTILLAS = (
@@ -141,7 +150,9 @@ _REGLAS = (
     "4. Usa lenguaje incluyente con la forma «(a)» del español mexicano (Cajero(a), Repartidor(a)).\n"
     "5. Las preguntas de prefiltro salen PRINCIPALMENTE de los requisitos indispensables (primero los capturados "
     "por RH); deben responderse en una línea y marcar descarta=true SOLO cuando el requisito sea realmente "
-    "indispensable.\n"
+    "indispensable. Además, en `preguntas_filtro_whatsapp` elige SOLO 2 o 3 puntos críticos (experiencia, "
+    "ubicación/traslado, disponibilidad o el requisito eliminatorio principal) redactados como se preguntan "
+    "en una conversación de WhatsApp; el prefiltro web ya cubre el resto.\n"
     "6. Cada plataforma tiene su propio tono y formato: no repitas el mismo texto en las tres.\n"
     "7. Todo lo que escribas en `copy` y `page` lo lee el candidato. Nunca uses etiquetas internas como "
     "«indicado por RH», «según RH» o «no especificado»: escribe el sueldo directo («$10,500 mensuales») solo "
@@ -211,9 +222,32 @@ def _asegurar_capturado(salida: VacanteGenerada, ficha: FichaVacante) -> Vacante
     if not ficha.ubicacion:
         avisos.append("Ubicación no capturada: RH debe confirmarla antes de publicar.")
     salida.avisos_cumplimiento = avisos
-    for p in salida.preguntas_filtro:
+    for p in [*salida.preguntas_filtro, *salida.preguntas_filtro_whatsapp]:
         if p.tipo == "numero" and not p.opciones:
             p.opciones = _RANGO_ANOS_GENERICO
+    if not salida.preguntas_filtro_whatsapp:
+        salida.preguntas_filtro_whatsapp = puntos_criticos_whatsapp(salida.preguntas_filtro)
+    return salida
+
+
+def puntos_criticos_whatsapp(web: List[PreguntaFiltro]) -> List[PreguntaFiltro]:
+    """Prefiltro de WhatsApp derivado del web cuando la IA no lo entregó (o en modo demo): experiencia
+    (tipo numero) + hasta 2 eliminatorias, en tono de chat. Máximo 3."""
+    salida: List[PreguntaFiltro] = []
+    exp = next((p for p in web if p.tipo == "numero"), None)
+    if exp:
+        salida.append(PreguntaFiltro(
+            pregunta="Cuéntame, ¿cuánto tiempo llevas haciendo algo parecido a este puesto?",
+            tipo="numero", valida=exp.valida, respuesta_esperada=exp.respuesta_esperada, descarta=exp.descarta, opciones=exp.opciones,
+        ))
+    for p in web:
+        if len(salida) >= 3:
+            break
+        if p.descarta and p.tipo != "numero":
+            salida.append(PreguntaFiltro(
+                pregunta=p.pregunta if p.pregunta.endswith("?") else p.pregunta + "?",
+                tipo=p.tipo, valida=p.valida, respuesta_esperada=p.respuesta_esperada, descarta=True, opciones=p.opciones,
+            ))
     return salida
 
 
@@ -577,8 +611,10 @@ def prefiltro_turno(
     beneficios: Optional[List[str]] = None,
     perfil_ideal: str = "",
     nombre_candidato: str = "",
+    nota: str = "",
 ) -> Tuple[TurnoPrefiltro, bool]:
-    """historial: [{"rol": "user"|"assistant", "texto": str}, ...] — el último es del candidato."""
+    """historial: [{"rol": "user"|"assistant", "texto": str}, ...] — el último es del candidato.
+    `nota` (2026-09-16): contexto extra, p. ej. una inconsistencia Web vs WhatsApp que hay que aclarar."""
     client = _client()
     if client is None:
         n_agente = sum(1 for m in historial if m["rol"] == "assistant")
@@ -647,6 +683,7 @@ def prefiltro_turno(
             "(10) en tu PRIMER mensaje de la conversación (revisa el historial: si no hay turnos tuyos "
             "previos, es el primero), preséntate como «Red Human» — nunca como «asistente virtual» ni "
             "«asistente de reclutamiento» — y menciona el título de la vacante a la que se postula."
+            + (f"\nContexto adicional: {nota}" if nota else "")
         ),
         input=mensajes,
         text_format=TurnoPrefiltro,
@@ -1343,12 +1380,27 @@ class ModuloCursoGenerado(BaseModel):
     preguntas_verificacion: List[PreguntaVerificacion] = Field(description="1 a 2 preguntas de comprensión.")
 
 
+class PreguntaEvaluacion(BaseModel):
+    """Pregunta de la evaluación final INTEGRADA (2026-09-16): opción múltiple o verdadero/falso, calificable sola."""
+
+    pregunta: str = Field(description="Pregunta clara sobre el contenido de los módulos, español mexicano.")
+    tipo: Literal["opcion", "vf"] = Field(description="'opcion' = opción múltiple (3-4 opciones); 'vf' = verdadero/falso.")
+    opciones: List[str] = Field(description="Para 'opcion': 3 a 4 opciones. Para 'vf': exactamente ['Verdadero', 'Falso'].")
+    correcta: int = Field(description="Índice (0-based) de la opción correcta dentro de `opciones`.")
+    explicacion: str = Field(default="", description="Una línea que justifica la respuesta correcta (se muestra al terminar).")
+
+
 class GuionCurso(BaseModel):
     objetivo: str = Field(
-        description="Objetivo del curso en 2-3 frases: qué sabrá o podrá hacer el colaborador al terminar."
+        description="Objetivo del curso en 2-3 frases: qué sabrá o podrá hacer la persona al terminar."
     )
+    categoria: str = Field(default="", description="Categoría corta del curso (p. ej. Seguridad, Ventas, Inducción, Cumplimiento).")
     modulos: List[ModuloCursoGenerado] = Field(
-        description="Módulos ordenados: el primero SIEMPRE de bienvenida, el último SIEMPRE de evaluación final."
+        description="Módulos ordenados de contenido: el primero de bienvenida y contexto; NO incluyas un módulo de evaluación (va aparte)."
+    )
+    evaluacion: List[PreguntaEvaluacion] = Field(
+        default_factory=list,
+        description="Evaluación final integrada: 5 a 10 preguntas (opción múltiple o V/F) que cubren todos los módulos.",
     )
 
 
@@ -1391,27 +1443,71 @@ def _guion_curso_demo(tema: str, duracion_horas: float) -> GuionCurso:
     )
 
 
-def guion_curso(tema: str, duracion_horas: float) -> Tuple[GuionCurso, bool]:
+def _evaluacion_demo(tema: str, modulos: List[ModuloCursoGenerado]) -> List[PreguntaEvaluacion]:
+    salida = [
+        PreguntaEvaluacion(
+            pregunta=f"¿Cuál es el objetivo principal del curso «{tema}»?",
+            tipo="opcion",
+            opciones=["Aplicar lo aprendido en el trabajo diario", "Memorizar definiciones", "Cumplir un trámite", "Ninguna de las anteriores"],
+            correcta=0, explicacion="El curso busca que apliques el contenido en tu trabajo.",
+        ),
+        PreguntaEvaluacion(pregunta="El primer módulo presenta los objetivos del curso.", tipo="vf", opciones=["Verdadero", "Falso"], correcta=0, explicacion="El módulo de bienvenida presenta los objetivos."),
+    ]
+    for m in modulos[1:4]:
+        salida.append(PreguntaEvaluacion(
+            pregunta=f"El módulo «{m.titulo}» forma parte de este curso.", tipo="vf", opciones=["Verdadero", "Falso"], correcta=0,
+            explicacion=f"«{m.titulo}» es uno de los módulos del curso.",
+        ))
+    return salida
+
+
+def _asegurar_evaluacion(g: GuionCurso, tema: str) -> GuionCurso:
+    """La evaluación es parte del curso: si el modelo no la trajo o vino inválida, se completa."""
+    validas: List[PreguntaEvaluacion] = []
+    for q in g.evaluacion:
+        if q.tipo == "vf":
+            q.opciones = ["Verdadero", "Falso"]
+        if not q.opciones or not (0 <= q.correcta < len(q.opciones)):
+            continue
+        validas.append(q)
+    g.evaluacion = validas or _evaluacion_demo(tema, g.modulos)
+    # los módulos son de contenido: un «Evaluación final» heredado se quita (la evaluación va integrada aparte)
+    g.modulos = [m for m in g.modulos if not m.titulo.strip().lower().startswith("evaluaci")] or g.modulos
+    return g
+
+
+def guion_curso(tema: str, duracion_horas: float, contexto: str = "", material: str = "") -> Tuple[GuionCurso, bool]:
+    """Módulo universal (2026-09-16): a partir del tema, el contexto opcional de RH, el material adjunto
+    (texto extraído) y la duración, genera objetivo, categoría, módulos y la evaluación final integrada."""
     client = _client()
     if client is None:
-        return _guion_curso_demo(tema, duracion_horas), False
+        g = _guion_curso_demo(tema, duracion_horas)
+        g.categoria = g.categoria or "General"
+        return _asegurar_evaluacion(g, tema), False
 
+    entrada = f"Tema del curso: {tema}\nDuración estimada: {duracion_horas} horas"
+    if contexto.strip():
+        entrada += f"\nContexto de RH (público, tono, énfasis): {contexto.strip()[:2000]}"
+    if material.strip():
+        entrada += f"\n\nMaterial de referencia adjunto (úsalo como fuente principal del contenido):\n{material.strip()[:24000]}"
     resp = client.responses.parse(
         model=MODEL,
         instructions=(
-            "Diseñas cursos de capacitación corporativa para Red Human AI (RH en México), pensados "
-            "para impartirse por un instructor o, más adelante, un avatar de IA. Reglas: (1) el primer "
-            "módulo SIEMPRE es 'Bienvenida y objetivos'; (2) el último módulo SIEMPRE es 'Evaluación "
-            "final'; (3) los módulos intermedios cubren el tema de forma práctica y aplicable al "
-            "trabajo diario, en español mexicano; (4) el número de módulos es proporcional a la "
-            "duración (aprox. un módulo por cada 20-30 minutos); (5) cada módulo trae 1-2 preguntas "
-            "de verificación de comprensión con su criterio de respuesta correcta; (6) nunca pidas ni "
-            "menciones datos sensibles (salud, embarazo, religión, estado civil, orientación)."
+            "Diseñas cursos de capacitación para Red Human AI (México) que se cursan en pantalla: la persona lee "
+            "cada módulo y al final contesta una evaluación integrada calificada automáticamente. Reglas: (1) el "
+            "primer módulo es de bienvenida y contexto; los demás cubren el tema de forma práctica, en español "
+            "mexicano, con `contenido` completo y autoexplicativo (párrafos cortos, listas cuando ayuden); (2) el "
+            "número de módulos es proporcional a la duración (aprox. uno por cada 20-30 minutos, máximo 8); "
+            "(3) NO agregues un módulo de evaluación: la evaluación va en `evaluacion` como 5 a 10 preguntas de "
+            "opción múltiple (3-4 opciones, UNA correcta) o verdadero/falso, que cubran todos los módulos y con "
+            "`explicacion` breve; (4) si hay material adjunto, básate en él y no inventes datos que lo contradigan; "
+            "(5) asigna una `categoria` corta; (6) nunca pidas ni menciones datos sensibles (salud, embarazo, "
+            "religión, estado civil, orientación)."
         ),
-        input=f"Tema del curso: {tema}\nDuración estimada: {duracion_horas} horas",
+        input=entrada,
         text_format=GuionCurso,
     )
-    return resp.output_parsed, True
+    return _asegurar_evaluacion(resp.output_parsed, tema), True
 
 
 class TurnoCurso(BaseModel):

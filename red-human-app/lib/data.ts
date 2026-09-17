@@ -179,6 +179,12 @@ export interface Candidato {
    * calculada al vuelo en cada lectura del detalle — nunca se persiste, siempre está al día. --- */
   /** Prefiltro = SOLO status de entrada (cumple / no_cumple); no participa en la evaluación integral. */
   prefiltroResumen?: { cumple: number; total: number; incumplidos: string[]; resultado?: "cumple" | "no_cumple" | null } | null;
+  /** 2026-09-16: prefiltro dual y control manual */
+  respuestasWeb?: { pregunta: string; respuesta: string }[];
+  inconsistencias?: { criterio: string; pregunta: string; web: string; whatsapp: string; detectada_en: string; aclarada: boolean; aclaracion: string }[];
+  actividadesOmitidas?: { actividad: string; etapa: string; usuario: string; fecha: string; motivo: string; hacia: string }[];
+  /** Capacitación universal: cursos de filtro cursados (resultado en la evaluación del candidato). */
+  capacitacion?: { curso: string; titulo: string; calificacion: number; aprobado: boolean; fecha: string; asignacion: string }[];
   /** 2026-09-13: status de la Entrevista Red Human (bloque propio). */
   entrevistaStatus?: {
     codigo: string;
@@ -286,6 +292,9 @@ export interface Vacante {
   criteriosWhatsapp?: { pregunta: string; tipo: string; valida: string; respuesta_esperada: string; descarta: boolean; opciones?: string[] }[];
   ubicacionEstado?: string;
   ubicacionMunicipio?: string;
+  /** Capacitación universal: curso que se asigna como filtro al quedar apto */
+  cursoFiltroId?: string | null;
+  cursoFiltroTitulo?: string | null;
   /** CRUD: baja lógica */
   eliminadaEn?: string | null;
   eliminadaPor?: string;

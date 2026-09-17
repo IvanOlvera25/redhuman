@@ -27,11 +27,19 @@ const COLUMNAS: Record<TipoCargaMasiva, string> = {
 
 export function BotonCargaMasiva({ tipo, onTerminado }: { tipo: TipoCargaMasiva; onTerminado?: () => void }) {
   const [abierto, setAbierto] = useState(false);
+  // Regla de UI (2026-09-16): acción secundaria → solo ícono con tooltip; el botón principal de cada
+  // sección sigue siendo «+ Nueva/Agregar».
   return (
     <>
-      <Button size="sm" variant="outline" onClick={() => setAbierto(true)}>
-        <Upload className="h-4 w-4" /> Carga masiva
-      </Button>
+      <button
+        type="button"
+        onClick={() => setAbierto(true)}
+        title={`Carga masiva de ${TITULOS[tipo]} (CSV o Excel)`}
+        aria-label={`Carga masiva de ${TITULOS[tipo]}`}
+        className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-border-soft text-ink-3 transition hover:border-brand/40 hover:text-brand"
+      >
+        <Upload className="h-4 w-4" />
+      </button>
       {abierto && (
         <ModalCargaMasiva
           tipo={tipo}

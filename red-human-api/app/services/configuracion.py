@@ -18,6 +18,14 @@ def modo_prueba_activo(db: Session) -> bool:
     return obtener(db).modo_prueba
 
 
+def permite_duplicados(db: Session) -> bool:
+    """2026-09-16 (Modo Prueba flexible): con Modo Prueba activo, el mismo teléfono/WhatsApp o correo
+    puede repetirse entre candidatos y registros sin bloquear ni fusionar (cada alta es una persona
+    independiente). Al apagarlo vuelve la deduplicación normal. NO aplica al correo de login de
+    Usuario, que sigue siendo único siempre (routers/auth.crear_usuario_basico)."""
+    return modo_prueba_activo(db)
+
+
 def ventana_modo_prueba_min(db: Session) -> int:
     """Punto 13: minutos sin actividad tras los cuales una conversacion de prueba se considera
     fria y el siguiente mensaje arranca una postulacion nueva (ver webhooks._conversacion_fria)."""

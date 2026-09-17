@@ -39,10 +39,12 @@ import {
   contenidoDesdePlantilla,
   contenidoDesdeVacante,
   faltantesDatosPrincipales,
+  requisitosLista,
   tieneContenidoManual,
   type ContenidoVacante,
 } from "@/components/dashboard/vacantes/formulario-contenido";
 import { PageHeader } from "@/components/dashboard/parts";
+import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import { Aviso, BotonCopiar } from "@/components/dashboard/subida";
 import type { Vacante } from "@/lib/data";
 import { useRouter } from "next/navigation";
@@ -57,6 +59,7 @@ import {
   regenerarVacante,
   generarVacanteIA,
   fetchClientes,
+  fetchCursos,
   fetchEntrevistadores,
   fetchPlantillas,
   guardarVacanteComoPlantilla,
@@ -1387,6 +1390,69 @@ function RelacionesVacante({ v, onCambio }: { v: Vacante; onCambio: () => void }
 /* ============================================================
    Drawer: detalle de una vacante ya guardada
    ============================================================ */
+/* Capacitación universal (2026-09-16): curso publicado que se asigna al candidato como filtro al quedar apto. */
+function CursoFiltro({ v, onCambio }: { v: Vacante; onCambio: () => void }) {
+  const [cursos, setCursos] = useState<{ id: string; titulo: string; estado: string }[]>([]);
+  const [guardando, setGuardando] = useState(false);
+  useEffect(() => {
+    fetchCursos().then((c) => setCursos((c ?? []).filter((x) => x.estado === "Publicado")));
+  }, []);
+  async function cambiar(codigo: string) {
+    setGuardando(true);
+    await actualizarVacante(v.id, { curso_filtro: codigo });
+    setGuardando(false);
+    onCambio();
+  }
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-[11px] uppercase tracking-wide text-ink-3">Curso de filtro para candidatos</span>
+      <select
+        value={v.cursoFiltroId ?? ""}
+        onChange={(e) => cambiar(e.target.value)}
+        disabled={guardando}
+        className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand"
+      >
+        <option value="">Sin curso</option>
+        {cursos.map((c) => (
+          <option key={c.id} value={c.id}>{c.titulo}</option>
+        ))}
+      </select>
+      <span className="text-[11px] text-ink-3">Se asigna solo cuando el candidato queda apto; su resultado aparece en su ficha.</span>
+    </label>
+  );
+}
+
+/* Sección plegable CERRADA por defecto (regla de UI 2026-09-16: nada de "efecto libro"). */
+function Plegable({ titulo, resumen, children }: { titulo: string; resumen?: string; children: React.ReactNode }) {
+  const [abierto, setAbierto] = useState(false);
+  return (
+    <section className="rounded-xl border border-border-soft">
+      <button type="button" onClick={() => setAbierto((a) => !a)} aria-expanded={abierto} className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left">
+        <span className="min-w-0">
+          <span className="text-sm font-semibold text-ink">{titulo}</span>
+          {resumen && <span className="block truncate text-xs text-ink-3">{resumen}</span>}
+        </span>
+        {abierto ? <ChevronDown className="h-4 w-4 shrink-0 text-ink-3" /> : <ChevronRight className="h-4 w-4 shrink-0 text-ink-3" />}
+      </button>
+      {abierto && <div className="flex flex-col gap-4 border-t border-border-faint px-4 py-4">{children}</div>}
+    </section>
+  );
+}
+
+function ListaResumen({ titulo, items }: { titulo: string; items: string[] }) {
+  if (!items.length) return null;
+  return (
+    <div>
+      <p className="text-[11px] uppercase tracking-wide text-ink-3">{titulo}</p>
+      <ul className="mt-1 space-y-1">
+        {items.map((x, i) => (
+          <li key={i} className="text-sm leading-relaxed text-ink-2">· {x}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function DetalleVacante({
   v,
   live,
@@ -1485,9 +1551,25 @@ function DetalleVacante({
 
   const embudo = v.embudo?.etapas ?? {};
 
+  // Regla de UI (2026-09-16): resumen compacto arriba, UNA acción principal (Publicar / Cerrar-Reabrir),
+  // secundarias en «…», y todo el contenido en secciones CERRADAS (Requisitos, Prefiltros, Entrevista,
+  // Publicaciones, Gestión) — nada de "efecto libro".
+  const puedeActuar = live && puedeDecidir && v.estado !== "Eliminada";
+  const accionesMenu = [
+    ...(live ? [{ etiqueta: "Vista previa (como la ve el candidato)", icono: <Eye />, onClick: onVerPrevia }] : []),
+    ...(puedeActuar ? [{ etiqueta: "Editar vacante", icono: <Pencil />, onClick: () => setEditando(true), disabled: Boolean(ocupado) }] : []),
+    ...(puedeActuar && v.estado !== "Cerrada" ? [{ etiqueta: "Regenerar con IA", icono: <RefreshCw />, onClick: regenerar, disabled: Boolean(ocupado) }] : []),
+    ...(puedeActuar && tieneContenido ? [{ etiqueta: "Guardar como plantilla", icono: <FileEdit />, onClick: () => setMostrarGuardarPlantilla(true) }] : []),
+    ...(puedeActuar && v.estado === "Publicada" ? [{ etiqueta: "Cerrar vacante", icono: <Ban />, onClick: alternarEstatus, disabled: Boolean(ocupado) }] : []),
+    ...(puedeActuar && v.estado === "Cerrada" ? [{ etiqueta: "Reabrir vacante", icono: <RotateCcw />, onClick: alternarEstatus, disabled: Boolean(ocupado) }] : []),
+    ...(puedeActuar ? [{ etiqueta: "Eliminar vacante", icono: <Trash2 />, peligrosa: true, onClick: () => setConfirmarEliminar(true), disabled: Boolean(ocupado) }] : []),
+  ];
+  const nPrefiltro = (v.criterios?.length ?? 0) + (v.criteriosWhatsapp?.length ?? 0);
+
   return (
     <Panel titulo={v.titulo} eyebrow={v.id} onClose={onClose} ancho="max-w-3xl">
-      <div className="flex flex-col gap-5 p-6">
+      <div className="flex flex-col gap-4 p-6">
+        {/* Resumen compacto */}
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={estadoTone[v.estado]} dot>
             {v.estado}
@@ -1497,6 +1579,7 @@ function DetalleVacante({
           <span className="text-sm text-ink-2">
             {v.area} · {v.ubicacion} · <span className="font-mono text-brand">{v.sueldo}</span>
           </span>
+          <MenuAcciones className="ml-auto" etiqueta="Más acciones de la vacante" acciones={accionesMenu} />
         </div>
 
         {v.estado === "Eliminada" && (
@@ -1506,29 +1589,12 @@ function DetalleVacante({
           </Aviso>
         )}
 
-        {live && puedeDecidir && v.estado !== "Eliminada" && (
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={() => setEditando(true)} disabled={Boolean(ocupado)}>
-              <Pencil className="h-4 w-4" /> Editar vacante
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="border-bad/40 text-bad hover:bg-bad-soft"
-              onClick={() => setConfirmarEliminar(true)}
-              disabled={Boolean(ocupado)}
-            >
-              <Trash2 className="h-4 w-4" /> Eliminar vacante
-            </Button>
-          </div>
-        )}
-
         {/* Embudo de esta vacante — conecta con el pipeline de candidatos */}
         <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
           {["Prefiltro", "Entrevista IA", "Evaluación", "Entrevista Humana", "Contratación", "Onboarding"].map((e) => (
             <div key={e} className="rounded-xl border border-border-soft bg-surface p-3 text-center">
               <p className="font-display text-xl font-bold tabular">{embudo[e] ?? 0}</p>
-              <p className="mt-0.5 text-[11px] text-ink-3">{e}</p>
+              <p className="mt-0.5 text-[11px] text-ink-3">{nombreEtapa(e)}</p>
             </div>
           ))}
         </div>
@@ -1538,30 +1604,73 @@ function DetalleVacante({
             <Link2 className="h-4 w-4 shrink-0 text-ink-3" />
             <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink-2">{liga}</span>
             <BotonCopiar texto={liga} etiqueta="Copiar liga" />
-            <a
-              href={`/aplicar/${v.slug}`}
-              target="_blank"
-              rel="noreferrer"
-              className="text-ink-3 transition hover:text-brand"
-              aria-label="Abrir página de postulación"
-            >
+            <a href={`/aplicar/${v.slug}`} target="_blank" rel="noreferrer" className="text-ink-3 transition hover:text-brand" aria-label="Abrir página de postulación">
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           </div>
         )}
 
-        {live && (
-          <button
-            onClick={onVerPrevia}
-            className="flex items-center justify-center gap-2 rounded-xl border border-border-soft px-4 py-2.5 text-sm font-semibold text-ink-2 transition hover:border-brand/40 hover:text-brand"
-          >
-            <Eye className="h-4 w-4" /> Vista previa — cómo la ve el candidato
-          </button>
+        {aviso && <Aviso tono={aviso.tono} onCerrar={() => setAviso(null)}>{aviso.texto}</Aviso>}
+
+        {/* Acción principal: publicar (con destinos) mientras no esté publicada; publicada = indicador */}
+        {puedeActuar && v.estado !== "Publicada" && v.estado !== "Cerrada" && (
+          <div className="flex flex-col gap-3 rounded-xl border border-dashed border-brand/40 bg-brand-soft/30 p-4">
+            <div className="flex flex-wrap gap-2">
+              {PLATAFORMAS.map((p) => {
+                const activo = destinos.includes(p.api);
+                return (
+                  <button
+                    key={p.clave}
+                    onClick={() => setDestinos((d) => (activo ? d.filter((x) => x !== p.api) : [...d, p.api]))}
+                    className={cn(
+                      "rounded-full border px-3 py-1.5 text-[13px] font-medium transition",
+                      activo ? "border-brand bg-brand-soft text-brand" : "border-border-soft text-ink-2 hover:border-brand/40",
+                    )}
+                  >
+                    {p.nombre}
+                  </button>
+                );
+              })}
+            </div>
+            <Button className="w-full" onClick={publicar} disabled={Boolean(ocupado) || !destinos.length || !tieneContenido}>
+              <Send className="h-4 w-4" />
+              {ocupado === "publicar" ? "Publicando…" : "Publicar"}
+            </Button>
+            {!tieneContenido && <p className="text-xs text-ink-3">Sin contenido todavía: usa «Regenerar con IA» en el menú «…».</p>}
+          </div>
+        )}
+        {puedeActuar && v.estado === "Publicada" && (
+          <div className="flex items-center justify-center gap-2 rounded-xl border border-good/30 bg-good-soft px-4 py-2.5 text-sm font-semibold text-good">
+            <Check className="h-4 w-4" /> Publicada · {ocupado === "estatus" ? "actualizando…" : "el candidato ya puede postularse"}
+          </div>
         )}
 
-        {live && <RelacionesVacante v={v} onCambio={() => onCambio(v.id)} />}
-
-        {aviso && <Aviso tono={aviso.tono} onCerrar={() => setAviso(null)}>{aviso.texto}</Aviso>}
+        {mostrarGuardarPlantilla && (
+          <div className="flex flex-wrap gap-2 rounded-xl border border-border-soft p-4">
+            <input
+              value={nombrePlantilla}
+              onChange={(e) => setNombrePlantilla(e.target.value)}
+              placeholder="Nombre de la plantilla"
+              className="h-10 min-w-[200px] flex-1 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+            />
+            {v.clienteId && (
+              <select
+                value={alcancePlantilla}
+                onChange={(e) => setAlcancePlantilla(e.target.value as "general" | "cliente")}
+                className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand"
+              >
+                <option value="general">General de la Cuenta</option>
+                <option value="cliente">Solo para {v.cliente || "este Cliente"}</option>
+              </select>
+            )}
+            <Button size="sm" onClick={guardarComoPlantilla} disabled={guardandoPlantilla || !nombrePlantilla.trim()}>
+              {guardandoPlantilla ? "Guardando…" : "Guardar"}
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setMostrarGuardarPlantilla(false)}>
+              Cancelar
+            </Button>
+          </div>
+        )}
 
         {(v.avisosCumplimiento?.length ?? 0) > 0 && (
           <Card className="border-warn/30 bg-warn-soft/40 p-4">
@@ -1570,145 +1679,53 @@ function DetalleVacante({
             </span>
             <ul className="mt-2 space-y-1.5">
               {v.avisosCumplimiento!.map((a, i) => (
-                <li key={i} className="text-[13px] leading-relaxed text-ink-2">
-                  · {a}
-                </li>
+                <li key={i} className="text-[13px] leading-relaxed text-ink-2">· {a}</li>
               ))}
             </ul>
           </Card>
         )}
 
-        {tieneContenido ? (
-          <PestanasPlataforma bloques={bloques} liga={liga} />
-        ) : (
-          <Aviso tono="info">
-            Esta vacante todavía no tiene publicación por plataforma. Genérala para obtener el copy y la page de
-            OCC y LinkedIn.
-          </Aviso>
-        )}
+        {/* Secciones CERRADAS por defecto */}
+        <Plegable titulo="Requisitos" resumen={`${requisitosLista(v.requisitos).length} indispensables · ${v.requisitosDeseables?.length ?? 0} deseables · ${v.beneficios?.length ?? 0} prestaciones`}>
+          {v.descripcion && <p className="text-sm leading-relaxed text-ink-2">{v.descripcion}</p>}
+          <ListaResumen titulo="Responsabilidades" items={v.responsabilidades ?? []} />
+          <ListaResumen titulo="Indispensables" items={requisitosLista(v.requisitos)} />
+          <ListaResumen titulo="Deseables" items={v.requisitosDeseables ?? []} />
+          <ListaResumen titulo="Prestaciones" items={v.beneficios ?? []} />
+        </Plegable>
 
-        {(v.criterios?.length ?? 0) > 0 && <Criterios criterios={v.criterios as CriterioFiltro[]} />}
-        {/* Fase 4: prefiltro por WhatsApp independiente; vacío = el agente usa las de la web */}
-        {(v.criteriosWhatsapp?.length ?? 0) > 0 ? (
-          <Criterios criterios={v.criteriosWhatsapp as CriterioFiltro[]} titulo="Criterios de prefiltro · WhatsApp" />
-        ) : (v.criterios?.length ?? 0) > 0 ? (
-          <p className="text-[12px] text-ink-3">Prefiltro por WhatsApp: usa las mismas preguntas de la postulación web (no se capturaron preguntas propias).</p>
-        ) : null}
+        <Plegable titulo="Prefiltros" resumen={`${nPrefiltro ? `${v.criterios?.length ?? 0} web · ${v.criteriosWhatsapp?.length ?? 0} WhatsApp` : "Sin preguntas todavía"}${v.cursoFiltroTitulo ? ` · curso: ${v.cursoFiltroTitulo}` : ""}`}>
+          {live && puedeDecidir && <CursoFiltro v={v} onCambio={() => onCambio(v.id)} />}
+          {(v.criterios?.length ?? 0) > 0 && <Criterios criterios={v.criterios as CriterioFiltro[]} />}
+          {(v.criteriosWhatsapp?.length ?? 0) > 0 ? (
+            <Criterios criterios={v.criteriosWhatsapp as CriterioFiltro[]} titulo="Criterios de prefiltro · WhatsApp (puntos críticos)" />
+          ) : (v.criterios?.length ?? 0) > 0 ? (
+            <p className="text-[12px] text-ink-3">WhatsApp: el agente confirma con las mismas preguntas de la web (no hay puntos críticos propios).</p>
+          ) : null}
+        </Plegable>
 
-        {live && puedeDecidir && tieneContenido && (
-          <div className="rounded-xl border border-border-soft p-4">
-            {mostrarGuardarPlantilla ? (
-              <div className="flex flex-wrap gap-2">
-                <input
-                  value={nombrePlantilla}
-                  onChange={(e) => setNombrePlantilla(e.target.value)}
-                  placeholder="Nombre de la plantilla"
-                  className="h-10 min-w-[200px] flex-1 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
-                />
-                {v.clienteId && (
-                  <select
-                    value={alcancePlantilla}
-                    onChange={(e) => setAlcancePlantilla(e.target.value as "general" | "cliente")}
-                    className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand"
-                  >
-                    <option value="general">General de la Cuenta</option>
-                    <option value="cliente">Solo para {v.cliente || "este Cliente"}</option>
-                  </select>
-                )}
-                <Button size="sm" onClick={guardarComoPlantilla} disabled={guardandoPlantilla || !nombrePlantilla.trim()}>
-                  {guardandoPlantilla ? "Guardando…" : "Guardar"}
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => setMostrarGuardarPlantilla(false)}>
-                  Cancelar
-                </Button>
-              </div>
-            ) : (
-              <button
-                onClick={() => setMostrarGuardarPlantilla(true)}
-                className="text-sm font-medium text-brand hover:underline"
-              >
-                Guardar como plantilla
-              </button>
-            )}
-          </div>
-        )}
+        <Plegable titulo="Entrevista" resumen={ENFOQUES_ENTREVISTA.find((e) => e.valor === (v.enfoqueEntrevista ?? "profesional"))?.texto ?? "Profesional"}>
+          <p className="text-sm text-ink-2">{ENFOQUES_ENTREVISTA.find((e) => e.valor === (v.enfoqueEntrevista ?? "profesional"))?.detalle}</p>
+          {v.perfilIdeal && (
+            <div>
+              <p className="text-[11px] uppercase tracking-wide text-ink-3">Perfil ideal</p>
+              <p className="mt-1 text-sm leading-relaxed text-ink-2">{v.perfilIdeal}</p>
+            </div>
+          )}
+        </Plegable>
 
-        {live && puedeDecidir && (
-          <div className="flex flex-col gap-3 border-t border-border-faint pt-5">
-            {v.estado === "Publicada" ? (
-              // Punto 1: mientras esté Publicada, "Publicar" deja de mostrarse — el único
-              // indicador de estatus accionable es el toggle Cerrar/Reabrir de abajo.
-              <div className="flex items-center justify-center gap-2 rounded-xl border border-good/30 bg-good-soft px-4 py-2.5 text-sm font-semibold text-good">
-                <Check className="h-4 w-4" /> Publicada
-              </div>
-            ) : v.estado !== "Cerrada" ? (
-              <>
-                <div>
-                  <Eyebrow>Distribuir en</Eyebrow>
-                  <div className="mt-2.5 flex flex-wrap gap-2">
-                    {PLATAFORMAS.map((p) => {
-                      const activo = destinos.includes(p.api);
-                      return (
-                        <button
-                          key={p.clave}
-                          onClick={() =>
-                            setDestinos((d) => (activo ? d.filter((x) => x !== p.api) : [...d, p.api]))
-                          }
-                          className={cn(
-                            "rounded-full border px-3 py-1.5 text-[13px] font-medium transition",
-                            activo
-                              ? "border-brand bg-brand-soft text-brand"
-                              : "border-border-soft text-ink-2 hover:border-brand/40",
-                          )}
-                        >
-                          {p.nombre}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
+        <Plegable titulo="Publicaciones" resumen={tieneContenido ? `${Object.keys(bloques).length} plataforma(s)${v.plataformas.length ? ` · distribuida en ${v.plataformas.join(", ")}` : ""}` : "Sin contenido generado"}>
+          {tieneContenido ? (
+            <PestanasPlataforma bloques={bloques} liga={liga} />
+          ) : (
+            <p className="text-sm text-ink-3">Esta vacante todavía no tiene publicación por plataforma. Genérala con «Regenerar con IA».</p>
+          )}
+        </Plegable>
 
-                <div className="flex gap-3">
-                  <Button variant="outline" className="flex-1" onClick={regenerar} disabled={Boolean(ocupado)}>
-                    <RefreshCw className={cn("h-4 w-4", ocupado === "regenerar" && "animate-spin")} />
-                    {ocupado === "regenerar" ? "Generando…" : "Regenerar con IA"}
-                  </Button>
-                  <Button className="flex-1" onClick={publicar} disabled={Boolean(ocupado) || !destinos.length}>
-                    <Send className="h-4 w-4" />
-                    {ocupado === "publicar" ? "Publicando…" : "Publicar"}
-                  </Button>
-                </div>
-              </>
-            ) : null}
-
-            {(v.estado === "Publicada" || v.estado === "Cerrada") && (
-              <div>
-                <Eyebrow>Estatus de la vacante</Eyebrow>
-                <button
-                  onClick={alternarEstatus}
-                  disabled={Boolean(ocupado)}
-                  className={cn(
-                    "mt-2.5 flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-semibold transition disabled:opacity-50",
-                    v.estado === "Publicada"
-                      ? "border-bad/30 text-bad hover:bg-bad-soft"
-                      : "border-good/30 text-good hover:bg-good-soft",
-                  )}
-                >
-                  {v.estado === "Publicada" ? (
-                    <>
-                      <Ban className="h-4 w-4" />
-                      {ocupado === "estatus" ? "Cerrando…" : "Cerrar vacante (deja de verse en el portal)"}
-                    </>
-                  ) : (
-                    <>
-                      <RotateCcw className="h-4 w-4" />
-                      {ocupado === "estatus" ? "Reabriendo…" : "Reabrir vacante"}
-                    </>
-                  )}
-                </button>
-              </div>
-            )}
-          </div>
+        {live && (
+          <Plegable titulo="Gestión" resumen={[v.cliente ? `Cliente: ${v.cliente}` : "Recluta directo", v.responsable ? `Responsable: ${v.responsable}` : ""].filter(Boolean).join(" · ")}>
+            <RelacionesVacante v={v} onCambio={() => onCambio(v.id)} />
+          </Plegable>
         )}
       </div>
       {editando && (

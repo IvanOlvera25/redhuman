@@ -119,5 +119,15 @@ def guardar(archivo: ArchivoValidado, carpeta: str, base: str) -> str:
     return ruta
 
 
+def guardar_bytes(contenido: bytes, carpeta: str, nombre: str) -> str:
+    """Guarda un binario tal cual (adjuntos de cursos, 2026-09-16) en `uploads/<carpeta>/<nombre saneado>`."""
+    destino = os.path.join(RAIZ_UPLOADS, carpeta)
+    os.makedirs(destino, exist_ok=True)
+    ruta = os.path.join(destino, _sanear(nombre))
+    with open(ruta, "wb") as f:
+        f.write(contenido)
+    return ruta
+
+
 def existe(ruta: Optional[str]) -> bool:
     return bool(ruta) and os.path.isfile(ruta)
