@@ -113,11 +113,45 @@ def _texto_solicitud_documentos(liga: str) -> str:
     )
 
 
-def _texto_recordatorio_documentos(liga: str) -> str:
+def texto_recordatorio_documentos(
+    nivel: int, primer_nombre: str, puesto: str, pendientes: Optional[List[str]], liga: str = "",
+    fecha_limite: Optional[datetime] = None, detalle_rechazos: str = "",
+) -> str:
+    """Recordatorio de documentos en 3 niveles progresivos (2026-09-17):
+    1 ligero (amistoso), 2 intermedio (estándar, con lista y fecha), 3 definitivo (último aviso
+    automático: firme, claro sobre la consecuencia, sin amenazas ni presión indebida).
+    Sirve para WhatsApp (texto libre) y correo. `pendientes` None → liga genérica de subida."""
+    nivel = max(1, min(int(nivel or 1), 3))
+    nombre = f" {primer_nombre}" if primer_nombre else ""
+    que = f"me falta recibir: {', '.join(pendientes)}" if pendientes else "me faltan tu INE y tu comprobante de domicilio"
+    donde = f"\n\nSúbelos aquí: {liga}" if liga else "\n\nMándalos por aquí (foto o PDF)."
+    fecha_txt = _fecha_hora_legible_mx(fecha_limite).split(" a las")[0] if fecha_limite else ""
+    limite = f" La fecha límite es el {fecha_txt}." if fecha_txt else ""
+    rechazos = f"\n\nAlgunos necesitan volver a enviarse:{detalle_rechazos}" if detalle_rechazos else ""
+    if nivel == 1:
+        # la fecha se menciona como dato, sin presión («tienes hasta…»)
+        limite_suave = f" Tienes hasta el {fecha_txt} (fecha límite), así que hay tiempo." if fecha_txt else ""
+        return (
+            f"Hola{nombre} 👋 ¿Cómo vas? Para seguir con tu expediente de {puesto} {que}.{limite_suave}"
+            f"{rechazos}{donde}\n\nSin prisa, en cuanto los tengas a la mano. 🙌"
+        )
+    if nivel == 2:
+        return (
+            f"Hola{nombre}, te escribo de nuevo para dar seguimiento a tu expediente de {puesto}: "
+            f"todavía {que}.{limite}{rechazos}{donde}\n\nCon eso podemos avanzar con tu ingreso. "
+            "Si tienes alguna dificultad para conseguirlos, cuéntame y lo resolvemos. 🙂"
+        )
     return (
-        "Hola de nuevo 👋 Te escribo para dar seguimiento: ¿ya tienes a la mano tu INE y tu "
-        f"comprobante de domicilio? Súbelos desde esta liga en cuanto puedas para no atrasar tu "
-        f"proceso de ingreso: {liga}"
+        f"Hola{nombre}. Este es el último recordatorio automático sobre tu expediente de {puesto}: "
+        f"aún {que}.{limite}{rechazos}{donde}\n\nSi no los recibimos, tu proceso de ingreso quedará en "
+        "pausa hasta completarlo y una persona de Recursos Humanos se pondrá en contacto contigo. "
+        "Si necesitas más tiempo o tienes alguna dificultad, respóndeme por aquí y lo vemos juntos."
+    )
+
+
+def _asunto_recordatorio(nivel: int) -> str:
+    return {1: "Recordatorio de documentos", 2: "Seguimiento: documentos pendientes", 3: "Último recordatorio: documentos pendientes"}.get(
+        max(1, min(int(nivel or 1), 3)), "Recordatorio de documentos"
     )
 
 
@@ -284,22 +318,14 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
 
     if evento == "recordatorio_documentos":
         if audiencia == "candidato":
-            pendientes = extra.get("pendientes")
-            if pendientes is not None:
-                # contratacion.py::recordatorio — lista lo que falta del Expediente en curso.
-                detalle_rechazos = extra.get("detalle_rechazos", "")
-                fecha_limite = extra.get("fecha_limite")
-                texto = (
-                    f"Hola {primer_nombre} 👋 Para completar tu expediente de {puesto} "
-                    f"me falta recibir: {', '.join(pendientes)}."
-                    + (f"\n\nAlgunos necesitan volver a enviarse:{detalle_rechazos}" if detalle_rechazos else "")
-                    + (f"\n\nLa fecha límite es el {_fecha_hora_legible_mx(fecha_limite).split(' a las')[0]}." if fecha_limite else "")
-                    + "\n\nMándalos por aquí cuando puedas. 🙌"
-                )
-            else:
-                # candidatos.py::recordatorio_documentos — liga pública genérica de subida.
-                texto = _texto_recordatorio_documentos(liga)
-            return texto if canal == "whatsapp" else ("Recordatorio de documentos", f"<p>{texto}</p>")
+            # 2026-09-17: tono por nivel (1 ligero, 2 intermedio, 3 definitivo) — `extra["nivel"]` lo
+            # decide el expediente (Expediente.nivel_recordatorio); sin dato se asume 1.
+            nivel = int(extra.get("nivel") or 1)
+            texto = texto_recordatorio_documentos(
+                nivel, primer_nombre, puesto, extra.get("pendientes"), liga,
+                fecha_limite=extra.get("fecha_limite"), detalle_rechazos=extra.get("detalle_rechazos", ""),
+            )
+            return texto if canal == "whatsapp" else (_asunto_recordatorio(nivel), "<p>" + texto.replace("\n", "<br>") + "</p>")
 
     return None
 
@@ -327,6 +353,7 @@ def _valores_plantilla_documentos(c: Postulacion, liga: str, extra: dict) -> dic
         "liga": liga or "",
         "empresa": nombre_empresa_candidato(v) if v else "",
         "vacante": extra.get("puesto") or (v.titulo if v else ""),
+        "nivel": int(extra.get("nivel") or 1),  # 2026-09-17: elige la plantilla por nivel (no es variable de Meta)
     }
 
 
@@ -348,7 +375,7 @@ async def _enviar_y_registrar(
         return {**base, "enviado": False, "detalle": detalle}
     try:
         if canal == "whatsapp" and plantilla_valores is not None:
-            envio = await enviar_plantilla_documentos(destino, plantilla_valores, contenido)
+            envio = await enviar_plantilla_documentos(destino, plantilla_valores, contenido, nivel=int(plantilla_valores.get("nivel") or 1))
         elif canal == "whatsapp":
             envio = await enviar_mensaje(destino, contenido)
         else:

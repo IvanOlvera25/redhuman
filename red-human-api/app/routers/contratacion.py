@@ -18,7 +18,8 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import Candidato, Colaborador, Cuenta, Documento, Expediente, Postulacion, Usuario, registrar
+from ..models import NIVELES_RECORDATORIO, Candidato, Colaborador, Cuenta, Documento, Expediente, Postulacion, Usuario, registrar
+from ..services.recordatorios import registrar_recordatorio_enviado
 from ..serial import colaborador_dict, expediente_dict, nombre_empresa_candidato
 from ..services import archivos as fs
 from ..services import ia
@@ -419,7 +420,7 @@ def quitar_documento(
 @router.post("/expedientes/{exp_id}/recordatorio")
 async def recordatorio(
     exp_id: int, notificar: Optional[NotificarIn] = Body(default=None, embed=True),
-    db: Session = Depends(get_db), _: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
 ):
     e = _expediente(db, exp_id, cuenta.id)
     pendientes = e.pendientes
@@ -431,15 +432,18 @@ async def recordatorio(
     rechazados = [d for d in e.documentos if d.estado == "rechazado"]
     detalle_rechazos = "".join(f"\n• {d.tipo}: {d.notas_ia}" for d in rechazados if d.notas_ia)
     resultados: List[dict] = []
+    nivel = e.nivel_recordatorio  # 2026-09-17: 1 ligero → 2 intermedio → 3 definitivo (RH puede seguir mandando el definitivo)
     if p:
         resultados = await notificaciones.disparar(
             db, "recordatorio_documentos", p, "agente-ia",
-            extra={"pendientes": pendientes, "detalle_rechazos": detalle_rechazos, "puesto": e.puesto or "tu nuevo puesto"},
+            extra={"pendientes": pendientes, "detalle_rechazos": detalle_rechazos, "puesto": e.puesto or "tu nuevo puesto",
+                   "fecha_limite": e.documentos_hasta, "nivel": nivel},
             override=override_de(notificar),
         )
-    registrar(db, "agente-ia", "recordatorio_enviado", "expediente", str(e.id), {"pendientes": pendientes, "notificaciones": resultados})
+    registrar_recordatorio_enviado(db, e, nivel, u.nombre, resultados)
+    e.ultimo_recordatorio_en = datetime.now(timezone.utc)
     db.commit()
-    return {"enviado": True, "pendientes": pendientes, "notificaciones": resultados, "expediente": expediente_dict(e)}
+    return {"enviado": True, "pendientes": pendientes, "nivel": nivel, "tono": NIVELES_RECORDATORIO[nivel], "notificaciones": resultados, "expediente": expediente_dict(e)}
 
 
 # ------------------------------------------------------------

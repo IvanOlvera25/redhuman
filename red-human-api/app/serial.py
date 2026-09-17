@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from .config import settings
-from .models import AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
+from .models import NIVELES_RECORDATORIO, AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
 from .services.avatar import avatar_activo
 from .services.ia import texto_preguntas, texto_util_candidato
 
@@ -418,6 +418,8 @@ def postulacion_dict(p: Postulacion, detalle: bool = False) -> dict:
         # --- Expediente (Contratación) — pertenece a ESTA postulación (decisión P5) ---
         "expedienteId": exp.id if exp else None,
         "expedienteProgreso": exp.progreso if exp else None,
+        "recordatorioNivel": exp.nivel_recordatorio if exp else None,
+        "recordatoriosEnviados": (exp.recordatorios_enviados or 0) if exp else None,
         "expedienteEstado": exp.estado if exp else None,
         "expedienteCondiciones": {
             "puesto": exp.puesto,
@@ -708,6 +710,11 @@ def expediente_dict(e: Expediente) -> dict:
         "sinConfirmar": sin_confirmar,
         # Fase 3: recordatorios automáticos de documentos
         "documentosHasta": e.documentos_hasta.isoformat() if e.documentos_hasta else None,
+        # 2026-09-17: recordatorios en 3 niveles
+        "recordatoriosEnviados": e.recordatorios_enviados or 0,
+        "nivelRecordatorio": e.nivel_recordatorio,
+        "tonoRecordatorio": NIVELES_RECORDATORIO[e.nivel_recordatorio],
+        "recordatoriosAgotados": e.recordatorios_agotados,
         "ultimoRecordatorioEn": e.ultimo_recordatorio_en.isoformat() if e.ultimo_recordatorio_en else None,
         "listoParaAlta": estado == "completo" and not sin_confirmar,
         # --- puentes hacia el módulo 1 (candidatoId = Postulación: es lo que /candidatos/{codigo} espera) ---

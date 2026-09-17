@@ -172,12 +172,19 @@ async def enviar_plantilla(
 PARAMS_PLANTILLA_DOCUMENTOS = ("nombre", "documentos", "liga", "empresa", "vacante")
 
 
-async def enviar_plantilla_documentos(telefono: str, valores: dict, texto_fallback: str) -> dict:
+def plantilla_documentos_por_nivel(nivel: int) -> str:
+    """Nombre de la plantilla de Meta según el nivel del recordatorio (2026-09-17); sin plantilla
+    específica cae a META_PLANTILLA_DOCUMENTOS."""
+    especifica = {2: settings.meta_plantilla_recordatorio_2, 3: settings.meta_plantilla_recordatorio_3}.get(int(nivel or 1), "")
+    return (especifica or settings.meta_plantilla_documentos or "").strip()
+
+
+async def enviar_plantilla_documentos(telefono: str, valores: dict, texto_fallback: str, nivel: int = 1) -> dict:
     """Solicitud/recordatorio de documentos (2026-09-15): primero la plantilla aprobada
     META_PLANTILLA_DOCUMENTOS (sirve también fuera de la ventana de 24 h), con sus variables en el
     orden de META_PLANTILLA_DOCUMENTOS_PARAMS; si no está configurada o Meta la rechaza, se manda
     el texto libre de siempre (que a su vez cae a META_PLANTILLA_AVISO fuera de ventana)."""
-    plantilla = (settings.meta_plantilla_documentos or "").strip()
+    plantilla = plantilla_documentos_por_nivel(nivel)
     if settings.whatsapp_provider == "meta" and plantilla:
         claves = [k.strip().lower() for k in (settings.meta_plantilla_documentos_params or "").split(",") if k.strip()]
         parametros = [str(valores.get(k, "") or "-") for k in claves if k in PARAMS_PLANTILLA_DOCUMENTOS]

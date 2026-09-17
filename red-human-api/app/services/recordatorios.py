@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
-from ..models import ConfiguracionSistema, Expediente, Postulacion, registrar
+from ..models import NIVELES_RECORDATORIO, ConfiguracionSistema, Expediente, Postulacion, registrar
 from . import notificaciones
 from .configuracion import obtener
 
@@ -46,6 +46,8 @@ def toca_recordar(e: Expediente, cfg: ConfiguracionSistema, ahora: datetime) -> 
         return ""
     if ahora > _fin_del_dia_mx(e.documentos_hasta):
         return "" if e.documentos_vencidos_avisado else "vencido"
+    if e.recordatorios_agotados:
+        return ""  # 2026-09-17: tras el definitivo (nivel 3) no salen más automáticos — RH da seguimiento
     if ahora.astimezone(TZ_MEXICO).hour < int(cfg.recordatorio_documentos_hora or 0):
         return ""
     ultimo = _utc(e.ultimo_recordatorio_en)
@@ -56,6 +58,23 @@ def toca_recordar(e: Expediente, cfg: ConfiguracionSistema, ahora: datetime) -> 
     if ahora - ultimo < timedelta(days=max(1, int(cfg.recordatorio_documentos_dias or 1))):
         return ""
     return "enviar"
+
+
+def registrar_recordatorio_enviado(db: Session, e: Expediente, nivel: int, actor: str, resultados, automatico: bool = False) -> None:
+    """Avanza el contador de niveles (2026-09-17) y deja bitácora; al mandar el DEFINITIVO se registra
+    `recordatorios_agotados` para que RH tome el seguimiento (aparece en el tablero de Onboarding)."""
+    e.recordatorios_enviados = (e.recordatorios_enviados or 0) + 1
+    p = e.postulacion
+    registrar(
+        db, actor, "recordatorio_documentos_automatico" if automatico else "recordatorio_enviado", "expediente", str(e.id),
+        {"postulacion": p.codigo if p else None, "pendientes": e.pendientes, "nivel": nivel,
+         "tono": NIVELES_RECORDATORIO.get(nivel, ""), "notificaciones": resultados},
+    )
+    if nivel >= 3 and e.recordatorios_enviados == 3:
+        registrar(
+            db, actor, "recordatorios_agotados", "expediente", str(e.id),
+            {"postulacion": p.codigo if p else None, "pendientes": e.pendientes, "detalle": "Se envió el recordatorio definitivo; RH da seguimiento personal."},
+        )
 
 
 def _reclamar(db: Session, e: Expediente, ahora: datetime) -> bool:
@@ -94,14 +113,12 @@ async def revisar_recordatorios_documentos() -> int:
             if p is None or not _reclamar(db, e, ahora):
                 continue
             db.refresh(e)
+            nivel = e.nivel_recordatorio
             resultados = await notificaciones.disparar(
                 db, "recordatorio_documentos", p, "sistema",
-                extra={"pendientes": e.pendientes, "puesto": e.puesto or "tu nuevo puesto", "fecha_limite": _utc(e.documentos_hasta)},
+                extra={"pendientes": e.pendientes, "puesto": e.puesto or "tu nuevo puesto", "fecha_limite": _utc(e.documentos_hasta), "nivel": nivel},
             )
-            registrar(
-                db, "sistema", "recordatorio_documentos_automatico", "expediente", str(e.id),
-                {"postulacion": p.codigo, "pendientes": e.pendientes, "notificaciones": resultados},
-            )
+            registrar_recordatorio_enviado(db, e, nivel, "sistema", resultados, automatico=True)
             db.commit()
             enviados += 1
         if enviados:

@@ -146,6 +146,9 @@ export interface Candidato {
   /* puentes hacia los otros módulos */
   expedienteId?: number | null;
   expedienteProgreso?: number | null;
+  /** 2026-09-17: nivel (1-3) del próximo recordatorio de documentos y cuántos van. */
+  recordatorioNivel?: 1 | 2 | 3 | null;
+  recordatoriosEnviados?: number | null;
   expedienteEstado?: string | null;
   expedienteCondiciones?: {
     puesto: string;
