@@ -75,6 +75,9 @@ class Vacante(Base):
     # Fase 4: ubicación estructurada (Estado / Municipio-Alcaldía de México); `ubicacion` (texto) se deriva.
     ubicacion_estado: Mapped[str] = mapped_column(String(60), default="")
     ubicacion_municipio: Mapped[str] = mapped_column(String(100), default="")
+    # Capacitación universal (2026-09-16): curso que se asigna al candidato como filtro al quedar apto.
+    curso_filtro_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cursos.id"), nullable=True)
+    curso_filtro: Mapped[Optional["Curso"]] = relationship(foreign_keys=[curso_filtro_id])
     plataformas: Mapped[list] = mapped_column(JSON, default=list)
     # Fase 4 (Punto 6): qué cubre la Entrevista IA — ver ENFOQUES_ENTREVISTA. Solo 2 niveles.
     enfoque_entrevista: Mapped[str] = mapped_column(String(30), default="profesional")
@@ -1143,18 +1146,26 @@ class Curso(Base):
     categoria: Mapped[str] = mapped_column(String(100), default="")
     duracion_horas: Mapped[float] = mapped_column(Float, default=0)
     objetivo: Mapped[str] = mapped_column(Text, default="")  # generado por IA
-    estado: Mapped[str] = mapped_column(String(20), default="Borrador")  # Borrador | Publicado
+    estado: Mapped[str] = mapped_column(String(20), default="Borrador")  # Borrador | Publicado | Archivado
     obligatorio: Mapped[bool] = mapped_column(Boolean, default=False)
     creado_por: Mapped[str] = mapped_column(String(150), default="")
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
     # Cuenta (Fase A multi-cuenta) — a diferencia del resto, Curso no cuelga de ningún
     # Candidato/Vacante, así que necesita su propia columna en vez de resolverse por join.
     cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
+    # Módulo universal (2026-09-16): lo que RH capturó para generar y la evaluación final INTEGRADA
+    # (opción múltiple / verdadero-falso, calificada automáticamente). Un solo curso sirve para
+    # colaboradores, candidatos y externos.
+    contexto: Mapped[str] = mapped_column(Text, default="")
+    adjuntos: Mapped[list] = mapped_column(JSON, default=list)  # [{nombre, ruta, caracteres}]
+    evaluacion: Mapped[list] = mapped_column(JSON, default=list)  # [{pregunta, tipo, opciones, correcta, explicacion}]
+    calificacion_minima: Mapped[int] = mapped_column(Integer, default=70)  # % para «Aprobado»
 
     modulos: Mapped[List["ModuloCurso"]] = relationship(
         back_populates="curso", order_by="ModuloCurso.orden", cascade="all, delete-orphan"
     )
     asignaciones: Mapped[List["AsignacionCurso"]] = relationship(back_populates="curso", cascade="all, delete-orphan")
+    cuenta: Mapped[Optional["Cuenta"]] = relationship()
 
 
 class ModuloCurso(Base):
@@ -1177,17 +1188,53 @@ class AsignacionCurso(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     curso_id: Mapped[int] = mapped_column(ForeignKey("cursos.id"), index=True)
-    colaborador_id: Mapped[int] = mapped_column(ForeignKey("colaboradores.id"), index=True)
-    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # liga pública (Fase 2, sin servir aún)
+    # Asignación UNIVERSAL (2026-09-16): colaborador, candidato (postulación) o externo — mismo curso.
+    tipo: Mapped[str] = mapped_column(String(20), default="colaborador")  # colaborador | candidato | externo
+    colaborador_id: Mapped[Optional[int]] = mapped_column(ForeignKey("colaboradores.id"), nullable=True, index=True)
+    postulacion_id: Mapped[Optional[int]] = mapped_column(ForeignKey("postulaciones.id"), nullable=True, index=True)
+    externo_nombre: Mapped[str] = mapped_column(String(200), default="")
+    externo_correo: Mapped[str] = mapped_column(String(200), default="")
+    externo_telefono: Mapped[str] = mapped_column(String(30), default="")
+    externo_organizacion: Mapped[str] = mapped_column(String(200), default="")  # proveedor/cliente (opcional)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # liga pública
     estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # pendiente | en_curso | completado
-    modulo_actual: Mapped[int] = mapped_column(Integer, default=0)
-    transcript: Mapped[list] = mapped_column(JSON, default=list)
-    resultado_evaluacion: Mapped[dict] = mapped_column(JSON, default=dict)
+    modulo_actual: Mapped[int] = mapped_column(Integer, default=0)  # módulos completados
+    transcript: Mapped[list] = mapped_column(JSON, default=list)  # legado (sala con avatar)
+    resultado_evaluacion: Mapped[dict] = mapped_column(JSON, default=dict)  # {respuestas:[...], aciertos, total, calificacion, aprobado}
+    calificacion: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # %
+    aprobado: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    asignado_por: Mapped[str] = mapped_column(String(150), default="")
     asignado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    iniciado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     completado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     curso: Mapped["Curso"] = relationship(back_populates="asignaciones")
-    colaborador: Mapped["Colaborador"] = relationship()
+    colaborador: Mapped[Optional["Colaborador"]] = relationship()
+    postulacion: Mapped[Optional["Postulacion"]] = relationship()
+
+    @property
+    def nombre_persona(self) -> str:
+        if self.tipo == "colaborador" and self.colaborador:
+            return self.colaborador.nombre
+        if self.tipo == "candidato" and self.postulacion:
+            return self.postulacion.nombre
+        return self.externo_nombre or ""
+
+    @property
+    def correo_persona(self) -> str:
+        if self.tipo == "colaborador" and self.colaborador:
+            return self.colaborador.correo or ""
+        if self.tipo == "candidato" and self.postulacion:
+            return self.postulacion.correo or ""
+        return self.externo_correo or ""
+
+    @property
+    def telefono_persona(self) -> str:
+        if self.tipo == "colaborador" and self.colaborador:
+            return self.colaborador.telefono or ""
+        if self.tipo == "candidato" and self.postulacion:
+            return self.postulacion.telefono or ""
+        return self.externo_telefono or ""
 
 
 # ============================================================

@@ -59,6 +59,7 @@ import {
   regenerarVacante,
   generarVacanteIA,
   fetchClientes,
+  fetchCursos,
   fetchEntrevistadores,
   fetchPlantillas,
   guardarVacanteComoPlantilla,
@@ -1389,6 +1390,38 @@ function RelacionesVacante({ v, onCambio }: { v: Vacante; onCambio: () => void }
 /* ============================================================
    Drawer: detalle de una vacante ya guardada
    ============================================================ */
+/* Capacitación universal (2026-09-16): curso publicado que se asigna al candidato como filtro al quedar apto. */
+function CursoFiltro({ v, onCambio }: { v: Vacante; onCambio: () => void }) {
+  const [cursos, setCursos] = useState<{ id: string; titulo: string; estado: string }[]>([]);
+  const [guardando, setGuardando] = useState(false);
+  useEffect(() => {
+    fetchCursos().then((c) => setCursos((c ?? []).filter((x) => x.estado === "Publicado")));
+  }, []);
+  async function cambiar(codigo: string) {
+    setGuardando(true);
+    await actualizarVacante(v.id, { curso_filtro: codigo });
+    setGuardando(false);
+    onCambio();
+  }
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-[11px] uppercase tracking-wide text-ink-3">Curso de filtro para candidatos</span>
+      <select
+        value={v.cursoFiltroId ?? ""}
+        onChange={(e) => cambiar(e.target.value)}
+        disabled={guardando}
+        className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand"
+      >
+        <option value="">Sin curso</option>
+        {cursos.map((c) => (
+          <option key={c.id} value={c.id}>{c.titulo}</option>
+        ))}
+      </select>
+      <span className="text-[11px] text-ink-3">Se asigna solo cuando el candidato queda apto; su resultado aparece en su ficha.</span>
+    </label>
+  );
+}
+
 /* Sección plegable CERRADA por defecto (regla de UI 2026-09-16: nada de "efecto libro"). */
 function Plegable({ titulo, resumen, children }: { titulo: string; resumen?: string; children: React.ReactNode }) {
   const [abierto, setAbierto] = useState(false);
@@ -1661,7 +1694,8 @@ function DetalleVacante({
           <ListaResumen titulo="Prestaciones" items={v.beneficios ?? []} />
         </Plegable>
 
-        <Plegable titulo="Prefiltros" resumen={nPrefiltro ? `${v.criterios?.length ?? 0} web · ${v.criteriosWhatsapp?.length ?? 0} WhatsApp` : "Sin preguntas todavía"}>
+        <Plegable titulo="Prefiltros" resumen={`${nPrefiltro ? `${v.criterios?.length ?? 0} web · ${v.criteriosWhatsapp?.length ?? 0} WhatsApp` : "Sin preguntas todavía"}${v.cursoFiltroTitulo ? ` · curso: ${v.cursoFiltroTitulo}` : ""}`}>
+          {live && puedeDecidir && <CursoFiltro v={v} onCambio={() => onCambio(v.id)} />}
           {(v.criterios?.length ?? 0) > 0 && <Criterios criterios={v.criterios as CriterioFiltro[]} />}
           {(v.criteriosWhatsapp?.length ?? 0) > 0 ? (
             <Criterios criterios={v.criteriosWhatsapp as CriterioFiltro[]} titulo="Criterios de prefiltro · WhatsApp (puntos críticos)" />

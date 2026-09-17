@@ -1020,6 +1020,20 @@ async def _avisar_apto_e_iniciar_agenda(db: Session, p: Postulacion) -> dict:
     return envio
 
 
+async def _asignar_curso_filtro(db: Session, p: Postulacion) -> None:
+    """Capacitación universal (2026-09-16): si la vacante tiene curso de filtro, se asigna al candidato en
+    cuanto queda apto y se le manda la liga; su resultado aparece en la evaluación de la postulación."""
+    v = p.vacante
+    if not v or not v.curso_filtro or v.curso_filtro.estado != "Publicado":
+        return
+    from .capacitacion import asignar_a_postulacion  # import local: capacitacion importa modelos, no a candidatos
+
+    try:
+        await asignar_a_postulacion(db, p, v.curso_filtro, actor="agente-ia")
+    except Exception as ex:  # noqa: BLE001 — nunca bloquea el flujo
+        registrar(db, "sistema", "curso_filtro_no_asignado", "postulacion", p.codigo, {"error": str(ex)[:200]})
+
+
 async def _auto_decision_zero_touch(db: Session, p: Postulacion, resultado_prefiltro: str = "") -> dict:
     """Flujo Zero-Touch: al terminar el prefiltro, clasifica la postulación contra
     UMBRAL_ZERO_TOUCH y le avisa el resultado por WhatsApp sin intervención de RH.
@@ -1050,6 +1064,7 @@ async def _auto_decision_zero_touch(db: Session, p: Postulacion, resultado_prefi
         return {"respuesta": texto, "whatsapp": envio}
 
     p.estado = "cumple"
+    await _asignar_curso_filtro(db, p)
     # antes la tarjeta solo se movía al agendar la cita, así que una postulación ya clasificada
     # como apta seguía viéndose "atorada" en Prefiltro mientras coordinaba fecha/hora.
     p.etapa = "Entrevista IA"
@@ -1718,6 +1733,7 @@ async def mover_etapa(
             raise HTTPException(409, "El candidato no tiene WhatsApp registrado; no se puede iniciar el agendamiento.")
         p.estado = "cumple"
         p.prefiltro_completo = True
+        await _asignar_curso_filtro(db, p)
         # Una falla de WhatsApp/Meta NUNCA bloquea el movimiento: se registra y RH sigue.
         try:
             envio = await _avisar_apto_e_iniciar_agenda(db, p)

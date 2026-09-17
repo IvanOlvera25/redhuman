@@ -17,7 +17,7 @@ from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import (
-    ENFOQUES_ENTREVISTA, MONEDAS_SUELDO, PERIODICIDADES_SUELDO, PLATAFORMAS, Cliente, Cuenta, Plantilla, Postulacion,
+    ENFOQUES_ENTREVISTA, MONEDAS_SUELDO, PERIODICIDADES_SUELDO, PLATAFORMAS, Cliente, Cuenta, Curso, Plantilla, Postulacion,
     Usuario, UsuarioCuenta, Vacante, registrar, slugificar, texto_sueldo, texto_ubicacion,
 )
 from ..serial import nombre_empresa, nombre_empresa_candidato, vacante_dict
@@ -505,6 +505,7 @@ class ActualizarIn(BaseModel):
     preguntas_filtro_whatsapp: Optional[List[dict]] = None  # Fase 4
     ubicacion_estado: Optional[str] = None  # Fase 4
     ubicacion_municipio: Optional[str] = None
+    curso_filtro: Optional[str] = None  # Capacitación universal: código CUR-#### ("" = quitar)
     publicaciones: Optional[Dict[str, dict]] = None
     estado: Optional[str] = None
     # --- Fase B: Cliente/Responsable/Colaboradores/visibilidad (punto 8/10) ---
@@ -533,6 +534,15 @@ def actualizar(
     if datos.enfoque_entrevista is not None and datos.enfoque_entrevista not in ENFOQUES_ENTREVISTA:
         raise HTTPException(400, f"Enfoque de entrevista inválido. Usa uno de: {', '.join(ENFOQUES_ENTREVISTA)}")
     cambios.pop("empresa", None)  # Punto 1: nunca texto libre; se recalcula abajo
+    if "curso_filtro" in cambios:
+        codigo_curso = (cambios.pop("curso_filtro") or "").strip()
+        if not codigo_curso:
+            v.curso_filtro_id = None
+        else:
+            curso = db.query(Curso).filter(Curso.codigo == codigo_curso, Curso.cuenta_id == cuenta.id, Curso.estado == "Publicado").first()
+            if not curso:
+                raise HTTPException(400, "El curso de filtro no existe o no está publicado.")
+            v.curso_filtro_id = curso.id
     if datos.sueldo_periodicidad is not None and datos.sueldo_periodicidad not in PERIODICIDADES_SUELDO:
         raise HTTPException(400, f"Periodicidad de sueldo inválida. Usa una de: {', '.join(PERIODICIDADES_SUELDO)}")
     if datos.seniority is not None and datos.seniority and datos.seniority not in ia.SENIORITY.__args__:

@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from .config import settings
 from .models import AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
 from .services.avatar import avatar_activo
 from .services.ia import texto_preguntas
@@ -120,6 +121,9 @@ def vacante_dict(
         "criteriosWhatsapp": [p for p in (v.preguntas_filtro_whatsapp or []) if isinstance(p, dict)],
         "ubicacionEstado": v.ubicacion_estado or "",
         "ubicacionMunicipio": v.ubicacion_municipio or "",
+        # Capacitación universal (2026-09-16): curso que se asigna como filtro al quedar apto
+        "cursoFiltroId": v.curso_filtro.codigo if v.curso_filtro else None,
+        "cursoFiltroTitulo": v.curso_filtro.titulo if v.curso_filtro else None,
         # embudo de esta vacante (conecta con el pipeline de candidatos)
         "embudo": embudo or {},
         "eliminadaEn": iso(v.eliminada_en),
@@ -309,6 +313,8 @@ def _sintesis_global(p: Postulacion) -> dict:
         "respuestasWeb": a.get("respuestas_web") or [],
         "inconsistencias": a.get("inconsistencias") or [],
         "actividadesOmitidas": p.actividades_omitidas or [],
+        # Capacitación universal: cursos de filtro cursados por el candidato (resultado en su evaluación)
+        "capacitacion": a.get("capacitacion") or [],
         "entrevistaStatus": entrevista_status,
         "evaluacionIntegral": bool(match_ia is not None or (score and hay_cv and entrevista_valida)),
         "afinidadGlobal": afinidad,
@@ -527,6 +533,9 @@ def entrevista_dict(e: Entrevista) -> dict:
 
 
 def curso_dict(c: Curso, detalle: bool = False) -> dict:
+    """Módulo universal (2026-09-16): resumen + (detalle) módulos, evaluación integrada y adjuntos."""
+    asigs = c.asignaciones
+    completadas = [a for a in asigs if a.estado == "completado"]
     base = {
         "id": c.codigo,
         "titulo": c.titulo,
@@ -538,60 +547,90 @@ def curso_dict(c: Curso, detalle: bool = False) -> dict:
         "creadoPor": c.creado_por,
         "creado": hace(c.creado_en),
         "modulos": len(c.modulos),
-        "asignados": len(c.asignaciones),
-        "completados": sum(1 for a in c.asignaciones if a.estado == "completado"),
+        "preguntas": len(c.evaluacion or []),
+        "calificacionMinima": c.calificacion_minima or 70,
+        "asignados": len(asigs),
+        "completados": len(completadas),
+        "aprobados": sum(1 for a in completadas if a.aprobado),
+        "adjuntos": [x.get("nombre") for x in (c.adjuntos or [])],
     }
     if detalle:
-        base["listaModulos"] = [
-            {
-                "orden": m.orden,
-                "titulo": m.titulo,
-                "contenido": m.contenido,
-                "preguntasVerificacion": m.preguntas_verificacion or [],
-            }
-            for m in sorted(c.modulos, key=lambda m: m.orden)
+        base["contexto"] = c.contexto or ""
+        base["listaModulos"] = [{"orden": m.orden, "titulo": m.titulo, "contenido": m.contenido} for m in sorted(c.modulos, key=lambda m: m.orden)]
+        base["evaluacion"] = [
+            {"pregunta": q.get("pregunta", ""), "tipo": q.get("tipo", "opcion"), "opciones": q.get("opciones") or [], "correcta": q.get("correcta", 0), "explicacion": q.get("explicacion", "")}
+            for q in (c.evaluacion or [])
         ]
     return base
 
 
 def asignacion_dict(a: AsignacionCurso) -> dict:
-    col = a.colaborador
+    """Fila del tablero único de seguimiento: quién (colaborador / candidato / externo), curso, avance y resultado."""
+    total = len(a.curso.modulos) if a.curso else 0
+    p = a.postulacion if a.tipo == "candidato" else None
     return {
         "id": a.codigo,
         "cursoId": a.curso.codigo if a.curso else "",
-        "colaboradorId": col.codigo if col else "",
-        "colaboradorNombre": col.nombre if col else "",
+        "cursoTitulo": a.curso.titulo if a.curso else "",
+        "tipo": a.tipo,
+        "persona": a.nombre_persona or "(externo sin registrar)",
+        "correo": a.correo_persona,
+        "telefono": a.telefono_persona,
+        "organizacion": a.externo_organizacion or "",
+        "colaboradorId": a.colaborador.codigo if a.colaborador else None,
+        "postulacionId": p.codigo if p else None,
+        "vacante": p.vacante.titulo if p and p.vacante else None,
         "estado": a.estado,
         "moduloActual": a.modulo_actual,
+        "totalModulos": total,
+        "avance": round(a.modulo_actual / total * 100) if total else 0,
+        "calificacion": a.calificacion,
+        "aprobado": a.aprobado,
+        "asignadoPor": a.asignado_por,
         "asignado": hace(a.asignado_en),
+        "asignadoEn": iso(a.asignado_en),
+        "iniciadoEn": iso(a.iniciado_en),
         "completado": iso(a.completado_en),
         "token": a.token,
+        "liga": f"{settings.app_url}/capacitacion/{a.token}",
     }
 
 
 def asignacion_publica_dict(a: AsignacionCurso) -> dict:
-    """Forma que consume la sala pública (Fase 2) — a diferencia de `asignacion_dict`, nunca
-    expone `contenido`/`preguntasVerificacion` de módulos que la persona todavía no alcanza."""
+    """Lo que ve la persona en la sala pública: módulos completos (avanza uno por uno), la evaluación SIN
+    las respuestas correctas (una pregunta por pantalla) y su resultado al terminar."""
     curso = a.curso
     modulos = sorted(curso.modulos, key=lambda m: m.orden) if curso else []
-    total = len(modulos)
-    salida_modulos = []
-    for i, m in enumerate(modulos):
-        item = {"orden": m.orden, "titulo": m.titulo, "completado": i < a.modulo_actual}
-        if i <= a.modulo_actual:  # módulo actual y anteriores: sí traen contenido
-            item["contenido"] = m.contenido
-            item["preguntasVerificacion"] = m.preguntas_verificacion or []
-        salida_modulos.append(item)
+    preguntas = curso.evaluacion or [] if curso else []
+    respondidas = len(((a.resultado_evaluacion or {}).get("respuestas")) or [])
+    res = a.resultado_evaluacion or {}
     return {
-        "colaborador": a.colaborador.nombre if a.colaborador else "",
+        "persona": a.nombre_persona,
+        "tipo": a.tipo,
+        "requiereRegistro": a.tipo == "externo" and not a.externo_nombre,
         "curso": curso.titulo if curso else "",
-        "empresa": "Red Human",
+        "objetivo": curso.objetivo if curso else "",
+        "categoria": curso.categoria if curso else "",
+        "duracionHoras": curso.duracion_horas if curso else 0,
+        "empresa": (curso.cuenta.nombre_comercial if curso and curso.cuenta else "") or "Red Human",
         "estado": a.estado,
-        "moduloActual": min(a.modulo_actual + 1, total) if total else 0,
-        "totalModulos": total,
-        "avatarDisponible": avatar_activo(),
-        "modulos": salida_modulos,
-        "resultadoEvaluacion": a.resultado_evaluacion or None,
+        "modulosCompletados": a.modulo_actual,
+        "totalModulos": len(modulos),
+        "modulos": [{"orden": m.orden, "titulo": m.titulo, "contenido": m.contenido, "completado": i < a.modulo_actual} for i, m in enumerate(modulos)],
+        "totalPreguntas": len(preguntas),
+        "preguntasRespondidas": respondidas,
+        "pregunta": (
+            {"indice": respondidas, "pregunta": preguntas[respondidas].get("pregunta", ""), "tipo": preguntas[respondidas].get("tipo", "opcion"), "opciones": preguntas[respondidas].get("opciones") or []}
+            if a.modulo_actual >= len(modulos) and respondidas < len(preguntas) and a.estado != "completado" else None
+        ),
+        "resultado": (
+            {"calificacion": res.get("calificacion"), "aprobado": res.get("aprobado"), "aciertos": res.get("aciertos"), "total": res.get("total"), "minimo": res.get("minimo"),
+             "detalle": [
+                 {"pregunta": preguntas[r["indice"]].get("pregunta", ""), "correcta": r["correcta"], "explicacion": preguntas[r["indice"]].get("explicacion", "")}
+                 for r in (res.get("respuestas") or []) if r.get("indice", 0) < len(preguntas)
+             ]}
+            if a.estado == "completado" else None
+        ),
     }
 
 

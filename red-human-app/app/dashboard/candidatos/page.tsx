@@ -2020,6 +2020,23 @@ function PestanaResumen({
         </Card>
       </div>
 
+      {(c.capacitacion?.length ?? 0) > 0 && (
+        <div>
+          <Eyebrow>Capacitación (filtro de la vacante)</Eyebrow>
+          <Card className="mt-2 p-4">
+            <ul className="space-y-1">
+              {c.capacitacion!.map((k) => (
+                <li key={k.asignacion} className="text-sm">
+                  <span className={k.aprobado ? "font-semibold text-good" : "font-semibold text-bad"}>{k.aprobado ? "Aprobado" : "No aprobado"} · {k.calificacion}%</span>
+                  <span className="text-ink-2"> — {k.titulo}</span>
+                  <span className="text-[11px] text-ink-3"> · {fechaCorta(k.fecha)}</span>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        </div>
+      )}
+
       {(c.actividadesOmitidas?.length ?? 0) > 0 && (
         <p className="text-[11px] text-ink-3">
           Omitido manualmente: {c.actividadesOmitidas!.map((o) => `${nombreEtapa(o.actividad)} (${o.usuario}, ${fechaCorta(o.fecha)}${o.motivo ? `: ${o.motivo}` : ""})`).join(" · ")}

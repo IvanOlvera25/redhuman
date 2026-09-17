@@ -1,191 +1,90 @@
 "use client";
 
-/* Sala pública de capacitación con agente IA (Fase 2). Con ANAM_API_KEY → avatar en video;
-   sin clave → chat de texto con el mismo instructor. El curso se imparte módulo por módulo:
-   al terminar cada uno, la persona da clic en "Continuar" (nunca lo decide la IA sola — ver
-   el plan de Fase 2) y el backend evalúa sus respuestas antes de pasar al siguiente. */
+/* Sala pública del curso (módulo universal, 2026-09-16). Una sola pantalla:
+   1) externos con liga abierta: registro (solo nombre y correo o WhatsApp);
+   2) módulos uno por uno con «Siguiente módulo»;
+   3) evaluación integrada, UNA pregunta por pantalla, calificada al instante;
+   4) resultado: Aprobado / No aprobado + %. */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import {
-  ShieldCheck,
-  Sparkles,
-  Send,
-  Video,
-  MessageCircle,
-  CheckCircle2,
-  Loader2,
-  Lock,
-  ArrowRight,
-} from "lucide-react";
-import { Logo, Button, Card, Badge } from "@/components/ui";
+import { ArrowRight, Award, BookOpen, CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { Badge, Button, Card, Logo } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
-import {
-  fetchAsignacionPublica,
-  iniciarSesionCurso,
-  turnoCurso,
-  avanzarModulo,
-  type AsignacionPublica,
-} from "@/lib/api";
+import { avanzarModulo, fetchAsignacionPublica, registrarExternoCurso, responderEvaluacion, type AsignacionPublica } from "@/lib/api";
 
-type Fase = "cargando" | "no_disponible" | "bienvenida" | "conectando" | "sala" | "avanzando" | "fin";
-type Msg = { rol: "assistant" | "user"; texto: string };
-/* Tiempo máximo para que el avatar transmita antes de seguir el módulo por chat (2026-09-14). */
-const ESPERA_AVATAR_SEG = 60;
+type Vista = "cargando" | "no_disponible" | "registro" | "portada" | "modulo" | "evaluacion" | "resultado";
 
-export default function SalaCapacitacion() {
+export default function SalaCurso() {
   const params = useParams();
   const token = String(params?.token ?? "");
+  const [a, setA] = useState<AsignacionPublica | null>(null);
+  const [vista, setVista] = useState<Vista>("cargando");
+  const [ocupado, setOcupado] = useState(false);
+  const [error, setError] = useState("");
+  // registro externo
+  const [nombre, setNombre] = useState("");
+  const [correo, setCorreo] = useState("");
+  const [telefono, setTelefono] = useState("");
+  // evaluación
+  const [eleccion, setEleccion] = useState<number | null>(null);
+  const [retro, setRetro] = useState<{ correcta: boolean; explicacion: string } | null>(null);
 
-  const [fase, setFase] = useState<Fase>("cargando");
-  const [info, setInfo] = useState<AsignacionPublica | null>(null);
-  const [modo, setModo] = useState<"avatar" | "texto">("texto");
-  const [mensajes, setMensajes] = useState<Msg[]>([]);
-  const [texto, setTexto] = useState("");
-  const [pensando, setPensando] = useState(false);
-
-  const anamRef = useRef<{ stopStreaming?: () => Promise<void> } | null>(null);
-  const transcriptRef = useRef<Msg[]>([]);
-  const chatRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    // precalienta el chunk del SDK del avatar; el clic solo tiene que iniciar el stream
-    import("@anam-ai/js-sdk").catch(() => {});
-    fetchAsignacionPublica(token).then((i) => {
-      if (!i) return setFase("no_disponible");
-      setInfo(i);
-      setFase(i.estado === "completado" ? "fin" : "bienvenida");
-    });
-  }, [token]);
+  const colocar = useCallback((d: AsignacionPublica) => {
+    setA(d);
+    if (d.requiereRegistro) return setVista("registro");
+    if (d.estado === "completado" && d.resultado) return setVista("resultado");
+    if (d.modulosCompletados >= d.totalModulos) return setVista(d.pregunta ? "evaluacion" : "resultado");
+    setVista(d.modulosCompletados === 0 && d.estado === "pendiente" ? "portada" : "modulo");
+  }, []);
 
   useEffect(() => {
-    chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
-  }, [mensajes, pensando]);
+    fetchAsignacionPublica(token).then((d) => (d ? colocar(d) : setVista("no_disponible")));
+  }, [token, colocar]);
 
-  const conectarModulo = useCallback(async () => {
-    setFase("conectando");
-    const sesion = await iniciarSesionCurso(token);
-    if (!sesion.ok) return setFase("no_disponible");
-    const s = sesion.data;
-    setInfo(s);
-    transcriptRef.current = [];
-    setMensajes([]);
+  async function registrar() {
+    setOcupado(true);
+    setError("");
+    const r = await registrarExternoCurso(token, { nombre, correo, telefono });
+    setOcupado(false);
+    if (!r.ok) return setError(r.error);
+    colocar(r.data);
+  }
 
-    if (s.modo === "avatar" && s.session_token) {
-      try {
-        const { createClient, AnamEvent } = await import("@anam-ai/js-sdk");
-        const client = createClient(s.session_token);
-        const anam = client as unknown as {
-          stopStreaming?: () => Promise<void>;
-          addListener: (ev: string, cb: (...args: any[]) => void) => void;
-        };
-        anamRef.current = anam;
-        anam.addListener(AnamEvent.MESSAGE_HISTORY_UPDATED, (historial: { role: string; content: string }[]) => {
-          transcriptRef.current = historial.map((m) => ({
-            rol: m.role === "persona" ? "assistant" : "user",
-            texto: m.content,
-          }));
-          setMensajes(transcriptRef.current.slice(-4));
-        });
-        // 2026-09-14 (mismo patrón que la sala de entrevista): si el avatar no llega a transmitir —
-        // micrófono negado, WebRTC bloqueado, Anam sin responder en ESPERA_AVATAR_SEG — la sala NO se
-        // queda en negro: se sigue el módulo por chat con el mismo instructor (/turno funciona igual).
-        let listo = false;
-        let vigilante: ReturnType<typeof setTimeout> | null = null;
-        const caerATexto = async (motivo: unknown) => {
-          if (listo) return;
-          listo = true;
-          if (vigilante) clearTimeout(vigilante);
-          console.error("❌ Avatar no disponible, siguiendo por chat:", motivo);
-          anamRef.current = null;
-          try {
-            await anam.stopStreaming?.();
-          } catch {}
-          setModo("texto");
-          const iniciales = (s.mensajes ?? []).map((m) => ({ rol: m.rol as Msg["rol"], texto: m.texto }));
-          setMensajes(iniciales);
-          transcriptRef.current = iniciales;
-        };
-        const avatarListo = () => {
-          if (listo) return;
-          listo = true;
-          if (vigilante) clearTimeout(vigilante);
-        };
-        anam.addListener(AnamEvent.SESSION_READY, avatarListo);
-        anam.addListener(AnamEvent.VIDEO_PLAY_STARTED, avatarListo);
-        anam.addListener(AnamEvent.CONNECTION_CLOSED, (codigo?: string, razon?: string) => {
-          if (!listo) void caerATexto(`conexión cerrada antes de iniciar (${codigo ?? "?"}${razon ? ": " + razon : ""})`);
-        });
-        setModo("avatar");
-        setFase("sala");
-        vigilante = setTimeout(() => caerATexto(`sin SESSION_READY ni video en ${ESPERA_AVATAR_SEG} s`), ESPERA_AVATAR_SEG * 1000);
-        void (async () => {
-          // el <video id="avatar-video"> se monta al pasar a "sala": se espera a que exista en el DOM
-          const inicio = Date.now();
-          while (!document.getElementById("avatar-video") && Date.now() - inicio < 5000) {
-            await new Promise((r) => setTimeout(r, 50));
-          }
-          try {
-            await client.streamToVideoElement("avatar-video");
-          } catch (err) {
-            caerATexto(err);
-          }
-        })();
-        return;
-      } catch (err) {
-        // si el avatar falla en el navegador, seguimos por texto
-        console.error("❌ Error inicializando Anam:", err);
-      }
-    }
+  async function siguienteModulo() {
+    if (!a) return;
+    setOcupado(true);
+    setError("");
+    const r = await avanzarModulo(token, a.modulosCompletados + 1);
+    setOcupado(false);
+    if (!r.ok) return setError(r.error);
+    setA(r.data);
+    setVista(r.data.modulosCompletados >= r.data.totalModulos ? "evaluacion" : "modulo");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
-    setModo("texto");
-    const iniciales = (s.mensajes ?? []).map((m) => ({ rol: m.rol as Msg["rol"], texto: m.texto }));
-    setMensajes(iniciales);
-    transcriptRef.current = iniciales;
-    setFase("sala");
-  }, [token]);
+  async function responder() {
+    if (!a?.pregunta || eleccion === null) return;
+    setOcupado(true);
+    setError("");
+    const r = await responderEvaluacion(token, a.pregunta.indice, eleccion);
+    setOcupado(false);
+    if (!r.ok) return setError(r.error);
+    setRetro({ correcta: Boolean(r.data.correcta), explicacion: r.data.explicacion });
+    setA(r.data);
+  }
 
-  const enviar = useCallback(async () => {
-    const t = texto.trim();
-    if (!t || pensando) return;
-    setTexto("");
-    setMensajes((m) => [...m, { rol: "user", texto: t }]);
-    transcriptRef.current = [...transcriptRef.current, { rol: "user", texto: t }];
-    setPensando(true);
-    const turno = await turnoCurso(token, t);
-    setPensando(false);
-    if (!turno.ok) {
-      setMensajes((m) => [...m, { rol: "assistant", texto: `No pude procesar tu respuesta: ${turno.error}` }]);
-      return;
-    }
-    setMensajes((m) => [...m, { rol: "assistant", texto: turno.data.respuesta }]);
-    transcriptRef.current = [...transcriptRef.current, { rol: "assistant", texto: turno.data.respuesta }];
-  }, [texto, pensando, token]);
+  function continuar() {
+    setRetro(null);
+    setEleccion(null);
+    if (a?.estado === "completado") setVista("resultado");
+  }
 
-  const continuarModulo = useCallback(async () => {
-    setFase("avanzando");
-    try {
-      await anamRef.current?.stopStreaming?.();
-    } catch {}
-    const r = await avanzarModulo(token, modo === "avatar" ? transcriptRef.current : undefined);
-    if (!r.ok) {
-      setFase("sala");
-      return;
-    }
-    setInfo(r.data);
-    if (r.data.estado === "completado") {
-      setFase("fin");
-      return;
-    }
-    await conectarModulo();
-  }, [token, modo, conectarModulo]);
-
-  const moduloActualInfo = info?.modulos.find((m) => m.orden === info.moduloActual);
+  const modulo = a && vista === "modulo" ? a.modulos[a.modulosCompletados] : null;
 
   return (
     <main className="min-h-svh bg-bg">
-      <link rel="preconnect" href="https://api.anam.ai" />
       <header className="border-b border-border-soft">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-5 py-4">
           <Logo />
@@ -194,209 +93,146 @@ export default function SalaCapacitacion() {
       </header>
 
       <div className="mx-auto max-w-3xl px-5 py-8 sm:py-10">
-        {fase === "cargando" && (
-          <div className="grid place-items-center py-24 text-ink-3">
-            <Loader2 className="h-6 w-6 animate-spin" />
-          </div>
-        )}
+        {vista === "cargando" && <div className="grid place-items-center py-24 text-ink-3"><Loader2 className="h-6 w-6 animate-spin" /></div>}
 
-        {fase === "no_disponible" && (
+        {vista === "no_disponible" && (
           <Card className="p-8 text-center">
             <h1 className="font-display text-xl font-bold">Liga no disponible</h1>
-            <p className="mt-2 text-sm text-ink-2">
-              Esta capacitación no existe o ya no está activa. Verifica la liga que recibiste o contacta al equipo de RH.
-            </p>
+            <p className="mt-2 text-sm text-ink-2">Este curso no existe o ya no está activo. Pide una liga nueva a quien te lo asignó.</p>
           </Card>
         )}
 
-        {info && (fase === "bienvenida" || fase === "sala" || fase === "conectando" || fase === "avanzando") && (
-          <ProgresoModulos info={info} />
-        )}
-
-        {fase === "bienvenida" && info && (
-          <>
-            <div className="mt-6 text-center">
-              <Badge tone="good" dot>
-                Capacitación · {info.empresa}
-              </Badge>
-              <h1 className="font-display mt-3 text-2xl font-bold sm:text-3xl">
-                Hola {info.colaborador.split(" ")[0]}, bienvenido(a) a «{info.curso}»
-              </h1>
-              <p className="mx-auto mt-2 max-w-xl text-sm leading-relaxed text-ink-2">
-                Vas a tomar este curso con <b className="text-ink">tu instructor virtual</b>
-                {info.avatarDisponible ? " en video" : " por chat"}, un módulo a la vez. Al terminar cada módulo te va
-                a hacer un par de preguntas para verificar que quedó claro.
-              </p>
-            </div>
-
-            <Card className="mt-6 p-6">
-              <div className="flex items-start gap-3">
-                <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-human" />
-                <p className="text-sm leading-relaxed text-ink-2">
-                  Esta sesión se registra para evaluar tu comprensión del curso — el equipo de RH puede revisar tu
-                  avance y resultados.
-                </p>
+        {a && vista !== "cargando" && vista !== "no_disponible" && (
+          <div className="mb-6 text-center">
+            <Badge tone="brand" dot>{a.empresa} · Capacitación</Badge>
+            <h1 className="font-display mt-3 text-2xl font-bold sm:text-3xl">{a.curso}</h1>
+            {a.totalModulos > 0 && vista !== "registro" && (
+              <div className="mx-auto mt-4 flex max-w-md items-center gap-2">
+                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-2">
+                  <div className="h-full rounded-full bg-brand transition-all" style={{ width: `${Math.round(((a.modulosCompletados + (vista === "resultado" ? 1 : 0)) / (a.totalModulos + 1)) * 100)}%` }} />
+                </div>
+                <span className="font-mono text-[11px] text-ink-3">
+                  {vista === "evaluacion" ? `Evaluación ${a.preguntasRespondidas + 1}/${a.totalPreguntas}` : vista === "resultado" ? "Terminado" : `Módulo ${Math.min(a.modulosCompletados + 1, a.totalModulos)}/${a.totalModulos}`}
+                </span>
               </div>
-              <Button className="mt-5 w-full" onClick={conectarModulo}>
-                {info.avatarDisponible ? <Video className="h-4 w-4" /> : <MessageCircle className="h-4 w-4" />}
-                Entendido, comenzar
-              </Button>
-            </Card>
-          </>
-        )}
-
-        {fase === "conectando" && (
-          <div className="grid place-items-center gap-3 py-16 text-ink-2">
-            <Loader2 className="h-6 w-6 animate-spin text-brand" />
-            <p className="text-sm">Preparando tu módulo…</p>
+            )}
           </div>
         )}
 
-        {(fase === "sala" || fase === "avanzando") && info && (
-          <Card className="mt-4 overflow-hidden">
-            {modo === "avatar" ? (
-              <div className="relative aspect-video bg-[#151517]">
-                <video id="avatar-video" autoPlay playsInline className="h-full w-full object-cover" />
-                <span className="absolute left-3 top-3 flex items-center gap-1.5 rounded-full bg-black/50 px-2.5 py-1 font-mono text-[11px] text-white/90 backdrop-blur">
-                  <Sparkles className="h-3 w-3" /> Instructor · IA en video
-                </span>
-                <div className="absolute inset-x-0 bottom-0 space-y-1 bg-gradient-to-t from-black/70 to-transparent p-4 pt-10">
-                  {mensajes.slice(-2).map((m, i) => (
-                    <p key={i} className="text-[13px] leading-snug text-white/90">
-                      <b>{m.rol === "assistant" ? "Instructor: " : "Tú: "}</b>
-                      {m.texto}
-                    </p>
-                  ))}
-                </div>
+        {a && vista === "registro" && (
+          <Card className="p-6">
+            <h2 className="font-display text-lg font-bold">Antes de empezar</h2>
+            <p className="mt-1 text-sm text-ink-2">Solo necesitamos tu nombre y un correo o WhatsApp para enviarte tu resultado.</p>
+            <div className="mt-4 flex flex-col gap-3">
+              <input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Nombre completo" className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+              <div className="grid gap-3 sm:grid-cols-2">
+                <input value={correo} onChange={(e) => setCorreo(e.target.value)} placeholder="Correo" type="email" className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+                <input value={telefono} onChange={(e) => setTelefono(e.target.value)} placeholder="WhatsApp (10 dígitos)" className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
               </div>
-            ) : (
-              <div ref={chatRef} className="h-[24rem] space-y-3 overflow-y-auto p-5">
-                {mensajes.map((m, i) => (
-                  <div key={i} className={cn("flex", m.rol === "user" ? "justify-end" : "justify-start")}>
-                    <div
-                      className={cn(
-                        "max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed",
-                        m.rol === "user" ? "bg-brand text-white" : "bg-surface-2 text-ink",
-                      )}
-                    >
-                      {m.rol === "assistant" && (
-                        <span className="mb-0.5 flex items-center gap-1 font-mono text-[10px] font-semibold text-brand">
-                          <Sparkles className="h-3 w-3" /> INSTRUCTOR
-                        </span>
-                      )}
-                      {m.texto}
-                    </div>
-                  </div>
-                ))}
-                {pensando && (
-                  <div className="flex items-center gap-2 text-ink-3">
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
-                    <span className="text-xs italic">El instructor está escribiendo…</span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="flex items-center gap-2 border-t border-border-faint p-4">
-              {modo === "texto" && (
-                <>
-                  <input
-                    value={texto}
-                    onChange={(e) => setTexto(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && enviar()}
-                    placeholder="Escribe tu respuesta…"
-                    disabled={fase === "avanzando"}
-                    className="h-11 flex-1 rounded-xl border border-border-soft bg-surface px-4 text-sm outline-none transition focus:border-brand"
-                  />
-                  <Button size="sm" onClick={enviar} disabled={!texto.trim() || fase === "avanzando"}>
-                    <Send className="h-4 w-4" />
-                  </Button>
-                </>
-              )}
-              <Button
-                size="sm"
-                onClick={continuarModulo}
-                disabled={fase === "avanzando"}
-                className={cn(modo === "avatar" && "ml-auto")}
-              >
-                {fase === "avanzando" ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <ArrowRight className="h-4 w-4" />
-                )}
-                Continuar al siguiente módulo
+              {error && <p className="text-sm font-semibold text-bad">{error}</p>}
+              <Button className="w-full" onClick={registrar} disabled={ocupado || !nombre.trim() || !(correo.trim() || telefono.trim())}>
+                {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />} Empezar el curso
               </Button>
-            </div>
-
-            <div className="flex items-center gap-2.5 border-t border-border-faint bg-human-soft/40 px-5 py-2.5">
-              <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-human" />
-              <p className="text-[12px] text-ink-3">
-                Módulo {info.moduloActual} de {info.totalModulos}
-                {moduloActualInfo ? ` · ${moduloActualInfo.titulo}` : ""} — da clic en "Continuar" cuando tu
-                instructor te lo indique.
-              </p>
             </div>
           </Card>
         )}
 
-        {fase === "fin" && info && (
-          <Card className="p-8 text-center">
-            <span className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-good/10">
-              <CheckCircle2 className="h-7 w-7 text-good" />
-            </span>
-            <h1 className="font-display mt-4 text-2xl font-bold">¡Curso completado!</h1>
-            <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">
-              Terminaste «{info.curso}». Tus resultados quedaron registrados y el equipo de RH puede revisarlos.
-            </p>
-            {info.resultadoEvaluacion && (
-              <div className="mx-auto mt-6 max-w-md space-y-2 text-left">
-                {info.resultadoEvaluacion.modulos.map((m) => (
-                  <div key={m.modulo} className="flex items-center gap-2 rounded-xl border border-border-soft bg-surface p-3">
-                    {m.comprendio ? (
-                      <CheckCircle2 className="h-4 w-4 shrink-0 text-good" />
-                    ) : (
-                      <span className="h-4 w-4 shrink-0 rounded-full border-2 border-warn" />
-                    )}
-                    <span className="text-sm">{m.titulo}</span>
-                  </div>
-                ))}
+        {a && vista === "portada" && (
+          <Card className="p-6">
+            <p className="text-sm text-ink-2">Hola{a.persona ? ` ${a.persona.split(" ")[0]}` : ""} 👋</p>
+            <h2 className="font-display mt-1 text-lg font-bold">Objetivo del curso</h2>
+            <p className="mt-2 text-sm leading-relaxed text-ink-2">{a.objetivo}</p>
+            <ul className="mt-4 flex flex-col gap-1.5 text-sm text-ink-2">
+              {a.modulos.map((m) => (
+                <li key={m.orden} className="flex items-center gap-2"><BookOpen className="h-4 w-4 text-ink-3" /> {m.orden}. {m.titulo}</li>
+              ))}
+              <li className="flex items-center gap-2"><Award className="h-4 w-4 text-ink-3" /> Evaluación final ({a.totalPreguntas} preguntas)</li>
+            </ul>
+            <p className="mt-3 text-xs text-ink-3">Duración aproximada: {a.duracionHoras} h. Puedes cerrar y volver: tu avance se guarda.</p>
+            <Button className="mt-5 w-full" onClick={() => setVista("modulo")}>
+              <ArrowRight className="h-4 w-4" /> Comenzar
+            </Button>
+          </Card>
+        )}
+
+        {a && vista === "modulo" && modulo && (
+          <Card className="p-6">
+            <p className="font-mono text-[11px] uppercase tracking-wide text-ink-3">Módulo {modulo.orden} de {a.totalModulos}</p>
+            <h2 className="font-display mt-1 text-xl font-bold">{modulo.titulo}</h2>
+            <div className="mt-4 whitespace-pre-wrap text-sm leading-relaxed text-ink-2">{modulo.contenido}</div>
+            {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
+            <Button className="mt-6 w-full" onClick={siguienteModulo} disabled={ocupado}>
+              {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
+              {a.modulosCompletados + 1 >= a.totalModulos ? "Terminar módulos e ir a la evaluación" : "Siguiente módulo"}
+            </Button>
+          </Card>
+        )}
+
+        {a && vista === "evaluacion" && a.pregunta && (
+          <Card className="p-6">
+            <p className="font-mono text-[11px] uppercase tracking-wide text-ink-3">Evaluación · pregunta {a.pregunta.indice + 1} de {a.totalPreguntas}</p>
+            <h2 className="font-display mt-1 text-lg font-bold">{a.pregunta.pregunta}</h2>
+            <div className="mt-4 flex flex-col gap-2">
+              {a.pregunta.opciones.map((o, k) => (
+                <button
+                  key={k}
+                  type="button"
+                  disabled={retro !== null}
+                  onClick={() => setEleccion(k)}
+                  className={cn(
+                    "rounded-xl border px-4 py-3 text-left text-sm transition",
+                    eleccion === k ? "border-brand bg-brand-soft text-ink" : "border-border-soft hover:border-brand/40",
+                    retro !== null && eleccion === k && (retro.correcta ? "border-good bg-good-soft" : "border-bad bg-bad-soft"),
+                  )}
+                >
+                  {o}
+                </button>
+              ))}
+            </div>
+            {retro && (
+              <div className={cn("mt-4 flex items-start gap-2 rounded-xl p-3 text-sm", retro.correcta ? "bg-good-soft text-good" : "bg-bad-soft text-bad")}>
+                {retro.correcta ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : <XCircle className="mt-0.5 h-4 w-4 shrink-0" />}
+                <span>{retro.correcta ? "¡Correcto!" : "Incorrecto."} {retro.explicacion && <span className="text-ink-2">{retro.explicacion}</span>}</span>
               </div>
             )}
+            {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
+            {retro === null ? (
+              <Button className="mt-5 w-full" onClick={responder} disabled={ocupado || eleccion === null}>
+                {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />} Responder
+              </Button>
+            ) : (
+              <Button className="mt-5 w-full" onClick={continuar}>
+                <ArrowRight className="h-4 w-4" /> {a.estado === "completado" ? "Ver mi resultado" : "Siguiente pregunta"}
+              </Button>
+            )}
+          </Card>
+        )}
+
+        {a && vista === "evaluacion" && !a.pregunta && a.estado !== "completado" && (
+          <Card className="p-6 text-center text-sm text-ink-2">Cargando la evaluación…</Card>
+        )}
+
+        {a && vista === "resultado" && a.resultado && (
+          <Card className="p-8 text-center">
+            <span className={cn("mx-auto grid h-16 w-16 place-items-center rounded-full", a.resultado.aprobado ? "bg-good-soft text-good" : "bg-bad-soft text-bad")}>
+              {a.resultado.aprobado ? <Award className="h-8 w-8" /> : <XCircle className="h-8 w-8" />}
+            </span>
+            <h2 className="font-display mt-4 text-2xl font-bold">{a.resultado.aprobado ? "¡Aprobado!" : "No aprobado"}</h2>
+            <p className="mt-1 text-sm text-ink-2">
+              {a.resultado.calificacion}% · {a.resultado.aciertos} de {a.resultado.total} correctas · mínimo {a.resultado.minimo}%
+            </p>
+            <ul className="mx-auto mt-5 max-w-md divide-y divide-border-faint text-left">
+              {a.resultado.detalle.map((d, i) => (
+                <li key={i} className="flex items-start gap-2 py-2 text-xs">
+                  {d.correcta ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-good" /> : <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-bad" />}
+                  <span className="text-ink-2">{d.pregunta}{!d.correcta && d.explicacion ? <span className="block text-ink-3">{d.explicacion}</span> : null}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-5 text-xs text-ink-3">Tu resultado quedó registrado{a.persona ? ` a nombre de ${a.persona}` : ""}. Ya puedes cerrar esta ventana.</p>
           </Card>
         )}
       </div>
     </main>
-  );
-}
-
-function ProgresoModulos({ info }: { info: AsignacionPublica }) {
-  return (
-    <div className="mt-2 flex flex-wrap items-center gap-2">
-      {info.modulos.map((m) => {
-        const actual = m.orden === info.moduloActual && info.estado !== "completado";
-        return (
-          <span
-            key={m.orden}
-            className={cn(
-              "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium",
-              m.completado
-                ? "bg-good-soft text-good"
-                : actual
-                  ? "bg-brand-soft text-brand"
-                  : "bg-surface-2 text-ink-3",
-            )}
-          >
-            {m.completado ? (
-              <CheckCircle2 className="h-3.5 w-3.5" />
-            ) : actual ? (
-              <span className="h-1.5 w-1.5 rounded-full bg-brand" />
-            ) : (
-              <Lock className="h-3 w-3" />
-            )}
-            {m.titulo}
-          </span>
-        );
-      })}
-    </div>
   );
 }

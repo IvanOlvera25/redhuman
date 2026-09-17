@@ -1380,12 +1380,27 @@ class ModuloCursoGenerado(BaseModel):
     preguntas_verificacion: List[PreguntaVerificacion] = Field(description="1 a 2 preguntas de comprensión.")
 
 
+class PreguntaEvaluacion(BaseModel):
+    """Pregunta de la evaluación final INTEGRADA (2026-09-16): opción múltiple o verdadero/falso, calificable sola."""
+
+    pregunta: str = Field(description="Pregunta clara sobre el contenido de los módulos, español mexicano.")
+    tipo: Literal["opcion", "vf"] = Field(description="'opcion' = opción múltiple (3-4 opciones); 'vf' = verdadero/falso.")
+    opciones: List[str] = Field(description="Para 'opcion': 3 a 4 opciones. Para 'vf': exactamente ['Verdadero', 'Falso'].")
+    correcta: int = Field(description="Índice (0-based) de la opción correcta dentro de `opciones`.")
+    explicacion: str = Field(default="", description="Una línea que justifica la respuesta correcta (se muestra al terminar).")
+
+
 class GuionCurso(BaseModel):
     objetivo: str = Field(
-        description="Objetivo del curso en 2-3 frases: qué sabrá o podrá hacer el colaborador al terminar."
+        description="Objetivo del curso en 2-3 frases: qué sabrá o podrá hacer la persona al terminar."
     )
+    categoria: str = Field(default="", description="Categoría corta del curso (p. ej. Seguridad, Ventas, Inducción, Cumplimiento).")
     modulos: List[ModuloCursoGenerado] = Field(
-        description="Módulos ordenados: el primero SIEMPRE de bienvenida, el último SIEMPRE de evaluación final."
+        description="Módulos ordenados de contenido: el primero de bienvenida y contexto; NO incluyas un módulo de evaluación (va aparte)."
+    )
+    evaluacion: List[PreguntaEvaluacion] = Field(
+        default_factory=list,
+        description="Evaluación final integrada: 5 a 10 preguntas (opción múltiple o V/F) que cubren todos los módulos.",
     )
 
 
@@ -1428,27 +1443,71 @@ def _guion_curso_demo(tema: str, duracion_horas: float) -> GuionCurso:
     )
 
 
-def guion_curso(tema: str, duracion_horas: float) -> Tuple[GuionCurso, bool]:
+def _evaluacion_demo(tema: str, modulos: List[ModuloCursoGenerado]) -> List[PreguntaEvaluacion]:
+    salida = [
+        PreguntaEvaluacion(
+            pregunta=f"¿Cuál es el objetivo principal del curso «{tema}»?",
+            tipo="opcion",
+            opciones=["Aplicar lo aprendido en el trabajo diario", "Memorizar definiciones", "Cumplir un trámite", "Ninguna de las anteriores"],
+            correcta=0, explicacion="El curso busca que apliques el contenido en tu trabajo.",
+        ),
+        PreguntaEvaluacion(pregunta="El primer módulo presenta los objetivos del curso.", tipo="vf", opciones=["Verdadero", "Falso"], correcta=0, explicacion="El módulo de bienvenida presenta los objetivos."),
+    ]
+    for m in modulos[1:4]:
+        salida.append(PreguntaEvaluacion(
+            pregunta=f"El módulo «{m.titulo}» forma parte de este curso.", tipo="vf", opciones=["Verdadero", "Falso"], correcta=0,
+            explicacion=f"«{m.titulo}» es uno de los módulos del curso.",
+        ))
+    return salida
+
+
+def _asegurar_evaluacion(g: GuionCurso, tema: str) -> GuionCurso:
+    """La evaluación es parte del curso: si el modelo no la trajo o vino inválida, se completa."""
+    validas: List[PreguntaEvaluacion] = []
+    for q in g.evaluacion:
+        if q.tipo == "vf":
+            q.opciones = ["Verdadero", "Falso"]
+        if not q.opciones or not (0 <= q.correcta < len(q.opciones)):
+            continue
+        validas.append(q)
+    g.evaluacion = validas or _evaluacion_demo(tema, g.modulos)
+    # los módulos son de contenido: un «Evaluación final» heredado se quita (la evaluación va integrada aparte)
+    g.modulos = [m for m in g.modulos if not m.titulo.strip().lower().startswith("evaluaci")] or g.modulos
+    return g
+
+
+def guion_curso(tema: str, duracion_horas: float, contexto: str = "", material: str = "") -> Tuple[GuionCurso, bool]:
+    """Módulo universal (2026-09-16): a partir del tema, el contexto opcional de RH, el material adjunto
+    (texto extraído) y la duración, genera objetivo, categoría, módulos y la evaluación final integrada."""
     client = _client()
     if client is None:
-        return _guion_curso_demo(tema, duracion_horas), False
+        g = _guion_curso_demo(tema, duracion_horas)
+        g.categoria = g.categoria or "General"
+        return _asegurar_evaluacion(g, tema), False
 
+    entrada = f"Tema del curso: {tema}\nDuración estimada: {duracion_horas} horas"
+    if contexto.strip():
+        entrada += f"\nContexto de RH (público, tono, énfasis): {contexto.strip()[:2000]}"
+    if material.strip():
+        entrada += f"\n\nMaterial de referencia adjunto (úsalo como fuente principal del contenido):\n{material.strip()[:24000]}"
     resp = client.responses.parse(
         model=MODEL,
         instructions=(
-            "Diseñas cursos de capacitación corporativa para Red Human AI (RH en México), pensados "
-            "para impartirse por un instructor o, más adelante, un avatar de IA. Reglas: (1) el primer "
-            "módulo SIEMPRE es 'Bienvenida y objetivos'; (2) el último módulo SIEMPRE es 'Evaluación "
-            "final'; (3) los módulos intermedios cubren el tema de forma práctica y aplicable al "
-            "trabajo diario, en español mexicano; (4) el número de módulos es proporcional a la "
-            "duración (aprox. un módulo por cada 20-30 minutos); (5) cada módulo trae 1-2 preguntas "
-            "de verificación de comprensión con su criterio de respuesta correcta; (6) nunca pidas ni "
-            "menciones datos sensibles (salud, embarazo, religión, estado civil, orientación)."
+            "Diseñas cursos de capacitación para Red Human AI (México) que se cursan en pantalla: la persona lee "
+            "cada módulo y al final contesta una evaluación integrada calificada automáticamente. Reglas: (1) el "
+            "primer módulo es de bienvenida y contexto; los demás cubren el tema de forma práctica, en español "
+            "mexicano, con `contenido` completo y autoexplicativo (párrafos cortos, listas cuando ayuden); (2) el "
+            "número de módulos es proporcional a la duración (aprox. uno por cada 20-30 minutos, máximo 8); "
+            "(3) NO agregues un módulo de evaluación: la evaluación va en `evaluacion` como 5 a 10 preguntas de "
+            "opción múltiple (3-4 opciones, UNA correcta) o verdadero/falso, que cubran todos los módulos y con "
+            "`explicacion` breve; (4) si hay material adjunto, básate en él y no inventes datos que lo contradigan; "
+            "(5) asigna una `categoria` corta; (6) nunca pidas ni menciones datos sensibles (salud, embarazo, "
+            "religión, estado civil, orientación)."
         ),
-        input=f"Tema del curso: {tema}\nDuración estimada: {duracion_horas} horas",
+        input=entrada,
         text_format=GuionCurso,
     )
-    return resp.output_parsed, True
+    return _asegurar_evaluacion(resp.output_parsed, tema), True
 
 
 class TurnoCurso(BaseModel):

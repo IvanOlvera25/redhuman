@@ -1435,16 +1435,26 @@ export function finalizarEntrevista(token: string, transcript?: { rol: string; t
    Módulo 1 · Capacitación (Fase 1 — sin avatar todavía)
    ============================================================ */
 
-export interface PreguntaVerificacion {
-  pregunta: string;
-  criterio_respuesta_correcta: string;
-}
+/* ============================================================
+   Capacitación — módulo UNIVERSAL (2026-09-16)
+   Un solo tipo de curso (objetivo + módulos + evaluación integrada), asignable a colaboradores, candidatos
+   (filtro de una vacante) y externos (liga pública). Un solo tablero de seguimiento.
+   ============================================================ */
+
+export type TipoAsignacionCurso = "colaborador" | "candidato" | "externo";
 
 export interface ModuloCurso {
   orden: number;
   titulo: string;
   contenido: string;
-  preguntasVerificacion: PreguntaVerificacion[];
+}
+
+export interface PreguntaEvaluacion {
+  pregunta: string;
+  tipo: "opcion" | "vf";
+  opciones: string[];
+  correcta: number;
+  explicacion: string;
 }
 
 export interface Curso {
@@ -1453,26 +1463,57 @@ export interface Curso {
   categoria: string;
   duracionHoras: number;
   objetivo: string;
-  estado: "Borrador" | "Publicado";
+  estado: "Borrador" | "Publicado" | "Archivado";
   obligatorio: boolean;
   creadoPor: string;
   creado: string;
   modulos: number;
+  preguntas: number;
+  calificacionMinima: number;
   asignados: number;
   completados: number;
+  aprobados: number;
+  adjuntos: string[];
+  /* detalle */
+  contexto?: string;
   listaModulos?: ModuloCurso[];
+  evaluacion?: PreguntaEvaluacion[];
 }
 
 export interface AsignacionCurso {
   id: string;
   cursoId: string;
-  colaboradorId: string;
-  colaboradorNombre: string;
+  cursoTitulo: string;
+  tipo: TipoAsignacionCurso;
+  persona: string;
+  correo: string;
+  telefono: string;
+  organizacion: string;
+  colaboradorId: string | null;
+  postulacionId: string | null;
+  vacante: string | null;
   estado: "pendiente" | "en_curso" | "completado";
   moduloActual: number;
+  totalModulos: number;
+  avance: number;
+  calificacion: number | null;
+  aprobado: boolean | null;
+  asignadoPor: string;
   asignado: string;
+  asignadoEn: string | null;
+  iniciadoEn: string | null;
   completado: string | null;
   token: string;
+  liga: string;
+}
+
+export interface CapacitacionKpis {
+  cursosActivos: number;
+  enFormacion: number;
+  tasaFinalizacion: number;
+  tasaAprobacion: number;
+  horasImpartidas: number;
+  porTipo: Record<TipoAsignacionCurso, number>;
 }
 
 export function fetchCursos() {
@@ -1483,12 +1524,28 @@ export function fetchCurso(codigo: string) {
   return get<Curso>(`/capacitacion/${codigo}`);
 }
 
-export function generarCurso(datos: { tema: string; duracionHoras: number; categoria?: string; obligatorio?: boolean }) {
-  return post<Curso>("/capacitacion/generar", {
-    tema: datos.tema,
-    duracion_horas: datos.duracionHoras,
-    categoria: datos.categoria ?? "",
-    obligatorio: datos.obligatorio ?? false,
+/** «Generar curso con IA»: solo tema, contexto opcional, adjuntos y duración. */
+export function generarCurso(datos: { tema: string; duracionHoras: number; contexto?: string; archivos?: File[] }) {
+  const form = new FormData();
+  form.append("tema", datos.tema);
+  form.append("duracion_horas", String(datos.duracionHoras));
+  form.append("contexto", datos.contexto ?? "");
+  for (const f of datos.archivos ?? []) form.append("archivos", f);
+  return subir<Curso & { ia: boolean }>("/capacitacion/generar", form);
+}
+
+export function editarCurso(
+  codigo: string,
+  cambios: { titulo?: string; objetivo?: string; categoria?: string; duracionHoras?: number; calificacionMinima?: number; modulos?: { titulo: string; contenido: string }[]; evaluacion?: PreguntaEvaluacion[] },
+) {
+  return patch<Curso>(`/capacitacion/${codigo}`, {
+    titulo: cambios.titulo,
+    objetivo: cambios.objetivo,
+    categoria: cambios.categoria,
+    duracion_horas: cambios.duracionHoras,
+    calificacion_minima: cambios.calificacionMinima,
+    modulos: cambios.modulos,
+    evaluacion: cambios.evaluacion,
   });
 }
 
@@ -1496,106 +1553,80 @@ export function publicarCurso(codigo: string) {
   return patch<Curso>(`/capacitacion/${codigo}/publicar`, {});
 }
 
-export function asignarCurso(codigo: string, colaboradorIds: string[]) {
-  return post<AsignacionCurso[]>(`/capacitacion/${codigo}/asignar`, { colaborador_ids: colaboradorIds });
+export function archivarCurso(codigo: string) {
+  return eliminar<{ ok: boolean }>(`/capacitacion/${codigo}`);
+}
+
+/** Asignación universal: colaboradores (COL-####), candidatos (P-####) y/o externos (con o sin datos). */
+export function asignarCurso(
+  codigo: string,
+  datos: { colaboradorIds?: string[]; postulacionIds?: string[]; externos?: { nombre?: string; correo?: string; telefono?: string; organizacion?: string }[]; notificar?: boolean },
+) {
+  return post<{ asignaciones: AsignacionCurso[]; envios: Record<string, unknown>[]; noEncontrados: string[] }>(`/capacitacion/${codigo}/asignar`, {
+    colaborador_ids: datos.colaboradorIds ?? [],
+    postulacion_ids: datos.postulacionIds ?? [],
+    externos: datos.externos ?? [],
+    notificar: datos.notificar ?? true,
+  });
 }
 
 export function fetchAsignacionesCurso(codigo: string) {
   return get<AsignacionCurso[]>(`/capacitacion/${codigo}/asignaciones`);
 }
 
-/* ---------------- Fase 3 — KPIs globales y reporte por curso ---------------- */
-
-export interface CapacitacionKpis {
-  cursosActivos: number;
-  colaboradoresEnFormacion: number;
-  tasaFinalizacionGlobal: number;
-  horasImpartidas: number;
+/** Tablero único de seguimiento con filtros. */
+export function fetchTableroCapacitacion(filtros?: { tipo?: TipoAsignacionCurso | ""; estado?: string; curso?: string; aprobado?: boolean | null }) {
+  const params = new URLSearchParams();
+  if (filtros?.tipo) params.set("tipo", filtros.tipo);
+  if (filtros?.estado) params.set("estado", filtros.estado);
+  if (filtros?.curso) params.set("curso", filtros.curso);
+  if (filtros?.aprobado !== undefined && filtros?.aprobado !== null) params.set("aprobado", String(filtros.aprobado));
+  const q = params.toString();
+  return get<AsignacionCurso[]>(`/capacitacion/asignaciones${q ? `?${q}` : ""}`);
 }
 
 export function fetchCapacitacionKpis() {
   return get<CapacitacionKpis>("/capacitacion/kpis");
 }
 
-export interface ReporteModulo {
-  orden: number;
-  titulo: string;
-  totalEvaluados: number;
-  comprendioPct: number | null;
-}
-
-export interface ReporteColaborador {
-  asignacionId: string;
-  colaboradorId: string;
-  colaboradorNombre: string;
-  estado: "pendiente" | "en_curso" | "completado";
-  moduloActual: number;
-  asignado: string;
-  completado: string | null;
-  resultadoEvaluacion: AsignacionPublica["resultadoEvaluacion"];
-}
-
-export interface ReporteCurso {
-  totalAsignados: number;
-  completados: number;
-  enCurso: number;
-  pendientes: number;
-  tasaFinalizacion: number;
-  duracionPromedioHoras: number | null;
-  porModulo: ReporteModulo[];
-  colaboradores: ReporteColaborador[];
-}
-
-export function fetchReporteCurso(codigo: string) {
-  return get<ReporteCurso>(`/capacitacion/${codigo}/reporte`);
-}
-
-/* ---------------- Fase 2 — sala pública (colaborador) ---------------- */
-
-export interface ModuloCursoPublico {
-  orden: number;
-  titulo: string;
-  completado: boolean;
-  contenido?: string;
-  preguntasVerificacion?: PreguntaVerificacion[];
-}
+/* ---------- sala pública (liga /capacitacion/[token]) ---------- */
 
 export interface AsignacionPublica {
-  colaborador: string;
+  persona: string;
+  tipo: TipoAsignacionCurso;
+  requiereRegistro: boolean;
   curso: string;
+  objetivo: string;
+  categoria: string;
+  duracionHoras: number;
   empresa: string;
   estado: "pendiente" | "en_curso" | "completado";
-  moduloActual: number;
+  modulosCompletados: number;
   totalModulos: number;
-  avatarDisponible: boolean;
-  modulos: ModuloCursoPublico[];
-  resultadoEvaluacion: {
-    modulos: {
-      modulo: number;
-      titulo: string;
-      comprendio: boolean;
-      comentario: string;
-      preguntas: { pregunta: string; respondida_correctamente: boolean; evidencia: string }[];
-    }[];
-  } | null;
+  modulos: { orden: number; titulo: string; contenido: string; completado: boolean }[];
+  totalPreguntas: number;
+  preguntasRespondidas: number;
+  pregunta: { indice: number; pregunta: string; tipo: "opcion" | "vf"; opciones: string[] } | null;
+  resultado: { calificacion: number; aprobado: boolean; aciertos: number; total: number; minimo: number; detalle: { pregunta: string; correcta: boolean; explicacion: string }[] } | null;
 }
 
 export function fetchAsignacionPublica(token: string) {
   return get<AsignacionPublica>(`/capacitacion/publica/${token}`);
 }
 
-export function iniciarSesionCurso(token: string) {
-  return post<{ modo: "avatar" | "texto"; session_token?: string; mensajes?: { rol: string; texto: string }[] } & AsignacionPublica>(
-    `/capacitacion/publica/${token}/sesion`,
+export function registrarExternoCurso(token: string, datos: { nombre: string; correo?: string; telefono?: string }) {
+  return post<AsignacionPublica>(`/capacitacion/publica/${token}/registro`, datos);
+}
+
+export function avanzarModulo(token: string, modulo: number) {
+  return post<AsignacionPublica>(`/capacitacion/publica/${token}/avanzar`, { modulo });
+}
+
+export function responderEvaluacion(token: string, indice: number, respuesta: number) {
+  return post<AsignacionPublica & { terminado: boolean; correcta: boolean | null; explicacion: string; siguiente: number | null }>(
+    `/capacitacion/publica/${token}/responder`,
+    { indice, respuesta },
   );
-}
-
-export function turnoCurso(token: string, texto: string) {
-  return post<{ respuesta: string; ia: boolean }>(`/capacitacion/publica/${token}/turno`, { texto });
-}
-
-export function avanzarModulo(token: string, transcript?: { rol: string; texto: string }[]) {
-  return post<AsignacionPublica>(`/capacitacion/publica/${token}/avanzar`, { transcript: transcript ?? null });
 }
 
 /* ============================================================
