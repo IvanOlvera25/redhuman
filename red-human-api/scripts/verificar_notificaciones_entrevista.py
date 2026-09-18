@@ -130,6 +130,40 @@ with TestClient(app) as client:
     check("quedó agendada" in asunto_c and "https://teams.microsoft.com/l/meetup-join/abc" in html_c and "10:30 h" in html_c and "septiembre" in html_c, "correo del candidato: fecha, hora y liga de conexión (Teams)")
     check("Grupo CARBE" in html_c and "Unirme a la entrevista" in html_c, "…con la empresa visible y botón de unirse")
 
+    # ================= 2b. Mismo layout para modificada / recordatorio / cancelada =================
+    print("\n--- 2b. Modificada, recordatorio y cancelada con el layout corporativo ---")
+    CORREOS.clear()
+    r = client.patch(f"/candidatos/{P}/entrevista-humana", json={"fecha": "2026-09-25", "hora": "12:00", "modalidad": "Videollamada", "liga": "https://teams.microsoft.com/l/meetup-join/abc", "notificar": {"candidato_correo": True, "entrevistador_correo": True, "cliente_correo": False, "cliente_whatsapp": False}})
+    check(r.status_code == 200, f"modificar entrevista ({r.status_code})")
+    cm = {c[0]: c for c in CORREOS}
+    check("modificada" in cm[admin.correo][1].lower() and "<!doctype html>" in cm[admin.correo][2].lower() and "Ver expediente del candidato" in cm[admin.correo][2] and "25 de septiembre" in cm[admin.correo][2], "entrevistador · modificada: HTML corporativo con la nueva fecha y CTA")
+    check("modificada" in cm["carlos@correo.mx"][1].lower() and "12:00 h" in cm["carlos@correo.mx"][2] and "Unirme a la entrevista" in cm["carlos@correo.mx"][2], "candidato · modificada: HTML con nueva hora y liga")
+    CORREOS.clear()
+    r = client.post(f"/candidatos/{P}/entrevista-humana/recordatorio", json={"notificar": {"candidato_correo": True, "entrevistador_correo": True, "cliente_correo": False, "cliente_whatsapp": False}})
+    check(r.status_code == 200, f"recordatorio ({r.status_code})")
+    cm = {c[0]: c for c in CORREOS}
+    check(admin.correo in cm and "Recordatorio" in cm[admin.correo][1] and "<!doctype html>" in cm[admin.correo][2].lower(), "entrevistador · recordatorio: HTML corporativo")
+    check("carlos@correo.mx" in cm and "Recordatorio" in cm["carlos@correo.mx"][1] and "se acerca" in cm["carlos@correo.mx"][2], "candidato · recordatorio: HTML corporativo")
+    CORREOS.clear()
+    r = client.post(f"/candidatos/{P}/entrevista-humana/cancelar", json={"notificar": {"candidato_correo": True, "entrevistador_correo": True, "cliente_correo": False, "cliente_whatsapp": False}})
+    check(r.status_code == 200, f"cancelar ({r.status_code})")
+    cm = {c[0]: c for c in CORREOS}
+    check(admin.correo in cm and "cancelada" in cm[admin.correo][1].lower() and "<!doctype html>" in cm[admin.correo][2].lower() and "Ver expediente" not in cm[admin.correo][2], "entrevistador · cancelada: HTML corporativo sin CTA")
+    check("carlos@correo.mx" in cm and "cancelada" in cm["carlos@correo.mx"][1].lower() and "Unirme" not in cm["carlos@correo.mx"][2], "candidato · cancelada: HTML sin botón de unirse")
+    check(all("<!doctype html>" in c[2].lower() for c in CORREOS), "ningún correo de entrevista sale en texto plano")
+
+    # ================= 2c. Vista previa con datos reales =================
+    print("\n--- 2c. Vista previa dinámica (query params) ---")
+    r = client.get("/api/emails/preview/candidato?evento=modificada&candidato=Ana%20Ruiz&entrevistador=Luis%20P%C3%A9rez&vacante=Cajera&empresa=Grupo%20CARBE&fecha=2026-09-24&hora=10:30&modalidad=Videollamada&liga=https://meet.google.com/abc&json=1").json()
+    check(r["asunto"] == "Tu entrevista para Cajera fue modificada" and r["datos"]["fecha"] == "jueves 24 de septiembre de 2026" and r["datos"]["hora"] == "10:30 h", "fecha ISO + hora del formulario → texto legible en México")
+    check(r["datos"]["liga_conexion"] == "https://meet.google.com/abc" and r["datos"]["entrevistador"] == "Luis Pérez", "liga y entrevistador reales")
+    r = client.get("/api/emails/preview/entrevistador?candidato=Ana%20Ruiz&vacante=Cajera&modalidad=Presencial&ubicacion=Reforma%20222&fecha=2026-09-24")
+    check(r.status_code == 200 and "Ana Ruiz" in r.text and "Reforma 222" in r.text and "Mariana" not in r.text, "vista previa del entrevistador con datos reales (sin mock)")
+    r = client.get("/api/emails/preview/entrevistador?evento=cancelada&candidato=Ana&vacante=Cajera")
+    check("cancel" in r.text.lower() and "Ver expediente" not in r.text, "evento=cancelada en la vista previa")
+    r = client.get("/api/emails/preview/entrevistador")
+    check("Mariana" in r.text, "sin parámetros sigue el ejemplo de prueba")
+
     # ================= 3. Respaldo si la plantilla de Meta falla =================
     print("\n--- 3. Respaldos ---")
     PLANTILLA_OK["ok"] = False

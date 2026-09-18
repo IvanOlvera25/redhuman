@@ -96,6 +96,13 @@ def datos_entrevista_humana(db: Session, eh: EntrevistaHumana, c: Postulacion) -
     }
 
 
+def _aviso_cliente(titulo: str, texto: str, d: dict) -> tuple:
+    """Correo al contacto del Cliente con el layout corporativo y la tabla de la entrevista."""
+    filas = [("Candidato", d.get("candidato", "")), ("Vacante", d.get("vacante", "")), ("Entrevistador(a)", d.get("entrevistador", "")),
+             ("Fecha", d.get("fecha") or "Por confirmar"), ("Hora", d.get("hora") or "Por confirmar"), ("Modalidad", d.get("modalidad") or "Por confirmar")] if d else None
+    return plantillas_correo.html_aviso(titulo, texto, d.get("empresa", "") if d else "", filas)
+
+
 def parametros_plantilla_entrevista(d: dict) -> List[str]:
     """Los 6 parámetros posicionales de `alerta_entrevista_asignada`, en este orden exacto."""
     return [
@@ -240,40 +247,44 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
             return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d) if d else (f"Entrevista programada con {c.nombre}", _html_correo_entrevistador(eh, c)))
         if audiencia == "cliente":
             texto = f"Se programó una entrevista para el candidato {c.nombre} ({puesto}) {cita}"
-            return texto if canal == "whatsapp" else (f"Entrevista programada — {puesto}", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _aviso_cliente(f"Entrevista programada — {puesto}", texto, d)
 
+    # 2026-09-18: los cuatro eventos de la Entrevista Humana (agendada/modificada/recordatorio/cancelada)
+    # usan el MISMO layout corporativo (plantillas_correo) para candidato y entrevistador; el Cliente
+    # recibe el aviso genérico con el mismo layout. Nada sale en texto plano.
+    d = extra.get("_datos_entrevista") or {}
     if evento == "recordatorio_entrevista" and eh:
         if audiencia == "candidato":
             texto = f"¡Hola de nuevo, {primer_nombre}! 👋 Te recordamos tu entrevista {cita}"
-            return texto if canal == "whatsapp" else ("Recordatorio de tu entrevista", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else (plantillas_correo.html_candidato(d, "recordatorio") if d else ("Recordatorio de tu entrevista", f"<p>{texto}</p>"))
         if audiencia == "entrevistador":
             texto = f"Recordatorio: tienes una entrevista con {c.nombre} ({puesto}) {cita}"
-            return texto if canal == "whatsapp" else ("Recordatorio de entrevista", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d, "recordatorio") if d else ("Recordatorio de entrevista", f"<p>{texto}</p>"))
         if audiencia == "cliente":
             texto = f"Recordatorio: entrevista programada con {c.nombre} ({puesto}) {cita}"
-            return texto if canal == "whatsapp" else ("Recordatorio de entrevista", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _aviso_cliente("Recordatorio de entrevista", texto, d)
 
     if evento == "entrevista_modificada" and eh:
         if audiencia == "candidato":
             texto = f"Hola {primer_nombre}, tu entrevista cambió — ahora es {cita}"
-            return texto if canal == "whatsapp" else ("Tu entrevista fue modificada", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else (plantillas_correo.html_candidato(d, "modificada") if d else ("Tu entrevista fue modificada", f"<p>{texto}</p>"))
         if audiencia == "entrevistador":
             texto = f"La entrevista con {c.nombre} ({puesto}) fue modificada — ahora es {cita}"
-            return texto if canal == "whatsapp" else ("Entrevista modificada", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d, "modificada") if d else ("Entrevista modificada", f"<p>{texto}</p>"))
         if audiencia == "cliente":
             texto = f"La entrevista con el candidato {c.nombre} ({puesto}) fue modificada — ahora es {cita}"
-            return texto if canal == "whatsapp" else ("Entrevista modificada", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _aviso_cliente("Entrevista modificada", texto, d)
 
     if evento == "entrevista_cancelada":
         if audiencia == "candidato":
             texto = f"Hola {primer_nombre}, tu entrevista programada fue cancelada. Nos pondremos en contacto para definir los siguientes pasos."
-            return texto if canal == "whatsapp" else ("Tu entrevista fue cancelada", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else (plantillas_correo.html_candidato(d, "cancelada") if d else ("Tu entrevista fue cancelada", f"<p>{texto}</p>"))
         if audiencia == "entrevistador":
             texto = f"La entrevista con {c.nombre} ({puesto}) fue cancelada."
-            return texto if canal == "whatsapp" else ("Entrevista cancelada", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d, "cancelada") if d else ("Entrevista cancelada", f"<p>{texto}</p>"))
         if audiencia == "cliente":
             texto = f"La entrevista con el candidato {c.nombre} ({puesto}) fue cancelada."
-            return texto if canal == "whatsapp" else ("Entrevista cancelada", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _aviso_cliente("Entrevista cancelada", texto, d)
 
     if evento == "candidato_apto":
         if audiencia == "candidato":
@@ -547,7 +558,7 @@ async def disparar(
 
     resultados: List[dict] = []
     # 2026-09-18: datos compartidos por las plantillas de la Entrevista Humana (correo + Meta)
-    if evento == "entrevista_agendada" and eh:
+    if evento in ("entrevista_agendada", "entrevista_modificada", "recordatorio_entrevista", "entrevista_cancelada") and eh:
         extra = {**extra, "_datos_entrevista": datos_entrevista_humana(db, eh, c)}
 
     # --- Candidato: correo/teléfono ya en su ficha (punto 23) ---

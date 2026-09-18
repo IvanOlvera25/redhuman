@@ -111,12 +111,86 @@ def _base(titulo: str, preheader: str, empresa: str, logo_url: str, contenido: s
 </html>"""
 
 
-def html_entrevistador(d: dict) -> tuple[str, str]:
+EVENTOS = ("agendada", "modificada", "recordatorio", "cancelada")
+
+_TEXTOS_ENTREVISTADOR = {
+    "agendada": {
+        "eyebrow": "Entrevista asignada",
+        "titulo": "Hola {nombre}, tienes una nueva entrevista",
+        "intro": "Se te asignó la entrevista de <strong style=\"color:{ink};\">{candidato}</strong> para la vacante <strong style=\"color:{ink};\">{vacante}</strong> en {empresa}. Red Human ya hizo el prefiltro y la primera entrevista: en el expediente encontrarás su CV, la evaluación integral y los puntos por validar.",
+        "asunto": "Nueva entrevista asignada: {candidato} · {vacante}",
+        "cta": "Ver expediente del candidato",
+    },
+    "modificada": {
+        "eyebrow": "Entrevista modificada",
+        "titulo": "Hola {nombre}, cambió tu entrevista con {candidato}",
+        "intro": "La entrevista de <strong style=\"color:{ink};\">{candidato}</strong> para la vacante <strong style=\"color:{ink};\">{vacante}</strong> en {empresa} fue reprogramada. Estos son los datos vigentes:",
+        "asunto": "Entrevista modificada: {candidato} · {vacante}",
+        "cta": "Ver expediente del candidato",
+    },
+    "recordatorio": {
+        "eyebrow": "Recordatorio",
+        "titulo": "Hola {nombre}, tu entrevista con {candidato} se acerca",
+        "intro": "Te recordamos la entrevista de <strong style=\"color:{ink};\">{candidato}</strong> para la vacante <strong style=\"color:{ink};\">{vacante}</strong> en {empresa}. En el expediente tienes su CV, la evaluación integral y los puntos por validar.",
+        "asunto": "Recordatorio: entrevista con {candidato} · {vacante}",
+        "cta": "Ver expediente del candidato",
+    },
+    "cancelada": {
+        "eyebrow": "Entrevista cancelada",
+        "titulo": "Hola {nombre}, se canceló tu entrevista con {candidato}",
+        "intro": "La entrevista de <strong style=\"color:{ink};\">{candidato}</strong> para la vacante <strong style=\"color:{ink};\">{vacante}</strong> en {empresa} quedó cancelada. No necesitas hacer nada; si se reprograma te avisamos por este medio.",
+        "asunto": "Entrevista cancelada: {candidato} · {vacante}",
+        "cta": "",
+    },
+}
+
+_TEXTOS_CANDIDATO = {
+    "agendada": {
+        "eyebrow": "Entrevista agendada",
+        "titulo": "¡{nombre}, ya tienes fecha para tu entrevista!",
+        "intro": "Gracias por tu entrevista con Red Human. Con base en tus resultados, <strong style=\"color:{ink};\">{empresa}</strong> quiere conocerte en persona: te agendamos una entrevista con <strong style=\"color:{ink};\">{entrevistador}</strong>.",
+        "asunto": "Tu entrevista para {vacante} quedó agendada",
+        "cta": "Unirme a la entrevista",
+    },
+    "modificada": {
+        "eyebrow": "Entrevista modificada",
+        "titulo": "{nombre}, tu entrevista cambió de fecha u horario",
+        "intro": "<strong style=\"color:{ink};\">{empresa}</strong> reprogramó tu entrevista con <strong style=\"color:{ink};\">{entrevistador}</strong>. Estos son los datos vigentes (los anteriores ya no aplican):",
+        "asunto": "Tu entrevista para {vacante} fue modificada",
+        "cta": "Unirme a la entrevista",
+    },
+    "recordatorio": {
+        "eyebrow": "Recordatorio",
+        "titulo": "{nombre}, tu entrevista se acerca",
+        "intro": "Te recordamos tu entrevista con <strong style=\"color:{ink};\">{entrevistador}</strong> de <strong style=\"color:{ink};\">{empresa}</strong>. ¡Mucho éxito!",
+        "asunto": "Recordatorio: tu entrevista para {vacante}",
+        "cta": "Unirme a la entrevista",
+    },
+    "cancelada": {
+        "eyebrow": "Entrevista cancelada",
+        "titulo": "{nombre}, tu entrevista fue cancelada",
+        "intro": "<strong style=\"color:{ink};\">{empresa}</strong> canceló la entrevista que tenías programada con <strong style=\"color:{ink};\">{entrevistador}</strong>. Tu proceso sigue abierto: nos pondremos en contacto contigo para definir los siguientes pasos.",
+        "asunto": "Tu entrevista para {vacante} fue cancelada",
+        "cta": "",
+    },
+}
+
+
+def _normalizar_evento(evento: str) -> str:
+    e = (evento or "agendada").replace("entrevista_", "").replace("_entrevista", "")
+    return e if e in EVENTOS else "agendada"
+
+
+def html_entrevistador(d: dict, evento: str = "agendada") -> tuple[str, str]:
     """(asunto, html) para la persona que entrevista. d: entrevistador, candidato, vacante, empresa,
-    fecha, hora, modalidad, detalle_conexion, liga_expediente, telefono_candidato, comentario, logo_url."""
+    fecha, hora, modalidad, detalle_conexion, liga_expediente, telefono_candidato, comentario, logo_url.
+    `evento`: agendada | modificada | recordatorio | cancelada (2026-09-18: mismo layout para todos)."""
+    evento = _normalizar_evento(evento)
+    t = _TEXTOS_ENTREVISTADOR[evento]
     empresa = d.get("empresa") or "tu empresa"
     nombre = (d.get("entrevistador") or "").split(" ")[0] or "Hola"
-    asunto = f"Nueva entrevista asignada: {d.get('candidato', '')} · {d.get('vacante', '')}"
+    ctx = {"nombre": escape(nombre), "candidato": escape(d.get("candidato", "")), "vacante": escape(d.get("vacante", "")), "empresa": escape(empresa), "entrevistador": escape(d.get("entrevistador") or ""), "ink": INK}
+    asunto = t["asunto"].format(**ctx).replace("&amp;", "&")
     filas = (
         _fila("Candidato", escape(d.get("candidato", "")))
         + _fila("Vacante", escape(d.get("vacante", "")))
@@ -126,28 +200,30 @@ def html_entrevistador(d: dict) -> tuple[str, str]:
         + (_fila("Conexión / lugar", escape(d["detalle_conexion"])) if d.get("detalle_conexion") else "")
         + _fila("Teléfono del candidato", escape(d.get("telefono_candidato") or "—"), ultima=True)
     )
+    cancelada = evento == "cancelada"
     contenido = (
-        f'<p style="margin:0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:{ROJO};font-weight:700;">Entrevista asignada</p>'
-        f'<h1 class="titulo" style="margin:8px 0 12px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:26px;line-height:1.2;color:{INK};">Hola {escape(nombre)}, tienes una nueva entrevista</h1>'
-        f'<p style="margin:0 0 20px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:{INK2};">'
-        f'Se te asignó la entrevista de <strong style="color:{INK};">{escape(d.get("candidato", ""))}</strong> para la vacante '
-        f'<strong style="color:{INK};">{escape(d.get("vacante", ""))}</strong> en {escape(empresa)}. Red Human ya hizo el prefiltro y la primera entrevista: '
-        f'en el expediente encontrarás su CV, la evaluación integral y los puntos por validar.</p>'
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafb;border:1px solid #eceef1;border-radius:14px;padding:6px 18px;">{filas}</table>'
-        + (f'<p style="margin:18px 0 0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:{INK2};"><strong>Nota de RH:</strong> {escape(d["comentario"])}</p>' if d.get("comentario") else "")
-        + _boton("Ver expediente del candidato", d.get("liga_expediente") or settings.app_url)
-        + f'<p style="margin:6px 0 0;text-align:center;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;color:#8a8d91;">Desde ahí también registras tu evaluación al terminar.</p>'
+        f'<p style="margin:0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:{ROJO};font-weight:700;">{t["eyebrow"]}</p>'
+        f'<h1 class="titulo" style="margin:8px 0 12px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:26px;line-height:1.2;color:{INK};">{t["titulo"].format(**ctx)}</h1>'
+        f'<p style="margin:0 0 20px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:{INK2};">{t["intro"].format(**ctx)}</p>'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafb;border:1px solid #eceef1;border-radius:14px;padding:6px 18px;{"opacity:.6;" if cancelada else ""}">{filas}</table>'
+        + (f'<p style="margin:18px 0 0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:{INK2};"><strong>Nota de RH:</strong> {escape(d["comentario"])}</p>' if d.get("comentario") and not cancelada else "")
+        + (_boton(t["cta"], d.get("liga_expediente") or settings.app_url) if t["cta"] else "")
+        + (f'<p style="margin:6px 0 0;text-align:center;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;color:#8a8d91;">Desde ahí también registras tu evaluación al terminar.</p>' if t["cta"] else "")
     )
     pie = f"Recibes este aviso porque {escape(empresa)} te asignó como entrevistador(a) en Red Human AI. Si no te corresponde, responde a Recursos Humanos."
-    return asunto, _base(asunto, f"Entrevista con {d.get('candidato', '')} · {d.get('fecha', '')} {d.get('hora', '')}", empresa, d.get("logo_url", ""), contenido, pie)
+    return asunto, _base(asunto, f"{t['eyebrow']} · {d.get('candidato', '')} · {d.get('fecha', '')} {d.get('hora', '')}", empresa, d.get("logo_url", ""), contenido, pie)
 
 
-def html_candidato(d: dict) -> tuple[str, str]:
+def html_candidato(d: dict, evento: str = "agendada") -> tuple[str, str]:
     """(asunto, html) para el candidato. d: candidato, entrevistador, vacante, empresa, fecha, hora, modalidad,
-    liga_conexion, ubicacion, telefono_contacto, comentario, logo_url."""
+    liga_conexion, ubicacion, telefono_contacto, comentario, logo_url. `evento` como en html_entrevistador."""
+    evento = _normalizar_evento(evento)
+    t = _TEXTOS_CANDIDATO[evento]
+    cancelada = evento == "cancelada"
     empresa = d.get("empresa") or "la empresa"
     nombre = (d.get("candidato") or "").split(" ")[0] or "Hola"
-    asunto = f"Tu entrevista para {d.get('vacante', '')} quedó agendada"
+    ctx = {"nombre": escape(nombre), "candidato": escape(d.get("candidato", "")), "vacante": escape(d.get("vacante", "")), "empresa": escape(empresa), "entrevistador": escape(d.get("entrevistador") or "el equipo de Recursos Humanos"), "ink": INK}
+    asunto = t["asunto"].format(**ctx).replace("&amp;", "&")
     modalidad = d.get("modalidad") or "Por confirmar"
     if d.get("liga_conexion"):
         conexion = _fila("Liga de conexión", f'<a href="{escape(d["liga_conexion"])}" style="color:{ROJO};text-decoration:none;word-break:break-all;">{escape(d["liga_conexion"])}</a>', ultima=True)
@@ -165,20 +241,35 @@ def html_candidato(d: dict) -> tuple[str, str]:
         + _fila("Modalidad", escape(modalidad))
         + conexion
     )
-    boton = _boton("Unirme a la entrevista", d["liga_conexion"]) if d.get("liga_conexion") else ""
+    boton = _boton(t["cta"], d["liga_conexion"]) if d.get("liga_conexion") and t["cta"] else ""
     contenido = (
-        f'<p style="margin:0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:{ROJO};font-weight:700;">Entrevista agendada</p>'
-        f'<h1 class="titulo" style="margin:8px 0 12px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:26px;line-height:1.2;color:{INK};">¡{escape(nombre)}, ya tienes fecha para tu entrevista!</h1>'
-        f'<p style="margin:0 0 20px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:{INK2};">'
-        f'Gracias por tu entrevista con Red Human. Con base en tus resultados, <strong style="color:{INK};">{escape(empresa)}</strong> quiere conocerte en persona: '
-        f'te agendamos una entrevista con <strong style="color:{INK};">{escape(d.get("entrevistador") or "el equipo de Recursos Humanos")}</strong>.</p>'
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafb;border:1px solid #eceef1;border-radius:14px;padding:6px 18px;">{filas}</table>'
-        + (f'<p style="margin:18px 0 0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:{INK2};">{escape(d["comentario"])}</p>' if d.get("comentario") else "")
+        f'<p style="margin:0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:{ROJO};font-weight:700;">{t["eyebrow"]}</p>'
+        f'<h1 class="titulo" style="margin:8px 0 12px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:26px;line-height:1.2;color:{INK};">{t["titulo"].format(**ctx)}</h1>'
+        f'<p style="margin:0 0 20px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:{INK2};">{t["intro"].format(**ctx)}</p>'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafb;border:1px solid #eceef1;border-radius:14px;padding:6px 18px;{"opacity:.6;" if cancelada else ""}">{filas}</table>'
+        + (f'<p style="margin:18px 0 0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:{INK2};">{escape(d["comentario"])}</p>' if d.get("comentario") and not cancelada else "")
         + boton
-        + f'<p style="margin:16px 0 0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.6;color:{INK2};">Te recomendamos conectarte 5 minutos antes{" y probar tu cámara y micrófono" if modalidad == "Videollamada" else ""}. Si necesitas cambiar la fecha, respóndenos por WhatsApp.</p>'
+        + ("" if cancelada else f'<p style="margin:16px 0 0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.6;color:{INK2};">Te recomendamos conectarte 5 minutos antes{" y probar tu cámara y micrófono" if modalidad == "Videollamada" else ""}. Si necesitas cambiar la fecha, respóndenos por WhatsApp.</p>')
     )
     pie = f"Tus datos se tratan conforme al Aviso de Privacidad de {escape(empresa)} exclusivamente para este proceso de selección (LFPDPPP)."
-    return asunto, _base(asunto, f"Entrevista el {d.get('fecha', '')} a las {d.get('hora', '')} · {d.get('vacante', '')}", empresa, d.get("logo_url", ""), contenido, pie)
+    return asunto, _base(asunto, f"{t['eyebrow']} · {d.get('fecha', '')} {d.get('hora', '')} · {d.get('vacante', '')}", empresa, d.get("logo_url", ""), contenido, pie)
+
+
+def html_aviso(titulo: str, parrafo: str, empresa: str = "", filas: Optional[list[tuple[str, str]]] = None, cta: Optional[tuple[str, str]] = None) -> tuple[str, str]:
+    """Aviso genérico con el layout corporativo (para el Cliente y cualquier evento sin plantilla propia):
+    título, párrafo, tabla opcional de (etiqueta, valor) y CTA opcional (texto, url)."""
+    tabla = ""
+    if filas:
+        cuerpo = "".join(_fila(k, escape(v), ultima=(i == len(filas) - 1)) for i, (k, v) in enumerate(filas))
+        tabla = f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafb;border:1px solid #eceef1;border-radius:14px;padding:6px 18px;margin-top:4px;">{cuerpo}</table>'
+    contenido = (
+        f'<h1 class="titulo" style="margin:4px 0 12px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:24px;line-height:1.2;color:{INK};">{escape(titulo)}</h1>'
+        f'<p style="margin:0 0 16px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:{INK2};">{escape(parrafo)}</p>'
+        + tabla
+        + (_boton(cta[0], cta[1]) if cta else "")
+    )
+    pie = "Aviso automático de Red Human AI."
+    return titulo, _base(titulo, parrafo[:120], empresa, "", contenido, pie)
 
 
 # ------------------------------------------------------------

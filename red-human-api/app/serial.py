@@ -353,6 +353,7 @@ def _postulacion_resumen_dict(p: Postulacion) -> dict:
     return {
         "id": p.codigo,
         "puesto": p.vacante.titulo if p.vacante else "",
+        "empresaVisible": nombre_empresa_candidato(p.vacante) if p.vacante else "",  # 2026-09-18: vista previa de correos
         "vacanteId": p.vacante.codigo if p.vacante else "",
         "etapa": p.etapa,
         "estado": p.estado,
