@@ -18,7 +18,7 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .migraciones import crear_tablas_base, crear_tablas_conocimiento, candidatos_sin_postulacion, sincronizar
 from .migraciones import asegurar_reglas_entrevistador
-from .routers import agente, auth, candidatos, capacitacion, clientes, colaboradores, configuracion, conocimiento, contratacion, cuentas, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
+from .routers import agente, auth, candidatos, capacitacion, clientes, colaboradores, configuracion, conocimiento, contratacion, cuentas, emails_preview, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
 from .seed import rellenar_slugs_cuentas, sembrar, sembrar_admin
 from .models import TABLAS_CONOCIMIENTO
 from .services import rag
@@ -161,6 +161,7 @@ app.include_router(cuentas.router)
 app.include_router(notificaciones.router)
 app.include_router(capacitacion.router)
 app.include_router(conocimiento.router)
+app.include_router(emails_preview.router)
 app.include_router(webhooks.router)
 app.include_router(agente.router)
 app.include_router(integraciones.router)

@@ -199,6 +199,27 @@ async def enviar_plantilla_documentos(telefono: str, valores: dict, texto_fallba
     return await enviar_mensaje(telefono, texto_fallback)
 
 
+async def enviar_plantilla_entrevista(telefono: str, parametros: List[str], texto_fallback: str) -> dict:
+    """Aviso al entrevistador de una Entrevista Humana asignada (2026-09-18): plantilla
+    META_PLANTILLA_ENTREVISTA («alerta_entrevista_asignada») con EXACTAMENTE 6 parámetros posicionales
+    [entrevistador, candidato, vacante, fecha, hora, liga al expediente]. Sirve fuera de la ventana de 24 h
+    (el entrevistador casi nunca le ha escrito al número). Si no está configurada o Meta la rechaza, texto
+    libre (que a su vez cae a META_PLANTILLA_AVISO)."""
+    plantilla = (settings.meta_plantilla_entrevista or "").strip()
+    if settings.whatsapp_provider == "meta" and plantilla:
+        if len(parametros) != 6:
+            raise ValueError(f"La plantilla {plantilla} requiere 6 parámetros; llegaron {len(parametros)}")
+        resultado = await enviar_plantilla(telefono, plantilla, [str(x or "-") for x in parametros], settings.meta_plantilla_idioma)
+        if resultado.get("enviado"):
+            resultado["plantilla"] = plantilla
+            return resultado
+        print(f"[whatsapp] plantilla de entrevista «{plantilla}» no salió ({resultado.get('detalle')}); se manda texto libre")
+        alterno = await enviar_mensaje(telefono, texto_fallback)
+        alterno["motivo_fallback"] = f"plantilla {plantilla}: {resultado.get('detalle')}"
+        return alterno
+    return await enviar_mensaje(telefono, texto_fallback)
+
+
 # Meta → extensión aceptada por services/archivos.FORMATOS (documentos de expediente).
 _EXT_POR_MIME = {
     "application/pdf": "pdf",
