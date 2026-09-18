@@ -446,6 +446,21 @@ async def _enviar_y_registrar(
     return {**base, **envio, "detalle": str(envio.get("detalle", ""))}
 
 
+def advertencias_de(resultados: List[dict]) -> List[str]:
+    """2026-09-18: avisos legibles para RH cuando un canal NO salió (se regresan en el JSON de la acción y el
+    frontend los muestra como toast amarillo). Un correo fallido deja de ser silencioso."""
+    avisos: List[str] = []
+    for r in resultados or []:
+        if r.get("enviado"):
+            continue
+        detalle = str(r.get("detalle") or "")
+        if r.get("canal") == "correo" and r.get("destino"):
+            avisos.append(f"Entrevista asignada, pero el correo falló. Verifica la API Key o el Dominio ({r.get('destinatario')}: {detalle[:120]})")
+        elif r.get("canal") == "whatsapp" and r.get("destino"):
+            avisos.append(f"El WhatsApp a {r.get('destinatario')} no salió: {detalle[:120]}")
+    return avisos
+
+
 FLAGS_NOTIFICACION = (
     "candidato_correo", "candidato_whatsapp",
     "entrevistador_correo", "entrevistador_whatsapp",

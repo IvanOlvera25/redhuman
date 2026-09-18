@@ -2003,7 +2003,8 @@ async def programar_entrevista_humana(
     db.commit()
     # Fase 7A: el resultado por canal viaja al modal (mismo shape que solicitar_documentos) — un correo
     # que no salió (sin RESEND_API_KEY, sin correo, Meta rechazó…) deja de ser silencioso.
-    return {"resultados": resultados, "candidato": postulacion_dict(p, detalle=True)}
+    # 2026-09-18: además `advertencias` (texto listo para el toast amarillo del frontend).
+    return {"resultados": resultados, "advertencias": notificaciones.advertencias_de(resultados), "candidato": postulacion_dict(p, detalle=True)}
 
 
 RESULTADOS_ENTREVISTA_HUMANA = ("aprobado", "no_aprobado")

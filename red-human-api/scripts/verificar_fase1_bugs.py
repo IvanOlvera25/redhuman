@@ -158,7 +158,7 @@ with TestClient(app) as client:
     r = client.get(f"/contratacion/expedientes/{EXP}")
     check(r.status_code == 200 and r.json()["progreso"] == 0, "expediente nuevo al 0%")
     r = client.post(f"/contratacion/expedientes/{EXP}/documentos", data={"tipo": "CURP"}, files={"archivo": ("curp.pdf", PDF_MIN, "application/pdf")})
-    check(r.status_code == 200 and r.json()["documento"]["estado"] == "revision", "subir CURP digital (demo → queda en revisión)")
+    check(r.status_code == 200 and r.json()["documento"]["estado"] in ("revision", "recibido"), f"subir CURP digital → {r.json()['documento']['estado']} (revisión sin IA; recibido si Modo Prueba está activo — 2026-09-18)")
     check(r.json()["expediente"]["progreso"] == 17, f"el porcentaje sube SOLO con la subida digital: {r.json()['expediente']['progreso']}% (1 de 6)")
     check("CURP" in r.json()["expediente"]["sinConfirmar"], "…y queda listado para confirmación de RH (HITL)")
     r = client.get(f"/candidatos/{codigos[1]}")

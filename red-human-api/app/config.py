@@ -85,7 +85,9 @@ class Settings(BaseSettings):
     # de sandbox (onboarding@resend.dev) solo entrega al correo con el que se creó la cuenta;
     # al verificar un dominio propio en Resend basta con cambiar RESEND_FROM, sin tocar código.
     resend_api_key: str = ""
-    resend_from: str = "Red Human AI <onboarding@resend.dev>"
+    # 2026-09-18: el remitente SIEMPRE es del dominio redhuman.mx (correo.remitente() lo garantiza aunque
+    # el .env traiga otro). El dominio debe estar verificado en Resend.
+    resend_from: str = "Red Human AI <notificaciones@redhuman.mx>"
 
     # --- Microsoft Teams / Microsoft 365 (Fase 7B) ---
     # Nombres EXACTOS de las variables: TEAMS_CLIENT_ID, TEAMS_TENANT_ID, TEAMS_CLIENT_SECRET.

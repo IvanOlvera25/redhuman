@@ -26,7 +26,7 @@ from ..services import ia
 from ..services import notificaciones
 from ..services.pdf import pdf_carta_intencion
 from ..services.notificaciones import TZ_MEXICO, NotificarIn, override_de
-from ..services.configuracion import puede_forzar_prueba
+from ..services.configuracion import modo_prueba_activo, puede_forzar_prueba
 
 router = APIRouter(prefix="/contratacion", tags=["contratacion"])
 
@@ -284,7 +284,16 @@ def documento_para_adjunto(db: Session, e: Expediente, pie: str, nombre_archivo:
 
 def _registrar_documento(db: Session, e: Expediente, doc: Documento, validado, subido_por: str) -> dict:
     titular = e.candidato.nombre if e.candidato else ""
-    v, con_ia = ia.validar_documento(validado.b64, validado.extension, doc.tipo, titular)
+    if modo_prueba_activo(db):
+        # 2026-09-18 (Modo Prueba TOTAL): se salta el OCR/IA y cualquier PDF o imagen queda válido de inmediato.
+        v = ia.DocumentoValidado(
+            tipo_detectado=doc.tipo, es_documento_oficial=True, coincide_tipo=True, legible=True, completo=True, vigente=None,
+            nombre_detectado=None, coincide_titular=None, motivo_rechazo=None,
+            observaciones="Modo Prueba: validación por IA omitida; documento aceptado automáticamente.",
+        )
+        con_ia = True
+    else:
+        v, con_ia = ia.validar_documento(validado.b64, validado.extension, doc.tipo, titular)
 
     doc.archivo = fs.guardar(validado, f"expedientes/{e.id}", doc.tipo.replace(" ", "_"))
     doc.nombre_archivo = validado.nombre
@@ -512,16 +521,18 @@ async def alta(
     e = _expediente(db, exp_id, cuenta.id)
     if e.estado == "alta":
         raise HTTPException(409, f"El expediente ya fue dado de alta por {e.alta_autorizada_por}.")
-    # 2026-09-15 (bloqueo de seguridad, pedido del cliente): sin NINGÚN archivo adjunto no hay alta,
-    # ni con forzar_prueba — no es fricción de secuencia, es integridad del expediente.
-    if not any(d.archivo for d in e.documentos):
+    # 2026-09-18 (Modo Prueba TOTAL, pedido del cliente): con modo_prueba activo se omite POR COMPLETO la
+    # validación de integridad del expediente (documentos adjuntos, 100 %, confirmación de RH) — el flag
+    # forzar_prueba ya no es necesario. Con Modo Prueba apagado todo sigue exigiéndose.
+    prueba = modo_prueba_activo(db)
+    if not prueba and not any(d.archivo for d in e.documentos):
         raise HTTPException(400, "No se puede dar de alta al colaborador: El expediente no tiene documentos adjuntos.")
-    if e.progreso < 100 and not puede_forzar_prueba(db, forzar_prueba):
+    if e.progreso < 100 and not prueba and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, f"El expediente está al {e.progreso}%. Faltan: {', '.join(e.pendientes)}.")
     # HITL: lo que cuenta para el % (recibido o digital en revisión) lo confirma una persona de RH
     # antes del alta — el porcentaje ya no espera esa confirmación, el alta sí.
     sin_revisar = e.sin_confirmar
-    if sin_revisar and not puede_forzar_prueba(db, forzar_prueba):
+    if sin_revisar and not prueba and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(
             409,
             "Antes del alta, una persona de RH debe confirmar los documentos subidos (validados por la IA o en revisión): "
