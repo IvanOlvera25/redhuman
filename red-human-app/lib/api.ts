@@ -600,9 +600,39 @@ export function fetchVacantesPublicas(cuenta = "") {
   return get<Vacante[]>(`/vacantes/publicas${cuenta ? `?cuenta=${encodeURIComponent(cuenta)}` : ""}`);
 }
 
-/** Vistas previas de los correos corporativos de Entrevista Humana (datos de prueba, sin enviar). */
-export function urlPreviewCorreo(plantilla: "entrevistador" | "candidato", modalidad = "Videollamada") {
-  return `${API}/api/emails/preview/${plantilla}?modalidad=${encodeURIComponent(modalidad)}`;
+/** Vistas previas de los correos corporativos de Entrevista Humana (sin enviar). Con `datos` se renderiza el
+ * correo EXACTO con el contexto real capturado en el modal (2026-09-18); sin datos, ejemplo de prueba. */
+export interface DatosPreviewCorreo {
+  evento?: "agendada" | "modificada" | "recordatorio" | "cancelada";
+  candidato?: string;
+  entrevistador?: string;
+  vacante?: string;
+  empresa?: string;
+  fecha?: string; // «2026-09-24»
+  hora?: string; // «10:30»
+  modalidad?: string;
+  liga?: string;
+  ubicacion?: string;
+  telefono?: string;
+  telefonoCandidato?: string;
+  comentario?: string;
+  ligaExpediente?: string;
+}
+
+export function urlPreviewCorreo(plantilla: "entrevistador" | "candidato", datos?: DatosPreviewCorreo | string) {
+  const p = new URLSearchParams();
+  if (typeof datos === "string") {
+    p.set("modalidad", datos);
+  } else if (datos) {
+    const mapa: Record<string, string | undefined> = {
+      evento: datos.evento, candidato: datos.candidato, entrevistador: datos.entrevistador, vacante: datos.vacante, empresa: datos.empresa,
+      fecha: datos.fecha, hora: datos.hora, modalidad: datos.modalidad, liga: datos.liga, ubicacion: datos.ubicacion, telefono: datos.telefono,
+      telefono_candidato: datos.telefonoCandidato, comentario: datos.comentario, liga_expediente: datos.ligaExpediente,
+    };
+    for (const [k, v] of Object.entries(mapa)) if (v !== undefined && v !== null && v !== "") p.set(k, v);
+  }
+  const q = p.toString();
+  return `${API}/api/emails/preview/${plantilla}${q ? `?${q}` : ""}`;
 }
 
 export function fetchCuentaPublica(cuenta: string) {

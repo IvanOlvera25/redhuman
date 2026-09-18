@@ -3548,6 +3548,30 @@ function ModalProgramarEntrevista({
 
   const inputCls = "h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20";
 
+  /** 2026-09-18: nombre del entrevistador según lo capturado (interno del perfil, contacto del Cliente u «Otro»). */
+  const nombreEntrevistadorActual =
+    tipoEntrevistador === "interno"
+      ? entrevistadores.find((e) => e.id === entrevistadorUsuarioId)?.nombre ?? ""
+      : typeof contactoSel === "number"
+        ? contactos?.find((k) => k.id === contactoSel)?.nombreCompleto ?? ""
+        : entrevistadorNombre;
+  /** Vista previa con el contexto REAL del candidato y del formulario; cambia en vivo con los inputs. */
+  const datosPreview = {
+    evento: "agendada" as const,
+    candidato: c.nombre,
+    entrevistador: nombreEntrevistadorActual,
+    vacante: c.puesto || c.vacanteTitulo || "",
+    empresa: c.empresaVisible || "",
+    fecha,
+    hora,
+    modalidad,
+    liga: modalidad === "Videollamada" ? (porTeams ? "" : liga) : "",
+    ubicacion: modalidad === "Presencial" ? ubicacion : "",
+    telefono: modalidad === "Llamada" ? telefonoContacto : "",
+    telefonoCandidato: c.telefono,
+    comentario,
+  };
+
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4">
       {/* 2026-09-18: más ancho, cuerpo con scroll propio y footer fijo — los botones nunca se pierden (web y móvil) */}
@@ -3773,12 +3797,15 @@ function ModalProgramarEntrevista({
                 ))}
               </div>
               <div className="flex items-center gap-2">
-                <span className="hidden text-[11px] text-ink-3 sm:inline">Vista previa con datos de ejemplo · modalidad {modalidad}</span>
-                <a href={urlPreviewCorreo(preview, modalidad)} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand hover:underline">Abrir en pestaña</a>
+                <span className="hidden text-[11px] text-ink-3 sm:inline">
+                  Correo real para {c.nombre.split(" ")[0]} · {modalidad}{fecha ? ` · ${fecha}${hora ? ` ${hora}` : ""}` : " · sin fecha aún"}
+                </span>
+                <a href={urlPreviewCorreo(preview, datosPreview)} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand hover:underline">Abrir en pestaña</a>
                 <button onClick={() => setPreview(null)} className="grid h-8 w-8 place-items-center rounded-lg text-ink-3 hover:bg-surface-2" aria-label="Cerrar"><X className="h-4 w-4" /></button>
               </div>
             </div>
-            <iframe title={`Vista previa · ${preview}`} src={urlPreviewCorreo(preview, modalidad)} className="min-h-0 w-full flex-1 bg-white" />
+            {/* key = URL: al cambiar fecha/hora/modalidad/liga en el formulario el iframe se vuelve a cargar con los datos precisos */}
+            <iframe key={urlPreviewCorreo(preview, datosPreview)} title={`Vista previa · ${preview}`} src={urlPreviewCorreo(preview, datosPreview)} className="min-h-0 w-full flex-1 bg-white" />
           </Card>
         </div>
       )}
