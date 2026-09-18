@@ -18,7 +18,14 @@ from ..serial import iso
 from ..services import archivos as fs
 from ..services import ia, rag
 
-router = APIRouter(prefix="/conocimiento", tags=["conocimiento"])
+def _requiere_rag() -> None:
+    """Hotfix 2026-09-18: si las tablas no se pudieron crear al arrancar, el módulo responde 503 con el
+    motivo en vez de tumbar la API."""
+    if not rag.disponible():
+        raise HTTPException(503, f"La Base de Conocimiento no está disponible en este servidor: {rag.error_inicializacion() or 'tablas no inicializadas'}. Revisa el log de arranque de la API.")
+
+
+router = APIRouter(prefix="/conocimiento", tags=["conocimiento"], dependencies=[Depends(_requiere_rag)])
 
 MAX_ARCHIVO = 15 * 1024 * 1024
 
@@ -58,6 +65,7 @@ def estado(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), 
     consultas = db.query(ConsultaConocimiento).filter(ConsultaConocimiento.cuenta_id == cuenta.id).count()
     sin_ev = db.query(ConsultaConocimiento).filter(ConsultaConocimiento.cuenta_id == cuenta.id, ConsultaConocimiento.sin_evidencia.is_(True)).count()
     return {
+        "disponible": rag.disponible(),
         "documentos": len(docs),
         "fragmentos": sum(d.fragmentos_total for d in docs),
         "semantico": ia.ia_activa() and any(d.con_embeddings for d in docs),

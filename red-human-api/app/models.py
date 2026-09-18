@@ -1132,12 +1132,20 @@ class Bitacora(Base):
 
 TIPOS_CONOCIMIENTO = ["politica", "proceso", "manual", "reglamento", "faq", "otro"]
 
+# Tablas del módulo (se crean en un paso aparte y NO fatal del arranque — ver main.lifespan y
+# migraciones.crear_tablas_conocimiento). HOTFIX 2026-09-18: el primer despliegue tiró la API en producción
+# al crear estas tablas («FOREIGN KEY(cuenta_id) REFERENCES cuentas (id)» → ProgrammingError). `cuenta_id`
+# es ahora un entero indexado SIN restricción de llave foránea (el aislamiento por Cuenta lo garantiza el
+# router con cuenta_actual, igual que en el resto del sistema), y un fallo al crearlas deja la Base de
+# Conocimiento deshabilitada (503) sin afectar al resto de la plataforma.
+TABLAS_CONOCIMIENTO = ("documentos_conocimiento", "fragmentos_conocimiento", "consultas_conocimiento")
+
 
 class DocumentoConocimiento(Base):
     __tablename__ = "documentos_conocimiento"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)  # sin FK (hotfix 2026-09-18)
     titulo: Mapped[str] = mapped_column(String(200))
     tipo: Mapped[str] = mapped_column(String(20), default="politica")  # ver TIPOS_CONOCIMIENTO
     nombre_archivo: Mapped[str] = mapped_column(String(300), default="")
@@ -1157,7 +1165,7 @@ class FragmentoConocimiento(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     documento_id: Mapped[int] = mapped_column(ForeignKey("documentos_conocimiento.id"), index=True)
-    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)  # sin FK (hotfix 2026-09-18)
     orden: Mapped[int] = mapped_column(Integer, default=0)
     texto: Mapped[str] = mapped_column(Text)
     embedding: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # vector (text-embedding-3-small); None = solo léxico
@@ -1170,7 +1178,7 @@ class ConsultaConocimiento(Base):
     __tablename__ = "consultas_conocimiento"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)  # sin FK (hotfix 2026-09-18)
     usuario: Mapped[str] = mapped_column(String(150), default="")
     pregunta: Mapped[str] = mapped_column(Text)
     respuesta: Mapped[dict] = mapped_column(JSON, default=dict)
