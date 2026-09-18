@@ -58,6 +58,7 @@ async def _fake_correo(destino, asunto, html):
 
 
 rcap.enviar_mensaje = _fake_wa
+rcap.enviar_texto_sin_plantilla = _fake_wa  # 2026-09-18: colaboradores reciben texto libre sin plantilla
 rcap.enviar_correo = _fake_correo
 
 PDF_MIN = b"%PDF-1.4\n" + b"%" * 600 + b"\n%%EOF\n"

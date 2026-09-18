@@ -261,6 +261,26 @@ async def descargar_media(media_id: str) -> dict:
     return {"ok": True, "contenido": binario.content, "mime": mime, "extension": ext, "filename": f"whatsapp_{media_id}.{ext}", "tamano": len(binario.content)}
 
 
+async def enviar_texto_sin_plantilla(telefono: str, texto: str) -> dict:
+    """Texto libre (type text) SIN respaldo de plantilla (2026-09-18, aviso de curso a colaboradores): si Meta
+    lo rechaza por la ventana de 24 h se deja un warning en el log y se regresa {enviado: False,
+    fuera_de_ventana: True}; nunca lanza. Con otro proveedor se comporta como enviar_mensaje."""
+    if settings.whatsapp_provider != "meta":
+        return await enviar_mensaje(telefono, texto)
+    resultado = await _meta_post({
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": numero_e164(telefono),
+        "type": "text",
+        "text": {"preview_url": True, "body": texto},
+    })
+    if not resultado.get("enviado") and resultado.get("codigo") in CODIGOS_FUERA_DE_VENTANA:
+        print(f"[whatsapp] ⚠️ Mensaje de texto rechazado por ventana de 24h ({numero_e164(telefono)}): {resultado.get('detalle')}", flush=True)
+        resultado["fuera_de_ventana"] = True
+        resultado["detalle"] = "Mensaje de texto rechazado por ventana de 24h: el colaborador no ha escrito al WhatsApp de la empresa en las últimas 24 h."
+    return resultado
+
+
 async def enviar_mensaje(telefono: str, texto: str) -> dict:
     """Envía un mensaje de texto. Regresa {enviado, proveedor, detalle}."""
     if settings.whatsapp_provider == "meta":

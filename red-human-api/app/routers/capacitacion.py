@@ -32,7 +32,7 @@ from ..services import ia
 from ..services.avatar import crear_sesion_avatar
 from ..services.pdf import pdf_curso
 from ..services.correo import enviar_correo
-from ..services.whatsapp import enviar_mensaje
+from ..services.whatsapp import enviar_mensaje, enviar_texto_sin_plantilla
 
 router = APIRouter(prefix="/capacitacion", tags=["capacitacion"])
 
@@ -270,6 +270,22 @@ class AsignarIn(BaseModel):
     notificar: bool = True
 
 
+def _empresa_curso(curso: Curso) -> str:
+    cu = getattr(curso, "cuenta", None)
+    return (cu.nombre_comercial or cu.nombre) if cu else "Red Human"
+
+
+def mensaje_curso_colaborador(nombre: str, curso: Curso, liga: str) -> str:
+    """WhatsApp de texto libre al COLABORADOR al asignarle un curso (2026-09-18, sin plantilla de Meta):
+    «Hola [Nombre], se te asignó el curso de capacitación de [Empresa]: [Título]. Accede a tu curso,
+    interactúa con el avatar y descarga tu material en la siguiente liga: [URL]»."""
+    primer = (nombre or "").split(" ")[0] or "colaborador(a)"
+    return (
+        f"Hola {primer}, se te asignó el curso de capacitación de {_empresa_curso(curso)}: {curso.titulo}. "
+        f"Accede a tu curso, interactúa con el avatar y descarga tu material en la siguiente liga: {liga}"
+    )
+
+
 def _mensaje_liga(nombre: str, curso: Curso, liga: str, tipo: str) -> str:
     primer = (nombre or "").split(" ")[0]
     saludo = f"¡Hola {primer}!" if primer else "¡Hola!"
@@ -297,8 +313,16 @@ async def _notificar(a: AsignacionCurso) -> dict:
     tel, correo, nombre = a.telefono_persona, a.correo_persona, a.nombre_persona
     if tel:
         try:
-            salida["whatsapp"] = await enviar_mensaje(tel, _mensaje_liga(nombre, curso, liga, a.tipo))
-        except Exception as ex:  # noqa: BLE001
+            if a.tipo == "colaborador":
+                # 2026-09-18: texto libre (sin plantilla) con la liga absoluta al curso; si Meta lo rechaza por la
+                # ventana de 24 h queda el warning en el log y la asignación se guarda igual.
+                salida["whatsapp"] = await enviar_texto_sin_plantilla(tel, mensaje_curso_colaborador(nombre, curso, liga))
+            else:
+                salida["whatsapp"] = await enviar_mensaje(tel, _mensaje_liga(nombre, curso, liga, a.tipo))
+            if salida["whatsapp"] and salida["whatsapp"].get("fuera_de_ventana"):
+                print(f"[capacitacion] ⚠️ Mensaje de texto rechazado por ventana de 24h — asignación {a.codigo} guardada sin aviso por WhatsApp.", flush=True)
+        except Exception as ex:  # noqa: BLE001 — salvavidas: la asignación se guarda aunque WhatsApp falle
+            print(f"[capacitacion] ⚠️ WhatsApp no disponible para la asignación {a.codigo}: {ex}", flush=True)
             salida["whatsapp"] = {"enviado": False, "proveedor": "error", "detalle": str(ex)[:200]}
     if correo:
         try:
