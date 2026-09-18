@@ -197,8 +197,12 @@ def _resolver_estado(v: ia.DocumentoValidado, con_ia: bool) -> tuple[str, str]:
     """Traduce la validación de la IA a un estado y un motivo legible para RH."""
     if not con_ia:
         return "revision", "Modo demo: se requiere revisión humana."
-    if not v.coincide_tipo:
-        return "rechazado", f"El archivo parece ser {v.tipo_detectado}, no el documento solicitado."
+    # 2026-09-18 (validación estricta): un archivo que no es claramente el documento oficial solicitado
+    # (tarea, foto casual, captura, otro trámite) se RECHAZA automáticamente — nunca cuenta como válido.
+    if not v.coincide_tipo or not getattr(v, "es_documento_oficial", True) or (v.tipo_detectado or "").strip().lower() in ("otro", "desconocido", "ninguno", ""):
+        detectado = (v.tipo_detectado or "").strip()
+        que = f"El archivo parece ser {detectado}" if detectado and detectado.lower() not in ("otro", "desconocido", "ninguno") else "El archivo no es el documento solicitado"
+        return "rechazado", v.motivo_rechazo or f"{que}; sube el documento oficial correcto (foto clara o PDF)."
     if not v.legible:
         return "rechazado", v.motivo_rechazo or "El documento no se lee con claridad."
     if not v.completo:
@@ -702,7 +706,8 @@ def carta_intencion(
     return Response(
         content=pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{nombre_archivo}"'},
+        # 2026-09-18: inline — la vista /carta/[id] del frontend la embebe con título y favicon de Red Human
+        headers={"Content-Disposition": f'inline; filename="{nombre_archivo}"'},
     )
 
 

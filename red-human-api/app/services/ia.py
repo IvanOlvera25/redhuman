@@ -1590,8 +1590,9 @@ def evaluar_modulo_curso(
 
 
 class DocumentoValidado(BaseModel):
-    tipo_detectado: str = Field(description="Qué documento parece ser (INE, CURP, RFC, comprobante, NSS, otro).")
-    coincide_tipo: bool = Field(description="true si corresponde al tipo de documento solicitado.")
+    tipo_detectado: str = Field(description="Qué documento parece ser (INE, CURP, RFC, comprobante, NSS, acta, título, otro). Si es basura (tarea, foto casual, captura, meme, documento de otro trámite) escribe 'otro' y descríbelo en observaciones.")
+    es_documento_oficial: bool = Field(description="true SOLO si el archivo es un documento oficial/válido del tipo esperado (con formato, sellos, folios o campos propios de ese documento). Cualquier otra cosa → false.")
+    coincide_tipo: bool = Field(description="true únicamente si corresponde claramente al tipo de documento solicitado; ante duda → false.")
     legible: bool = Field(description="true si el documento se lee completo, sin cortes, reflejos ni desenfoque.")
     completo: bool = Field(description="false si falta parte del documento (por ejemplo solo el frente de la INE).")
     vigente: Optional[bool] = Field(default=None, description="null si el documento no tiene vigencia visible.")
@@ -1616,6 +1617,7 @@ def validar_documento(
         return (
             DocumentoValidado(
                 tipo_detectado=tipo_esperado,
+                es_documento_oficial=False,
                 coincide_tipo=True,
                 legible=True,
                 completo=True,
@@ -1669,8 +1671,13 @@ def validar_documento(
         model=MODEL,
         instructions=(
             "Validas documentos de expedientes laborales en México (INE, CURP, RFC, comprobante de domicilio, NSS, "
-            "acta de nacimiento, título profesional). Revisa tipo, legibilidad, integridad y vigencia visible. "
-            f"{titular} Sé conservador: ante cualquier duda, deja constancia en observaciones para revisión humana. "
+            "acta de nacimiento, título profesional) mediante visión/OCR. Revisa tipo, legibilidad, integridad y vigencia visible. "
+            f"{titular} VALIDACIÓN ESTRICTA (2026-09-18): el candidato puede subir cualquier cosa (una tarea escolar, una foto "
+            "casual, una captura de pantalla, un recibo ajeno, un documento de otro tipo). Solo es válido si es CLARAMENTE el "
+            "documento oficial solicitado, con los elementos propios de ese documento (formato, campos, folios, sellos, logotipos "
+            "de la institución). Si no lo es, coincide_tipo=false, es_documento_oficial=false, tipo_detectado='otro' y un "
+            "motivo_rechazo claro y amable para el candidato (qué subió y qué debe subir). Ante duda real sobre el tipo, "
+            "rechaza; la duda solo sobre el titular va a revisión humana. "
             "No transcribas datos personales completos (nada de CURP, RFC ni domicilio íntegros) en las observaciones."
         ),
         input=[

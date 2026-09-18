@@ -1125,6 +1125,60 @@ class Bitacora(Base):
     cuenta_id: Mapped[Optional[int]] = mapped_column(ForeignKey("cuentas.id"), nullable=True, index=True)
 
 
+# ------------------------------------------------------------
+# Base de conocimiento con RAG (2026-09-18): documentos de la Cuenta (políticas, procesos, manuales) →
+# fragmentos con embedding. Ver services/rag.py.
+# ------------------------------------------------------------
+
+TIPOS_CONOCIMIENTO = ["politica", "proceso", "manual", "reglamento", "faq", "otro"]
+
+
+class DocumentoConocimiento(Base):
+    __tablename__ = "documentos_conocimiento"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
+    titulo: Mapped[str] = mapped_column(String(200))
+    tipo: Mapped[str] = mapped_column(String(20), default="politica")  # ver TIPOS_CONOCIMIENTO
+    nombre_archivo: Mapped[str] = mapped_column(String(300), default="")
+    ruta: Mapped[str] = mapped_column(String(400), default="")  # archivo original en uploads/ (vacío si fue texto pegado)
+    texto: Mapped[str] = mapped_column(Text, default="")  # texto plano completo (fuente de los fragmentos)
+    fragmentos_total: Mapped[int] = mapped_column(Integer, default=0)
+    con_embeddings: Mapped[bool] = mapped_column(Boolean, default=False)
+    activo: Mapped[bool] = mapped_column(Boolean, default=True)
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+    fragmentos: Mapped[List["FragmentoConocimiento"]] = relationship(back_populates="documento", cascade="all, delete-orphan")
+
+
+class FragmentoConocimiento(Base):
+    __tablename__ = "fragmentos_conocimiento"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    documento_id: Mapped[int] = mapped_column(ForeignKey("documentos_conocimiento.id"), index=True)
+    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
+    orden: Mapped[int] = mapped_column(Integer, default=0)
+    texto: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # vector (text-embedding-3-small); None = solo léxico
+
+    documento: Mapped["DocumentoConocimiento"] = relationship(back_populates="fragmentos")
+
+
+class ConsultaConocimiento(Base):
+    """Historial de preguntas (auditoría + mejora de la base): qué se preguntó, si hubo evidencia."""
+    __tablename__ = "consultas_conocimiento"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(ForeignKey("cuentas.id"), index=True)
+    usuario: Mapped[str] = mapped_column(String(150), default="")
+    pregunta: Mapped[str] = mapped_column(Text)
+    respuesta: Mapped[dict] = mapped_column(JSON, default=dict)
+    sin_evidencia: Mapped[bool] = mapped_column(Boolean, default=False)
+    modo: Mapped[str] = mapped_column(String(20), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
 def registrar(db: Session, actor: str, accion: str, entidad: str, entidad_id: str, detalle: Optional[dict] = None) -> Bitacora:
     """Escribe un evento en la bitácora encadenando el hash del evento anterior."""
     prev = db.query(Bitacora).order_by(Bitacora.id.desc()).first()

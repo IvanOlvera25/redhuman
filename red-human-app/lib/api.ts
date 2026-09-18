@@ -1661,6 +1661,27 @@ export function avanzarModulo(token: string, modulo: number) {
   return post<AsignacionPublica>(`/capacitacion/publica/${token}/avanzar`, { modulo });
 }
 
+/** 2026-09-18: instructor con avatar (Anam) o chat de texto para el módulo en curso. */
+export function iniciarInstructorCurso(token: string, modulo: number) {
+  return post<{ modo: "avatar" | "texto"; session_token?: string; modulo: number; mensajes: { rol: string; texto: string }[] }>(
+    `/capacitacion/publica/${token}/sesion`,
+    { modulo },
+  );
+}
+
+export function preguntarInstructorCurso(token: string, modulo: number, texto: string) {
+  return post<{ respuesta: string; ia: boolean; mensajes: { rol: string; texto: string }[] }>(`/capacitacion/publica/${token}/turno`, { modulo, texto });
+}
+
+/** PDF del contenido del curso (sala pública / ficha de RH). */
+export function urlPdfCursoPublico(token: string) {
+  return urlArchivo(`/capacitacion/publica/${token}/pdf`);
+}
+
+export function urlPdfCurso(codigo: string) {
+  return urlArchivo(`/capacitacion/${codigo}/pdf`);
+}
+
 export function responderEvaluacion(token: string, indice: number, respuesta: number) {
   return post<AsignacionPublica & { terminado: boolean; correcta: boolean | null; explicacion: string; siguiente: number | null }>(
     `/capacitacion/publica/${token}/responder`,
@@ -1744,8 +1765,15 @@ export function autorizarAlta(expedienteId: number, fechaIngreso?: string, forza
 
 /** Liga de descarga de la carta de intención en PDF — mismo patrón que urlDocumento: <a href>
  * autenticado por cookie de sesión, sin manejo de blobs en el frontend. */
-export function urlCartaIntencion(expedienteId: number) {
+/** PDF crudo de la carta (lo embebe la vista /carta/[id]). */
+export function urlCartaIntencionPdf(expedienteId: number) {
   return urlArchivo(`/contratacion/expedientes/${expedienteId}/carta-intencion`);
+}
+
+/** 2026-09-18: la carta se abre en una vista propia (título + favicon de Red Human en la pestaña) en vez
+ * del PDF pelón, que el navegador mostraba con el ícono genérico. */
+export function urlCartaIntencion(expedienteId: number) {
+  return `/carta/${expedienteId}`;
 }
 
 /** Botón "Cancelar contratación" — cierra el expediente y regresa al candidato a Entrevista Humana. */
@@ -2149,4 +2177,77 @@ export function probarTeams() {
 
 export function desconectarTeams() {
   return eliminar<{ ok: boolean }>("/integraciones/teams");
+}
+
+/* ============================================================
+   Base de conocimiento con RAG (2026-09-18)
+   ============================================================ */
+
+export interface DocumentoConocimiento {
+  id: number;
+  titulo: string;
+  tipo: string;
+  nombreArchivo: string;
+  caracteres: number;
+  fragmentos: number;
+  conEmbeddings: boolean;
+  activo: boolean;
+  creadoPor: string;
+  creadoEn: string | null;
+  extracto: string;
+}
+
+export interface EstadoConocimiento {
+  documentos: number;
+  fragmentos: number;
+  semantico: boolean;
+  iaActiva: boolean;
+  consultas: number;
+  consultasSinEvidencia: number;
+  tipos: string[];
+}
+
+export interface RespuestaConocimiento {
+  respuesta: string;
+  pasos: string[];
+  fuentes: { documento: string; cita: string }[];
+  confianza: "alta" | "media" | "baja";
+  sin_evidencia: boolean;
+  ia: boolean;
+  modo: string;
+  fragmentos: { documentoId: number; documento: string; tipo: string; orden: number; puntaje: number; texto: string }[];
+  creadoEn: string;
+}
+
+export function fetchDocumentosConocimiento() {
+  return get<DocumentoConocimiento[]>("/conocimiento/documentos");
+}
+
+export function fetchEstadoConocimiento() {
+  return get<EstadoConocimiento>("/conocimiento/estado");
+}
+
+export function subirDocumentosConocimiento(datos: { titulo?: string; tipo?: string; texto?: string; archivos?: File[] }) {
+  const form = new FormData();
+  form.append("titulo", datos.titulo ?? "");
+  form.append("tipo", datos.tipo ?? "politica");
+  form.append("texto", datos.texto ?? "");
+  for (const f of datos.archivos ?? []) form.append("archivos", f);
+  return subir<DocumentoConocimiento[]>("/conocimiento/documentos", form);
+}
+
+export function eliminarDocumentoConocimiento(id: number) {
+  return eliminar<{ ok: boolean }>(`/conocimiento/documentos/${id}`);
+}
+
+export function reindexarDocumentoConocimiento(id: number) {
+  return post<DocumentoConocimiento>(`/conocimiento/documentos/${id}/reindexar`, {});
+}
+
+export function preguntarConocimiento(pregunta: string, historial: { rol: string; texto: string }[] = []) {
+  return post<RespuestaConocimiento>("/conocimiento/preguntar", { pregunta, historial });
+}
+
+export function fetchConsultasConocimiento() {
+  return get<{ id: number; usuario: string; pregunta: string; sinEvidencia: boolean; modo: string; creadoEn: string | null }[]>("/conocimiento/consultas");
 }

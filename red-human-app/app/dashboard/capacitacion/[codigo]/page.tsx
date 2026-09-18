@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Link2, Loader2, Pencil, Save, Send, Users, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Download, Link2, Loader2, Pencil, Save, Send, Users, X } from "lucide-react";
 import { Badge, Button, Card, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
 import { Aviso } from "@/components/dashboard/subida";
@@ -23,6 +23,7 @@ import {
   fetchColaboradores,
   fetchCurso,
   publicarCurso,
+  urlPdfCurso,
   type AsignacionCurso,
   type Colaborador,
   type Curso,
@@ -122,6 +123,7 @@ export default function FichaCurso() {
               { etiqueta: "Editar objetivo", icono: <Pencil />, onClick: () => setEditando("objetivo") },
               { etiqueta: "Editar módulos", icono: <Pencil />, onClick: () => setEditando("modulos") },
               { etiqueta: "Editar evaluación", icono: <Pencil />, onClick: () => setEditando("evaluacion") },
+              { etiqueta: "Descargar PDF del curso", icono: <Download />, onClick: () => window.open(urlPdfCurso(curso.id), "_blank") },
               { etiqueta: "Archivar curso", icono: <X />, peligrosa: true, onClick: archivar },
             ]}
           />

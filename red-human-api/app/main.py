@@ -18,7 +18,7 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .migraciones import candidatos_sin_postulacion, sincronizar
 from .migraciones import asegurar_reglas_entrevistador
-from .routers import agente, auth, candidatos, capacitacion, clientes, colaboradores, configuracion, contratacion, cuentas, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
+from .routers import agente, auth, candidatos, capacitacion, clientes, colaboradores, configuracion, conocimiento, contratacion, cuentas, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
 from .seed import rellenar_slugs_cuentas, sembrar, sembrar_admin
 from .services.agenda import revisar_videollamadas_noshow
 from .services.recordatorios import revisar_recordatorios_documentos
@@ -151,6 +151,7 @@ app.include_router(configuracion.router)
 app.include_router(cuentas.router)
 app.include_router(notificaciones.router)
 app.include_router(capacitacion.router)
+app.include_router(conocimiento.router)
 app.include_router(webhooks.router)
 app.include_router(agente.router)
 app.include_router(integraciones.router)
