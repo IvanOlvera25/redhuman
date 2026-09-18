@@ -20,7 +20,8 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..models import REGLAS_NOTIFICACION_DEFAULT, ClienteContacto, EntrevistaHumana, Mensaje, NotificacionEnviada, Postulacion, ReglaNotificacion, Usuario
 from .correo import enviar_correo
-from .whatsapp import enviar_mensaje, enviar_plantilla_documentos
+from .whatsapp import enviar_mensaje, enviar_plantilla_documentos, enviar_plantilla_entrevista
+from . import plantillas_correo
 from ..serial import nombre_empresa_candidato
 
 # RH/entrevistador capturan fecha/hora pensando en hora de México — nunca vienen con offset.
@@ -65,6 +66,46 @@ def _texto_cita_entrevista_humana(eh: EntrevistaHumana, c: Postulacion) -> str:
     if eh.comentario:
         texto += f" {eh.comentario}"
     return texto
+
+
+def datos_entrevista_humana(db: Session, eh: EntrevistaHumana, c: Postulacion) -> dict:
+    """Datos comunes de las plantillas (correo corporativo y plantilla de Meta) de una Entrevista
+    Humana: nombres, vacante, empresa visible para el candidato, fecha/hora en México, conexión y la
+    liga al expediente del candidato para el entrevistador (`/entrevista-humana/{token}`: expediente,
+    evaluación integral y registro de su evaluación, sin sesión)."""
+    v = c.vacante
+    fecha, hora = plantillas_correo.fecha_hora_mx(eh.fecha)
+    liga_conexion = eh.liga if eh.modalidad == "Videollamada" and eh.liga else ""
+    detalle = _detalle_modalidad(eh, c)
+    return {
+        "entrevistador": eh.entrevistador or "",
+        "candidato": c.nombre or "",
+        "vacante": v.titulo if v else "",
+        "empresa": nombre_empresa_candidato(v) if v else "",
+        "fecha": fecha,
+        "hora": hora,
+        "modalidad": eh.modalidad or "",
+        "detalle_conexion": detalle,
+        "liga_conexion": liga_conexion,
+        "ubicacion": eh.ubicacion or "",
+        "telefono_contacto": eh.telefono_contacto or "",
+        "telefono_candidato": c.telefono or "",
+        "comentario": eh.comentario or "",
+        "liga_expediente": f"{settings.app_url}/entrevista-humana/{eh.token}",
+        "logo_url": "",
+    }
+
+
+def parametros_plantilla_entrevista(d: dict) -> List[str]:
+    """Los 6 parámetros posicionales de `alerta_entrevista_asignada`, en este orden exacto."""
+    return [
+        d.get("entrevistador") or "Entrevistador(a)",
+        d.get("candidato") or "",
+        d.get("vacante") or "",
+        d.get("fecha") or "Por confirmar",
+        d.get("hora") or "Por confirmar",
+        d.get("liga_expediente") or "",
+    ]
 
 
 def _html_correo_candidato(eh: EntrevistaHumana, c: Postulacion) -> str:
@@ -187,12 +228,16 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
     cita = _texto_cita_entrevista_humana(eh, c) if eh else ""
 
     if evento == "entrevista_agendada" and eh:
+        # 2026-09-18: correos con las plantillas corporativas (services/plantillas_correo.py). El WhatsApp del
+        # entrevistador sale como plantilla de Meta «alerta_entrevista_asignada» (ver disparar); este texto
+        # es el respaldo si la plantilla falla.
+        d = extra.get("_datos_entrevista") or {}
         if audiencia == "candidato":
             texto = f"¡Hola {primer_nombre}! 📅 Con base en tu entrevista con Red Human, te programamos una entrevista {cita}"
-            return texto if canal == "whatsapp" else ("Tu entrevista con Red Human AI", _html_correo_candidato(eh, c))
+            return texto if canal == "whatsapp" else (plantillas_correo.html_candidato(d) if d else ("Tu entrevista con Red Human AI", _html_correo_candidato(eh, c)))
         if audiencia == "entrevistador":
-            texto = f"Tienes una entrevista programada con {c.nombre} ({puesto}) {cita}"
-            return texto if canal == "whatsapp" else (f"Entrevista programada con {c.nombre}", _html_correo_entrevistador(eh, c))
+            texto = f"Tienes una entrevista programada con {c.nombre} ({puesto}) {cita} Expediente: {d.get('liga_expediente', '')}".strip()
+            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d) if d else (f"Entrevista programada con {c.nombre}", _html_correo_entrevistador(eh, c)))
         if audiencia == "cliente":
             texto = f"Se programó una entrevista para el candidato {c.nombre} ({puesto}) {cita}"
             return texto if canal == "whatsapp" else (f"Entrevista programada — {puesto}", f"<p>{texto}</p>")
@@ -360,6 +405,7 @@ def _valores_plantilla_documentos(c: Postulacion, liga: str, extra: dict) -> dic
 async def _enviar_y_registrar(
     db: Session, p: Postulacion, evento: str, destinatario_tipo: str, canal: str, destino: str, contenido,
     plantilla_valores: Optional[dict] = None,
+    plantilla_entrevista: Optional[List[str]] = None,
 ) -> dict:
     """Regresa {destinatario, canal, destino, enviado, proveedor, detalle} — Fase 7A: el detalle de
     por qué NO salió un envío (sin correo, RESEND_API_KEY sin configurar, Meta rechazó…) ya no se
@@ -376,6 +422,9 @@ async def _enviar_y_registrar(
     try:
         if canal == "whatsapp" and plantilla_valores is not None:
             envio = await enviar_plantilla_documentos(destino, plantilla_valores, contenido, nivel=int(plantilla_valores.get("nivel") or 1))
+        elif canal == "whatsapp" and plantilla_entrevista is not None and settings.whatsapp_provider == "meta" and (settings.meta_plantilla_entrevista or "").strip():
+            # plantilla de Meta «alerta_entrevista_asignada» (6 parámetros); si Meta la rechaza cae a texto
+            envio = await enviar_plantilla_entrevista(destino, plantilla_entrevista, contenido)
         elif canal == "whatsapp":
             envio = await enviar_mensaje(destino, contenido)
         else:
@@ -465,20 +514,26 @@ async def disparar(
     if not c.cuenta_id:
         return []
     regla_guardada = _regla(db, c.cuenta_id, evento)
-    if not regla_guardada and not override:
+    if not regla_guardada:
         # Fase 3 (2026-09-15): sin regla guardada (nadie abrió Configuración → Notificaciones todavía)
         # se aplica la regla con la que NACERÍA (REGLAS_NOTIFICACION_DEFAULT) — antes un evento
         # automático (recordatorio, no-show) no mandaba nada en una Cuenta nueva.
-        defaults = REGLAS_NOTIFICACION_DEFAULT.get(evento)
-        if not defaults:
+        # 2026-09-18: los defaults son la BASE aunque la acción traiga un override parcial (p. ej. solo
+        # «cliente» apagado): antes ese override parcial dejaba en False todo lo que no mencionaba y la
+        # entrevista se agendaba sin avisar a nadie.
+        defaults = REGLAS_NOTIFICACION_DEFAULT.get(evento) or {}
+        override = {**defaults, **{k: v for k, v in (override or {}).items() if v is not None}}
+        if not override:
             return []
-        override = dict(defaults)
     regla = _ReglaEfectiva(regla_guardada, override)
     if not regla.alguno():
         return []
     eh = eh or (c.entrevistas_humanas[-1] if c.entrevistas_humanas else None)
 
     resultados: List[dict] = []
+    # 2026-09-18: datos compartidos por las plantillas de la Entrevista Humana (correo + Meta)
+    if evento == "entrevista_agendada" and eh:
+        extra = {**extra, "_datos_entrevista": datos_entrevista_humana(db, eh, c)}
 
     # --- Candidato: correo/teléfono ya en su ficha (punto 23) ---
     if regla.candidato_whatsapp:
@@ -494,8 +549,9 @@ async def disparar(
     if eh and (regla.entrevistador_whatsapp or regla.entrevistador_correo):
         if regla.entrevistador_whatsapp:
             texto = _mensaje(evento, "entrevistador", "whatsapp", c, eh, liga, extra)
+            params = parametros_plantilla_entrevista(extra["_datos_entrevista"]) if evento == "entrevista_agendada" and extra.get("_datos_entrevista") else None
             resultados.append(await _enviar_y_registrar(
-                db, c, evento, "entrevistador", "whatsapp", _whatsapp_entrevistador(db, eh), texto
+                db, c, evento, "entrevistador", "whatsapp", _whatsapp_entrevistador(db, eh), texto, plantilla_entrevista=params,
             ))
         if regla.entrevistador_correo:
             contenido = _mensaje(evento, "entrevistador", "correo", c, eh, liga, extra)

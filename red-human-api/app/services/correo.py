@@ -25,7 +25,11 @@ async def enviar_correo(destinatario: str, asunto: str, cuerpo_html: str) -> dic
     if not destinatario:
         return _resultado(False, "Sin dirección de correo")
     if not settings.resend_api_key:
+        print("[correo] ⚠️ RESEND_API_KEY sin configurar: el correo no sale (se registra como no enviado).", flush=True)
         return _resultado(False, "RESEND_API_KEY sin configurar")
+    if "onboarding@resend.dev" in (settings.resend_from or ""):
+        # Sandbox de Resend: solo entrega al dueño de la cuenta. Se avisa, pero se intenta igual.
+        print(f"[correo] ⚠️ RESEND_FROM en modo sandbox ({settings.resend_from}): Resend solo entrega al correo del dueño de la cuenta; configura un dominio verificado para {destinatario}.", flush=True)
 
     try:
         async with httpx.AsyncClient(timeout=15) as cli:
@@ -44,6 +48,8 @@ async def enviar_correo(destinatario: str, asunto: str, cuerpo_html: str) -> dic
             )
         if r.status_code < 300:
             return _resultado(True, r.status_code, id=(r.json() or {}).get("id"))
+        print(f"[correo] ⚠️ Resend rechazó el envío a {destinatario} ({r.status_code}): {r.text[:200]}", flush=True)
         return _resultado(False, r.text[:300], codigo=r.status_code)
     except Exception as e:  # que Resend falle no debe tumbar el flujo que lo llama
+        print(f"[correo] ⚠️ Resend no disponible ({e}); el flujo continúa sin correo.", flush=True)
         return _resultado(False, str(e))

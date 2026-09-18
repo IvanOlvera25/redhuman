@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     # Vacías → se usa META_PLANTILLA_DOCUMENTOS para todos los niveles.
     meta_plantilla_recordatorio_2: str = ""
     meta_plantilla_recordatorio_3: str = ""
+    # 2026-09-18: plantilla aprobada en Meta para avisar al ENTREVISTADOR de una Entrevista Humana asignada.
+    # 6 variables posicionales: {{1}} entrevistador, {{2}} candidato, {{3}} vacante, {{4}} fecha, {{5}} hora,
+    # {{6}} liga al expediente. Si Meta la rechaza (no aprobada, nombre distinto) sale texto libre.
+    meta_plantilla_entrevista: str = "alerta_entrevista_asignada"
 
     # --- Gateway propio (alternativa sin costo por mensaje) ---
     waha_url: str = "http://localhost:3001"
