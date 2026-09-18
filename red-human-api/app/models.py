@@ -814,6 +814,9 @@ class Colaborador(Base):
     candidato_origen: Mapped[Optional["Candidato"]] = relationship()
     cliente: Mapped[Optional["Cliente"]] = relationship()  # Fase 5: filtro por Cliente
     expediente: Mapped[Optional["Expediente"]] = relationship()
+    # 2026-09-18: sus asignaciones de capacitación se van con él (borrado físico en cascada; en la
+    # eliminación LÓGICA el endpoint las borra explícitamente para que el tablero y los contadores se actualicen).
+    asignaciones_curso: Mapped[List["AsignacionCurso"]] = relationship(cascade="all, delete-orphan", passive_deletes=False)
 
 
 # ============================================================
@@ -1300,8 +1303,13 @@ class AsignacionCurso(Base):
     completado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     curso: Mapped["Curso"] = relationship(back_populates="asignaciones")
-    colaborador: Mapped[Optional["Colaborador"]] = relationship()
+    colaborador: Mapped[Optional["Colaborador"]] = relationship(overlaps="asignaciones_curso")
     postulacion: Mapped[Optional["Postulacion"]] = relationship()
+
+    @property
+    def viva(self) -> bool:
+        """False si su colaborador fue eliminado (lógicamente) — nunca se lista ni se cuenta."""
+        return not (self.colaborador is not None and self.colaborador.eliminado_en is not None)
 
     @property
     def nombre_persona(self) -> str:

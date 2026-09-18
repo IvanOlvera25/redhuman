@@ -539,7 +539,7 @@ def entrevista_dict(e: Entrevista) -> dict:
 
 def curso_dict(c: Curso, detalle: bool = False) -> dict:
     """Módulo universal (2026-09-16): resumen + (detalle) módulos, evaluación integrada y adjuntos."""
-    asigs = c.asignaciones
+    asigs = [a for a in c.asignaciones if a.viva]  # 2026-09-18: sin colaboradores eliminados
     completadas = [a for a in asigs if a.estado == "completado"]
     base = {
         "id": c.codigo,

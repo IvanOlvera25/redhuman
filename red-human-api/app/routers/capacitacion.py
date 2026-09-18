@@ -130,7 +130,7 @@ def listar(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), 
 def kpis(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
     """KPIs del tablero — antes de /{codigo} a propósito ('kpis' no es un código)."""
     cursos = db.query(Curso).filter(Curso.cuenta_id == cuenta.id, Curso.estado != "Archivado").all()
-    asignaciones = db.query(AsignacionCurso).join(Curso, AsignacionCurso.curso_id == Curso.id).filter(Curso.cuenta_id == cuenta.id).all()
+    asignaciones = [a for a in db.query(AsignacionCurso).join(Curso, AsignacionCurso.curso_id == Curso.id).filter(Curso.cuenta_id == cuenta.id).all() if a.viva]
     completadas = [a for a in asignaciones if a.estado == "completado"]
     aprobadas = [a for a in completadas if a.aprobado]
     return {
@@ -159,7 +159,7 @@ def tablero(
         q = q.filter(Curso.codigo == curso)
     if aprobado is not None:
         q = q.filter(AsignacionCurso.aprobado.is_(aprobado))
-    return [asignacion_dict(a) for a in q.order_by(AsignacionCurso.id.desc()).all()]
+    return [asignacion_dict(a) for a in q.order_by(AsignacionCurso.id.desc()).all() if a.viva]
 
 
 @router.get("/{codigo}")
@@ -387,7 +387,7 @@ async def asignar(codigo: str, datos: AsignarIn, db: Session = Depends(get_db), 
 @router.get("/{codigo}/asignaciones")
 def asignaciones_curso(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
     curso = _por_codigo(db, codigo, cuenta.id)
-    return [asignacion_dict(a) for a in db.query(AsignacionCurso).filter(AsignacionCurso.curso_id == curso.id).order_by(AsignacionCurso.id.desc()).all()]
+    return [asignacion_dict(a) for a in db.query(AsignacionCurso).filter(AsignacionCurso.curso_id == curso.id).order_by(AsignacionCurso.id.desc()).all() if a.viva]
 
 
 # ------------------------------------------------------------

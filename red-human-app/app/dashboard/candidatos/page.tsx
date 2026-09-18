@@ -67,6 +67,7 @@ import {
   enviarPrefiltro,
   fetchCandidato,
   fetchCandidatos,
+  urlPreviewCorreo,
   fetchClientes,
   fetchEntrevistadores,
   evaluarEntrevistaConLoQueHay,
@@ -111,6 +112,7 @@ import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import { LineaNotificar, useNotificarAccion } from "@/components/dashboard/linea-notificar";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import { SwitchModoPrueba } from "@/components/dashboard/switch-modo-prueba";
+import { Toast, type ToastMsg } from "@/components/dashboard/toast";
 import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
 import { cn, etiquetaRecordatorio } from "@/lib/utils";
 
@@ -1244,6 +1246,7 @@ function ModalCandidato({
   /** 2026-09-17: Descartar pasa SIEMPRE por confirmación con motivo (HITL, queda en bitácora). Con
    * expediente abierto (Contratación/Onboarding) el backend lo cancela en la misma decisión. */
   const [confirmarDescartar, setConfirmarDescartar] = useState<null | { motivo: string }>(null);
+  const [toast, setToast] = useState<ToastMsg>(null);
 
   function descartar() {
     if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
@@ -1823,15 +1826,25 @@ function ModalCandidato({
             }}
           />
         )}
+      <Toast msg={toast} onClose={() => setToast(null)} />
       {modalEntrevista && (
         <ModalProgramarEntrevista
           c={c}
           onClose={() => setModalEntrevista(false)}
-          onListo={(actualizado, resultados) => {
+          onListo={(actualizado, resultados, advertencias) => {
             setModalEntrevista(false);
             // Fase 7A: el resultado por canal ya no es silencioso — se muestra qué salió y qué no (y por qué)
             const lineas = lineasResultados(resultados);
             const fallidos = lineas.filter((l) => !l.ok);
+            // 2026-09-18: además un toast amarillo flotante si algún correo/WhatsApp no salió (no se pierde con el scroll)
+            const correoFallo = resultados.some((r) => r.canal === "correo" && !r.enviado && r.destino);
+            if (advertencias?.length || correoFallo) {
+              setToast({
+                tono: "warn",
+                texto: correoFallo ? "Entrevista asignada, pero el correo falló. Verifica la API Key o el Dominio" : "Entrevista asignada con avisos",
+                detalle: advertencias ?? [],
+              });
+            }
             setAviso({
               tono: fallidos.length ? "warn" : "ok",
               texto: lineas.length
@@ -3424,7 +3437,7 @@ function ModalProgramarEntrevista({
 }: {
   c: Candidato;
   onClose: () => void;
-  onListo: (c: Candidato, resultados: ResultadoNotificacion[]) => void;
+  onListo: (c: Candidato, resultados: ResultadoNotificacion[], advertencias?: string[]) => void;
 }) {
   const notificar = useNotificarAccion("entrevista_agendada");
   const clienteId = c.clienteIdVacante ?? null;
@@ -3447,6 +3460,7 @@ function ModalProgramarEntrevista({
   const [comentario, setComentario] = useState("");
   const [error, setError] = useState("");
   const [enviando, setEnviando] = useState(false);
+  const [preview, setPreview] = useState<null | "entrevistador" | "candidato">(null);
   // Fase 7B: con Teams conectado en la Cuenta la videollamada se crea sola; «Usar otra liga» = excepción
   const [teamsConectado, setTeamsConectado] = useState(false);
   const [otraLiga, setOtraLiga] = useState(false);
@@ -3529,19 +3543,22 @@ function ModalProgramarEntrevista({
       setError(r.error);
       return;
     }
-    onListo(r.data.candidato, r.data.resultados);
+    onListo(r.data.candidato, r.data.resultados, r.data.advertencias);
   }
 
   const inputCls = "h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20";
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <Card className="w-full max-w-md p-5">
-        <h3 className="font-display text-lg font-bold">Programar entrevista humana</h3>
-        <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-          Con {c.nombre.split(" ")[0]}. Al guardar, la tarjeta se mueve a Entrevista Humana y se confirma por correo y WhatsApp.
-        </p>
-
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4">
+      {/* 2026-09-18: más ancho, cuerpo con scroll propio y footer fijo — los botones nunca se pierden (web y móvil) */}
+      <Card className="flex h-[100dvh] w-full flex-col overflow-hidden rounded-none p-0 sm:h-auto sm:max-h-[85vh] sm:max-w-2xl sm:rounded-2xl">
+        <div className="shrink-0 border-b border-border-faint px-5 pt-5 pb-3">
+          <h3 className="font-display text-lg font-bold">Programar entrevista humana</h3>
+          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
+            Con {c.nombre.split(" ")[0]}. Al guardar, la tarjeta se mueve a Entrevista Humana y se confirma por correo y WhatsApp.
+          </p>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-4">
         <div className="mt-4 flex flex-col gap-3">
           <div>
             <span className="text-sm font-medium text-ink-2">Entrevistador</span>
@@ -3719,16 +3736,52 @@ function ModalProgramarEntrevista({
         )}
 
         <LineaNotificar className="mt-4" value={notificar.value} onChange={notificar.setValue} hayCliente={Boolean(clienteId)} clienteId={clienteId} />
+        </div>
 
-        <div className="mt-5 flex gap-3">
-          <Button variant="outline" className="flex-1" onClick={onClose} disabled={enviando}>
-            Cancelar
-          </Button>
-          <Button className="flex-1" onClick={programar} disabled={enviando}>
-            {enviando ? "Programando…" : "Programar entrevista"}
-          </Button>
+        {/* Footer sticky: siempre visible */}
+        <div className="shrink-0 border-t border-border-soft bg-surface px-5 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={() => setPreview("entrevistador")} disabled={enviando} title="Previsualiza el HTML exacto que recibirán el entrevistador y el candidato">
+              <Mail className="h-4 w-4" /> Ver cuerpo del correo
+            </Button>
+            <div className="ml-auto flex gap-2">
+              <Button variant="outline" onClick={onClose} disabled={enviando}>
+                Cancelar
+              </Button>
+              <Button onClick={programar} disabled={enviando}>
+                {enviando ? "Programando…" : "Programar entrevista"}
+              </Button>
+            </div>
+          </div>
         </div>
       </Card>
+
+      {preview && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4" onClick={() => setPreview(null)}>
+          <Card className="flex h-[100dvh] w-full flex-col overflow-hidden rounded-none p-0 sm:h-[90vh] sm:max-w-3xl sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border-soft px-4 py-3">
+              <div className="scroll-x gap-1 rounded-xl border border-border-soft bg-surface-2/60 p-1">
+                {(["entrevistador", "candidato"] as const).map((k) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setPreview(k)}
+                    className={cn("rounded-lg px-3 py-1.5 text-xs font-semibold transition", preview === k ? "bg-brand text-white" : "text-ink-2 hover:text-ink")}
+                  >
+                    {k === "entrevistador" ? "Correo al entrevistador" : "Correo al candidato"}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="hidden text-[11px] text-ink-3 sm:inline">Vista previa con datos de ejemplo · modalidad {modalidad}</span>
+                <a href={urlPreviewCorreo(preview, modalidad)} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand hover:underline">Abrir en pestaña</a>
+                <button onClick={() => setPreview(null)} className="grid h-8 w-8 place-items-center rounded-lg text-ink-3 hover:bg-surface-2" aria-label="Cerrar"><X className="h-4 w-4" /></button>
+              </div>
+            </div>
+            <iframe title={`Vista previa · ${preview}`} src={urlPreviewCorreo(preview, modalidad)} className="min-h-0 w-full flex-1 bg-white" />
+          </Card>
+        </div>
+      )}
     </div>
   );
 }

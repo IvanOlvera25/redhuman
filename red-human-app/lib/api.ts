@@ -600,6 +600,11 @@ export function fetchVacantesPublicas(cuenta = "") {
   return get<Vacante[]>(`/vacantes/publicas${cuenta ? `?cuenta=${encodeURIComponent(cuenta)}` : ""}`);
 }
 
+/** Vistas previas de los correos corporativos de Entrevista Humana (datos de prueba, sin enviar). */
+export function urlPreviewCorreo(plantilla: "entrevistador" | "candidato", modalidad = "Videollamada") {
+  return `${API}/api/emails/preview/${plantilla}?modalidad=${encodeURIComponent(modalidad)}`;
+}
+
 export function fetchCuentaPublica(cuenta: string) {
   return get<{ id: number; slug: string; nombre: string; logoUrl: string }>(`/vacantes/publicas/cuenta?cuenta=${encodeURIComponent(cuenta)}`);
 }
@@ -1070,7 +1075,7 @@ export function programarEntrevistaHumana(
     notificar?: NotificarAccion;
   },
 ) {
-  return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana`, {
+  return post<{ resultados: ResultadoNotificacion[]; advertencias?: string[]; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana`, {
     tipo_entrevistador: datos.tipoEntrevistador,
     entrevistador_usuario_id: datos.entrevistadorUsuarioId ?? null,
     entrevistador_contacto_id: datos.entrevistadorContactoId ?? null,

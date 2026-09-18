@@ -1678,6 +1678,10 @@ def validar_documento(
             "de la institución). Si no lo es, coincide_tipo=false, es_documento_oficial=false, tipo_detectado='otro' y un "
             "motivo_rechazo claro y amable para el candidato (qué subió y qué debe subir). Ante duda real sobre el tipo, "
             "rechaza; la duda solo sobre el titular va a revisión humana. "
+            "COMPROBANTES DE DOMICILIO (luz, agua, teléfono, predial, estado de cuenta): en México es normal que vengan a nombre "
+            "de un tercero (padres, familiares, arrendador). Para ese tipo NO compares el titular: deja coincide_titular=null y "
+            "fíjate únicamente en que el comprobante en sí sea legítimo (emisor real, domicilio completo, fecha de emisión reciente, "
+            "formato del proveedor). "
             "No transcribas datos personales completos (nada de CURP, RFC ni domicilio íntegros) en las observaciones."
         ),
         input=[

@@ -219,10 +219,12 @@ with TestClient(app) as client:
     exp_id = r.json()["expedienteId"]
     db.expire_all()
     base = db.query(NotificacionEnviada).count()
-    client.patch("/configuracion", json={"modo_prueba": True})  # forzar_prueba solo aplica con Modo Prueba
-    # 2026-09-15: sin NINGÚN documento adjunto el alta es 400 (ni con forzar_prueba) — se adjunta uno.
+    # 2026-09-18 (Modo Prueba TOTAL): con Modo Prueba apagado, sin NINGÚN documento adjunto el alta es 400;
+    # con Modo Prueba activo se omite toda la validación de integridad.
+    client.patch("/configuracion", json={"modo_prueba": False})
     r = client.post(f"/contratacion/expedientes/{exp_id}/alta", json={}, params={"forzar_prueba": "true"})
-    check(r.status_code == 400 and "no tiene documentos adjuntos" in r.json()["detail"], "alta sin documentos adjuntos → 400 aun con forzar_prueba")
+    check(r.status_code == 400 and "no tiene documentos adjuntos" in r.json()["detail"], "alta sin documentos adjuntos → 400 con Modo Prueba apagado (forzar_prueba no aplica)")
+    client.patch("/configuracion", json={"modo_prueba": True})
     pdf = b"%PDF-1.4\n" + b"%" * 600 + b"\n%%EOF\n"
     r = client.post(f"/contratacion/expedientes/{exp_id}/documentos", data={"tipo": "CURP"}, files={"archivo": ("curp.pdf", pdf, "application/pdf")})
     check(r.status_code == 200, "subir un documento al expediente")

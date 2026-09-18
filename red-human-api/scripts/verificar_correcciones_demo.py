@@ -261,10 +261,18 @@ with TestClient(app) as client:
     r = client.patch(f"/candidatos/{P6}/etapa?forzar_prueba=true", json={"etapa": "Contratación"})
     check(r.status_code == 200 and r.json().get("expedienteId"), "mover a Contratación abre el expediente")
     EXP = r.json()["expedienteId"]
+    # 2026-09-18 (Modo Prueba TOTAL): con Modo Prueba activo el alta ya no exige documentos; el bloqueo se
+    # verifica con Modo Prueba apagado.
+    cfg_demo = obtener(db)
+    prueba_previa = cfg_demo.modo_prueba
+    cfg_demo.modo_prueba = False
+    db.commit()
     r = client.post(f"/contratacion/expedientes/{EXP}/alta?forzar_prueba=true", json={})
-    check(r.status_code == 400 and "no tiene documentos adjuntos" in r.json()["detail"], f"alta sin documentos → 400 aunque se fuerce con Modo Prueba: «{r.json().get('detail')}»")
+    check(r.status_code == 400 and "no tiene documentos adjuntos" in r.json()["detail"], f"alta sin documentos → 400 con Modo Prueba apagado: «{r.json().get('detail')}»")
     r = client.post(f"/contratacion/expedientes/{EXP}/alta", json={})
-    check(r.status_code == 400, "alta sin documentos → 400 también sin forzar")
+    check(r.status_code == 400, "alta sin documentos → 400 también sin forzar (Modo Prueba apagado)")
+    cfg_demo.modo_prueba = prueba_previa
+    db.commit()
 
     # ================= 4. Plantilla + documento por WhatsApp =================
     print("\n--- 4. Solicitud de documentos por plantilla y carga por WhatsApp ---")
@@ -306,9 +314,14 @@ with TestClient(app) as client:
     # descarga fallida → aviso al candidato, sin 500
     r = webhook_meta(client, "5215577778888", "", tipo="document", media={"id": "media-mala", "mime_type": "application/pdf"}, wamid="wamid.doc2")
     check(r.status_code == 200 and r.json().get("error") and "no pude descargarlo" in ENVIADOS[-1]["texto"], "descarga fallida de Meta → se le avisa al candidato, sin 500")
-    # ahora sí hay documentos: el alta ya no se bloquea por «sin documentos» (sigue el gate de progreso)
+    # ahora sí hay documentos: el alta ya no se bloquea por «sin documentos» (sigue el gate de progreso).
+    # 2026-09-18: el gate solo aplica con Modo Prueba apagado (Modo Prueba TOTAL lo omite).
+    cfg_demo.modo_prueba = False
+    db.commit()
     r = client.post(f"/contratacion/expedientes/{EXP}/alta", json={})
     check(r.status_code == 409 and "no tiene documentos adjuntos" not in r.json()["detail"], "con documentos adjuntos el alta pasa el nuevo gate (y sigue el de completitud/revisión: 409)")
+    cfg_demo.modo_prueba = True
+    db.commit()
     # adjunto fuera de Contratación/Onboarding → no se toca ningún expediente
     r = webhook_meta(client, TEL, "", tipo="image", media={"id": "media-9", "mime_type": "image/jpeg"}, wamid="wamid.img9")
     check(r.status_code == 200 and r.json().get("accion") == "adjunto_ignorado", "imagen en etapa Entrevista IA → se ignora con aviso (sin expediente)")

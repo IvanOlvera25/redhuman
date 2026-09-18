@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import Cliente, Colaborador, Cuenta, Usuario, registrar
+from ..models import AsignacionCurso, Cliente, Colaborador, Cuenta, Usuario, registrar
 from ..serial import colaborador_detalle_dict, colaborador_dict
 
 router = APIRouter(prefix="/colaboradores", tags=["colaboradores"])
@@ -128,6 +128,12 @@ def eliminar(
     col.eliminado_en = datetime.now(timezone.utc)
     col.eliminado_por = u.nombre
     col.activo = False
-    registrar(db, u.nombre, "colaborador_eliminado", "colaborador", col.codigo, {"nombre": col.nombre, "correo_rh": u.correo})
+    # 2026-09-18: sus asignaciones de capacitación se eliminan (dejaban «fantasmas» en Seguimiento y en los
+    # contadores «X personas asignadas»).
+    asignaciones = db.query(AsignacionCurso).filter(AsignacionCurso.colaborador_id == col.id).all()
+    cursos = sorted({a.curso.codigo for a in asignaciones if a.curso})
+    for a in asignaciones:
+        db.delete(a)
+    registrar(db, u.nombre, "colaborador_eliminado", "colaborador", col.codigo, {"nombre": col.nombre, "correo_rh": u.correo, "asignaciones_curso_eliminadas": len(asignaciones), "cursos": cursos})
     db.commit()
-    return {"ok": True, "colaborador": col.codigo}
+    return {"ok": True, "colaborador": col.codigo, "asignacionesCursoEliminadas": len(asignaciones)}
