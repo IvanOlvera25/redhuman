@@ -32,6 +32,23 @@ from ..config import settings
 from ..models import DocumentoConocimiento, FragmentoConocimiento
 from . import ia
 
+# Disponibilidad del módulo (hotfix 2026-09-18): la fija main.lifespan según se hayan podido crear sus tablas.
+_DISPONIBLE = {"ok": True, "error": ""}
+
+
+def marcar_disponible(ok: bool, error: str = "") -> None:
+    _DISPONIBLE["ok"] = bool(ok)
+    _DISPONIBLE["error"] = error or ""
+
+
+def disponible() -> bool:
+    return _DISPONIBLE["ok"]
+
+
+def error_inicializacion() -> str:
+    return _DISPONIBLE["error"]
+
+
 MODELO_EMBEDDING = "text-embedding-3-small"
 TAM_FRAGMENTO = 900
 SOLAPE = 150

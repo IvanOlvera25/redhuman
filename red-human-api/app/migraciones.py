@@ -7,7 +7,7 @@ el modelo para que los renglones viejos no queden en NULL.
 """
 
 import json
-from typing import List
+from typing import List, Optional
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
@@ -37,16 +37,46 @@ def _default_sql(col) -> str:
     return ""  # datetimes u otros callables → la columna queda NULL
 
 
-def sincronizar(engine: Engine) -> List[str]:
-    """Agrega a la base las columnas que existen en los modelos y no en las tablas."""
+def crear_tablas_base(engine: Engine) -> None:
+    """Tablas del núcleo (todas menos las de la Base de Conocimiento): si esto falla, la API NO arranca,
+    como siempre."""
+    from .models import TABLAS_CONOCIMIENTO
+
+    nucleo = [t for t in Base.metadata.sorted_tables if t.name not in TABLAS_CONOCIMIENTO]
+    Base.metadata.create_all(bind=engine, tables=nucleo)
+
+
+def crear_tablas_conocimiento(engine: Engine) -> Optional[str]:
+    """Tablas de la Base de Conocimiento (RAG) en un paso aparte y NO fatal (hotfix 2026-09-18): regresa
+    None si quedaron listas, o el texto del error si no — en ese caso el módulo queda deshabilitado (503)
+    y el resto de la plataforma arranca normal. Se crean una por una para que un fallo aislado no
+    bloquee a las demás y el error diga exactamente qué tabla y qué dijo el motor."""
+    from .models import TABLAS_CONOCIMIENTO
+
+    errores = []
+    for nombre in TABLAS_CONOCIMIENTO:
+        tabla = Base.metadata.tables.get(nombre)
+        if tabla is None:
+            continue
+        try:
+            Base.metadata.create_all(bind=engine, tables=[tabla])
+        except Exception as ex:  # noqa: BLE001 — se reporta, nunca tumba el arranque
+            errores.append(f"{nombre}: {str(ex).splitlines()[0][:300]}")
+    return "; ".join(errores) if errores else None
+
+
+def sincronizar(engine: Engine, omitir: Optional[set] = None) -> List[str]:
+    """Agrega a la base las columnas que existen en los modelos y no en las tablas.
+    `omitir`: tablas que no se tocan (p. ej. las de conocimiento cuando no se pudieron crear)."""
     insp = inspect(engine)
     tablas = set(insp.get_table_names())
     cambios: List[str] = []
+    omitir = omitir or set()
 
     with engine.begin() as con:
         for tabla in Base.metadata.sorted_tables:
-            if tabla.name not in tablas:
-                continue  # create_all ya la creó completa
+            if tabla.name not in tablas or tabla.name in omitir:
+                continue  # create_all ya la creó completa (o está deshabilitada)
             existentes = {c["name"] for c in insp.get_columns(tabla.name)}
             for col in tabla.columns:
                 if col.name in existentes:

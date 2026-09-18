@@ -16,10 +16,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import Base, SessionLocal, engine
-from .migraciones import candidatos_sin_postulacion, sincronizar
+from .migraciones import crear_tablas_base, crear_tablas_conocimiento, candidatos_sin_postulacion, sincronizar
 from .migraciones import asegurar_reglas_entrevistador
 from .routers import agente, auth, candidatos, capacitacion, clientes, colaboradores, configuracion, conocimiento, contratacion, cuentas, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
 from .seed import rellenar_slugs_cuentas, sembrar, sembrar_admin
+from .models import TABLAS_CONOCIMIENTO
+from .services import rag
 from .services.agenda import revisar_videollamadas_noshow
 from .services.recordatorios import revisar_recordatorios_documentos
 from .routers.entrevistas import cerrar_entrevistas_inactivas
@@ -33,8 +35,15 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    cambios = sincronizar(engine)  # columnas nuevas sobre una base ya existente
+    # HOTFIX 2026-09-18: el núcleo se crea como siempre (fatal si falla); las tablas de la Base de
+    # Conocimiento van aparte y NUNCA tumban el arranque — si fallan, el módulo responde 503 y se
+    # imprime el error exacto del motor para corregirlo con calma.
+    crear_tablas_base(engine)
+    error_rag = crear_tablas_conocimiento(engine)
+    rag.marcar_disponible(error_rag is None, error_rag or "")
+    if error_rag:
+        print(f"[conocimiento] ⚠️ Base de Conocimiento DESHABILITADA: no se pudieron crear sus tablas → {error_rag}", flush=True)
+    cambios = sincronizar(engine, omitir=set(TABLAS_CONOCIMIENTO) if error_rag else None)  # columnas nuevas sobre una base ya existente
     if cambios:
         print(f"[esquema] columnas agregadas: {', '.join(cambios)}")
     with SessionLocal() as db:
