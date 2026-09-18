@@ -17,6 +17,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from fastapi.responses import Response
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -24,10 +25,12 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import AsignacionCurso, Candidato, Colaborador, Cuenta, Curso, ModuloCurso, Postulacion, Usuario, registrar
+from ..models import slugificar, AsignacionCurso, Candidato, Colaborador, Cuenta, Curso, ModuloCurso, Postulacion, Usuario, registrar
 from ..serial import asignacion_dict, asignacion_publica_dict, curso_dict
 from ..services import archivos as fs
 from ..services import ia
+from ..services.avatar import crear_sesion_avatar
+from ..services.pdf import pdf_curso
 from ..services.correo import enviar_correo
 from ..services.whatsapp import enviar_mensaje
 
@@ -426,6 +429,128 @@ def registro_externo(token: str, datos: RegistroExternoIn, db: Session = Depends
     registrar(db, "externo", "curso_registro_externo", "asignacion_curso", a.codigo, {"nombre": a.externo_nombre})
     db.commit()
     return asignacion_publica_dict(a)
+
+
+# ------------------------------------------------------------
+# Instructor con avatar (restaurado 2026-09-18): el avatar explica el módulo y responde dudas; convive
+# con el contenido escrito (que sigue siendo la fuente de verdad del curso). Sin Anam → chat de texto.
+# ------------------------------------------------------------
+
+
+def _modulo_por_orden(a: AsignacionCurso, orden: int) -> ModuloCurso:
+    for m in sorted(a.curso.modulos or [], key=lambda x: x.orden):
+        if m.orden == orden:
+            return m
+    raise HTTPException(404, "Ese módulo no existe en el curso.")
+
+
+def _prompt_instructor(a: AsignacionCurso, m: ModuloCurso) -> str:
+    total = len(a.curso.modulos or [])
+    nombre = (a.nombre_persona or "").split(" ")[0] or "la persona"
+    return (
+        f"Eres el instructor virtual de Red Human AI (México) impartiendo el curso «{a.curso.titulo}» a {nombre}. "
+        f"Estás en el módulo «{m.titulo}» ({m.orden} de {total}).\n\n"
+        f"Objetivo del curso: {a.curso.objetivo}\n\nContenido del módulo (fuente de verdad, no inventes nada fuera de esto):\n{m.contenido}\n\n"
+        "Instrucciones: (1) explica el contenido de forma conversacional, cálida y clara, en español mexicano, en "
+        "mensajes cortos (se dicen en voz alta); (2) responde las dudas de la persona SOLO con base en el contenido; si "
+        "algo no está en el módulo, dilo y sugiere consultarlo con Recursos Humanos; (3) al terminar de explicar, invita a "
+        "la persona a dar clic en «Siguiente módulo»; (4) nunca pidas ni menciones datos sensibles (salud, embarazo, "
+        "religión, estado civil, orientación)."
+    )
+
+
+class SesionCursoIn(BaseModel):
+    modulo: int  # orden (1-based) del módulo que se está viendo
+
+
+@router.post("/publica/{token}/sesion")
+async def sesion_instructor(token: str, datos: SesionCursoIn, db: Session = Depends(get_db)):
+    """Sesión del avatar instructor para UN módulo (token efímero de Anam) o modo texto si no hay
+    avatar. Nunca tumba la sala: cualquier falla cae a texto."""
+    a = _asignacion_por_token(db, token)
+    if a.tipo == "externo" and not a.externo_nombre:
+        raise HTTPException(409, "Regístrate con tu nombre antes de empezar.")
+    m = _modulo_por_orden(a, datos.modulo)
+    saludo = f"¡Hola! Soy tu instructor de Red Human. Vamos con el módulo «{m.titulo}». Te lo explico y me preguntas lo que quieras."
+    ses = None
+    try:
+        ses = await crear_sesion_avatar("Instructor Red Human", _prompt_instructor(a, m), saludo)
+    except Exception as ex:  # el avatar nunca debe tumbar la sala: cae a modo texto
+        print(f"[ERROR] crear_sesion_avatar falló (curso {a.codigo}): {str(ex)}", flush=True)
+        registrar(db, "sistema", "avatar_error", "asignacion_curso", a.codigo, {"error": str(ex)[:300]})
+    if a.iniciado_en is None:
+        a.iniciado_en = datetime.now(timezone.utc)
+        a.estado = "en_curso"
+    db.commit()
+    base = {"modulo": datos.modulo, "mensajes": [{"rol": "assistant", "texto": saludo}]}
+    if ses is None:
+        return {"modo": "texto", **base}
+    return {"modo": "avatar", **ses, **base}
+
+
+class TurnoCursoIn(BaseModel):
+    modulo: int
+    texto: str
+
+
+@router.post("/publica/{token}/turno")
+def turno_instructor(token: str, datos: TurnoCursoIn, db: Session = Depends(get_db)):
+    """Pregunta escrita al instructor sobre el módulo (modo texto o junto al avatar). El historial
+    por módulo se guarda en `AsignacionCurso.transcript`."""
+    a = _asignacion_por_token(db, token)
+    if not datos.texto.strip():
+        raise HTTPException(400, "Escribe tu pregunta.")
+    m = _modulo_por_orden(a, datos.modulo)
+    bloques = list(a.transcript or [])
+    bloque = next((b for b in bloques if b.get("modulo") == datos.modulo), None)
+    historial = list(bloque.get("mensajes", [])) if bloque else []
+    historial = historial + [{"rol": "user", "texto": datos.texto.strip()[:2000]}]
+    t, con_ia = ia.curso_turno(_prompt_instructor(a, m), historial)
+    historial = historial + [{"rol": "assistant", "texto": t.respuesta}]
+    if bloque:
+        bloque["mensajes"] = historial[-40:]
+    else:
+        bloques.append({"modulo": datos.modulo, "titulo": m.titulo, "mensajes": historial})
+    a.transcript = bloques
+    db.commit()
+    return {"respuesta": t.respuesta, "ia": con_ia, "mensajes": historial}
+
+
+def _datos_pdf_curso(curso: Curso, a: Optional[AsignacionCurso] = None) -> dict:
+    empresa = curso.cuenta.nombre_comercial if getattr(curso, "cuenta", None) and curso.cuenta else ""
+    d = {
+        "titulo": curso.titulo, "categoria": curso.categoria, "objetivo": curso.objetivo, "duracion_horas": curso.duracion_horas,
+        "empresa": empresa,
+        "modulos": [{"orden": m.orden, "titulo": m.titulo, "contenido": m.contenido} for m in sorted(curso.modulos or [], key=lambda x: x.orden)],
+        "evaluacion": [{"pregunta": q.get("pregunta"), "opciones": q.get("opciones") or []} for q in (curso.evaluacion or [])],
+    }
+    if a is not None:
+        d["persona"] = a.nombre_persona
+        if a.estado == "completado" and a.calificacion is not None:
+            r = a.resultado_evaluacion or {}
+            d["resultado"] = {"calificacion": a.calificacion, "aprobado": a.aprobado, "aciertos": r.get("aciertos"), "total": r.get("total"), "minimo": curso.calificacion_minima}
+    return d
+
+
+def _respuesta_pdf(contenido: bytes, nombre: str) -> Response:
+    return Response(content=contenido, media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="{nombre}"'})
+
+
+@router.get("/publica/{token}/pdf")
+def pdf_publico(token: str, db: Session = Depends(get_db)):
+    """Descarga del contenido del curso (2026-09-18) para la persona asignada — solo si ya empezó o
+    terminó (la liga es la credencial)."""
+    a = _asignacion_por_token(db, token)
+    if a.tipo == "externo" and not a.externo_nombre:
+        raise HTTPException(409, "Regístrate con tu nombre antes de descargar el material.")
+    return _respuesta_pdf(pdf_curso(_datos_pdf_curso(a.curso, a)), f"{slugificar(a.curso.titulo)}.pdf")
+
+
+@router.get("/{codigo}/pdf")
+def pdf_curso_rh(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Material del curso en PDF para RH (ficha del curso)."""
+    curso = _por_codigo(db, codigo, cuenta.id)
+    return _respuesta_pdf(pdf_curso(_datos_pdf_curso(curso)), f"{slugificar(curso.titulo)}.pdf")
 
 
 class AvanzarIn(BaseModel):

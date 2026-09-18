@@ -8,11 +8,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { ArrowRight, Award, BookOpen, CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { ArrowRight, Award, BookOpen, CheckCircle2, Download, Loader2, XCircle } from "lucide-react";
 import { Badge, Button, Card, Logo } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
-import { avanzarModulo, fetchAsignacionPublica, registrarExternoCurso, responderEvaluacion, type AsignacionPublica } from "@/lib/api";
+import { avanzarModulo, fetchAsignacionPublica, registrarExternoCurso, responderEvaluacion, urlPdfCursoPublico, type AsignacionPublica } from "@/lib/api";
+import { InstructorAvatar } from "@/components/capacitacion/instructor-avatar";
 
 type Vista = "cargando" | "no_disponible" | "registro" | "portada" | "modulo" | "evaluacion" | "resultado";
 
@@ -92,7 +93,7 @@ export default function SalaCurso() {
         </div>
       </header>
 
-      <div className="mx-auto max-w-3xl px-5 py-8 sm:py-10">
+      <div className={cn("mx-auto px-5 py-8 sm:py-10", vista === "modulo" ? "max-w-5xl" : "max-w-3xl")}>
         {vista === "cargando" && <div className="grid place-items-center py-24 text-ink-3"><Loader2 className="h-6 w-6 animate-spin" /></div>}
 
         {vista === "no_disponible" && (
@@ -156,16 +157,29 @@ export default function SalaCurso() {
         )}
 
         {a && vista === "modulo" && modulo && (
-          <Card className="p-6">
-            <p className="font-mono text-[11px] uppercase tracking-wide text-ink-3">Módulo {modulo.orden} de {a.totalModulos}</p>
-            <h2 className="font-display mt-1 text-xl font-bold">{modulo.titulo}</h2>
-            <div className="mt-4 whitespace-pre-wrap text-sm leading-relaxed text-ink-2">{modulo.contenido}</div>
-            {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
-            <Button className="mt-6 w-full" onClick={siguienteModulo} disabled={ocupado}>
-              {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
-              {a.modulosCompletados + 1 >= a.totalModulos ? "Terminar módulos e ir a la evaluación" : "Siguiente módulo"}
-            </Button>
-          </Card>
+          <div className="grid gap-5 lg:grid-cols-[1fr_360px]">
+            <Card className="p-6">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-mono text-[11px] uppercase tracking-wide text-ink-3">Módulo {modulo.orden} de {a.totalModulos}</p>
+                  <h2 className="font-display mt-1 text-xl font-bold">{modulo.titulo}</h2>
+                </div>
+                <a href={urlPdfCursoPublico(token)} target="_blank" rel="noreferrer" title="Descargar el contenido del curso en PDF" className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-border-soft bg-surface px-3 text-xs font-semibold text-ink-2 transition hover:border-brand/40 hover:text-brand">
+                  <Download className="h-4 w-4" /> PDF
+                </a>
+              </div>
+              <div className="mt-4 whitespace-pre-wrap text-sm leading-relaxed text-ink-2">{modulo.contenido}</div>
+              {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
+              <Button className="mt-6 w-full" onClick={siguienteModulo} disabled={ocupado}>
+                {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
+                {a.modulosCompletados + 1 >= a.totalModulos ? "Terminar módulos e ir a la evaluación" : "Siguiente módulo"}
+              </Button>
+            </Card>
+            {/* 2026-09-18: el instructor con avatar convive con el contenido (explica y responde dudas) */}
+            <div className="lg:sticky lg:top-6 lg:self-start">
+              <InstructorAvatar token={token} modulo={modulo.orden} titulo={modulo.titulo} />
+            </div>
+          </div>
         )}
 
         {a && vista === "evaluacion" && a.pregunta && (
@@ -230,6 +244,9 @@ export default function SalaCurso() {
               ))}
             </ul>
             <p className="mt-5 text-xs text-ink-3">Tu resultado quedó registrado{a.persona ? ` a nombre de ${a.persona}` : ""}. Ya puedes cerrar esta ventana.</p>
+            <Button href={urlPdfCursoPublico(token)} variant="outline" size="sm" className="mt-4">
+              <Download className="h-4 w-4" /> Descargar el material y mi resultado (PDF)
+            </Button>
           </Card>
         )}
       </div>

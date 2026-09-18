@@ -110,8 +110,9 @@ import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveed
 import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import { LineaNotificar, useNotificarAccion } from "@/components/dashboard/linea-notificar";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
-import { cn, etiquetaRecordatorio } from "@/lib/utils";
+import { SwitchModoPrueba } from "@/components/dashboard/switch-modo-prueba";
 import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
+import { cn, etiquetaRecordatorio } from "@/lib/utils";
 
 const etapas: EtapaCandidato[] = [
   "Prefiltro",
@@ -1667,30 +1668,34 @@ function ModalCandidato({
               )}
               {/* Botón principal — siempre visible en Onboarding, sin importar el estado de los documentos */}
               {c.etapa === "Onboarding" && (
-                <Button
-                  className="w-full"
-                  onClick={() => {
-                    // Validación previa (Fase 1): con documentos incompletos se avisa de inmediato, sin
-                    // abrir la confirmación ni pegarle al API. Con Modo Prueba se deja pasar (forzar).
-                    const progreso = c.expedienteProgreso ?? 0;
-                    if (progreso < 100 && !modoPrueba) {
-                      setAviso({
-                        tono: "error",
-                        texto: `La documentación no está completa (${progreso}%). Sube o marca como recibidos los documentos obligatorios pendientes antes de dar de alta.`,
-                      });
-                      return;
-                    }
-                    setConfirmacion("alta");
-                  }}
-                  disabled={Boolean(ocupado) || c.expedienteEstado === "alta"}
-                >
-                  <UserCheck className="h-4 w-4" />
-                  {c.expedienteEstado === "alta"
-                    ? "Alta completada ✓"
-                    : ocupado === "alta"
-                      ? "Dando de alta…"
-                      : "DAR DE ALTA COMO COLABORADOR"}
-                </Button>
+                <>
+                  {/* 2026-09-18: switch de Modo Prueba junto al alta. ACTIVO → se permite con expediente
+                      incompleto (se manda forzar_prueba directo); INACTIVO → el botón queda bloqueado
+                      hasta que el expediente esté validado al 100% (el backend lo refuerza). */}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[12px] text-ink-3">
+                      Expediente al <b className={cn("font-mono", (c.expedienteProgreso ?? 0) >= 100 ? "text-good" : "text-warn")}>{c.expedienteProgreso ?? 0}%</b>
+                      {(c.expedienteProgreso ?? 0) < 100 && !modoPrueba ? " · el alta exige 100% validado" : ""}
+                      {(c.expedienteProgreso ?? 0) < 100 && modoPrueba ? " · Modo Prueba permite el alta incompleta" : ""}
+                    </span>
+                    <SwitchModoPrueba />
+                  </div>
+                  <Button
+                    className="w-full"
+                    onClick={() => setConfirmacion("alta")}
+                    disabled={Boolean(ocupado) || c.expedienteEstado === "alta" || ((c.expedienteProgreso ?? 0) < 100 && !modoPrueba)}
+                    title={(c.expedienteProgreso ?? 0) < 100 && !modoPrueba ? "Completa y valida el expediente al 100% (o activa Modo Prueba) para dar de alta." : undefined}
+                  >
+                    <UserCheck className="h-4 w-4" />
+                    {c.expedienteEstado === "alta"
+                      ? "Alta completada ✓"
+                      : ocupado === "alta"
+                        ? "Dando de alta…"
+                        : (c.expedienteProgreso ?? 0) < 100 && modoPrueba
+                          ? `DAR DE ALTA (Modo Prueba · expediente al ${c.expedienteProgreso ?? 0}%)`
+                          : "DAR DE ALTA COMO COLABORADOR"}
+                  </Button>
+                </>
               )}
             </div>
           </div>
@@ -1813,7 +1818,8 @@ function ModalCandidato({
             onCancelar={() => setConfirmacion(null)}
             onConfirmar={async (n) => {
               setConfirmacion(null);
-              await darDeAltaComoColaborador(false, n);
+              // Modo Prueba activo con expediente incompleto → forzar directo (sin el segundo clic de «Continuar»)
+              await darDeAltaComoColaborador(modoPrueba && (c.expedienteProgreso ?? 0) < 100, n);
             }}
           />
         )}
@@ -4041,14 +4047,26 @@ function PanelContratacion({
   const [motivoCancelar, setMotivoCancelar] = useState("");
   const [ocupado, setOcupado] = useState("");
 
-  const cargarExpediente = useCallback(() => {
+  const firmaRef = useRef("");
+  const cargarExpediente = useCallback(async () => {
     if (!c.expedienteId) return;
-    fetchExpediente(c.expedienteId).then((e) => e && setExpediente(e));
-  }, [c.expedienteId]);
+    const e = await fetchExpediente(c.expedienteId);
+    if (!e) return;
+    setExpediente(e);
+    // 2026-09-18 (tiempo real): si cambió algún documento (el candidato subió desde su liga/WhatsApp),
+    // se refresca también la ficha (progreso, alta, avisos) sin recargar la página.
+    const firma = JSON.stringify((e.documentos ?? []).map((d) => [d.nombre, d.estado]));
+    if (firmaRef.current && firma !== firmaRef.current) {
+      const ficha = await fetchCandidato(c.id);
+      if (ficha) onCambio(ficha);
+    }
+    firmaRef.current = firma;
+  }, [c.expedienteId, c.id, onCambio]);
 
   useEffect(() => {
-    cargarExpediente();
+    void cargarExpediente();
   }, [cargarExpediente]);
+  usePolling(cargarExpediente, 8000);
 
   async function guardar() {
     setGuardando(true);

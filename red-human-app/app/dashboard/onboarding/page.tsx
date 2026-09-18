@@ -40,7 +40,8 @@ import {
   urlDocumento,
   type MensajePrefiltro,
 } from "@/lib/api";
-import { useNombreRH, usePuedeDecidir } from "@/components/sesion";
+import { useModoPrueba, useNombreRH, usePuedeDecidir } from "@/components/sesion";
+import { SwitchModoPrueba } from "@/components/dashboard/switch-modo-prueba";
 import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import type { NotificarAccion } from "@/lib/api";
 import { cn, etiquetaRecordatorio } from "@/lib/utils";
@@ -208,6 +209,7 @@ function Expediente({
   onActualizado: (n: NuevoIngreso) => void;
   onRecargar: () => void;
 }) {
+  const modoPrueba = useModoPrueba();
   const [ocupado, setOcupado] = useState("");
   const [nuevoDoc, setNuevoDoc] = useState("");
   const [verEvaluacion, setVerEvaluacion] = useState(false);
@@ -252,7 +254,8 @@ function Expediente({
   async function alta(notificar?: NotificarAccion) {
     if (!live || !n.expedienteId) return exigeApi();
     setOcupado("alta");
-    const r = await autorizarAlta(n.expedienteId, undefined, false, notificar);
+    // 2026-09-18: con Modo Prueba activo se permite el alta con expediente incompleto (forzar_prueba)
+    const r = await autorizarAlta(n.expedienteId, undefined, modoPrueba && !n.listoParaAlta, notificar);
     setOcupado("");
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
     const envios = r.data.notificaciones ?? [];
@@ -584,9 +587,22 @@ function Expediente({
         {/* Siempre visible y habilitado en Onboarding — el progreso de documentos ya no lo
             oculta ni lo deshabilita. Si faltan documentos obligatorios, el backend rechaza
             la petición (409) y el mensaje aparece arriba en {aviso}; el botón nunca desaparece. */}
-        <Button size="lg" className="w-full" disabled={Boolean(ocupado) || n.estado === "alta"} onClick={() => setConfirmacion("alta")}>
+        {/* 2026-09-18: Modo Prueba ACTIVO → alta permitida con expediente incompleto; INACTIVO → bloqueado hasta 100% validado. */}
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-[12px] text-ink-3">
+            {n.listoParaAlta ? "Expediente validado al 100%" : modoPrueba ? `Expediente al ${n.progreso}% · Modo Prueba permite el alta` : `Expediente al ${n.progreso}% · el alta exige 100% validado`}
+          </span>
+          <SwitchModoPrueba />
+        </div>
+        <Button
+          size="lg"
+          className="w-full"
+          disabled={Boolean(ocupado) || n.estado === "alta" || (!n.listoParaAlta && !modoPrueba)}
+          onClick={() => setConfirmacion("alta")}
+          title={!n.listoParaAlta && !modoPrueba ? "Completa y valida el expediente al 100% (o activa Modo Prueba) para dar de alta." : undefined}
+        >
           <FileCheck2 className="h-5 w-5" />
-          {n.estado === "alta" ? "Alta completada ✓" : ocupado === "alta" ? "Dando de alta…" : "DAR DE ALTA COMO COLABORADOR"}
+          {n.estado === "alta" ? "Alta completada ✓" : ocupado === "alta" ? "Dando de alta…" : !n.listoParaAlta && modoPrueba ? `DAR DE ALTA (Modo Prueba · ${n.progreso}%)` : "DAR DE ALTA COMO COLABORADOR"}
         </Button>
 
         {confirmacion === "solicitar" && (
