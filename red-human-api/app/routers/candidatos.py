@@ -2238,6 +2238,7 @@ class CondicionesContratacionIn(BaseModel):
     ubicacion: str = ""
     jefe_directo: str = ""
     instrucciones_ingreso: str = ""  # Fase 5: van en la bienvenida automática al dar de alta
+    empresa: str = ""  # 2026-09-19: empresa contratante (default: la visible de la vacante)
 
 
 @router.patch("/{codigo}/condiciones-contratacion")
@@ -2260,6 +2261,8 @@ def guardar_condiciones_contratacion(
     exp.ubicacion = datos.ubicacion.strip()
     exp.jefe_directo = datos.jefe_directo.strip()
     exp.instrucciones_ingreso = datos.instrucciones_ingreso.strip()
+    exp.empresa = datos.empresa.strip() or (nombre_empresa_candidato(p.vacante) if p.vacante else "")
+    exp.condiciones_guardadas_en = datetime.now(timezone.utc)
     if datos.fecha_ingreso:
         try:
             exp.fecha_ingreso = datetime.fromisoformat(datos.fecha_ingreso).replace(tzinfo=timezone.utc)

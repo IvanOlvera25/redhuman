@@ -430,6 +430,10 @@ def postulacion_dict(p: Postulacion, detalle: bool = False) -> dict:
             "jefeDirecto": exp.jefe_directo,
             "fechaIngreso": iso(exp.fecha_ingreso),
             "instruccionesIngreso": exp.instrucciones_ingreso or "",  # Fase 5
+            "empresa": exp.empresa or "",  # 2026-09-19
+            "guardadasEn": iso(exp.condiciones_guardadas_en),
+            # listo para generar documentos: puesto + sueldo + tipo + fecha (lo mínimo de una carta/contrato)
+            "completas": bool(exp.puesto and exp.sueldo and exp.tipo_contratacion and exp.fecha_ingreso),
         }
         if exp
         else None,
@@ -759,6 +763,8 @@ def colaborador_dict(col: Colaborador) -> dict:
         "puesto": col.puesto,
         "salario": col.salario,
         "empresa": col.empresa,
+        "tipoContratacion": col.tipo_contratacion or "",  # 2026-09-19
+        "condicionesIngreso": col.condiciones_ingreso or {},
         "ubicacion": col.ubicacion,
         "jefeDirecto": col.jefe_directo,
         "estatus": "Activo" if col.activo else "Inactivo",

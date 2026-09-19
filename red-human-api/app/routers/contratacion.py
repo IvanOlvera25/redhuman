@@ -7,6 +7,7 @@ autoriza siempre una persona de RH.
 
 import re
 import unicodedata
+import secrets
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import NIVELES_RECORDATORIO, Candidato, Colaborador, Cuenta, Documento, Expediente, Postulacion, Usuario, registrar
@@ -24,7 +26,10 @@ from ..serial import colaborador_dict, expediente_dict, nombre_empresa_candidato
 from ..services import archivos as fs
 from ..services import ia
 from ..services import notificaciones
-from ..services.pdf import pdf_carta_intencion
+from ..services.pdf import pdf_carta_intencion, pdf_contrato
+from ..services import plantillas_correo
+from ..services.correo import enviar_correo
+from ..services.whatsapp import enviar_mensaje
 from ..services.notificaciones import TZ_MEXICO, NotificarIn, override_de
 from ..services.configuracion import modo_prueba_activo, puede_forzar_prueba
 
@@ -475,6 +480,9 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
     vac = e.postulacion.vacante if e.postulacion else None
 
     cv = next((a for a in reversed(c.archivos) if a.tipo == "cv"), None)
+    # 2026-09-19 (Bloque 3, «alta perfecta»): las condiciones FINALES guardadas en Contratación mandan;
+    # la vacante solo completa lo que RH dejó vacío (antes: empresa interna de la vacante y campos vacíos).
+    empresa = e.empresa or (nombre_empresa_candidato(vac) if vac else "") or ""
     col = Colaborador(
         codigo="TMP",
         cuenta_id=c.cuenta_id,
@@ -483,10 +491,11 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
         correo=c.correo,
         telefono=c.telefono,
         puesto=e.puesto or (vac.titulo if vac else ""),
-        salario=e.sueldo or (vac.sueldo if vac else ""),
-        empresa=vac.empresa if vac else "",
+        salario=e.sueldo or "",
+        empresa=empresa,
         ubicacion=e.ubicacion or (vac.ubicacion if vac else ""),
-        jefe_directo=e.jefe_directo,
+        jefe_directo=e.jefe_directo or "",
+        tipo_contratacion=e.tipo_contratacion or "",
         cv_ruta=cv.ruta if cv else "",
         cv_nombre=cv.nombre if cv else "",
         fecha_ingreso=e.fecha_ingreso,
@@ -494,12 +503,21 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
         candidato_origen_id=c.id,
         expediente_id=e.id,
     )
+    # Registro histórico INMUTABLE de ingreso: lo que se firmó/acordó al momento del alta.
+    col.condiciones_ingreso = {
+        "puesto": col.puesto, "sueldo": col.salario, "tipo_contratacion": col.tipo_contratacion,
+        "fecha_ingreso": e.fecha_ingreso.isoformat() if e.fecha_ingreso else None, "ubicacion": col.ubicacion,
+        "jefe_directo": col.jefe_directo, "empresa": col.empresa, "cliente_id": col.cliente_id,
+        "vacante": vac.codigo if vac else None, "expediente": e.id, "postulacion": e.postulacion.codigo if e.postulacion else None,
+        "condiciones_guardadas_en": e.condiciones_guardadas_en.isoformat() if e.condiciones_guardadas_en else None,
+        "alta_por": u.nombre, "alta_en": datetime.now(timezone.utc).isoformat(),
+    }
     db.add(col)
     db.flush()
     col.codigo = f"COL-{100 + col.id}"
     registrar(
         db, u.nombre, "colaborador_alta", "colaborador", col.codigo,
-        {"candidato_origen": c.codigo, "puesto": col.puesto, "expediente": e.id},
+        {"candidato_origen": c.codigo, "puesto": col.puesto, "expediente": e.id, "condiciones_ingreso": col.condiciones_ingreso},
     )
     return col
 
@@ -527,6 +545,11 @@ async def alta(
     prueba = modo_prueba_activo(db)
     if not prueba and not any(d.archivo for d in e.documentos):
         raise HTTPException(400, "No se puede dar de alta al colaborador: El expediente no tiene documentos adjuntos.")
+    # 2026-09-19 (Bloque 3, alta perfecta): el alta toma ESTRICTAMENTE las condiciones finales guardadas —
+    # sin ellas no hay alta (salvo Modo Prueba).
+    faltan = [n for n, v in (("puesto", e.puesto), ("sueldo", e.sueldo), ("tipo de contratación", e.tipo_contratacion), ("fecha de ingreso", e.fecha_ingreso)) if not v]
+    if faltan and not prueba:
+        raise HTTPException(409, f"Captura y guarda las condiciones de contratación antes del alta. Faltan: {', '.join(faltan)}.")
     if e.progreso < 100 and not prueba and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, f"El expediente está al {e.progreso}%. Faltan: {', '.join(e.pendientes)}.")
     # HITL: lo que cuenta para el % (recibido o digital en revisión) lo confirma una persona de RH
@@ -720,6 +743,84 @@ def carta_intencion(
         # 2026-09-18: inline — la vista /carta/[id] del frontend la embebe con título y favicon de Red Human
         headers={"Content-Disposition": f'inline; filename="{nombre_archivo}"'},
     )
+
+
+def _documentos_listos(e: Expediente) -> bool:
+    return e.progreso == 100
+
+
+@router.get("/expedientes/{exp_id}/contrato")
+def contrato(
+    exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    """Contrato individual de trabajo (PDF) con las condiciones FINALES guardadas (2026-09-19). Solo cuando
+    los documentos requeridos ya están (expediente al 100 %), salvo Modo Prueba."""
+    e = _expediente(db, exp_id, cuenta.id)
+    if not _documentos_listos(e) and not modo_prueba_activo(db):
+        raise HTTPException(409, f"El contrato se genera cuando el expediente está al 100 % (hoy {e.progreso} %). Faltan: {', '.join(e.pendientes)}.")
+    d = _datos_carta_intencion(e)
+    if not (e.puesto and e.sueldo and e.tipo_contratacion and e.fecha_ingreso) and not modo_prueba_activo(db):
+        raise HTTPException(409, "Captura y guarda las condiciones de contratación (puesto, sueldo, tipo y fecha de ingreso) antes de generar el contrato.")
+    try:
+        pdf = pdf_contrato(d)
+    except Exception as ex:  # noqa: BLE001
+        raise HTTPException(503, f"No se pudo generar el contrato: {ex}")
+    registrar(db, u.nombre, "contrato_generado", "expediente", str(e.id), {"candidato": e.candidato.codigo if e.candidato else "", "correo_rh": u.correo})
+    db.commit()
+    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="contrato-{e.candidato.codigo if e.candidato else exp_id}.pdf"'})
+
+
+class EnviarCartaIn(BaseModel):
+    canal: str  # whatsapp | correo
+
+
+@router.post("/expedientes/{exp_id}/carta-intencion/enviar")
+async def enviar_carta_intencion(
+    exp_id: int, datos: EnviarCartaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    """Manda la carta al candidato (2026-09-19): por WhatsApp la liga pública de su expediente con la carta; por
+    correo el PDF adjunto con el layout corporativo. Trazabilidad en bitácora, sin ruido en pantalla."""
+    e = _expediente(db, exp_id, cuenta.id)
+    p = e.postulacion
+    c = e.candidato
+    if not c:
+        raise HTTPException(404, "Expediente sin candidato.")
+    if not e.token:
+        e.token = secrets.token_urlsafe(24)
+    liga = f"{settings.app_url}/expediente/{e.token}"
+    d = _datos_carta_intencion(e)
+    if datos.canal == "whatsapp":
+        if not c.telefono:
+            raise HTTPException(400, "El candidato no tiene WhatsApp registrado.")
+        texto = (
+            f"Hola {c.nombre.split(' ')[0]}, {d['empresa']} te comparte tu carta de intención para el puesto de {d['puesto']} "
+            f"({d['sueldo']}, ingreso el {d['fecha_ingreso']}). La puedes descargar desde tu expediente: {liga}"
+        )
+        envio = await enviar_mensaje(c.telefono, texto)
+        if p:
+            from .candidatos import guardar_mensaje  # import local: candidatos ↔ contratacion
+
+            guardar_mensaje(db, p, "assistant", texto, "whatsapp", envio)
+    elif datos.canal == "correo":
+        if not c.correo:
+            raise HTTPException(400, "El candidato no tiene correo registrado.")
+        try:
+            pdf = pdf_carta_intencion(d)
+        except Exception as ex:  # noqa: BLE001
+            raise HTTPException(503, f"No se pudo generar el PDF: {ex}")
+        asunto, html = plantillas_correo.html_aviso(
+            f"Tu carta de intención · {d['puesto']}",
+            f"{d['empresa']} te extiende esta carta de intención con las condiciones de tu incorporación. La encuentras adjunta en PDF y también en tu expediente.",
+            d["empresa"],
+            [("Puesto", d["puesto"]), ("Sueldo", d["sueldo"]), ("Tipo de contratación", d["tipo_contratacion"]), ("Fecha de ingreso", d["fecha_ingreso"]), ("Ubicación", d["ubicacion"])],
+            ("Ver mi expediente", liga),
+        )
+        envio = await enviar_correo(c.correo, asunto, html, adjuntos=[{"filename": "carta-intencion.pdf", "content": pdf}])
+    else:
+        raise HTTPException(400, "canal debe ser whatsapp o correo")
+    registrar(db, u.nombre, "carta_intencion_enviada", "expediente", str(e.id), {"canal": datos.canal, "enviado": bool(envio.get("enviado")), "detalle": str(envio.get("detalle", ""))[:200], "correo_rh": u.correo})
+    db.commit()
+    return {"canal": datos.canal, **envio, "detalle": str(envio.get("detalle", ""))}
 
 
 class CancelarIn(BaseModel):

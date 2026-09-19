@@ -18,6 +18,7 @@ import {
   subirDocumentoPublico,
   type DocumentoExpedientePublico,
   type ExpedientePublico,
+  urlCartaIntencionPublica,
 } from "@/lib/api";
 
 type Fase = "cargando" | "no_disponible" | "lista";
@@ -101,6 +102,11 @@ export default function ExpedientePublico() {
                 {info.puesto && `Para tu contratación como ${info.puesto}. `}Sube foto o PDF de cada documento —
                 puedes volver a esta liga cuantas veces necesites.
               </p>
+              {info.cartaDisponible && (
+                <a href={urlCartaIntencionPublica(token)} target="_blank" rel="noreferrer" className="mt-4 inline-flex items-center gap-1.5 rounded-xl border border-brand/40 bg-brand-soft px-4 py-2 text-sm font-semibold text-brand transition hover:brightness-105">
+                  Descargar mi carta de intención (PDF)
+                </a>
+              )}
             </div>
 
             {info.estado === "alta" ? (

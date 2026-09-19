@@ -1248,7 +1248,7 @@ export function enviarEvaluacionEntrevistaHumana(
 
 export function guardarCondicionesContratacion(
   codigo: string,
-  datos: { puesto?: string; sueldo?: string; tipoContratacion?: string; fechaIngreso?: string; ubicacion?: string; jefeDirecto?: string; instruccionesIngreso?: string },
+  datos: { puesto?: string; sueldo?: string; tipoContratacion?: string; fechaIngreso?: string; ubicacion?: string; jefeDirecto?: string; instruccionesIngreso?: string; empresa?: string },
 ) {
   return patch<Candidato>(`/candidatos/${codigo}/condiciones-contratacion`, {
     puesto: datos.puesto ?? "",
@@ -1258,6 +1258,7 @@ export function guardarCondicionesContratacion(
     ubicacion: datos.ubicacion ?? "",
     jefe_directo: datos.jefeDirecto ?? "",
     instrucciones_ingreso: datos.instruccionesIngreso ?? "",  // Fase 5: van en la bienvenida automática al alta
+    empresa: datos.empresa ?? "",  // 2026-09-19 (Bloque 3)
   });
 }
 
@@ -1831,6 +1832,15 @@ export function autorizarAlta(expedienteId: number, fechaIngreso?: string, forza
 /** Liga de descarga de la carta de intención en PDF — mismo patrón que urlDocumento: <a href>
  * autenticado por cookie de sesión, sin manejo de blobs en el frontend. */
 /** PDF crudo de la carta (lo embebe la vista /carta/[id]). */
+/** 2026-09-19 (Bloque 3): contrato con las condiciones finales (solo con expediente al 100 %). */
+export function urlContratoPdf(expedienteId: number) {
+  return urlArchivo(`/contratacion/expedientes/${expedienteId}/contrato`);
+}
+
+export function enviarCartaIntencion(expedienteId: number, canal: "whatsapp" | "correo") {
+  return post<{ canal: string; enviado: boolean; detalle: string }>(`/contratacion/expedientes/${expedienteId}/carta-intencion/enviar`, { canal });
+}
+
 export function urlCartaIntencionPdf(expedienteId: number) {
   return urlArchivo(`/contratacion/expedientes/${expedienteId}/carta-intencion`);
 }
@@ -1860,6 +1870,12 @@ export interface ExpedientePublico {
   puesto: string;
   estado: "integracion" | "completo" | "alta";
   documentos: DocumentoExpedientePublico[];
+  /** 2026-09-19: la carta de intención se puede descargar desde la liga pública. */
+  cartaDisponible?: boolean;
+}
+
+export function urlCartaIntencionPublica(token: string) {
+  return urlArchivo(`/expedientes/publica/${token}/carta-intencion`);
 }
 
 export function fetchExpedientePublico(token: string) {

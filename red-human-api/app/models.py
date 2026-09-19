@@ -679,6 +679,9 @@ class Expediente(Base):
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
     jefe_directo: Mapped[str] = mapped_column(String(150), default="")
     fecha_ingreso: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 2026-09-19 (Bloque 3): empresa contratante capturada en las condiciones (default: la visible de la vacante).
+    empresa: Mapped[str] = mapped_column(String(200), default="")
+    condiciones_guardadas_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # --- preparación de ingreso (Onboarding, bloque 4) ---
     contrato: Mapped[str] = mapped_column(String(20), default="Pendiente")  # Pendiente | Firmado
     alta_administrativa: Mapped[str] = mapped_column(String(20), default="Pendiente")  # Pendiente | Realizada
@@ -793,6 +796,10 @@ class Colaborador(Base):
     puesto: Mapped[str] = mapped_column(String(200), default="")
     salario: Mapped[str] = mapped_column(String(80), default="")
     empresa: Mapped[str] = mapped_column(String(150), default="")
+    # 2026-09-19 (Bloque 3): condiciones FINALES de contratación tal como se guardaron en el expediente y
+    # snapshot inmutable de ingreso (nunca se edita después del alta; es el registro histórico).
+    tipo_contratacion: Mapped[str] = mapped_column(String(60), default="")
+    condiciones_ingreso: Mapped[dict] = mapped_column(JSON, default=dict)
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
     jefe_directo: Mapped[str] = mapped_column(String(150), default="")
     cv_ruta: Mapped[str] = mapped_column(String(400), default="")

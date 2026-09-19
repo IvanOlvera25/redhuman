@@ -12,6 +12,7 @@ import {
   ThumbsUp,
   ThumbsDown,
   FileText,
+  FileCheck2,
   Sparkles,
   UploadCloud,
   Download,
@@ -68,6 +69,9 @@ import {
   fetchCandidato,
   fetchCandidatos,
   urlPreviewCorreo,
+  urlContratoPdf,
+  enviarCartaIntencion,
+  urlCartaIntencionPdf,
   fetchClientes,
   fetchEntrevistadores,
   evaluarEntrevistaConLoQueHay,
@@ -4099,7 +4103,14 @@ function PanelContratacion({
   const [ubicacion, setUbicacion] = useState(cond?.ubicacion ?? "");
   const [jefe, setJefe] = useState(cond?.jefeDirecto ?? "");
   const [instrucciones, setInstrucciones] = useState(cond?.instruccionesIngreso ?? "");
+  const [empresa, setEmpresa] = useState(cond?.empresa ?? c.empresaVisible ?? "");
   const [guardando, setGuardando] = useState(false);
+  // 2026-09-19 (Bloque 3): vista previa en la misma pantalla de carta / contrato con 3 acciones
+  const [docPreview, setDocPreview] = useState<null | "carta" | "contrato">(null);
+  const [enviandoDoc, setEnviandoDoc] = useState<"" | "whatsapp" | "correo">("");
+  const [resultadoDoc, setResultadoDoc] = useState<{ ok: boolean; texto: string } | null>(null);
+  const condicionesListas = Boolean(cond?.completas);
+  const documentosListos = (c.expedienteProgreso ?? 0) >= 100;
   const [expediente, setExpediente] = useState<NuevoIngreso | null>(null);
   const [cancelando, setCancelando] = useState(false);
   const [motivoCancelar, setMotivoCancelar] = useState("");
@@ -4136,11 +4147,23 @@ function PanelContratacion({
       ubicacion,
       jefeDirecto: jefe,
       instruccionesIngreso: instrucciones,
+      empresa,
     });
     setGuardando(false);
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
-    setAviso({ tono: "ok", texto: "Condiciones de contratación guardadas." });
+    setAviso({ tono: "ok", texto: "Condiciones guardadas. Ya puedes generar la carta, solicitar documentos y preparar el contrato." });
     onCambio(r.data);
+  }
+
+  /** WhatsApp / Correo de la carta: trazabilidad en bitácora, aviso mínimo en pantalla. */
+  async function enviarCarta(canal: "whatsapp" | "correo") {
+    if (!c.expedienteId) return;
+    setEnviandoDoc(canal);
+    setResultadoDoc(null);
+    const r = await enviarCartaIntencion(c.expedienteId, canal);
+    setEnviandoDoc("");
+    if (!r.ok) return setResultadoDoc({ ok: false, texto: r.error });
+    setResultadoDoc({ ok: r.data.enviado, texto: r.data.enviado ? `Carta enviada por ${canal === "whatsapp" ? "WhatsApp" : "correo"}.` : `No salió por ${canal}: ${r.data.detalle}` });
   }
 
   async function enviarOnboarding(forzarPrueba = false) {
@@ -4190,6 +4213,7 @@ function PanelContratacion({
         </label>
         <CampoTexto label="Ubicación" value={ubicacion} onChange={setUbicacion} />
         <CampoTexto label="Jefe directo" value={jefe} onChange={setJefe} />
+        <CampoTexto label="Empresa contratante" value={empresa} onChange={setEmpresa} placeholder={c.empresaVisible || "Empresa"} />
         {/* Fase 5: se mandan por WhatsApp/correo automáticamente al dar de alta (evento instrucciones_ingreso) */}
         <label className="flex flex-col gap-1.5 sm:col-span-2">
           <span className="text-xs font-medium text-ink-2">Instrucciones de ingreso (primer día)</span>
@@ -4204,9 +4228,42 @@ function PanelContratacion({
         </label>
       </div>
       {live && (
-        <Button size="sm" variant="secondary" className="mt-3" onClick={guardar} disabled={guardando}>
-          {guardando ? "Guardando…" : "Guardar condiciones"}
-        </Button>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <Button size="sm" onClick={guardar} disabled={guardando}>
+            {guardando ? "Guardando…" : condicionesListas ? "Guardar cambios" : "Guardar condiciones"}
+          </Button>
+          <span className="text-[12px] text-ink-3">
+            {condicionesListas ? `Condiciones guardadas${cond?.guardadasEn ? ` el ${new Date(cond.guardadasEn).toLocaleDateString("es-MX")}` : ""}.` : "Captura puesto, sueldo, tipo y fecha de ingreso y guarda para habilitar los documentos."}
+          </span>
+        </div>
+      )}
+
+      {/* 2026-09-19 (Bloque 3): flujo lineal — con condiciones guardadas aparecen aquí mismo las acciones */}
+      {live && condicionesListas && c.expedienteId != null && (
+        <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-border-soft bg-surface p-3">
+          <Button size="sm" variant="outline" onClick={() => { setResultadoDoc(null); setDocPreview("carta"); }}>
+            <FileText className="h-4 w-4" /> Generar carta de intención
+          </Button>
+          {onDocumentos && (
+            <Button size="sm" variant="outline" onClick={() => onDocumentos("solicitar")} disabled={Boolean(ocupado)}>
+              <Send className="h-4 w-4" /> Solicitar documentos
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => { setResultadoDoc(null); setDocPreview("contrato"); }}
+            disabled={!documentosListos && !modoPrueba}
+            title={documentosListos || modoPrueba ? "Contrato con las condiciones finales" : `Se habilita cuando el expediente esté al 100 % (hoy ${c.expedienteProgreso ?? 0} %)`}
+          >
+            <FileCheck2 className="h-4 w-4" /> Generar contrato
+          </Button>
+          {c.etapa === "Contratación" && (
+            <Button size="sm" className="ml-auto" onClick={() => enviarOnboarding()} disabled={Boolean(ocupado)}>
+              Enviar a Onboarding
+            </Button>
+          )}
+        </div>
       )}
 
       <div className="mt-5 border-t border-border-faint pt-4">
@@ -4240,27 +4297,12 @@ function PanelContratacion({
           >
             Cancelar contratación
           </Button>
-          {c.expedienteId != null && (
-            <a
-              href={urlCartaIntencion(c.expedienteId)}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center gap-1.5 rounded-xl border border-border-soft bg-surface px-3 py-1.5 text-xs font-semibold text-ink transition hover:bg-surface-2"
-            >
-              <FileText className="h-3.5 w-3.5" /> Generar carta de intención
-            </a>
-          )}
           {c.expedienteId != null && onDocumentos && (
-            <>
-              <Button size="sm" variant="outline" onClick={() => onDocumentos("solicitar")} disabled={Boolean(ocupado)}>
-                <Send className="h-4 w-4" /> Solicitar documentos
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => onDocumentos("recordatorio")} disabled={Boolean(ocupado)} title={etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).tono.descripcion}>
-                <RotateCw className="h-4 w-4" /> {etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).texto}
-              </Button>
-            </>
+            <Button size="sm" variant="outline" onClick={() => onDocumentos("recordatorio")} disabled={Boolean(ocupado)} title={etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).tono.descripcion}>
+              <RotateCw className="h-4 w-4" /> {etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).texto}
+            </Button>
           )}
-          {c.etapa === "Contratación" && (
+          {c.etapa === "Contratación" && !condicionesListas && (
             <Button size="sm" onClick={() => enviarOnboarding()} disabled={Boolean(ocupado)}>
               Enviar a Onboarding
             </Button>
@@ -4268,6 +4310,37 @@ function PanelContratacion({
           {onDescartar && (
             <MenuAcciones acciones={[{ etiqueta: "Descartar candidato…", icono: <ThumbsDown />, peligrosa: true, onClick: onDescartar, disabled: Boolean(ocupado) }]} />
           )}
+        </div>
+      )}
+
+      {docPreview && c.expedienteId != null && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4" onClick={() => !enviandoDoc && setDocPreview(null)}>
+          <Card className="flex h-[100dvh] w-full flex-col overflow-hidden rounded-none p-0 sm:h-[90vh] sm:max-w-3xl sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border-soft px-4 py-3">
+              <div>
+                <p className="text-sm font-semibold text-ink">{docPreview === "carta" ? "Carta de intención" : "Contrato individual de trabajo"}</p>
+                <p className="text-[11px] text-ink-3">Generado con las condiciones guardadas · {puesto} · {sueldo} · {tipo}{fechaIngreso ? ` · ingreso ${fechaIngreso}` : ""}</p>
+              </div>
+              <button onClick={() => setDocPreview(null)} className="grid h-8 w-8 place-items-center rounded-lg text-ink-3 hover:bg-surface-2" aria-label="Cerrar"><X className="h-4 w-4" /></button>
+            </div>
+            <iframe title={docPreview} src={docPreview === "carta" ? urlCartaIntencionPdf(c.expedienteId) : urlContratoPdf(c.expedienteId)} className="min-h-0 w-full flex-1 bg-surface-2" />
+            <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border-soft bg-surface px-4 py-3">
+              {docPreview === "carta" ? (
+                <>
+                  <Button size="sm" variant="outline" onClick={() => enviarCarta("whatsapp")} disabled={Boolean(enviandoDoc) || !c.telefono} title={c.telefono ? "Manda la liga de su expediente con la carta por WhatsApp" : "El candidato no tiene WhatsApp"}>
+                    <MessageCircle className="h-4 w-4" /> {enviandoDoc === "whatsapp" ? "Enviando…" : "WhatsApp"}
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => enviarCarta("correo")} disabled={Boolean(enviandoDoc) || !c.correo} title={c.correo ? "Correo con el PDF adjunto" : "El candidato no tiene correo"}>
+                    <Mail className="h-4 w-4" /> {enviandoDoc === "correo" ? "Enviando…" : "Correo"}
+                  </Button>
+                </>
+              ) : null}
+              <a href={docPreview === "carta" ? urlCartaIntencionPdf(c.expedienteId) : urlContratoPdf(c.expedienteId)} download className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-brand px-3 text-sm font-semibold text-white transition hover:brightness-110">
+                <Download className="h-4 w-4" /> Descargar
+              </a>
+              {resultadoDoc && <span className={cn("text-[12px]", resultadoDoc.ok ? "text-good" : "text-bad")}>{resultadoDoc.texto}</span>}
+            </div>
+          </Card>
         </div>
       )}
 

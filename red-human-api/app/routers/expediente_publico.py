@@ -11,11 +11,13 @@ candidato, sin excepción de Modo Prueba).
 """
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Expediente
-from .contratacion import subir_documento_interno
+from ..services.pdf import pdf_carta_intencion
+from .contratacion import _datos_carta_intencion, subir_documento_interno
 
 router = APIRouter(prefix="/expedientes", tags=["expedientes-publico"])
 
@@ -37,7 +39,22 @@ def publica(token: str, db: Session = Depends(get_db)):
         "documentos": [
             {"tipo": d.tipo, "estado": d.estado, "obligatorio": d.obligatorio} for d in e.documentos
         ],
+        # 2026-09-19: la carta de intención se descarga desde la misma liga (la comparte RH por WhatsApp)
+        "cartaDisponible": bool(e.puesto and e.sueldo),
     }
+
+
+@router.get("/publica/{token}/carta-intencion")
+def carta_publica(token: str, db: Session = Depends(get_db)):
+    """PDF de la carta de intención para el candidato (la liga es la credencial)."""
+    e = _por_token(db, token)
+    if not (e.puesto and e.sueldo):
+        raise HTTPException(404, "Tu carta todavía no está lista.")
+    try:
+        pdf = pdf_carta_intencion(_datos_carta_intencion(e))
+    except Exception as ex:  # noqa: BLE001
+        raise HTTPException(503, f"No se pudo generar la carta: {ex}")
+    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": 'inline; filename="carta-intencion.pdf"'})
 
 
 @router.post("/publica/{token}/documentos")
