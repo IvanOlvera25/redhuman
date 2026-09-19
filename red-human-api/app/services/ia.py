@@ -7,6 +7,7 @@ para que la plataforma siga funcionando de punta a punta.
 """
 
 import json
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -1374,10 +1375,13 @@ class PreguntaVerificacion(BaseModel):
 class ModuloCursoGenerado(BaseModel):
     titulo: str
     contenido: str = Field(
-        description="Guion completo del módulo, listo para explicarse en voz alta o mostrarse como "
-        "material — español mexicano."
+        description="Instructor IA: guion CONVERSACIONAL (frases cortas, lenguaje natural, pausas para preguntar «¿alguna duda "
+        "hasta aquí?»), como si el instructor hablara. Autoguiado: contenido breve, visual y modular (encabezados, listas). "
+        "Español mexicano."
     )
-    preguntas_verificacion: List[PreguntaVerificacion] = Field(description="1 a 2 preguntas de comprensión.")
+    resumen: str = Field(default="", description="2-3 frases del módulo para el material de apoyo (PDF).")
+    puntos_clave: List[str] = Field(default_factory=list, description="3 a 5 puntos clave del módulo para el material de apoyo.")
+    preguntas_verificacion: List[PreguntaVerificacion] = Field(default_factory=list, description="1 a 2 preguntas de comprensión.")
 
 
 class PreguntaEvaluacion(BaseModel):
@@ -1386,8 +1390,8 @@ class PreguntaEvaluacion(BaseModel):
     pregunta: str = Field(description="Pregunta clara sobre el contenido de los módulos, español mexicano.")
     tipo: Literal["opcion", "vf"] = Field(description="'opcion' = opción múltiple (3-4 opciones); 'vf' = verdadero/falso.")
     opciones: List[str] = Field(description="Para 'opcion': 3 a 4 opciones. Para 'vf': exactamente ['Verdadero', 'Falso'].")
-    correcta: int = Field(description="Índice (0-based) de la opción correcta dentro de `opciones`.")
-    explicacion: str = Field(default="", description="Una línea que justifica la respuesta correcta (se muestra al terminar).")
+    correcta: int = Field(description="Índice (0-based) de la opción correcta dentro de `opciones`. DEBE ser la única opción verdadera.")
+    explicacion: str = Field(default="", description="Una línea que justifica POR QUÉ `opciones[correcta]` es la respuesta de ESTA pregunta (coincide 100 % con ella; no menciona otra opción como correcta).")
 
 
 class GuionCurso(BaseModel):
@@ -1476,38 +1480,128 @@ def _asegurar_evaluacion(g: GuionCurso, tema: str) -> GuionCurso:
     return g
 
 
-def guion_curso(tema: str, duracion_horas: float, contexto: str = "", material: str = "") -> Tuple[GuionCurso, bool]:
+class _CorreccionPregunta(BaseModel):
+    indice: int
+    correcta: int = Field(description="Índice (0-based) de la opción verdaderamente correcta, decidido de forma independiente.")
+    explicacion: str = Field(description="Explicación que justifica EXACTAMENTE esa opción para ESA pregunta.")
+    consistente: bool = Field(description="true si la pregunta original ya tenía correcta y explicación coherentes.")
+
+
+class _VerificacionEvaluacion(BaseModel):
+    preguntas: List[_CorreccionPregunta]
+
+
+def _verificar_evaluacion(client, tema: str, modulos: List[ModuloCursoGenerado], preguntas: List[PreguntaEvaluacion]) -> List[PreguntaEvaluacion]:
+    """Segunda pasada (2026-09-19, fix de evaluaciones): el modelo vuelve a resolver cada pregunta SIN ver la
+    respuesta marcada y regresa índice + explicación coherentes; se adoptan sus correcciones. Cualquier fallo
+    deja las preguntas como estaban (la evaluación nunca se pierde)."""
+    if not preguntas:
+        return preguntas
+    try:
+        contexto = "\n\n".join(f"[{m.titulo}] {m.contenido[:1500]}" for m in modulos[:8])
+        listado = "\n".join(f"{i}. {q.pregunta}\n   opciones: " + " | ".join(f"({k}) {o}" for k, o in enumerate(q.opciones)) for i, q in enumerate(preguntas))
+        resp = client.responses.parse(
+            model=MODEL,
+            instructions=(
+                "Eres el revisor de la evaluación final de un curso de capacitación (México). Para CADA pregunta decide de forma "
+                "independiente cuál opción es la correcta con base en el contenido del curso, y escribe una explicación de una línea "
+                "que justifique EXACTAMENTE esa opción y hable de ESA pregunta (nunca de otra). Si una pregunta es ambigua o tiene dos "
+                "opciones válidas, elige la más sustentada por el contenido. Regresa todas las preguntas, en el mismo orden."
+            ),
+            input=f"TEMA: {tema}\n\nCONTENIDO DEL CURSO:\n{contexto}\n\nPREGUNTAS:\n{listado}",
+            text_format=_VerificacionEvaluacion,
+        )
+        por_indice = {c.indice: c for c in resp.output_parsed.preguntas}
+        for i, q in enumerate(preguntas):
+            c = por_indice.get(i)
+            if c is None or not (0 <= c.correcta < len(q.opciones)):
+                continue
+            q.correcta = c.correcta
+            if c.explicacion.strip():
+                q.explicacion = c.explicacion.strip()
+    except Exception as ex:  # noqa: BLE001
+        print(f"[ia] verificación de evaluación omitida: {ex}", flush=True)
+    return preguntas
+
+
+def guion_curso(tema: str, duracion_horas: float, contexto: str = "", material: str = "", modalidad: str = "autoguiado", duracion_texto: str = "") -> Tuple[GuionCurso, bool]:
     """Módulo universal (2026-09-16): a partir del tema, el contexto opcional de RH, el material adjunto
-    (texto extraído) y la duración, genera objetivo, categoría, módulos y la evaluación final integrada."""
+    (texto extraído) y la duración, genera objetivo, categoría, módulos y la evaluación final integrada.
+    2026-09-19 (Bloque 4): `modalidad` diferencia el prompt — instructor_ia = guion conversacional que el avatar
+    dice en voz alta; autoguiado = contenido breve, visual y modular. En ambos, el PDF es material de apoyo
+    (resumen + puntos clave), no la experiencia principal."""
     client = _client()
     if client is None:
         g = _guion_curso_demo(tema, duracion_horas)
         g.categoria = g.categoria or "General"
+        for m in g.modulos:
+            if not m.resumen:
+                m.resumen = m.contenido[:240]
+            if not m.puntos_clave:
+                m.puntos_clave = [x.strip("•- ").strip() for x in m.contenido.split("\n") if x.strip()][:4]
         return _asegurar_evaluacion(g, tema), False
 
-    entrada = f"Tema del curso: {tema}\nDuración estimada: {duracion_horas} horas"
+    duracion = duracion_texto.strip() or f"{duracion_horas} horas"
+    entrada = f"Tema del curso: {tema}\nDuración total: {duracion}\nModalidad: {'Instructor IA (avatar que explica en voz alta y responde dudas)' if modalidad == 'instructor_ia' else 'Autoguiado (la persona lee en pantalla a su ritmo)'}"
     if contexto.strip():
         entrada += f"\nContexto de RH (público, tono, énfasis): {contexto.strip()[:2000]}"
     if material.strip():
         entrada += f"\n\nMaterial de referencia adjunto (úsalo como fuente principal del contenido):\n{material.strip()[:24000]}"
+    if modalidad == "instructor_ia":
+        estilo = (
+            "MODALIDAD INSTRUCTOR IA: el `contenido` de cada módulo es un GUION CONVERSACIONAL que un instructor con avatar dirá en voz "
+            "alta: lenguaje natural y cercano, frases cortas (máximo ~20 palabras), una idea por párrafo, ejemplos cotidianos, y pausas "
+            "explícitas para preguntar («¿Alguna duda hasta aquí?», «¿Te ha pasado algo así?») cada 3-4 párrafos. NADA de instructivos "
+            "densos, listas largas ni encabezados en mayúsculas: si un tema es largo, se divide en más módulos cortos. "
+        )
+    else:
+        estilo = (
+            "MODALIDAD AUTOGUIADO: el `contenido` de cada módulo es BREVE, visual y modular: encabezados cortos, listas con viñetas, "
+            "3-6 ideas por módulo, ejemplos concretos; se lee en pantalla en pocos minutos. "
+        )
     resp = client.responses.parse(
         model=MODEL,
         instructions=(
-            "Diseñas cursos de capacitación para Red Human AI (México) que se cursan en pantalla: la persona lee "
-            "cada módulo y al final contesta una evaluación integrada calificada automáticamente. Reglas: (1) el "
-            "primer módulo es de bienvenida y contexto; los demás cubren el tema de forma práctica, en español "
-            "mexicano, con `contenido` completo y autoexplicativo (párrafos cortos, listas cuando ayuden); (2) el "
-            "número de módulos es proporcional a la duración (aprox. uno por cada 20-30 minutos, máximo 8); "
-            "(3) NO agregues un módulo de evaluación: la evaluación va en `evaluacion` como 5 a 10 preguntas de "
-            "opción múltiple (3-4 opciones, UNA correcta) o verdadero/falso, que cubran todos los módulos y con "
-            "`explicacion` breve; (4) si hay material adjunto, básate en él y no inventes datos que lo contradigan; "
-            "(5) asigna una `categoria` corta; (6) nunca pidas ni menciones datos sensibles (salud, embarazo, "
-            "religión, estado civil, orientación)."
+            "Diseñas cursos de capacitación para Red Human AI (México) que se cursan en pantalla y terminan con una evaluación "
+            "integrada calificada automáticamente. " + estilo +
+            "Reglas comunes: (1) el primer módulo es de bienvenida y contexto, breve; (2) el número y tamaño de los módulos es "
+            "proporcional a la duración total indicada (un curso de 5 minutos = 2-3 módulos muy cortos; de 1 hora = 4-6; máximo 8); "
+            "(3) cada módulo trae `resumen` (2-3 frases) y `puntos_clave` (3-5) para el material de apoyo en PDF; "
+            "(4) NO agregues un módulo de evaluación: la evaluación va en `evaluacion` como 5 a 10 preguntas de opción múltiple "
+            "(3-4 opciones, UNA sola correcta, sin «todas las anteriores») o verdadero/falso que cubran todos los módulos; en cada "
+            "pregunta `correcta` DEBE apuntar a la única opción verdadera según el contenido y `explicacion` DEBE justificar esa "
+            "misma opción y referirse a esa misma pregunta — verifica cada una antes de responder; (5) si hay material adjunto, "
+            "básate en él y no inventes datos que lo contradigan; (6) asigna una `categoria` corta; (7) nunca pidas ni menciones datos "
+            "sensibles (salud, embarazo, religión, estado civil, orientación)."
         ),
         input=entrada,
         text_format=GuionCurso,
     )
-    return _asegurar_evaluacion(resp.output_parsed, tema), True
+    g = _asegurar_evaluacion(resp.output_parsed, tema)
+    g.evaluacion = _verificar_evaluacion(client, tema, g.modulos, g.evaluacion)
+    return g, True
+
+
+def horas_desde_texto(texto: str, default: float = 0.5) -> float:
+    """«5 min» → 0.08, «15 minutos» → 0.25, «1h» → 1, «1 h 30» → 1.5, «2 horas» → 2, «90» → 1.5 (minutos). Para KPIs."""
+    t = (texto or "").strip().lower().replace(",", ".")
+    if not t:
+        return default
+    horas = 0.0
+    encontrado = False
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(h|hr|hrs|hora|horas)\b", t)
+    if m:
+        horas += float(m.group(1)); encontrado = True
+    m2 = re.search(r"(\d+(?:\.\d+)?)\s*(m|min|mins|minuto|minutos)\b", t)
+    if m2:
+        horas += float(m2.group(1)) / 60; encontrado = True
+    if not encontrado:
+        m3 = re.search(r"(\d+(?:\.\d+)?)", t)
+        if m3:
+            n = float(m3.group(1))
+            horas = n / 60 if n >= 10 else n  # «90» = minutos; «2» = horas
+            encontrado = True
+    return round(horas, 2) if encontrado and horas > 0 else default
 
 
 class TurnoCurso(BaseModel):

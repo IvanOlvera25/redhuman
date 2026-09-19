@@ -149,22 +149,51 @@ export default function SalaCurso() {
               ))}
               <li className="flex items-center gap-2"><Award className="h-4 w-4 text-ink-3" /> Evaluación final ({a.totalPreguntas} preguntas)</li>
             </ul>
-            <p className="mt-3 text-xs text-ink-3">Duración aproximada: {a.duracionHoras} h. Puedes cerrar y volver: tu avance se guarda.</p>
+            <p className="mt-3 text-xs text-ink-3">
+              {a.modalidad === "instructor_ia" ? "Tu instructor con avatar te explica cada módulo y responde tus dudas; al final contestas una evaluación breve." : "Lee cada módulo a tu ritmo; al final contestas una evaluación breve."} Duración aproximada: {a.duracion || `${a.duracionHoras} h`}. Puedes cerrar y volver: tu avance se guarda.
+            </p>
             <Button className="mt-5 w-full" onClick={() => setVista("modulo")}>
               <ArrowRight className="h-4 w-4" /> Comenzar
             </Button>
           </Card>
         )}
 
-        {a && vista === "modulo" && modulo && (
-          <div className="grid gap-5 lg:grid-cols-[1fr_360px]">
+        {a && vista === "modulo" && modulo && a.modalidad === "instructor_ia" && (
+          /* 2026-09-19 (Bloque 4): Instructor IA — el avatar explica primero; el guion queda plegado como apoyo.
+             Flujo: Instructor explica → la persona pregunta → Continuar → siguiente módulo → evaluación. */
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="font-mono text-[11px] uppercase tracking-wide text-ink-3">Módulo {modulo.orden} de {a.totalModulos}</p>
+                <h2 className="font-display mt-0.5 text-xl font-bold">{modulo.titulo}</h2>
+              </div>
+              <a href={urlPdfCursoPublico(token)} target="_blank" rel="noreferrer" title="Material de apoyo (PDF)" className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-border-soft bg-surface px-3 text-xs font-semibold text-ink-2 transition hover:border-brand/40 hover:text-brand">
+                <Download className="h-4 w-4" /> Material de apoyo
+              </a>
+            </div>
+            <InstructorAvatar token={token} modulo={modulo.orden} titulo={modulo.titulo} autoIniciar />
+            <details className="rounded-2xl border border-border-soft bg-surface">
+              <summary className="cursor-pointer px-5 py-3 text-sm font-semibold text-ink-2">Ver el guion del módulo (texto)</summary>
+              <div className="whitespace-pre-wrap border-t border-border-faint px-5 py-4 text-sm leading-relaxed text-ink-2">{modulo.contenido}</div>
+            </details>
+            {error && <p className="text-sm font-semibold text-bad">{error}</p>}
+            <Button className="w-full" onClick={siguienteModulo} disabled={ocupado}>
+              {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
+              {a.modulosCompletados + 1 >= a.totalModulos ? "Continuar a la evaluación" : "Continuar al siguiente módulo"}
+            </Button>
+          </div>
+        )}
+
+        {a && vista === "modulo" && modulo && a.modalidad !== "instructor_ia" && (
+          /* Autoguiado: contenido breve y visual; el instructor queda disponible por texto al lado. */
+          <div className="grid gap-5 lg:grid-cols-[1fr_340px]">
             <Card className="p-6">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="font-mono text-[11px] uppercase tracking-wide text-ink-3">Módulo {modulo.orden} de {a.totalModulos}</p>
                   <h2 className="font-display mt-1 text-xl font-bold">{modulo.titulo}</h2>
                 </div>
-                <a href={urlPdfCursoPublico(token)} target="_blank" rel="noreferrer" title="Descargar el contenido del curso en PDF" className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-border-soft bg-surface px-3 text-xs font-semibold text-ink-2 transition hover:border-brand/40 hover:text-brand">
+                <a href={urlPdfCursoPublico(token)} target="_blank" rel="noreferrer" title="Material de apoyo (PDF)" className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-border-soft bg-surface px-3 text-xs font-semibold text-ink-2 transition hover:border-brand/40 hover:text-brand">
                   <Download className="h-4 w-4" /> PDF
                 </a>
               </div>
@@ -175,7 +204,6 @@ export default function SalaCurso() {
                 {a.modulosCompletados + 1 >= a.totalModulos ? "Terminar módulos e ir a la evaluación" : "Siguiente módulo"}
               </Button>
             </Card>
-            {/* 2026-09-18: el instructor con avatar convive con el contenido (explica y responde dudas) */}
             <div className="lg:sticky lg:top-6 lg:self-start">
               <InstructorAvatar token={token} modulo={modulo.orden} titulo={modulo.titulo} />
             </div>

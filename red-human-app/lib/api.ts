@@ -1567,6 +1567,9 @@ export interface Curso {
   titulo: string;
   categoria: string;
   duracionHoras: number;
+  /** 2026-09-19 (Bloque 4): duración libre y cómo se imparte. */
+  duracion?: string;
+  modalidad?: ModalidadCurso;
   objetivo: string;
   estado: "Borrador" | "Publicado" | "Archivado";
   obligatorio: boolean;
@@ -1630,10 +1633,13 @@ export function fetchCurso(codigo: string) {
 }
 
 /** «Generar curso con IA»: solo tema, contexto opcional, adjuntos y duración. */
-export function generarCurso(datos: { tema: string; duracionHoras: number; contexto?: string; archivos?: File[] }) {
+export type ModalidadCurso = "instructor_ia" | "autoguiado";
+
+export function generarCurso(datos: { tema: string; duracion: string; modalidad: ModalidadCurso; contexto?: string; archivos?: File[] }) {
   const form = new FormData();
   form.append("tema", datos.tema);
-  form.append("duracion_horas", String(datos.duracionHoras));
+  form.append("duracion", datos.duracion);  // 2026-09-19: libre («5 min», «1 h»)
+  form.append("modalidad", datos.modalidad);
   form.append("contexto", datos.contexto ?? "");
   for (const f of datos.archivos ?? []) form.append("archivos", f);
   return subir<Curso & { ia: boolean }>("/capacitacion/generar", form);
@@ -1654,8 +1660,15 @@ export function editarCurso(
   });
 }
 
+/** «Finalizar curso» (2026-09-19: Crear → Revisar → Finalizar → Asignar). El estado interno sigue siendo «Publicado». */
 export function publicarCurso(codigo: string) {
-  return patch<Curso>(`/capacitacion/${codigo}/publicar`, {});
+  return patch<Curso>(`/capacitacion/${codigo}/finalizar`, {});
+}
+export const finalizarCurso = publicarCurso;
+
+/** Etiqueta visible del estado del curso. */
+export function etiquetaEstadoCurso(estado: string) {
+  return estado === "Publicado" ? "Finalizado" : estado;
 }
 
 export function archivarCurso(codigo: string) {
@@ -1701,6 +1714,8 @@ export interface AsignacionPublica {
   tipo: TipoAsignacionCurso;
   requiereRegistro: boolean;
   curso: string;
+  modalidad?: ModalidadCurso;
+  duracion?: string;
   objetivo: string;
   categoria: string;
   duracionHoras: number;

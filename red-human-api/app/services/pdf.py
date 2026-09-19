@@ -144,7 +144,7 @@ def pdf_curso(d: dict) -> bytes:
     pdf.ln(2)
     pdf.set_font(_FUENTE, "", 11)
     pdf.set_text_color(85, 85, 85)
-    meta = " - ".join(x for x in [d.get("empresa") or "", f"Duración aproximada: {d.get('duracion_horas') or 1} h", f"Para: {d['persona']}" if d.get("persona") else ""] if x)
+    meta = " - ".join(x for x in [d.get("empresa") or "", f"Duración aproximada: {d.get('duracion_texto') or str(d.get('duracion_horas') or 1) + ' h'}", "Material de apoyo del curso con Instructor IA" if d.get("modalidad") == "instructor_ia" else "", f"Para: {d['persona']}" if d.get("persona") else ""] if x)
     pdf.multi_cell(0, 6, _latin(meta), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     if d.get("objetivo"):
@@ -179,6 +179,15 @@ def pdf_curso(d: dict) -> bytes:
                 pdf.multi_cell(0, 6, _latin(parrafo.strip()), new_x="LMARGIN", new_y="NEXT")
             else:
                 pdf.ln(2)
+        if m.get("puntos_clave"):
+            pdf.ln(2)
+            pdf.set_font(_FUENTE, "B", 11)
+            pdf.set_text_color(0xEE, 0x44, 0x44)
+            pdf.cell(0, 6, "Puntos clave", new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font(_FUENTE, "", 11)
+            pdf.set_text_color(26, 26, 26)
+            for punto in m["puntos_clave"][:6]:
+                pdf.multi_cell(0, 6, _latin(f"- {punto}"), new_x="LMARGIN", new_y="NEXT")
     if d.get("evaluacion"):
         pdf.add_page()
         pdf.set_font(_FUENTE, "B", 15)

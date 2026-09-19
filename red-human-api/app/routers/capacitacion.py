@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import slugificar, AsignacionCurso, Candidato, Colaborador, Cuenta, Curso, ModuloCurso, Postulacion, Usuario, registrar
+from ..models import MODALIDADES_CURSO, slugificar, AsignacionCurso, Candidato, Colaborador, Cuenta, Curso, ModuloCurso, Postulacion, Usuario, registrar
 from ..serial import asignacion_dict, asignacion_publica_dict, curso_dict
 from ..services import archivos as fs
 from ..services import ia
@@ -76,21 +76,31 @@ def _texto_de_adjunto(nombre: str, contenido: bytes) -> str:
 @router.post("/generar", status_code=201)
 async def generar(
     tema: str = Form(...),
-    duracion_horas: float = Form(...),
+    duracion_horas: Optional[float] = Form(default=None),
+    duracion: str = Form(default=""),  # 2026-09-19: libre («5 min», «15 min», «1 h», «2 horas»)
+    modalidad: str = Form(default="autoguiado"),  # instructor_ia | autoguiado
     contexto: str = Form(default=""),
     archivos: List[UploadFile] = File(default=[]),
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """«Generar curso con IA»: Tema + contexto opcional + adjuntos + duración → objetivo, categoría, módulos
-    y evaluación final integrada. Queda como Borrador para que RH lo revise (secciones contraídas) y publique."""
+    """«Generar curso con IA»: Tema + modalidad (Instructor IA / Autoguiado) + duración libre + contexto opcional +
+    adjuntos → objetivo, categoría, módulos (guion conversacional o contenido modular) y evaluación final integrada.
+    Queda como Borrador para que RH lo revise y lo FINALICE (Crear → Revisar → Finalizar → Asignar)."""
     if not tema.strip():
         raise HTTPException(400, "El tema del curso es obligatorio.")
-    if duracion_horas <= 0:
-        raise HTTPException(400, "La duración debe ser mayor a cero.")
+    if modalidad not in MODALIDADES_CURSO:
+        raise HTTPException(400, "modalidad debe ser instructor_ia o autoguiado.")
+    duracion_texto = duracion.strip()
+    if duracion_horas is None or duracion_horas <= 0:
+        if not duracion_texto:
+            raise HTTPException(400, "Indica la duración (por ejemplo «15 min» o «1 h»).")
+        duracion_horas = ia.horas_desde_texto(duracion_texto)
+    if not duracion_texto:
+        duracion_texto = f"{duracion_horas:g} h"
     if len(archivos) > MAX_ADJUNTOS:
         raise HTTPException(400, f"Máximo {MAX_ADJUNTOS} archivos adjuntos.")
 
-    c = Curso(codigo="TMP", cuenta_id=cuenta.id, titulo=tema.strip(), duracion_horas=duracion_horas, contexto=contexto.strip(), estado="Borrador", creado_por=u.nombre)
+    c = Curso(codigo="TMP", cuenta_id=cuenta.id, titulo=tema.strip(), duracion_horas=duracion_horas, duracion_texto=duracion_texto, modalidad=modalidad, contexto=contexto.strip(), estado="Borrador", creado_por=u.nombre)
     db.add(c)
     db.flush()
     c.codigo = f"CUR-{100 + c.id}"
@@ -110,11 +120,11 @@ async def generar(
             material_partes.append(f"### {archivo.filename}\n{texto}")
     c.adjuntos = adjuntos
 
-    guion, con_ia = ia.guion_curso(tema.strip(), duracion_horas, contexto=contexto, material="\n\n".join(material_partes))
+    guion, con_ia = ia.guion_curso(tema.strip(), duracion_horas, contexto=contexto, material="\n\n".join(material_partes), modalidad=modalidad, duracion_texto=duracion_texto)
     c.objetivo = guion.objetivo
     c.categoria = guion.categoria or "General"
     for i, m in enumerate(guion.modulos, start=1):
-        db.add(ModuloCurso(curso_id=c.id, orden=i, titulo=m.titulo, contenido=m.contenido, preguntas_verificacion=[p.model_dump() for p in m.preguntas_verificacion]))
+        db.add(ModuloCurso(curso_id=c.id, orden=i, titulo=m.titulo, contenido=m.contenido, resumen=m.resumen or "", puntos_clave=list(m.puntos_clave or []), preguntas_verificacion=[p.model_dump() for p in m.preguntas_verificacion]))
     c.evaluacion = [q.model_dump() for q in guion.evaluacion]
     registrar(db, u.nombre, "curso_generado", "curso", c.codigo, {"tema": tema, "ia": con_ia, "modulos": len(guion.modulos), "preguntas": len(c.evaluacion), "adjuntos": [a["nombre"] for a in adjuntos]})
     db.commit()
@@ -185,6 +195,8 @@ class EditarCursoIn(BaseModel):
     objetivo: Optional[str] = None
     categoria: Optional[str] = None
     duracion_horas: Optional[float] = None
+    duracion: Optional[str] = None  # 2026-09-19: duración libre
+    modalidad: Optional[str] = None
     calificacion_minima: Optional[int] = None
     modulos: Optional[List[ModuloIn]] = None
     evaluacion: Optional[List[PreguntaIn]] = None
@@ -202,6 +214,11 @@ def editar(codigo: str, datos: EditarCursoIn, db: Session = Depends(get_db), u: 
         c.categoria = datos.categoria.strip()
     if datos.duracion_horas is not None and datos.duracion_horas > 0:
         c.duracion_horas = datos.duracion_horas
+    if datos.duracion is not None and datos.duracion.strip():
+        c.duracion_texto = datos.duracion.strip()[:40]
+        c.duracion_horas = ia.horas_desde_texto(c.duracion_texto, c.duracion_horas or 0.5)
+    if datos.modalidad in MODALIDADES_CURSO:
+        c.modalidad = datos.modalidad
     if datos.calificacion_minima is not None:
         if not (1 <= datos.calificacion_minima <= 100):
             raise HTTPException(400, "La calificación mínima debe estar entre 1 y 100.")
@@ -230,11 +247,14 @@ def editar(codigo: str, datos: EditarCursoIn, db: Session = Depends(get_db), u: 
     return curso_dict(c, detalle=True)
 
 
-@router.patch("/{codigo}/publicar")
+@router.patch("/{codigo}/finalizar")
+@router.patch("/{codigo}/publicar")  # alias histórico
 def publicar(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Finalizar curso» (2026-09-19: Crear → Revisar → Finalizar → Asignar). El estado interno sigue siendo
+    «Publicado» por compatibilidad; la UI lo muestra como Finalizado."""
     c = _por_codigo(db, codigo, cuenta.id)
     if not c.modulos or not c.evaluacion:
-        raise HTTPException(409, "El curso necesita módulos y evaluación antes de publicarse.")
+        raise HTTPException(409, "El curso necesita módulos y evaluación antes de finalizarse.")
     c.estado = "Publicado"
     registrar(db, u.nombre, "curso_publicado", "curso", c.codigo, {})
     db.commit()
@@ -545,7 +565,16 @@ def _datos_pdf_curso(curso: Curso, a: Optional[AsignacionCurso] = None) -> dict:
     d = {
         "titulo": curso.titulo, "categoria": curso.categoria, "objetivo": curso.objetivo, "duracion_horas": curso.duracion_horas,
         "empresa": empresa,
-        "modulos": [{"orden": m.orden, "titulo": m.titulo, "contenido": m.contenido} for m in sorted(curso.modulos or [], key=lambda x: x.orden)],
+        "modalidad": curso.modalidad or "autoguiado",
+        "duracion_texto": curso.duracion_texto or "",
+        # 2026-09-19: el PDF es MATERIAL DE APOYO — en Instructor IA lleva resumen + puntos clave (no el guion hablado);
+        # en Autoguiado el contenido modular ya es breve y se incluye completo.
+        "modulos": [
+            {"orden": m.orden, "titulo": m.titulo,
+             "contenido": (m.contenido if (curso.modalidad or "autoguiado") == "autoguiado" or not (m.resumen or m.puntos_clave) else m.resumen),
+             "puntos_clave": list(m.puntos_clave or [])}
+            for m in sorted(curso.modulos or [], key=lambda x: x.orden)
+        ],
         "evaluacion": [{"pregunta": q.get("pregunta"), "opciones": q.get("opciones") or []} for q in (curso.evaluacion or [])],
     }
     if a is not None:

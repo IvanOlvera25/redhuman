@@ -23,6 +23,7 @@ import {
   fetchColaboradores,
   fetchCurso,
   publicarCurso,
+  etiquetaEstadoCurso,
   urlPdfCurso,
   type AsignacionCurso,
   type Colaborador,
@@ -104,11 +105,11 @@ export default function FichaCurso() {
   return (
     <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-8">
       <Link href="/dashboard/capacitacion" className="inline-flex items-center gap-1.5 text-xs text-ink-3 hover:text-ink"><ArrowLeft className="h-3.5 w-3.5" /> Capacitación</Link>
-      <PageHeader title={curso.titulo} subtitle={`${curso.categoria || "General"} · ${curso.duracionHoras} h · ${curso.modulos} módulos · ${curso.preguntas} preguntas · mínimo ${curso.calificacionMinima}%`}>
-        <Badge tone={curso.estado === "Publicado" ? "good" : "neutral"} dot>{curso.estado}</Badge>
+      <PageHeader title={curso.titulo} subtitle={`${curso.categoria || "General"} · ${curso.modalidad === "instructor_ia" ? "Instructor IA" : "Autoguiado"} · ${curso.duracion || `${curso.duracionHoras} h`} · ${curso.modulos} módulos · ${curso.preguntas} preguntas · mínimo ${curso.calificacionMinima}%`}>
+        <Badge tone={curso.estado === "Publicado" ? "good" : "neutral"} dot>{etiquetaEstadoCurso(curso.estado)}</Badge>
         {puedeDecidir && curso.estado === "Borrador" && (
-          <Button onClick={publicar} disabled={Boolean(ocupado)}>
-            <Check className="h-4 w-4" /> {ocupado === "publicar" ? "Publicando…" : "Publicar curso"}
+          <Button onClick={publicar} disabled={Boolean(ocupado)} title="Crear → Revisar → Finalizar → Asignar">
+            <Check className="h-4 w-4" /> {ocupado === "publicar" ? "Finalizando…" : "Finalizar curso"}
           </Button>
         )}
         {puedeDecidir && curso.estado === "Publicado" && (

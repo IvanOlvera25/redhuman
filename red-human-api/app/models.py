@@ -1243,6 +1243,9 @@ class ConfiguracionSistema(Base):
 # ============================================================
 
 
+MODALIDADES_CURSO = ("instructor_ia", "autoguiado")
+
+
 class Curso(Base):
     __tablename__ = "cursos"
 
@@ -1251,6 +1254,9 @@ class Curso(Base):
     titulo: Mapped[str] = mapped_column(String(200))
     categoria: Mapped[str] = mapped_column(String(100), default="")
     duracion_horas: Mapped[float] = mapped_column(Float, default=0)
+    # 2026-09-19 (Bloque 4): cómo se imparte y duración libre («5 min», «1 h 30»); duracion_horas se deriva para KPIs.
+    modalidad: Mapped[str] = mapped_column(String(20), default="autoguiado")  # instructor_ia | autoguiado
+    duracion_texto: Mapped[str] = mapped_column(String(40), default="")
     objetivo: Mapped[str] = mapped_column(Text, default="")  # generado por IA
     estado: Mapped[str] = mapped_column(String(20), default="Borrador")  # Borrador | Publicado | Archivado
     obligatorio: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -1283,6 +1289,10 @@ class ModuloCurso(Base):
     titulo: Mapped[str] = mapped_column(String(200))
     contenido: Mapped[str] = mapped_column(Text, default="")  # guion que explicará el avatar (Fase 2)
     # [{"pregunta": str, "criterio_respuesta_correcta": str}] — con qué evaluar la comprensión (Fase 2)
+    # 2026-09-19 (Bloque 4): material de apoyo (PDF) — resumen breve y puntos clave; `contenido` es el guion
+    # conversacional (Instructor IA) o el contenido modular (Autoguiado).
+    resumen: Mapped[str] = mapped_column(Text, default="")
+    puntos_clave: Mapped[list] = mapped_column(JSON, default=list)
     preguntas_verificacion: Mapped[list] = mapped_column(JSON, default=list)
 
     curso: Mapped["Curso"] = relationship(back_populates="modulos")
