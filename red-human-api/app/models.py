@@ -428,6 +428,9 @@ class EntrevistaHumana(Base):
     # "" hasta que alguien capture el resultado; "rh" | "entrevistador" según quién ganó la
     # carrera (ver candidatos.py: RH siempre puede sobreescribir después, para corregir).
     resultado_capturado_por: Mapped[str] = mapped_column(String(20), default="")
+    # 2026-09-19: recordatorio automático (job) y cierre del ciclo desde la liga del entrevistador.
+    recordatorio_enviado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    evaluada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
     candidato: Mapped["Candidato"] = relationship(foreign_keys=[candidato_id])
@@ -1221,6 +1224,8 @@ class ConfiguracionSistema(Base):
     # Fase 3 (2026-09-15): recordatorios automáticos de documentos pendientes (services/recordatorios.py):
     # cada N días, a partir de esta hora (America/Mexico_City), mientras no pase Expediente.documentos_hasta.
     recordatorio_documentos_dias: Mapped[int] = mapped_column(Integer, default=2)
+    # 2026-09-19: horas antes de la Entrevista Humana para el recordatorio automático (0 = apagado).
+    recordatorio_entrevista_horas: Mapped[int] = mapped_column(Integer, default=24)
     recordatorio_documentos_hora: Mapped[int] = mapped_column(Integer, default=10)
 
 
@@ -1353,6 +1358,10 @@ EVENTOS_NOTIFICACION = [
     "recordatorio_documentos",
     # Fase 5 (2026-09-15): bienvenida + instrucciones de ingreso, automático al dar de alta (sin override).
     "instrucciones_ingreso",
+    # 2026-09-19: al publicar una vacante, su descripción (HTML) al Cliente y al responsable.
+    "vacante_publicada",
+    # 2026-09-19: cierre del ciclo — el entrevistador registró su evaluación desde su liga.
+    "entrevista_completada",
 ]
 
 # Fase 7A (2026-09-12): valores con los que NACE la regla de cada evento cuando una Cuenta no la
@@ -1362,8 +1371,10 @@ EVENTOS_NOTIFICACION = [
 # ya guardadas de una Cuenta NUNCA se tocan desde aquí.
 REGLAS_NOTIFICACION_DEFAULT = {
     "entrevista_agendada": {"candidato_correo": True, "candidato_whatsapp": True, "entrevistador_correo": True, "entrevistador_whatsapp": True},
-    "recordatorio_entrevista": {"candidato_whatsapp": True},
-    "entrevista_humana_terminada": {"entrevistador_correo": True},
+    "recordatorio_entrevista": {"candidato_whatsapp": True, "candidato_correo": True, "entrevistador_correo": True, "entrevistador_whatsapp": True},
+    "entrevista_humana_terminada": {"entrevistador_correo": True, "entrevistador_whatsapp": True},
+    "entrevista_completada": {"candidato_correo": True, "candidato_whatsapp": True, "cliente_correo": True},
+    "vacante_publicada": {"cliente_correo": True},
     "contratacion": {"candidato_whatsapp": True},
     "solicitud_documentos": {"candidato_whatsapp": True},
     "recordatorio_documentos": {"candidato_whatsapp": True},

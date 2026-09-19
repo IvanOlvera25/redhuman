@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
+from ..services import notificaciones
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import (
     ENFOQUES_ENTREVISTA, MONEDAS_SUELDO, PERIODICIDADES_SUELDO, PLATAFORMAS, Cliente, Cuenta, Curso, Plantilla, Postulacion,
@@ -663,7 +664,7 @@ class PublicarIn(BaseModel):
 
 
 @router.post("/{codigo}/publicar")
-def publicar(
+async def publicar(
     codigo: str, datos: PublicarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
@@ -684,7 +685,10 @@ def publicar(
         v.publicada_en = datetime.now(timezone.utc)
     registrar(db, u.nombre, "vacante_publicada", "vacante", v.codigo, {"plataformas": v.plataformas})
     db.commit()
-    return _salida(db, v)
+    # 2026-09-19: descripción de la vacante (HTML corporativo) al Cliente y al responsable; nunca bloquea.
+    envios = await notificaciones.notificar_vacante_publicada(db, v, u.nombre)
+    db.commit()
+    return {**_salida(db, v), "notificaciones": envios}
 
 
 @router.post("/{codigo}/cerrar")

@@ -3181,53 +3181,50 @@ function PanelEntrevistaHumana({
             </Badge>
             {eh.recomendacion && <Badge tone="brand">{RECOMENDACION_LABEL[eh.recomendacion]}</Badge>}
           </>
-        ) : eh.realizada ? (
-          <span className="text-xs text-ink-3">Esperando evaluación del entrevistador…</span>
         ) : live ? (
           <>
-            <Button size="sm" variant="secondary" onClick={() => setConfirmacion("realizada")} disabled={marcando}>
-              <CheckCircle2 className="h-4 w-4" /> {marcando ? "Enviando…" : "Marcar entrevista realizada"}
+            {/* 2026-09-19 (cambios Raúl): UN solo paso — «Entrevista realizada» abre el único modal
+                (Resultado + Comentarios opcionales + Guardar). Sin confirmaciones intermedias. */}
+            <Button size="sm" onClick={() => setModalResultado(true)} disabled={guardando || marcando}>
+              <CheckCircle2 className="h-4 w-4" /> {guardando ? "Guardando…" : eh.realizada ? "Registrar resultado" : "Entrevista realizada"}
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setConfirmacion("recordatorio")} disabled={recordando}>
-              <RotateCw className="h-4 w-4" /> {recordando ? "Enviando…" : "Enviar recordatorio"}
+            <Button size="sm" variant="outline" onClick={() => setModalModificar(true)} title="No se realizó: reprogramar fecha, hora o modalidad">
+              <RotateCw className="h-4 w-4" /> No realizada / Reprogramar
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setModalModificar(true)}>
-              <Pencil className="h-4 w-4" /> Modificar
-            </Button>
-            <Button size="sm" variant="outline" className="text-bad" onClick={() => setConfirmacion("cancelar")} disabled={cancelando}>
-              <XCircle className="h-4 w-4" /> {cancelando ? "Cancelando…" : "Cancelar"}
-            </Button>
+            <MenuAcciones
+              acciones={[
+                { etiqueta: "Reenviar liga de evaluación al entrevistador", icono: <Send />, onClick: () => setConfirmacion("realizada"), disabled: marcando },
+                { etiqueta: "Enviar recordatorio", icono: <RotateCw />, onClick: () => setConfirmacion("recordatorio"), disabled: recordando },
+                { etiqueta: "Modificar datos", icono: <Pencil />, onClick: () => setModalModificar(true) },
+                { etiqueta: "Cancelar entrevista", icono: <XCircle />, peligrosa: true, onClick: () => setConfirmacion("cancelar"), disabled: cancelando },
+              ]}
+            />
           </>
         ) : null}
       </div>
 
-      {/* Respaldo manual de RH (Eje 1) — solo aparece una vez marcada realizada, ya sea para
-          capturar el resultado si el entrevistador no ha contestado, o para corregirlo. */}
-      {eh.realizada && live && (
+      {eh.resultado && live && (
         <div className="mt-2.5 flex flex-wrap items-center gap-2.5">
-          {eh.resultado && (
-            <span className="text-[11px] text-ink-3">
-              Registrado por {eh.resultadoCapturadoPor === "entrevistador" ? "el entrevistador" : "RH"}.
-            </span>
-          )}
-          <button
-            onClick={() => setModalResultado(true)}
-            disabled={guardando}
-            className="text-[11px] font-semibold text-brand hover:underline"
-          >
-            {eh.resultado ? "Corregir resultado" : "Registrar resultado manualmente"}
+          <span className="text-[11px] text-ink-3">
+            Registrado por {eh.resultadoCapturadoPor === "entrevistador" ? "el entrevistador (liga)" : "RH"}.
+          </span>
+          <button onClick={() => setModalResultado(true)} disabled={guardando} className="text-[11px] font-semibold text-brand hover:underline">
+            Corregir resultado
           </button>
         </div>
+      )}
+      {eh.realizada && !eh.resultado && live && (
+        <p className="mt-2 text-[11px] text-ink-3">Esperando la evaluación del entrevistador desde su liga; también puedes registrarla aquí.</p>
       )}
 
       {confirmacion === "realizada" && (
         <ConfirmacionAccion
-          titulo="¿La entrevista ya se llevó a cabo?"
-          texto="Se le mandará al entrevistador la liga para registrar su evaluación."
+          titulo="Reenviar liga de evaluación"
+          texto="Se le manda al entrevistador (correo HTML / WhatsApp) la liga con el expediente y el formulario de evaluación."
           evento="entrevista_humana_terminada"
           hayCliente={hayCliente}
           clienteId={c.clienteIdVacante ?? null}
-          etiquetaConfirmar="Sí, se realizó"
+          etiquetaConfirmar="Enviar liga"
           onCancelar={() => setConfirmacion(null)}
           onConfirmar={async (n) => {
             setConfirmacion(null);
@@ -3326,20 +3323,20 @@ function ModalCerrarEntrevistaHumana({
 }) {
   const notificar = useNotificarAccion("recomendacion_final");
   const [resultado, setResultado] = useState<ResultadoEntrevistaHumana | "">(inicial?.resultado ?? "");
-  const [recomendacion, setRecomendacion] = useState<RecomendacionEntrevistaHumana | "">(inicial?.recomendacion ?? "");
   const [comentario, setComentario] = useState(inicial?.comentario ?? "");
+  const [segunda, setSegunda] = useState(inicial?.recomendacion === "segunda_entrevista");
 
-  const comentarioObligatorio = resultado === "no_aprobado" || recomendacion === "segunda_entrevista";
-  const listo = !!resultado && !!recomendacion && (!comentarioObligatorio || comentario.trim().length > 0);
+  // 2026-09-19 (cambios Raúl): un solo paso. La recomendación se deriva del resultado
+  // (Aprobado → avanzar, Rechazado → no avanzar; «pedir segunda entrevista» es una casilla opcional).
+  const recomendacion: RecomendacionEntrevistaHumana | "" = segunda ? "segunda_entrevista" : resultado === "aprobado" ? "avanzar" : resultado === "no_aprobado" ? "no_avanzar" : "";
+  const listo = !!resultado;
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
       <Card className="w-full max-w-md p-5">
-        <h3 className="font-display text-lg font-bold">{inicial ? "Corregir resultado" : "Registrar resultado de la entrevista"}</h3>
+        <h3 className="font-display text-lg font-bold">{inicial ? "Corregir resultado" : "Entrevista realizada"}</h3>
         <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-          {inicial
-            ? "Vas a sobreescribir el resultado ya registrado para esta entrevista."
-            : "Al confirmar se habilitan los botones «Descartar» y «Enviar a Contratación» para este candidato."}
+          {inicial ? "Vas a sobreescribir el resultado ya registrado." : "Registra el resultado y listo: la entrevista queda confirmada y se habilitan los siguientes pasos."}
         </p>
 
         <div className="mt-4 flex flex-col gap-4">
@@ -3362,46 +3359,27 @@ function ModalCerrarEntrevistaHumana({
                   resultado === "no_aprobado" ? "border-bad/25 bg-bad-soft text-bad" : "border-border-soft text-ink-2"
                 }`}
               >
-                No aprobado
+                Rechazado
               </button>
             </div>
           </div>
 
           <label className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium text-ink-2">Recomendación</span>
-            <select
-              value={recomendacion}
-              onChange={(e) => setRecomendacion(e.target.value as RecomendacionEntrevistaHumana)}
-              className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
-            >
-              <option value="" disabled>
-                Selecciona una opción
-              </option>
-              <option value="avanzar">Avanzar</option>
-              <option value="no_avanzar">No avanzar</option>
-              <option value="segunda_entrevista">Segunda entrevista</option>
-            </select>
-          </label>
-
-          <label className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium text-ink-2">
-              Comentarios{" "}
-              {comentarioObligatorio ? (
-                <span className="text-bad">(obligatorio)</span>
-              ) : (
-                <span className="text-ink-3">(opcional)</span>
-              )}
-            </span>
+            <span className="text-sm font-medium text-ink-2">Comentarios <span className="text-ink-3">(opcional)</span></span>
             <textarea
               value={comentario}
               onChange={(e) => setComentario(e.target.value)}
               rows={3}
+              placeholder="Lo que quieras dejar registrado de la entrevista…"
               className="rounded-xl border border-border-soft bg-surface px-3.5 py-2.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
             />
           </label>
-        </div>
 
-        <LineaNotificar className="mt-4" value={notificar.value} onChange={notificar.setValue} hayCliente={hayCliente} clienteId={clienteId} />
+          <label className="flex cursor-pointer items-center gap-2 text-[13px] text-ink-2">
+            <input type="checkbox" checked={segunda} onChange={(e) => setSegunda(e.target.checked)} className="h-4 w-4 accent-[var(--brand)]" />
+            Pedir una segunda entrevista
+          </label>
+        </div>
 
         <div className="mt-5 flex gap-3">
           <Button variant="outline" className="flex-1" onClick={onCancelar} disabled={cargando}>

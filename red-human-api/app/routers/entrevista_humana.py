@@ -7,13 +7,17 @@ así que basta con GET (contexto de solo lectura) + POST (el único envío posib
 la credencial, igual que en los otros dos: sin sesión, sin login.
 """
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import EntrevistaHumana, registrar
-from ..serial import iso
+from ..models import Archivo, EntrevistaHumana, registrar
+from ..serial import iso, nombre_empresa_candidato
+from ..services import archivos as fs
 from ..services import notificaciones
 
 router = APIRouter(prefix="/entrevista-humana", tags=["entrevista-humana"])
@@ -22,26 +26,81 @@ RESULTADOS_ENTREVISTA_HUMANA = ("aprobado", "no_aprobado")
 RECOMENDACIONES_ENTREVISTA_HUMANA = ("avanzar", "no_avanzar", "segunda_entrevista")
 
 
-def _por_token(db: Session, token: str) -> EntrevistaHumana:
-    """Sirve tanto para el GET como para el POST: si alguien más ya capturó el resultado entre
-    ambas llamadas, esta misma condición hace que el POST también la trate como no encontrada
-    — nunca sobreescribe (ver candidatos.registrar_resultado_entrevista_humana, el respaldo
-    de RH, para la única vía que sí puede corregir un resultado ya capturado)."""
+def _por_token(db: Session, token: str, permitir_evaluada: bool = False) -> EntrevistaHumana:
+    """POST: si alguien más ya capturó el resultado, se trata como no encontrada — nunca sobreescribe
+    (ver candidatos.registrar_resultado_entrevista_humana, el respaldo de RH, para la única vía que sí
+    puede corregir). GET (2026-09-19): la liga sigue mostrando el expediente aunque ya esté evaluada."""
     eh = db.query(EntrevistaHumana).filter(EntrevistaHumana.token == token).first()
-    if not eh or eh.resultado_capturado_por:
+    if not eh or (eh.resultado_capturado_por and not permitir_evaluada):
         raise HTTPException(404, "Esta liga ya no está disponible.")
     return eh
 
 
+def _expediente_para_entrevistador(db: Session, eh: EntrevistaHumana) -> dict:
+    """2026-09-19: el entrevistador ve el proceso ANTES de evaluar — CV (datos extraídos y archivo),
+    análisis de Luna, evaluación de la Entrevista Red Human y documentos del expediente. Solo lectura;
+    nada de datos sensibles (ia.DATOS_SENSIBLES_PROHIBIDOS ya los excluye de todo lo generado)."""
+    p = eh.postulacion
+    c = eh.candidato
+    v = p.vacante if p else None
+    cv = dict((c.cv_datos or {}) if c else {})
+    a = dict((p.analisis or {}) if p else {})
+    ultima_ia = None
+    for e in reversed(p.entrevistas if p else []):
+        if e.estado == "evaluada" and e.evaluacion:
+            ultima_ia = e.evaluacion
+            break
+    archivos = [{"id": x.id, "tipo": x.tipo, "nombre": x.nombre, "mime": x.mime} for x in (c.archivos if c else [])]
+    exp = p.expediente if p else None
+    documentos = [{"tipo": d.tipo, "estado": d.estado, "obligatorio": d.obligatorio} for d in (exp.documentos if exp else [])]
+    return {
+        "candidato": {"nombre": c.nombre if c else "", "telefono": (c.telefono if c else "") or "", "correo": (c.correo if c else "") or "", "fuente": (c.fuente if c else "") or ""},
+        "vacante": {"titulo": v.titulo if v else "", "requisitos": (v.requisitos if v else "") or "", "perfilIdeal": (v.perfil_ideal if v else "") or "", "empresa": nombre_empresa_candidato(v) if v else ""},
+        "etapa": p.etapa if p else "",
+        "score": p.score if p else None,
+        "cv": {
+            "resumen": cv.get("resumen_profesional") or "", "habilidades": cv.get("habilidades") or [], "estudios": cv.get("estudios") or [],
+            "idiomas": cv.get("idiomas") or [], "experiencia": cv.get("experiencia") or cv.get("experiencia_laboral") or [], "anosExperiencia": cv.get("anos_experiencia"),
+        },
+        "analisis": {
+            "requisitosCumplidos": a.get("requisitos_cumplidos") or [], "brechas": a.get("brechas") or [], "fortalezas": a.get("fortalezas_cv") or [],
+            "alertas": a.get("alertas") or [], "resumen": a.get("resumen") or "",
+        },
+        "entrevistaIA": {
+            "matchPerfil": ultima_ia.get("match_perfil"), "recomendacion": ultima_ia.get("recomendacion") or "", "resumen": ultima_ia.get("resumen") or "",
+            "fortalezas": ultima_ia.get("fortalezas") or [], "riesgos": ultima_ia.get("riesgos") or [], "faltante": ultima_ia.get("faltante") or [],
+        } if ultima_ia else None,
+        "capacitacion": a.get("capacitacion") or [],
+        "archivos": archivos,
+        "documentos": documentos,
+    }
+
+
 @router.get("/publica/{token}")
 def publica(token: str, db: Session = Depends(get_db)):
-    eh = _por_token(db, token)
+    eh = _por_token(db, token, permitir_evaluada=True)
     p = eh.postulacion
     return {
         "candidato": eh.candidato.nombre if eh.candidato else "",
         "puesto": p.vacante.titulo if p and p.vacante else "",
         "fecha": iso(eh.fecha),
+        "entrevistador": eh.entrevistador or "",
+        "modalidad": eh.modalidad or "",
+        "yaEvaluada": bool(eh.resultado_capturado_por),
+        "resultado": eh.resultado or "",
+        "recomendacion": eh.recomendacion or "",
+        "expediente": _expediente_para_entrevistador(db, eh),
     }
+
+
+@router.get("/publica/{token}/archivo/{archivo_id}")
+def archivo_publico(token: str, archivo_id: int, db: Session = Depends(get_db)):
+    """CV u otro archivo del candidato para el entrevistador (la liga es la credencial)."""
+    eh = _por_token(db, token, permitir_evaluada=True)
+    arch = db.query(Archivo).filter(Archivo.id == archivo_id, Archivo.candidato_id == eh.candidato_id).first()
+    if not arch or not arch.ruta or not fs.existe(arch.ruta):
+        raise HTTPException(404, "Archivo no disponible.")
+    return FileResponse(arch.ruta, media_type=arch.mime or "application/octet-stream", filename=arch.nombre or "archivo")
 
 
 class ResultadoEntrevistaHumanaPublicaIn(BaseModel):
@@ -58,19 +117,15 @@ async def enviar_resultado(token: str, datos: ResultadoEntrevistaHumanaPublicaIn
         raise HTTPException(400, f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_ENTREVISTA_HUMANA)}")
     if datos.recomendacion not in RECOMENDACIONES_ENTREVISTA_HUMANA:
         raise HTTPException(400, f"Recomendación inválida. Usa una de: {', '.join(RECOMENDACIONES_ENTREVISTA_HUMANA)}")
-    comentario = datos.comentario.strip()
-    if (datos.resultado == "no_aprobado" or datos.recomendacion == "segunda_entrevista") and not comentario:
-        raise HTTPException(
-            400,
-            "Agrega un comentario: es obligatorio cuando el resultado es 'No aprobado' o la "
-            "recomendación es 'Segunda entrevista'.",
-        )
+    comentario = datos.comentario.strip()  # 2026-09-19: opcional (antes obligatorio en no_aprobado / segunda)
 
+    # Autocierre (2026-09-19): la entrevista queda realizada y confirmada con evaluación; el ciclo se cierra aquí.
     eh.realizada = True
     eh.resultado = datos.resultado
     eh.recomendacion = datos.recomendacion
     eh.comentario = comentario
     eh.resultado_capturado_por = "entrevistador"
+    eh.evaluada_en = datetime.now(timezone.utc)
     # Fase C: actualizar resultado_apto y ultima_actividad_en de la POSTULACIÓN (Fase 2: el
     # Kanban lee de ahí, no de la persona). Se importa aquí para evitar import circular.
     from .candidatos import _recalcular_resultado_apto_y_notificar, _actualizar_ultima_actividad
@@ -80,9 +135,14 @@ async def enviar_resultado(token: str, datos: ResultadoEntrevistaHumanaPublicaIn
     _actualizar_ultima_actividad(p)
     await _recalcular_resultado_apto_y_notificar(db, p, "entrevistador-externo")
     resultados = await notificaciones.disparar(db, "recomendacion_final", p, "entrevistador-externo", eh=eh)
+    # 2026-09-19: aviso HTML de «entrevista completada» al candidato/cliente (regla) y a RH (responsable).
+    resultados += await notificaciones.disparar(db, "entrevista_completada", p, "entrevistador-externo", eh=eh)
+    aviso_rh = await notificaciones.notificar_rh_entrevista_completada(db, p, eh)
+    if aviso_rh:
+        resultados.append(aviso_rh)
     registrar(
         db, "entrevistador-externo", "entrevista_humana_evaluada_por_liga", "postulacion", p.codigo,
-        {"candidato": p.candidato.codigo, "resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario, "notificaciones": resultados},
+        {"candidato": p.candidato.codigo, "resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario, "notificaciones": resultados, "estatus": "realizada_confirmada"},
     )
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "estatus": "realizada", "notificaciones": resultados}

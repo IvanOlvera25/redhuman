@@ -30,6 +30,7 @@ def _salida(db: Session, cuenta_id: int) -> dict:
         # Fase 3: recordatorios automáticos de documentos
         "recordatorioDocumentosDias": cfg.recordatorio_documentos_dias,
         "recordatorioDocumentosHora": cfg.recordatorio_documentos_hora,
+        "recordatorioEntrevistaHoras": cfg.recordatorio_entrevista_horas,  # 2026-09-19
         "candidatosPrueba": candidatos_prueba,
         "postulacionesPrueba": postulaciones_prueba,
     }
@@ -45,6 +46,7 @@ class ConfiguracionIn(BaseModel):
     modo_prueba_ventana_min: Optional[int] = None
     recordatorio_documentos_dias: Optional[int] = None  # Fase 3: cada N días (1-30)
     recordatorio_documentos_hora: Optional[int] = None  # Fase 3: a partir de esta hora MX (0-23)
+    recordatorio_entrevista_horas: Optional[int] = None  # 2026-09-19: horas antes de la entrevista (0 = apagado, máx 168)
 
 
 @router.patch("")
@@ -63,6 +65,10 @@ def actualizar(
         if not (0 <= datos.recordatorio_documentos_hora <= 23):
             raise HTTPException(400, "La hora de los recordatorios debe estar entre 0 y 23.")
         cfg.recordatorio_documentos_hora = datos.recordatorio_documentos_hora
+    if datos.recordatorio_entrevista_horas is not None:
+        if not (0 <= datos.recordatorio_entrevista_horas <= 168):
+            raise HTTPException(400, "El recordatorio de entrevista debe ser entre 0 (apagado) y 168 horas antes.")
+        cfg.recordatorio_entrevista_horas = datos.recordatorio_entrevista_horas
     if datos.modo_prueba is not None and datos.modo_prueba != cfg.modo_prueba:
         cfg.modo_prueba = datos.modo_prueba
         registrar(

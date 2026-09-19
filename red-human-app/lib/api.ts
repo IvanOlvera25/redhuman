@@ -187,6 +187,8 @@ export interface ConfiguracionSistema {
   modoPrueba: boolean;
   /** Punto 13: minutos sin actividad para que una conversación de prueba arranque una sesión nueva. */
   modoPruebaVentanaMin: number;
+  /** 2026-09-19: horas antes de la Entrevista Humana para el recordatorio automático (0 = apagado). */
+  recordatorioEntrevistaHoras?: number;
   /** Fase 3: recordatorios automáticos de documentos — cada N días, a partir de esta hora (México). */
   recordatorioDocumentosDias: number;
   recordatorioDocumentosHora: number;
@@ -203,12 +205,14 @@ export function actualizarConfiguracion(cambios: {
   modoPruebaVentanaMin?: number;
   recordatorioDocumentosDias?: number;
   recordatorioDocumentosHora?: number;
+  recordatorioEntrevistaHoras?: number;
 }) {
   return patch<ConfiguracionSistema>("/configuracion", {
     modo_prueba: cambios.modoPrueba,
     modo_prueba_ventana_min: cambios.modoPruebaVentanaMin,
     recordatorio_documentos_dias: cambios.recordatorioDocumentosDias,
     recordatorio_documentos_hora: cambios.recordatorioDocumentosHora,
+    recordatorio_entrevista_horas: cambios.recordatorioEntrevistaHoras,
   });
 }
 
@@ -391,6 +395,8 @@ export const EVENTOS_NOTIFICACION = [
   "entrevista_cancelada",
   "candidato_apto",
   "entrevista_humana_terminada",
+  "entrevista_completada",
+  "vacante_publicada",
   "recomendacion_final",
   "contratacion",
   "solicitud_documentos",
@@ -407,6 +413,8 @@ export const NOMBRE_EVENTO_NOTIFICACION: Record<EventoNotificacion, string> = {
   entrevista_cancelada: "Entrevista cancelada",
   candidato_apto: "Candidato apto",
   entrevista_humana_terminada: "Entrevista humana terminada",
+  entrevista_completada: "Entrevista completada (evaluación registrada)",
+  vacante_publicada: "Vacante publicada",
   recomendacion_final: "Recomendación final disponible",
   contratacion: "Contratación",
   solicitud_documentos: "Solicitud de documentos",
@@ -1195,6 +1203,28 @@ export interface EntrevistaHumanaPublica {
   candidato: string;
   puesto: string;
   fecha: string | null;
+  entrevistador?: string;
+  modalidad?: string;
+  /** 2026-09-19: la liga sigue mostrando el expediente aunque ya se haya evaluado. */
+  yaEvaluada?: boolean;
+  resultado?: string;
+  recomendacion?: string;
+  expediente?: {
+    candidato: { nombre: string; telefono: string; correo: string; fuente: string };
+    vacante: { titulo: string; requisitos: string; perfilIdeal: string; empresa: string };
+    etapa: string;
+    score: number | null;
+    cv: { resumen: string; habilidades: string[]; estudios: string[]; idiomas: string[]; experiencia: (string | { puesto?: string; empresa?: string; periodo?: string })[]; anosExperiencia?: number | null };
+    analisis: { requisitosCumplidos: string[]; brechas: string[]; fortalezas: string[]; alertas: string[]; resumen: string };
+    entrevistaIA: { matchPerfil: number | null; recomendacion: string; resumen: string; fortalezas: string[]; riesgos: string[]; faltante: string[] } | null;
+    capacitacion: { curso: string; aprobado: boolean; calificacion: number }[];
+    archivos: { id: number; tipo: string; nombre: string; mime: string }[];
+    documentos: { tipo: string; estado: string; obligatorio: boolean }[];
+  };
+}
+
+export function urlArchivoEntrevistaHumanaPublica(token: string, archivoId: number) {
+  return urlArchivo(`/entrevista-humana/publica/${token}/archivo/${archivoId}`);
 }
 
 export function fetchEntrevistaHumanaPublica(token: string) {
