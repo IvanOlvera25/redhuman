@@ -24,7 +24,10 @@ import {
   type CapacitacionKpis,
   type Curso,
   type TipoAsignacionCurso,
+  type ModalidadCurso,
+  etiquetaEstadoCurso,
 } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 const ETIQUETA_TIPO: Record<TipoAsignacionCurso, string> = { colaborador: "Colaborador", candidato: "Candidato", externo: "Externo" };
 const ETIQUETA_ESTADO: Record<AsignacionCurso["estado"], string> = { pendiente: "Pendiente", en_curso: "En curso", completado: "Completado" };
@@ -105,9 +108,9 @@ export default function Capacitacion() {
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-semibold">{c.titulo}</p>
-                    <p className="truncate text-xs text-ink-3">{c.categoria || "General"} · {c.duracionHoras} h · {c.modulos} módulos · {c.preguntas} preguntas</p>
+                    <p className="truncate text-xs text-ink-3">{c.categoria || "General"} · {c.modalidad === "instructor_ia" ? "Instructor IA" : "Autoguiado"} · {c.duracion || `${c.duracionHoras} h`} · {c.modulos} módulos · {c.preguntas} preguntas</p>
                   </div>
-                  <Badge tone={c.estado === "Publicado" ? "good" : "neutral"} dot>{c.estado}</Badge>
+                  <Badge tone={c.estado === "Publicado" ? "good" : "neutral"} dot>{etiquetaEstadoCurso(c.estado)}</Badge>
                 </div>
                 <p className="line-clamp-2 text-xs leading-relaxed text-ink-2">{c.objetivo}</p>
                 <div className="mt-auto flex items-center justify-between border-t border-border-faint pt-3 text-[11px] text-ink-3">
@@ -148,19 +151,19 @@ export default function Capacitacion() {
 function NuevoCurso({ onClose, onGenerado }: { onClose: () => void; onGenerado: (c: Curso) => void }) {
   const [tema, setTema] = useState("");
   const [contexto, setContexto] = useState("");
-  const [duracion, setDuracion] = useState("2");
+  const [duracion, setDuracion] = useState("15 min");
+  const [modalidad, setModalidad] = useState<ModalidadCurso>("instructor_ia");
   const [archivos, setArchivos] = useState<File[]>([]);
   const [generando, setGenerando] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function generar() {
-    const h = parseFloat(duracion);
     if (!tema.trim()) return setError("Escribe el tema del curso.");
-    if (isNaN(h) || h <= 0) return setError("Indica la duración en horas.");
+    if (!duracion.trim()) return setError("Indica la duración (ej. 5 min, 15 min, 1 h).");
     setGenerando(true);
     setError("");
-    const r = await generarCurso({ tema: tema.trim(), duracionHoras: h, contexto: contexto.trim(), archivos });
+    const r = await generarCurso({ tema: tema.trim(), duracion: duracion.trim(), modalidad, contexto: contexto.trim(), archivos });
     setGenerando(false);
     if (!r.ok) return setError(r.error);
     onGenerado(r.data);
@@ -181,14 +184,37 @@ function NuevoCurso({ onClose, onGenerado }: { onClose: () => void; onGenerado: 
             <span className="text-xs font-medium text-ink-2">Tema *</span>
             <input value={tema} onChange={(e) => setTema(e.target.value)} placeholder="Ej. Atención al cliente en sucursal" className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
           </label>
+          {/* 2026-09-19 (Bloque 4): antes de generar, cómo se imparte */}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-ink-2">¿Cómo quieres impartir este curso? *</span>
+            <div className="grid grid-cols-2 gap-2">
+              {([
+                { id: "instructor_ia", titulo: "Instructor IA", detalle: "El avatar explica en voz alta, responde dudas y avanza módulo por módulo." },
+                { id: "autoguiado", titulo: "Autoguiado", detalle: "La persona lee contenido breve y visual a su ritmo." },
+              ] as { id: ModalidadCurso; titulo: string; detalle: string }[]).map((o) => (
+                <button
+                  key={o.id}
+                  type="button"
+                  onClick={() => setModalidad(o.id)}
+                  className={cn("rounded-xl border p-3 text-left transition", modalidad === o.id ? "border-brand bg-brand-soft" : "border-border-soft hover:border-brand/40")}
+                >
+                  <p className="text-sm font-semibold text-ink">{o.titulo}</p>
+                  <p className="mt-0.5 text-[11px] leading-snug text-ink-3">{o.detalle}</p>
+                </button>
+              ))}
+            </div>
+          </div>
           <label className="flex flex-col gap-1.5">
             <span className="text-xs font-medium text-ink-2">Contexto (opcional)</span>
             <textarea value={contexto} onChange={(e) => setContexto(e.target.value)} rows={2} placeholder="Para quién es, tono, qué enfatizar…" className="rounded-xl border border-border-soft bg-surface px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
           </label>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium text-ink-2">Duración (horas) *</span>
-              <input type="number" min={0.5} step={0.5} value={duracion} onChange={(e) => setDuracion(e.target.value)} className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+              <span className="text-xs font-medium text-ink-2">Duración *</span>
+              <input value={duracion} onChange={(e) => setDuracion(e.target.value)} placeholder="5 min, 15 min, 1 h, 2 horas…" list="duraciones-curso" className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+              <datalist id="duraciones-curso">
+                {["5 min", "10 min", "15 min", "30 min", "45 min", "1 h", "1 h 30 min", "2 h", "4 h"].map((d) => <option key={d} value={d} />)}
+              </datalist>
             </label>
             <div className="flex flex-col gap-1.5">
               <span className="text-xs font-medium text-ink-2">Adjuntar archivos (PDF, texto)</span>

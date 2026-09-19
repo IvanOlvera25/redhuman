@@ -144,7 +144,7 @@ def pdf_curso(d: dict) -> bytes:
     pdf.ln(2)
     pdf.set_font(_FUENTE, "", 11)
     pdf.set_text_color(85, 85, 85)
-    meta = " - ".join(x for x in [d.get("empresa") or "", f"Duración aproximada: {d.get('duracion_horas') or 1} h", f"Para: {d['persona']}" if d.get("persona") else ""] if x)
+    meta = " - ".join(x for x in [d.get("empresa") or "", f"Duración aproximada: {d.get('duracion_texto') or str(d.get('duracion_horas') or 1) + ' h'}", "Material de apoyo del curso con Instructor IA" if d.get("modalidad") == "instructor_ia" else "", f"Para: {d['persona']}" if d.get("persona") else ""] if x)
     pdf.multi_cell(0, 6, _latin(meta), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     if d.get("objetivo"):
@@ -179,6 +179,15 @@ def pdf_curso(d: dict) -> bytes:
                 pdf.multi_cell(0, 6, _latin(parrafo.strip()), new_x="LMARGIN", new_y="NEXT")
             else:
                 pdf.ln(2)
+        if m.get("puntos_clave"):
+            pdf.ln(2)
+            pdf.set_font(_FUENTE, "B", 11)
+            pdf.set_text_color(0xEE, 0x44, 0x44)
+            pdf.cell(0, 6, "Puntos clave", new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font(_FUENTE, "", 11)
+            pdf.set_text_color(26, 26, 26)
+            for punto in m["puntos_clave"][:6]:
+                pdf.multi_cell(0, 6, _latin(f"- {punto}"), new_x="LMARGIN", new_y="NEXT")
     if d.get("evaluacion"):
         pdf.add_page()
         pdf.set_font(_FUENTE, "B", 15)
@@ -200,4 +209,70 @@ def pdf_curso(d: dict) -> bytes:
         pdf.set_font(_FUENTE, "", 11)
         pdf.set_text_color(85, 85, 85)
         pdf.cell(0, 6, _latin(f"{r.get('aciertos')} de {r.get('total')} respuestas correctas - mínimo para aprobar {r.get('minimo')}%"), new_x="LMARGIN", new_y="NEXT")
+    return bytes(pdf.output())
+
+
+def pdf_contrato(d: dict) -> bytes:
+    """Contrato individual de trabajo (2026-09-19, Bloque 3) generado con las condiciones FINALES guardadas
+    en el expediente: empresa, colaborador, puesto, sueldo, tipo de contratación, fecha de ingreso, ubicación,
+    jefe directo. Cláusulas base y espacio de firmas; el texto legal definitivo lo revisa RH/legal."""
+    pdf = _Carta(format="letter")
+    pdf.set_margins(22, 20, 22)
+    pdf.set_auto_page_break(auto=True, margin=22)
+    pdf.add_page()
+    wordmark_red_human(pdf, 22, 14, 18)
+    pdf.set_xy(22, 30)
+    pdf.set_font(_FUENTE, "B", 15)
+    pdf.set_text_color(26, 26, 26)
+    pdf.cell(0, 9, _latin(f"Contrato Individual de Trabajo ({d['tipo_contratacion']})"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font(_FUENTE, "", 10)
+    pdf.set_text_color(85, 85, 85)
+    pdf.cell(0, 6, _latin(f"{d['empresa']} - {d['hoy']}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+    pdf.set_font(_FUENTE, "", 11)
+    pdf.set_text_color(26, 26, 26)
+    pdf.multi_cell(0, 6, _latin(
+        f"Contrato individual de trabajo que celebran, por una parte, {d['empresa']} (en adelante «la Empresa») y, por la otra, "
+        f"{d['nombre']} (en adelante «el Colaborador»), al tenor de las siguientes declaraciones y cláusulas:"
+    ), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    filas = [
+        ("Puesto", d["puesto"]), ("Sueldo", d["sueldo"]), ("Tipo de contratación", d["tipo_contratacion"]),
+        ("Fecha de ingreso", d["fecha_ingreso"]), ("Lugar de trabajo", d["ubicacion"]), ("Jefe directo", d["jefe"]),
+    ]
+    for etiqueta, valor in filas:
+        pdf.set_font(_FUENTE, "B", 11)
+        pdf.cell(55, 7, _latin(etiqueta), border="B")
+        pdf.set_font(_FUENTE, "", 11)
+        pdf.cell(0, 7, _latin(str(valor)), border="B", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+    clausulas = [
+        ("PRIMERA. Objeto.", f"El Colaborador se obliga a prestar sus servicios personales subordinados a la Empresa en el puesto de {d['puesto']}, desempeñando las funciones propias del mismo con la diligencia y cuidado apropiados."),
+        ("SEGUNDA. Duración.", f"El presente contrato es de tipo {d['tipo_contratacion']} y surtirá efectos a partir del {d['fecha_ingreso']}, conforme a la Ley Federal del Trabajo."),
+        ("TERCERA. Salario.", f"La Empresa pagará al Colaborador un sueldo de {d['sueldo']}, en los términos y periodicidad que marca la Ley, cubriendo las prestaciones legales correspondientes."),
+        ("CUARTA. Lugar y jornada.", f"El Colaborador prestará sus servicios en {d['ubicacion']}, bajo la supervisión de {d['jefe']}, dentro de la jornada legal aplicable."),
+        ("QUINTA. Confidencialidad y datos personales.", "El Colaborador guardará confidencialidad sobre la información de la Empresa. Sus datos personales se tratan conforme al Aviso de Privacidad de la Empresa (LFPDPPP)."),
+        ("SEXTA. Disposiciones generales.", "En lo no previsto, las partes se sujetan a la Ley Federal del Trabajo y demás ordenamientos aplicables."),
+    ]
+    for titulo, texto in clausulas:
+        pdf.set_font(_FUENTE, "B", 11)
+        pdf.cell(0, 6, _latin(titulo), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font(_FUENTE, "", 11)
+        pdf.multi_cell(0, 6, _latin(texto), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+    pdf.ln(10)
+    y = pdf.get_y()
+    if y > 230:
+        pdf.add_page()
+        y = pdf.get_y() + 10
+    pdf.set_font(_FUENTE, "", 10)
+    pdf.set_text_color(85, 85, 85)
+    pdf.set_xy(22, y + 14)
+    pdf.cell(80, 6, "______________________________", new_x="RIGHT")
+    pdf.set_x(115)
+    pdf.cell(80, 6, "______________________________", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_x(22)
+    pdf.cell(80, 6, _latin(f"{d['empresa']} - Representante"), new_x="RIGHT")
+    pdf.set_x(115)
+    pdf.cell(80, 6, _latin(d["nombre"]), new_x="LMARGIN", new_y="NEXT")
     return bytes(pdf.output())

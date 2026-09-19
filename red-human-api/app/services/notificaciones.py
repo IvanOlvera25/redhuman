@@ -96,6 +96,11 @@ def datos_entrevista_humana(db: Session, eh: EntrevistaHumana, c: Postulacion) -
     }
 
 
+def _html(titulo: str, texto: str, empresa: str = "") -> tuple:
+    """Cualquier correo sin plantilla propia sale con el layout corporativo (2026-09-19: cero texto plano)."""
+    return plantillas_correo.html_aviso(titulo, texto, empresa)
+
+
 def _aviso_cliente(titulo: str, texto: str, d: dict) -> tuple:
     """Correo al contacto del Cliente con el layout corporativo y la tabla de la entrevista."""
     filas = [("Candidato", d.get("candidato", "")), ("Vacante", d.get("vacante", "")), ("Entrevistador(a)", d.get("entrevistador", "")),
@@ -256,10 +261,10 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
     if evento == "recordatorio_entrevista" and eh:
         if audiencia == "candidato":
             texto = f"¡Hola de nuevo, {primer_nombre}! 👋 Te recordamos tu entrevista {cita}"
-            return texto if canal == "whatsapp" else (plantillas_correo.html_candidato(d, "recordatorio") if d else ("Recordatorio de tu entrevista", f"<p>{texto}</p>"))
+            return texto if canal == "whatsapp" else (plantillas_correo.html_candidato(d, "recordatorio") if d else _html("Recordatorio de tu entrevista", texto))
         if audiencia == "entrevistador":
             texto = f"Recordatorio: tienes una entrevista con {c.nombre} ({puesto}) {cita}"
-            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d, "recordatorio") if d else ("Recordatorio de entrevista", f"<p>{texto}</p>"))
+            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d, "recordatorio") if d else _html("Recordatorio de entrevista", texto))
         if audiencia == "cliente":
             texto = f"Recordatorio: entrevista programada con {c.nombre} ({puesto}) {cita}"
             return texto if canal == "whatsapp" else _aviso_cliente("Recordatorio de entrevista", texto, d)
@@ -267,10 +272,10 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
     if evento == "entrevista_modificada" and eh:
         if audiencia == "candidato":
             texto = f"Hola {primer_nombre}, tu entrevista cambió — ahora es {cita}"
-            return texto if canal == "whatsapp" else (plantillas_correo.html_candidato(d, "modificada") if d else ("Tu entrevista fue modificada", f"<p>{texto}</p>"))
+            return texto if canal == "whatsapp" else (plantillas_correo.html_candidato(d, "modificada") if d else _html("Tu entrevista fue modificada", texto))
         if audiencia == "entrevistador":
             texto = f"La entrevista con {c.nombre} ({puesto}) fue modificada — ahora es {cita}"
-            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d, "modificada") if d else ("Entrevista modificada", f"<p>{texto}</p>"))
+            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d, "modificada") if d else _html("Entrevista modificada", texto))
         if audiencia == "cliente":
             texto = f"La entrevista con el candidato {c.nombre} ({puesto}) fue modificada — ahora es {cita}"
             return texto if canal == "whatsapp" else _aviso_cliente("Entrevista modificada", texto, d)
@@ -278,10 +283,10 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
     if evento == "entrevista_cancelada":
         if audiencia == "candidato":
             texto = f"Hola {primer_nombre}, tu entrevista programada fue cancelada. Nos pondremos en contacto para definir los siguientes pasos."
-            return texto if canal == "whatsapp" else (plantillas_correo.html_candidato(d, "cancelada") if d else ("Tu entrevista fue cancelada", f"<p>{texto}</p>"))
+            return texto if canal == "whatsapp" else (plantillas_correo.html_candidato(d, "cancelada") if d else _html("Tu entrevista fue cancelada", texto))
         if audiencia == "entrevistador":
             texto = f"La entrevista con {c.nombre} ({puesto}) fue cancelada."
-            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d, "cancelada") if d else ("Entrevista cancelada", f"<p>{texto}</p>"))
+            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d, "cancelada") if d else _html("Entrevista cancelada", texto))
         if audiencia == "cliente":
             texto = f"La entrevista con el candidato {c.nombre} ({puesto}) fue cancelada."
             return texto if canal == "whatsapp" else _aviso_cliente("Entrevista cancelada", texto, d)
@@ -289,34 +294,46 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
     if evento == "candidato_apto":
         if audiencia == "candidato":
             texto = f"¡Buenas noticias, {primer_nombre}! 🎉 Avanzas en el proceso para {puesto}."
-            return texto if canal == "whatsapp" else ("¡Avanzas en el proceso!", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _html("¡Avanzas en el proceso!", texto, nombre_empresa_candidato(v) if v else "")
         if audiencia == "cliente":
             texto = f"El candidato {c.nombre} avanza en el proceso para el puesto {puesto}."
-            return texto if canal == "whatsapp" else (f"Avance de candidato — {puesto}", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _html(f"Avance de candidato — {puesto}", texto)
 
     if evento == "entrevista_humana_terminada" and eh:
         if audiencia == "entrevistador":
             liga_eval = f"{settings.app_url}/entrevista-humana/{eh.token}"
             texto = f"Gracias por entrevistar a {c.nombre} ({puesto}). Ayúdanos a registrar tu evaluación: {liga_eval}"
-            return texto if canal == "whatsapp" else (f"Tu evaluación de la entrevista con {c.nombre}", _html_correo_evaluacion_entrevistador(eh, c, liga_eval))
+            return texto if canal == "whatsapp" else (plantillas_correo.html_evaluacion_entrevistador(d) if d else _html(f"Tu evaluación de la entrevista con {c.nombre}", texto))
         if audiencia == "candidato":
             texto = f"¡Gracias, {primer_nombre}! Terminamos tu entrevista para {puesto}. El equipo de RH revisará tus resultados y te contactará pronto."
-            return texto if canal == "whatsapp" else ("Terminamos tu entrevista", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevista_completada(d, "candidato") if d else _html("Terminamos tu entrevista", texto))
         if audiencia == "cliente":
             texto = f"El candidato {c.nombre} completó su entrevista humana para el puesto {puesto}."
-            return texto if canal == "whatsapp" else (f"Entrevista completada — {puesto}", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _aviso_cliente(f"Entrevista completada — {puesto}", texto, d)
+
+    if evento == "entrevista_completada" and eh:
+        # 2026-09-19: el entrevistador registró su evaluación desde su liga → ciclo cerrado.
+        if audiencia == "candidato":
+            texto = f"¡Gracias, {primer_nombre}! Tu entrevista para {puesto} quedó registrada. El equipo de RH revisará los resultados y te contactará pronto."
+            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevista_completada(d, "candidato") if d else _html("Terminamos tu entrevista", texto))
+        if audiencia == "cliente":
+            texto = f"La entrevista de {c.nombre} ({puesto}) se completó: resultado {eh.resultado or 'registrado'}."
+            return texto if canal == "whatsapp" else (plantillas_correo.html_entrevista_completada(d, "cliente") if d else _html("Entrevista completada", texto))
+        if audiencia == "entrevistador":
+            texto = f"Gracias, registramos tu evaluación de {c.nombre} ({puesto})."
+            return texto if canal == "whatsapp" else _html("Evaluación registrada", texto, d.get("empresa", "") if d else "")
 
     if evento == "recomendacion_final" and eh:
         resultado_legible = "Aprobado" if eh.resultado == "aprobado" else "No aprobado"
         if audiencia == "cliente":
             texto = f"La recomendación final para el candidato {c.nombre} ({puesto}) ya está disponible: {resultado_legible}."
-            return texto if canal == "whatsapp" else (f"Recomendación final — {puesto}", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _html(f"Recomendación final — {puesto}", texto)
         if audiencia == "candidato":
             texto = f"Hola {primer_nombre}, ya tenemos una recomendación sobre tu proceso para {puesto}. El equipo de RH se pondrá en contacto contigo."
-            return texto if canal == "whatsapp" else ("Novedades de tu proceso", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _html("Novedades de tu proceso", texto)
         if audiencia == "entrevistador":
             texto = f"Se registró la recomendación final para {c.nombre} ({puesto}): {resultado_legible}."
-            return texto if canal == "whatsapp" else (f"Recomendación registrada — {c.nombre}", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _html(f"Recomendación registrada — {c.nombre}", texto)
 
     if evento == "contratacion":
         ingreso = ""
@@ -325,10 +342,10 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
             ingreso = f" Te esperamos el {fecha_ingreso.day}."
         if audiencia == "candidato":
             texto = f"¡Bienvenido(a) {primer_nombre}! 🎊 Tu expediente quedó completo y tu alta fue autorizada.{ingreso} En los próximos días te comparto tu plan de inducción."
-            return texto if canal == "whatsapp" else ("¡Bienvenido(a) al equipo!", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _html("¡Bienvenido(a) al equipo!", texto)
         if audiencia == "cliente":
             texto = f"El candidato {c.nombre} fue contratado para el puesto {puesto}.{ingreso}"
-            return texto if canal == "whatsapp" else (f"Contratación confirmada — {puesto}", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _html(f"Contratación confirmada — {puesto}", texto)
 
     if evento == "instrucciones_ingreso" and audiencia == "candidato":
         # Fase 5: bienvenida + instrucciones de ingreso, automático al dar de alta como colaborador.
@@ -370,7 +387,7 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
     if evento == "solicitud_documentos":
         if audiencia == "candidato":
             texto = _texto_solicitud_documentos(liga)
-            return texto if canal == "whatsapp" else ("Solicitud de documentos", f"<p>{texto}</p>")
+            return texto if canal == "whatsapp" else _html("Solicitud de documentos", texto)
 
     if evento == "recordatorio_documentos":
         if audiencia == "candidato":
@@ -381,7 +398,7 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
                 nivel, primer_nombre, puesto, extra.get("pendientes"), liga,
                 fecha_limite=extra.get("fecha_limite"), detalle_rechazos=extra.get("detalle_rechazos", ""),
             )
-            return texto if canal == "whatsapp" else (_asunto_recordatorio(nivel), "<p>" + texto.replace("\n", "<br>") + "</p>")
+            return texto if canal == "whatsapp" else _html(_asunto_recordatorio(nivel), texto)
 
     return None
 
@@ -558,8 +575,10 @@ async def disparar(
 
     resultados: List[dict] = []
     # 2026-09-18: datos compartidos por las plantillas de la Entrevista Humana (correo + Meta)
-    if evento in ("entrevista_agendada", "entrevista_modificada", "recordatorio_entrevista", "entrevista_cancelada") and eh:
-        extra = {**extra, "_datos_entrevista": datos_entrevista_humana(db, eh, c)}
+    if eh and evento in ("entrevista_agendada", "entrevista_modificada", "recordatorio_entrevista", "entrevista_cancelada", "entrevista_humana_terminada", "recomendacion_final", "entrevista_completada"):
+        d_eh = datos_entrevista_humana(db, eh, c)
+        d_eh.update({"resultado": eh.resultado or "", "recomendacion": eh.recomendacion or "", "comentario_evaluacion": eh.comentario or ""})
+        extra = {**extra, "_datos_entrevista": d_eh}
 
     # --- Candidato: correo/teléfono ya en su ficha (punto 23) ---
     if regla.candidato_whatsapp:
@@ -608,3 +627,78 @@ async def disparar(
 
     db.flush()
     return resultados
+
+
+# ------------------------------------------------------------
+# 2026-09-19 — Vacante publicada (evento sin postulación): descripción HTML al Cliente y al responsable
+# ------------------------------------------------------------
+
+
+def datos_vacante(v) -> dict:
+    from ..routers.vacantes import requisitos_lista  # import local: routers ↔ services
+
+    return {
+        "titulo": v.titulo, "empresa": nombre_empresa_candidato(v), "area": v.area or "", "ubicacion": v.ubicacion or "",
+        "modalidad": v.modalidad or "", "sueldo": v.sueldo or "", "seniority": v.seniority or "",
+        "resumen": v.resumen or "", "descripcion": v.descripcion or "",
+        "requisitos": requisitos_lista(v.requisitos or ""), "beneficios": list(v.beneficios or []),
+        "liga": f"{settings.app_url}/aplicar/{v.slug}" if v.slug else f"{settings.app_url}/portal",
+        "publicada_por": "", "logo_url": "",
+    }
+
+
+async def notificar_vacante_publicada(db: Session, v, actor: str) -> List[dict]:
+    """Al publicar una vacante: correo HTML con la descripción a los contactos del Cliente (regla
+    `vacante_publicada`, default cliente_correo=True) y al responsable de la vacante. Nunca bloquea la
+    publicación: cada envío regresa su resultado."""
+    regla_guardada = _regla(db, v.cuenta_id, "vacante_publicada") if v.cuenta_id else None
+    cliente_correo = bool(regla_guardada.cliente_correo) if regla_guardada else bool(REGLAS_NOTIFICACION_DEFAULT.get("vacante_publicada", {}).get("cliente_correo"))
+    d = datos_vacante(v)
+    d["publicada_por"] = actor
+    asunto, html = plantillas_correo.html_vacante_publicada(d)
+    destinos: List[tuple] = []
+    if cliente_correo and v.cliente_id:
+        for k in db.query(ClienteContacto).filter(ClienteContacto.cliente_id == v.cliente_id).all():
+            if k.correo:
+                destinos.append(("cliente", k.correo))
+    if v.responsable and v.responsable.correo:
+        destinos.append(("responsable", v.responsable.correo))
+    resultados: List[dict] = []
+    for tipo, correo in destinos:
+        try:
+            envio = await enviar_correo(correo, asunto, html)
+        except Exception as ex:  # noqa: BLE001
+            envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)[:200]}
+        db.add(NotificacionEnviada(
+            cuenta_id=v.cuenta_id, candidato_id=None, evento="vacante_publicada", destinatario_tipo=tipo, canal="correo",
+            destino=correo, enviado=bool(envio.get("enviado")), detalle=str(envio.get("detalle", "")),
+        ))
+        resultados.append({"destinatario": tipo, "canal": "correo", "destino": correo, **envio, "detalle": str(envio.get("detalle", ""))})
+    return resultados
+
+
+async def notificar_rh_entrevista_completada(db: Session, p: Postulacion, eh: EntrevistaHumana) -> Optional[dict]:
+    """Correo HTML a RH (responsable de la vacante o correo de comunicación de la Cuenta) cuando el
+    entrevistador cierra el ciclo desde su liga (2026-09-19)."""
+    v = p.vacante
+    correo = (v.responsable.correo if v and v.responsable and v.responsable.correo else "") or ""
+    if not correo and p.cuenta_id:
+        from ..models import Cuenta
+
+        cu = db.query(Cuenta).filter(Cuenta.id == p.cuenta_id).first()
+        correo = (cu.correo_comunicacion or "") if cu else ""
+    if not correo:
+        return None
+    d = datos_entrevista_humana(db, eh, p)
+    d.update({"resultado": eh.resultado or "", "recomendacion": eh.recomendacion or "", "comentario": eh.comentario or "",
+              "liga_dashboard": f"{settings.app_url}/dashboard/candidatos?abrir={p.codigo}"})
+    asunto, html = plantillas_correo.html_entrevista_completada(d, "rh")
+    try:
+        envio = await enviar_correo(correo, asunto, html)
+    except Exception as ex:  # noqa: BLE001
+        envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)[:200]}
+    db.add(NotificacionEnviada(
+        cuenta_id=p.cuenta_id, candidato_id=p.candidato_id, evento="entrevista_completada", destinatario_tipo="rh", canal="correo",
+        destino=correo, enviado=bool(envio.get("enviado")), detalle=str(envio.get("detalle", "")),
+    ))
+    return {"destinatario": "rh", "canal": "correo", "destino": correo, **envio, "detalle": str(envio.get("detalle", ""))}

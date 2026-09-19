@@ -1613,21 +1613,25 @@ function SeccionModoPrueba() {
   // Fase 3: parámetros del cron de recordatorios de documentos
   const [recDias, setRecDias] = useState("");
   const [recHora, setRecHora] = useState("");
+  const [recEntrevista, setRecEntrevista] = useState("");  // 2026-09-19: horas antes de la Entrevista Humana
   useEffect(() => {
     if (cfg) {
       setRecDias(String(cfg.recordatorioDocumentosDias ?? 2));
       setRecHora(String(cfg.recordatorioDocumentosHora ?? 10));
+      setRecEntrevista(String(cfg.recordatorioEntrevistaHoras ?? 24));
     }
   }, [cfg]);
-  const recCambio = cfg ? recDias !== String(cfg.recordatorioDocumentosDias) || recHora !== String(cfg.recordatorioDocumentosHora) : false;
+  const recCambio = cfg ? recDias !== String(cfg.recordatorioDocumentosDias) || recHora !== String(cfg.recordatorioDocumentosHora) || recEntrevista !== String(cfg.recordatorioEntrevistaHoras ?? 24) : false;
   async function guardarRecordatorios() {
     const d = parseInt(recDias, 10);
     const h = parseInt(recHora, 10);
+    const e = parseInt(recEntrevista, 10);
     if (isNaN(d) || d < 1 || d > 30) return setError("Los recordatorios deben ser cada 1 a 30 días.");
     if (isNaN(h) || h < 0 || h > 23) return setError("La hora debe estar entre 0 y 23.");
+    if (isNaN(e) || e < 0 || e > 168) return setError("El recordatorio de entrevista debe ser entre 0 (apagado) y 168 horas.");
     setGuardando(true);
     setError("");
-    const r = await actualizarConfiguracion({ recordatorioDocumentosDias: d, recordatorioDocumentosHora: h });
+    const r = await actualizarConfiguracion({ recordatorioDocumentosDias: d, recordatorioDocumentosHora: h, recordatorioEntrevistaHoras: e });
     setGuardando(false);
     if (!r.ok) { setError(r.error); return; }
     setCfg(r.data);
@@ -1730,10 +1734,15 @@ function SeccionModoPrueba() {
             <input type="number" min={0} max={23} value={recHora} onChange={(e) => setRecHora(e.target.value)}
               className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
           </div>
+          <div>
+            <label className="mb-1 block text-[12px] font-medium text-ink-2" title="Recordatorio automático de la Entrevista Humana a candidato y entrevistador (0 = apagado)">Entrevista: horas antes</label>
+            <input type="number" min={0} max={168} value={recEntrevista} onChange={(e) => setRecEntrevista(e.target.value)}
+              className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+          </div>
           <Button size="sm" onClick={guardarRecordatorios} disabled={guardando || !recCambio}>
             {guardando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Guardar
           </Button>
-          {cfg && !recCambio && <span className="pb-2.5 text-[12px] text-ink-3"><Check className="mr-1 inline h-3.5 w-3.5" />cada {cfg.recordatorioDocumentosDias} día(s) desde las {cfg.recordatorioDocumentosHora}:00</span>}
+          {cfg && !recCambio && <span className="pb-2.5 text-[12px] text-ink-3"><Check className="mr-1 inline h-3.5 w-3.5" />documentos cada {cfg.recordatorioDocumentosDias} día(s) desde las {cfg.recordatorioDocumentosHora}:00 · entrevista {cfg.recordatorioEntrevistaHoras ?? 24} h antes</span>}
         </div>
       </div>
 

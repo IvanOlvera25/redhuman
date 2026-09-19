@@ -5,6 +5,9 @@ Servicio de correo — notificaciones de Entrevista Humana vía Resend.
 en la bitácora, igual que WHATSAPP_PROVIDER sin configurar en services/whatsapp.py.
 """
 
+import base64
+from typing import List, Optional
+
 import httpx
 
 from ..config import settings
@@ -34,8 +37,9 @@ def _resultado(enviado: bool, detalle, **extra) -> dict:
     return {"enviado": enviado, "proveedor": "resend" if settings.resend_api_key else "demo", "detalle": detalle, **extra}
 
 
-async def enviar_correo(destinatario: str, asunto: str, cuerpo_html: str) -> dict:
-    """Manda un correo transaccional vía Resend. Regresa {enviado, proveedor, detalle}."""
+async def enviar_correo(destinatario: str, asunto: str, cuerpo_html: str, adjuntos: Optional[List[dict]] = None) -> dict:
+    """Manda un correo transaccional vía Resend. Regresa {enviado, proveedor, detalle}.
+    `adjuntos` (2026-09-19): [{"filename": "carta.pdf", "content": <bytes>}] → Resend los recibe en base64."""
     if not destinatario:
         return _resultado(False, "Sin dirección de correo")
     if not settings.resend_api_key:
@@ -56,6 +60,7 @@ async def enviar_correo(destinatario: str, asunto: str, cuerpo_html: str) -> dic
                     "to": [destinatario],
                     "subject": asunto,
                     "html": cuerpo_html,
+                    **({"attachments": [{"filename": a["filename"], "content": base64.b64encode(a["content"]).decode()} for a in adjuntos]} if adjuntos else {}),
                 },
             )
         if r.status_code < 300:

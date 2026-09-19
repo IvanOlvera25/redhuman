@@ -430,6 +430,10 @@ def postulacion_dict(p: Postulacion, detalle: bool = False) -> dict:
             "jefeDirecto": exp.jefe_directo,
             "fechaIngreso": iso(exp.fecha_ingreso),
             "instruccionesIngreso": exp.instrucciones_ingreso or "",  # Fase 5
+            "empresa": exp.empresa or "",  # 2026-09-19
+            "guardadasEn": iso(exp.condiciones_guardadas_en),
+            # listo para generar documentos: puesto + sueldo + tipo + fecha (lo mínimo de una carta/contrato)
+            "completas": bool(exp.puesto and exp.sueldo and exp.tipo_contratacion and exp.fecha_ingreso),
         }
         if exp
         else None,
@@ -547,6 +551,8 @@ def curso_dict(c: Curso, detalle: bool = False) -> dict:
         "titulo": c.titulo,
         "categoria": c.categoria,
         "duracionHoras": c.duracion_horas,
+        "duracion": c.duracion_texto or f"{c.duracion_horas:g} h",  # 2026-09-19: libre
+        "modalidad": c.modalidad or "autoguiado",
         "objetivo": c.objetivo,
         "estado": c.estado,
         "obligatorio": c.obligatorio,
@@ -615,6 +621,8 @@ def asignacion_publica_dict(a: AsignacionCurso) -> dict:
         "tipo": a.tipo,
         "requiereRegistro": a.tipo == "externo" and not a.externo_nombre,
         "curso": curso.titulo if curso else "",
+        "modalidad": (curso.modalidad or "autoguiado") if curso else "autoguiado",
+        "duracion": (curso.duracion_texto or f"{curso.duracion_horas:g} h") if curso else "",
         "objetivo": curso.objetivo if curso else "",
         "categoria": curso.categoria if curso else "",
         "duracionHoras": curso.duracion_horas if curso else 0,
@@ -759,6 +767,8 @@ def colaborador_dict(col: Colaborador) -> dict:
         "puesto": col.puesto,
         "salario": col.salario,
         "empresa": col.empresa,
+        "tipoContratacion": col.tipo_contratacion or "",  # 2026-09-19
+        "condicionesIngreso": col.condiciones_ingreso or {},
         "ubicacion": col.ubicacion,
         "jefeDirecto": col.jefe_directo,
         "estatus": "Activo" if col.activo else "Inactivo",

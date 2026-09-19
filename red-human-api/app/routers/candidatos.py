@@ -2164,13 +2164,7 @@ async def registrar_resultado_entrevista_humana(
         raise HTTPException(400, f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_ENTREVISTA_HUMANA)}")
     if datos.recomendacion not in RECOMENDACIONES_ENTREVISTA_HUMANA:
         raise HTTPException(400, f"Recomendación inválida. Usa una de: {', '.join(RECOMENDACIONES_ENTREVISTA_HUMANA)}")
-    comentario = datos.comentario.strip()
-    if (datos.resultado == "no_aprobado" or datos.recomendacion == "segunda_entrevista") and not comentario:
-        raise HTTPException(
-            400,
-            "Agrega un comentario: es obligatorio cuando el resultado es 'No aprobado' o la "
-            "recomendación es 'Segunda entrevista'.",
-        )
+    comentario = datos.comentario.strip()  # 2026-09-19 (cambios Raúl): comentarios opcionales
 
     eh = _ultima_entrevista_humana(p)
     ya_capturada = bool(eh.resultado_capturado_por)
@@ -2179,6 +2173,7 @@ async def registrar_resultado_entrevista_humana(
     eh.recomendacion = datos.recomendacion
     eh.comentario = comentario
     eh.resultado_capturado_por = "rh"
+    eh.evaluada_en = datetime.now(timezone.utc)
     _actualizar_ultima_actividad(p)
     await _recalcular_resultado_apto_y_notificar(db, p, u.nombre)
     override = override_de(datos.notificar)
@@ -2243,6 +2238,7 @@ class CondicionesContratacionIn(BaseModel):
     ubicacion: str = ""
     jefe_directo: str = ""
     instrucciones_ingreso: str = ""  # Fase 5: van en la bienvenida automática al dar de alta
+    empresa: str = ""  # 2026-09-19: empresa contratante (default: la visible de la vacante)
 
 
 @router.patch("/{codigo}/condiciones-contratacion")
@@ -2265,6 +2261,8 @@ def guardar_condiciones_contratacion(
     exp.ubicacion = datos.ubicacion.strip()
     exp.jefe_directo = datos.jefe_directo.strip()
     exp.instrucciones_ingreso = datos.instrucciones_ingreso.strip()
+    exp.empresa = datos.empresa.strip() or (nombre_empresa_candidato(p.vacante) if p.vacante else "")
+    exp.condiciones_guardadas_en = datetime.now(timezone.utc)
     if datos.fecha_ingreso:
         try:
             exp.fecha_ingreso = datetime.fromisoformat(datos.fecha_ingreso).replace(tzinfo=timezone.utc)

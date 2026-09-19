@@ -293,3 +293,76 @@ MOCK_ENTREVISTA = {
     "comentario": "Enfocar la conversación en experiencia con auditorías del SAT y manejo de equipo.",
     "logo_url": "",
 }
+
+
+def html_evaluacion_entrevistador(d: dict) -> tuple[str, str]:
+    """Entrevista realizada → el entrevistador registra su evaluación (CTA a su liga)."""
+    nombre = (d.get("entrevistador") or "").split(" ")[0] or "Hola"
+    asunto = f"Registra tu evaluación: {d.get('candidato', '')} · {d.get('vacante', '')}"
+    filas = [("Candidato", d.get("candidato", "")), ("Vacante", d.get("vacante", "")), ("Fecha", d.get("fecha") or "—"), ("Hora", d.get("hora") or "—")]
+    cuerpo = "".join(_fila(k, escape(v), ultima=(i == len(filas) - 1)) for i, (k, v) in enumerate(filas))
+    contenido = (
+        f'<p style="margin:0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:{ROJO};font-weight:700;">Entrevista realizada</p>'
+        f'<h1 class="titulo" style="margin:8px 0 12px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:26px;line-height:1.2;color:{INK};">Gracias por entrevistar a {escape(d.get("candidato", ""))}, {escape(nombre)}</h1>'
+        f'<p style="margin:0 0 20px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:{INK2};">Ayúdanos a registrar tu evaluación: te toma menos de un minuto. En la misma liga tienes el expediente completo del candidato por si quieres repasarlo.</p>'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafb;border:1px solid #eceef1;border-radius:14px;padding:6px 18px;">{cuerpo}</table>'
+        + _boton("Registrar mi evaluación", d.get("liga_expediente") or settings.app_url)
+    )
+    pie = f"Recibes este aviso porque {escape(d.get('empresa') or 'la empresa')} te asignó como entrevistador(a) en Red Human AI."
+    return asunto, _base(asunto, f"Evalúa a {d.get('candidato', '')}", d.get("empresa") or "", d.get("logo_url", ""), contenido, pie)
+
+
+def html_entrevista_completada(d: dict, audiencia: str) -> tuple[str, str]:
+    """Cierre del ciclo: la entrevista humana se completó y ya tiene evaluación (candidato / RH / cliente)."""
+    resultado = d.get("resultado") or ""
+    rec = d.get("recomendacion") or ""
+    etiqueta_res = {"aprobado": "Aprobado", "no_aprobado": "No aprobado"}.get(resultado, "Registrado")
+    etiqueta_rec = {"avanzar": "Avanzar", "no_avanzar": "No avanzar", "segunda_entrevista": "Segunda entrevista"}.get(rec, "")
+    if audiencia == "candidato":
+        nombre = (d.get("candidato") or "").split(" ")[0] or "Hola"
+        asunto = f"Terminamos tu entrevista para {d.get('vacante', '')}"
+        titulo = f"¡Gracias, {escape(nombre)}!"
+        parrafo = f"Tu entrevista con {escape(d.get('entrevistador') or 'el equipo')} de {escape(d.get('empresa') or 'la empresa')} quedó registrada. El equipo de Recursos Humanos revisará los resultados y te contactará pronto con el siguiente paso."
+        filas = [("Vacante", d.get("vacante", "")), ("Entrevista con", d.get("entrevistador") or "Recursos Humanos"), ("Fecha", d.get("fecha") or "—")]
+        eyebrow = "Entrevista completada"
+    else:
+        asunto = f"Entrevista completada: {d.get('candidato', '')} · {etiqueta_res}"
+        titulo = f"Entrevista con {escape(d.get('candidato', ''))} completada"
+        parrafo = f"{escape(d.get('entrevistador') or 'El entrevistador')} registró su evaluación de la entrevista para {escape(d.get('vacante', ''))}. La decisión final sigue siendo de Recursos Humanos."
+        filas = [("Candidato", d.get("candidato", "")), ("Vacante", d.get("vacante", "")), ("Entrevistador(a)", d.get("entrevistador", "")), ("Resultado", etiqueta_res)]
+        if etiqueta_rec:
+            filas.append(("Recomendación", etiqueta_rec))
+        if d.get("comentario"):
+            filas.append(("Comentario", d["comentario"][:300]))
+        eyebrow = "Ciclo cerrado"
+    cuerpo = "".join(_fila(k, escape(v), ultima=(i == len(filas) - 1)) for i, (k, v) in enumerate(filas))
+    contenido = (
+        f'<p style="margin:0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:{ROJO};font-weight:700;">{eyebrow}</p>'
+        f'<h1 class="titulo" style="margin:8px 0 12px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:26px;line-height:1.2;color:{INK};">{titulo}</h1>'
+        f'<p style="margin:0 0 20px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:{INK2};">{parrafo}</p>'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafb;border:1px solid #eceef1;border-radius:14px;padding:6px 18px;">{cuerpo}</table>'
+        + (_boton("Ver al candidato en Red Human", d["liga_dashboard"]) if audiencia == "rh" and d.get("liga_dashboard") else "")
+    )
+    pie = "Aviso automático de Red Human AI." if audiencia != "candidato" else f"Tus datos se tratan conforme al Aviso de Privacidad de {escape(d.get('empresa') or 'la empresa')} (LFPDPPP)."
+    return asunto, _base(asunto, parrafo[:120], d.get("empresa") or "", d.get("logo_url", ""), contenido, pie)
+
+
+def html_vacante_publicada(d: dict) -> tuple[str, str]:
+    """Nueva vacante publicada: descripción con el diseño corporativo + CTA a la vacante en el portal.
+    d: titulo, empresa, area, ubicacion, modalidad, sueldo, seniority, resumen, descripcion, requisitos (lista),
+    beneficios (lista), liga, publicada_por."""
+    asunto = f"Vacante publicada: {d.get('titulo', '')}"
+    filas = [x for x in [("Área", d.get("area")), ("Ubicación", d.get("ubicacion")), ("Modalidad", d.get("modalidad")), ("Sueldo", d.get("sueldo")), ("Nivel", d.get("seniority"))] if x[1]]
+    cuerpo = "".join(_fila(k, escape(str(v)), ultima=(i == len(filas) - 1)) for i, (k, v) in enumerate(filas))
+    lista = lambda items: "".join(f'<li style="margin:4px 0;">{escape(str(x))}</li>' for x in (items or [])[:12])  # noqa: E731
+    contenido = (
+        f'<p style="margin:0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:{ROJO};font-weight:700;">Nueva vacante</p>'
+        f'<h1 class="titulo" style="margin:8px 0 12px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:26px;line-height:1.2;color:{INK};">{escape(d.get("titulo", ""))}</h1>'
+        f'<p style="margin:0 0 16px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:{INK2};">{escape(d.get("resumen") or d.get("descripcion") or "")}</p>'
+        + (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafb;border:1px solid #eceef1;border-radius:14px;padding:6px 18px;">{cuerpo}</table>' if filas else "")
+        + (f'<h2 style="margin:20px 0 6px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:14px;color:{INK};">Requisitos</h2><ul style="margin:0;padding-left:20px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5;color:{INK2};">{lista(d.get("requisitos"))}</ul>' if d.get("requisitos") else "")
+        + (f'<h2 style="margin:16px 0 6px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:14px;color:{INK};">Prestaciones</h2><ul style="margin:0;padding-left:20px;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5;color:{INK2};">{lista(d.get("beneficios"))}</ul>' if d.get("beneficios") else "")
+        + (_boton("Ver la vacante", d["liga"]) if d.get("liga") else "")
+    )
+    pie = f"Publicada por {escape(d.get('publicada_por') or 'Recursos Humanos')} desde Red Human AI para {escape(d.get('empresa') or 'la empresa')}."
+    return asunto, _base(asunto, d.get("resumen") or d.get("titulo") or "", d.get("empresa") or "", d.get("logo_url", ""), contenido, pie)

@@ -187,6 +187,8 @@ export interface ConfiguracionSistema {
   modoPrueba: boolean;
   /** Punto 13: minutos sin actividad para que una conversación de prueba arranque una sesión nueva. */
   modoPruebaVentanaMin: number;
+  /** 2026-09-19: horas antes de la Entrevista Humana para el recordatorio automático (0 = apagado). */
+  recordatorioEntrevistaHoras?: number;
   /** Fase 3: recordatorios automáticos de documentos — cada N días, a partir de esta hora (México). */
   recordatorioDocumentosDias: number;
   recordatorioDocumentosHora: number;
@@ -203,12 +205,14 @@ export function actualizarConfiguracion(cambios: {
   modoPruebaVentanaMin?: number;
   recordatorioDocumentosDias?: number;
   recordatorioDocumentosHora?: number;
+  recordatorioEntrevistaHoras?: number;
 }) {
   return patch<ConfiguracionSistema>("/configuracion", {
     modo_prueba: cambios.modoPrueba,
     modo_prueba_ventana_min: cambios.modoPruebaVentanaMin,
     recordatorio_documentos_dias: cambios.recordatorioDocumentosDias,
     recordatorio_documentos_hora: cambios.recordatorioDocumentosHora,
+    recordatorio_entrevista_horas: cambios.recordatorioEntrevistaHoras,
   });
 }
 
@@ -391,6 +395,8 @@ export const EVENTOS_NOTIFICACION = [
   "entrevista_cancelada",
   "candidato_apto",
   "entrevista_humana_terminada",
+  "entrevista_completada",
+  "vacante_publicada",
   "recomendacion_final",
   "contratacion",
   "solicitud_documentos",
@@ -407,6 +413,8 @@ export const NOMBRE_EVENTO_NOTIFICACION: Record<EventoNotificacion, string> = {
   entrevista_cancelada: "Entrevista cancelada",
   candidato_apto: "Candidato apto",
   entrevista_humana_terminada: "Entrevista humana terminada",
+  entrevista_completada: "Entrevista completada (evaluación registrada)",
+  vacante_publicada: "Vacante publicada",
   recomendacion_final: "Recomendación final disponible",
   contratacion: "Contratación",
   solicitud_documentos: "Solicitud de documentos",
@@ -1195,6 +1203,28 @@ export interface EntrevistaHumanaPublica {
   candidato: string;
   puesto: string;
   fecha: string | null;
+  entrevistador?: string;
+  modalidad?: string;
+  /** 2026-09-19: la liga sigue mostrando el expediente aunque ya se haya evaluado. */
+  yaEvaluada?: boolean;
+  resultado?: string;
+  recomendacion?: string;
+  expediente?: {
+    candidato: { nombre: string; telefono: string; correo: string; fuente: string };
+    vacante: { titulo: string; requisitos: string; perfilIdeal: string; empresa: string };
+    etapa: string;
+    score: number | null;
+    cv: { resumen: string; habilidades: string[]; estudios: string[]; idiomas: string[]; experiencia: (string | { puesto?: string; empresa?: string; periodo?: string })[]; anosExperiencia?: number | null };
+    analisis: { requisitosCumplidos: string[]; brechas: string[]; fortalezas: string[]; alertas: string[]; resumen: string };
+    entrevistaIA: { matchPerfil: number | null; recomendacion: string; resumen: string; fortalezas: string[]; riesgos: string[]; faltante: string[] } | null;
+    capacitacion: { curso: string; aprobado: boolean; calificacion: number }[];
+    archivos: { id: number; tipo: string; nombre: string; mime: string }[];
+    documentos: { tipo: string; estado: string; obligatorio: boolean }[];
+  };
+}
+
+export function urlArchivoEntrevistaHumanaPublica(token: string, archivoId: number) {
+  return urlArchivo(`/entrevista-humana/publica/${token}/archivo/${archivoId}`);
 }
 
 export function fetchEntrevistaHumanaPublica(token: string) {
@@ -1218,7 +1248,7 @@ export function enviarEvaluacionEntrevistaHumana(
 
 export function guardarCondicionesContratacion(
   codigo: string,
-  datos: { puesto?: string; sueldo?: string; tipoContratacion?: string; fechaIngreso?: string; ubicacion?: string; jefeDirecto?: string; instruccionesIngreso?: string },
+  datos: { puesto?: string; sueldo?: string; tipoContratacion?: string; fechaIngreso?: string; ubicacion?: string; jefeDirecto?: string; instruccionesIngreso?: string; empresa?: string },
 ) {
   return patch<Candidato>(`/candidatos/${codigo}/condiciones-contratacion`, {
     puesto: datos.puesto ?? "",
@@ -1228,6 +1258,7 @@ export function guardarCondicionesContratacion(
     ubicacion: datos.ubicacion ?? "",
     jefe_directo: datos.jefeDirecto ?? "",
     instrucciones_ingreso: datos.instruccionesIngreso ?? "",  // Fase 5: van en la bienvenida automática al alta
+    empresa: datos.empresa ?? "",  // 2026-09-19 (Bloque 3)
   });
 }
 
@@ -1536,6 +1567,9 @@ export interface Curso {
   titulo: string;
   categoria: string;
   duracionHoras: number;
+  /** 2026-09-19 (Bloque 4): duración libre y cómo se imparte. */
+  duracion?: string;
+  modalidad?: ModalidadCurso;
   objetivo: string;
   estado: "Borrador" | "Publicado" | "Archivado";
   obligatorio: boolean;
@@ -1599,10 +1633,13 @@ export function fetchCurso(codigo: string) {
 }
 
 /** «Generar curso con IA»: solo tema, contexto opcional, adjuntos y duración. */
-export function generarCurso(datos: { tema: string; duracionHoras: number; contexto?: string; archivos?: File[] }) {
+export type ModalidadCurso = "instructor_ia" | "autoguiado";
+
+export function generarCurso(datos: { tema: string; duracion: string; modalidad: ModalidadCurso; contexto?: string; archivos?: File[] }) {
   const form = new FormData();
   form.append("tema", datos.tema);
-  form.append("duracion_horas", String(datos.duracionHoras));
+  form.append("duracion", datos.duracion);  // 2026-09-19: libre («5 min», «1 h»)
+  form.append("modalidad", datos.modalidad);
   form.append("contexto", datos.contexto ?? "");
   for (const f of datos.archivos ?? []) form.append("archivos", f);
   return subir<Curso & { ia: boolean }>("/capacitacion/generar", form);
@@ -1623,8 +1660,15 @@ export function editarCurso(
   });
 }
 
+/** «Finalizar curso» (2026-09-19: Crear → Revisar → Finalizar → Asignar). El estado interno sigue siendo «Publicado». */
 export function publicarCurso(codigo: string) {
-  return patch<Curso>(`/capacitacion/${codigo}/publicar`, {});
+  return patch<Curso>(`/capacitacion/${codigo}/finalizar`, {});
+}
+export const finalizarCurso = publicarCurso;
+
+/** Etiqueta visible del estado del curso. */
+export function etiquetaEstadoCurso(estado: string) {
+  return estado === "Publicado" ? "Finalizado" : estado;
 }
 
 export function archivarCurso(codigo: string) {
@@ -1670,6 +1714,8 @@ export interface AsignacionPublica {
   tipo: TipoAsignacionCurso;
   requiereRegistro: boolean;
   curso: string;
+  modalidad?: ModalidadCurso;
+  duracion?: string;
   objetivo: string;
   categoria: string;
   duracionHoras: number;
@@ -1801,6 +1847,15 @@ export function autorizarAlta(expedienteId: number, fechaIngreso?: string, forza
 /** Liga de descarga de la carta de intención en PDF — mismo patrón que urlDocumento: <a href>
  * autenticado por cookie de sesión, sin manejo de blobs en el frontend. */
 /** PDF crudo de la carta (lo embebe la vista /carta/[id]). */
+/** 2026-09-19 (Bloque 3): contrato con las condiciones finales (solo con expediente al 100 %). */
+export function urlContratoPdf(expedienteId: number) {
+  return urlArchivo(`/contratacion/expedientes/${expedienteId}/contrato`);
+}
+
+export function enviarCartaIntencion(expedienteId: number, canal: "whatsapp" | "correo") {
+  return post<{ canal: string; enviado: boolean; detalle: string }>(`/contratacion/expedientes/${expedienteId}/carta-intencion/enviar`, { canal });
+}
+
 export function urlCartaIntencionPdf(expedienteId: number) {
   return urlArchivo(`/contratacion/expedientes/${expedienteId}/carta-intencion`);
 }
@@ -1830,6 +1885,12 @@ export interface ExpedientePublico {
   puesto: string;
   estado: "integracion" | "completo" | "alta";
   documentos: DocumentoExpedientePublico[];
+  /** 2026-09-19: la carta de intención se puede descargar desde la liga pública. */
+  cartaDisponible?: boolean;
+}
+
+export function urlCartaIntencionPublica(token: string) {
+  return urlArchivo(`/expedientes/publica/${token}/carta-intencion`);
 }
 
 export function fetchExpedientePublico(token: string) {

@@ -428,6 +428,9 @@ class EntrevistaHumana(Base):
     # "" hasta que alguien capture el resultado; "rh" | "entrevistador" según quién ganó la
     # carrera (ver candidatos.py: RH siempre puede sobreescribir después, para corregir).
     resultado_capturado_por: Mapped[str] = mapped_column(String(20), default="")
+    # 2026-09-19: recordatorio automático (job) y cierre del ciclo desde la liga del entrevistador.
+    recordatorio_enviado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    evaluada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
     candidato: Mapped["Candidato"] = relationship(foreign_keys=[candidato_id])
@@ -676,6 +679,9 @@ class Expediente(Base):
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
     jefe_directo: Mapped[str] = mapped_column(String(150), default="")
     fecha_ingreso: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 2026-09-19 (Bloque 3): empresa contratante capturada en las condiciones (default: la visible de la vacante).
+    empresa: Mapped[str] = mapped_column(String(200), default="")
+    condiciones_guardadas_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # --- preparación de ingreso (Onboarding, bloque 4) ---
     contrato: Mapped[str] = mapped_column(String(20), default="Pendiente")  # Pendiente | Firmado
     alta_administrativa: Mapped[str] = mapped_column(String(20), default="Pendiente")  # Pendiente | Realizada
@@ -790,6 +796,10 @@ class Colaborador(Base):
     puesto: Mapped[str] = mapped_column(String(200), default="")
     salario: Mapped[str] = mapped_column(String(80), default="")
     empresa: Mapped[str] = mapped_column(String(150), default="")
+    # 2026-09-19 (Bloque 3): condiciones FINALES de contratación tal como se guardaron en el expediente y
+    # snapshot inmutable de ingreso (nunca se edita después del alta; es el registro histórico).
+    tipo_contratacion: Mapped[str] = mapped_column(String(60), default="")
+    condiciones_ingreso: Mapped[dict] = mapped_column(JSON, default=dict)
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
     jefe_directo: Mapped[str] = mapped_column(String(150), default="")
     cv_ruta: Mapped[str] = mapped_column(String(400), default="")
@@ -1221,6 +1231,8 @@ class ConfiguracionSistema(Base):
     # Fase 3 (2026-09-15): recordatorios automáticos de documentos pendientes (services/recordatorios.py):
     # cada N días, a partir de esta hora (America/Mexico_City), mientras no pase Expediente.documentos_hasta.
     recordatorio_documentos_dias: Mapped[int] = mapped_column(Integer, default=2)
+    # 2026-09-19: horas antes de la Entrevista Humana para el recordatorio automático (0 = apagado).
+    recordatorio_entrevista_horas: Mapped[int] = mapped_column(Integer, default=24)
     recordatorio_documentos_hora: Mapped[int] = mapped_column(Integer, default=10)
 
 
@@ -1231,6 +1243,9 @@ class ConfiguracionSistema(Base):
 # ============================================================
 
 
+MODALIDADES_CURSO = ("instructor_ia", "autoguiado")
+
+
 class Curso(Base):
     __tablename__ = "cursos"
 
@@ -1239,6 +1254,9 @@ class Curso(Base):
     titulo: Mapped[str] = mapped_column(String(200))
     categoria: Mapped[str] = mapped_column(String(100), default="")
     duracion_horas: Mapped[float] = mapped_column(Float, default=0)
+    # 2026-09-19 (Bloque 4): cómo se imparte y duración libre («5 min», «1 h 30»); duracion_horas se deriva para KPIs.
+    modalidad: Mapped[str] = mapped_column(String(20), default="autoguiado")  # instructor_ia | autoguiado
+    duracion_texto: Mapped[str] = mapped_column(String(40), default="")
     objetivo: Mapped[str] = mapped_column(Text, default="")  # generado por IA
     estado: Mapped[str] = mapped_column(String(20), default="Borrador")  # Borrador | Publicado | Archivado
     obligatorio: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -1271,6 +1289,10 @@ class ModuloCurso(Base):
     titulo: Mapped[str] = mapped_column(String(200))
     contenido: Mapped[str] = mapped_column(Text, default="")  # guion que explicará el avatar (Fase 2)
     # [{"pregunta": str, "criterio_respuesta_correcta": str}] — con qué evaluar la comprensión (Fase 2)
+    # 2026-09-19 (Bloque 4): material de apoyo (PDF) — resumen breve y puntos clave; `contenido` es el guion
+    # conversacional (Instructor IA) o el contenido modular (Autoguiado).
+    resumen: Mapped[str] = mapped_column(Text, default="")
+    puntos_clave: Mapped[list] = mapped_column(JSON, default=list)
     preguntas_verificacion: Mapped[list] = mapped_column(JSON, default=list)
 
     curso: Mapped["Curso"] = relationship(back_populates="modulos")
@@ -1353,6 +1375,10 @@ EVENTOS_NOTIFICACION = [
     "recordatorio_documentos",
     # Fase 5 (2026-09-15): bienvenida + instrucciones de ingreso, automático al dar de alta (sin override).
     "instrucciones_ingreso",
+    # 2026-09-19: al publicar una vacante, su descripción (HTML) al Cliente y al responsable.
+    "vacante_publicada",
+    # 2026-09-19: cierre del ciclo — el entrevistador registró su evaluación desde su liga.
+    "entrevista_completada",
 ]
 
 # Fase 7A (2026-09-12): valores con los que NACE la regla de cada evento cuando una Cuenta no la
@@ -1362,8 +1388,10 @@ EVENTOS_NOTIFICACION = [
 # ya guardadas de una Cuenta NUNCA se tocan desde aquí.
 REGLAS_NOTIFICACION_DEFAULT = {
     "entrevista_agendada": {"candidato_correo": True, "candidato_whatsapp": True, "entrevistador_correo": True, "entrevistador_whatsapp": True},
-    "recordatorio_entrevista": {"candidato_whatsapp": True},
-    "entrevista_humana_terminada": {"entrevistador_correo": True},
+    "recordatorio_entrevista": {"candidato_whatsapp": True, "candidato_correo": True, "entrevistador_correo": True, "entrevistador_whatsapp": True},
+    "entrevista_humana_terminada": {"entrevistador_correo": True, "entrevistador_whatsapp": True},
+    "entrevista_completada": {"candidato_correo": True, "candidato_whatsapp": True, "cliente_correo": True},
+    "vacante_publicada": {"cliente_correo": True},
     "contratacion": {"candidato_whatsapp": True},
     "solicitud_documentos": {"candidato_whatsapp": True},
     "recordatorio_documentos": {"candidato_whatsapp": True},

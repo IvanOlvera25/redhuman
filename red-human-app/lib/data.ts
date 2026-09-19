@@ -161,6 +161,10 @@ export interface Candidato {
     fechaIngreso: string | null;
     /** Fase 5: instrucciones del primer día (van en la bienvenida automática al alta). */
     instruccionesIngreso?: string;
+    /** 2026-09-19 (Bloque 3): empresa contratante y estado de captura. */
+    empresa?: string;
+    guardadasEn?: string | null;
+    completas?: boolean;
   } | null;
   entrevistaId?: string | null;
   entrevistaEstado?: string | null;

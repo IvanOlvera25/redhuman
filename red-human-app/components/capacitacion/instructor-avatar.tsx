@@ -13,7 +13,7 @@ import { iniciarInstructorCurso, preguntarInstructorCurso } from "@/lib/api";
 type Msg = { rol: "user" | "assistant"; texto: string };
 const ESPERA_AVATAR_SEG = 25;
 
-export function InstructorAvatar({ token, modulo, titulo }: { token: string; modulo: number; titulo: string }) {
+export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false }: { token: string; modulo: number; titulo: string; autoIniciar?: boolean }) {
   const [estado, setEstado] = useState<"inactivo" | "conectando" | "avatar" | "texto">("inactivo");
   const [mensajes, setMensajes] = useState<Msg[]>([]);
   const [texto, setTexto] = useState("");
@@ -46,6 +46,18 @@ export function InstructorAvatar({ token, modulo, titulo }: { token: string; mod
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
   }, [mensajes, pensando]);
+
+  // 2026-09-19 (Instructor IA): el avatar arranca solo al entrar al módulo — la persona no lee primero un documento.
+  useEffect(() => {
+    if (!autoIniciar) return;
+    const t = setTimeout(() => {
+      if (estadoRef.current === "inactivo") void iniciar(false);
+    }, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoIniciar, modulo]);
+  const estadoRef = useRef(estado);
+  estadoRef.current = estado;
 
   async function iniciar(forzarTexto = false) {
     setEstado("conectando");
