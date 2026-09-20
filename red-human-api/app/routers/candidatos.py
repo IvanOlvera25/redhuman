@@ -2338,9 +2338,13 @@ async def _disparar_mensaje_onboarding(
         registrar_recordatorio_enviado(db, e, extra["nivel"], u.nombre, resultados)
         e.ultimo_recordatorio_en = datetime.now(timezone.utc)
     else:
+        if e:
+            from ..services.recordatorios import marcar_solicitud_documentos  # B3: trazabilidad por documento
+
+            marcar_solicitud_documentos(e, resultados, u.nombre, "solicitud")
         registrar(db, u.nombre, accion, "postulacion", p.codigo, {"notificaciones": resultados, "correo_rh": u.correo, "notificar_override": override})
     _actualizar_ultima_actividad(p)
-    db.commit()
+    db.commit()  # B5: solicitar/recordar documentos NUNCA cambia la etapa
     return {"resultados": resultados, "nivel": extra.get("nivel"), "candidato": postulacion_dict(p, detalle=True)}
 
 

@@ -164,6 +164,20 @@ const FILTROS_ESTADO: { key: FiltroEstado; label: string }[] = [
 const ETAPAS_YA_CONTRATADO: EtapaCandidato[] = ["Contratación", "Onboarding"];
 
 const TIPOS_CONTRATACION = ["Tiempo indeterminado", "Tiempo determinado", "Por obra o proyecto", "Honorarios"];
+// 2026-09-20 (B3): formato de la trazabilidad de documentos
+function fechaHoraCorta(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("es-MX", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+function canalLegible(canal: string): string {
+  return canal
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map((x) => ({ whatsapp: "WhatsApp", correo: "Correo", liga: "Liga pública", rh: "RH (tablero)", fisico: "Entrega física" }[x] ?? x))
+    .join(" + ") || "—";
+}
 // 2026-09-20 (B2): «Tiempo determinado» pide duración + unidad; la fecha de término se calcula (aquí solo como
 // vista previa; la que vale es la del servidor, `expedienteCondiciones.fechaTermino`).
 const UNIDADES_DURACION = ["días", "meses", "años"] as const;
@@ -2570,6 +2584,17 @@ function PestanaDocumentos({
 }) {
   const puedeDecidir = usePuedeDecidir();
   const [cargandoCV, setCargandoCV] = useState(false);
+  // 2026-09-20 (B3): documentos requeridos del expediente con su trazabilidad (solicitud → recepción)
+  const [expediente, setExpediente] = useState<NuevoIngreso | null>(null);
+  const cargarExpediente = useCallback(async () => {
+    if (!live || !c.expedienteId) return;
+    const e = await fetchExpediente(c.expedienteId);
+    if (e) setExpediente(e);
+  }, [c.expedienteId, live]);
+  useEffect(() => {
+    void cargarExpediente();
+  }, [cargarExpediente]);
+  usePolling(cargarExpediente, 10000);
 
   const cv = (c.cvDatos || {}) as Record<string, unknown>;
   const habilidades = (cv.habilidades as string[]) || [];
@@ -2666,6 +2691,82 @@ function PestanaDocumentos({
                 <li key={i} className="text-xs text-ink-3">• Dato faltante: {df}</li>
               ))}
             </ul>
+          )}
+        </div>
+      )}
+
+      {/* 2026-09-20 (B3): trazabilidad de los documentos requeridos del expediente */}
+      {c.expedienteId != null && (
+        <div>
+          <Eyebrow>Documentos requeridos · trazabilidad</Eyebrow>
+          {!expediente ? (
+            <p className="mt-2 text-xs text-ink-3">Cargando expediente…</p>
+          ) : (expediente.documentos ?? []).length === 0 ? (
+            <p className="mt-2 text-xs text-ink-3">El expediente todavía no tiene documentos requeridos.</p>
+          ) : (
+            <div className="scroll-x mt-2 rounded-2xl border border-border-soft">
+              <table className="w-full min-w-[640px] text-left text-xs">
+                <thead className="bg-surface-2 text-[11px] uppercase tracking-wide text-ink-3">
+                  <tr>
+                    <th className="px-3 py-2 font-semibold">Documento</th>
+                    <th className="px-3 py-2 font-semibold">Solicitado</th>
+                    <th className="px-3 py-2 font-semibold">Canal</th>
+                    <th className="px-3 py-2 font-semibold">Recibido</th>
+                    <th className="px-3 py-2 font-semibold">Estado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(expediente.documentos ?? []).map((d) => {
+                    const estado = d.estadoSimple ?? (d.estado === "recibido" || (d.estado === "revision" && d.tieneArchivo) ? "Recibido" : d.estado === "rechazado" ? "Rechazado" : "Pendiente");
+                    const solicitudes = d.solicitudes ?? [];
+                    return (
+                      <tr key={d.nombre} className="border-t border-border-soft align-top">
+                        <td className="px-3 py-2">
+                          <p className="font-semibold text-ink">{d.nombre}</p>
+                          {d.obligatorio === false && <p className="text-[11px] text-ink-3">Opcional</p>}
+                        </td>
+                        <td className="px-3 py-2 text-ink-2">
+                          {d.solicitadoEn ? (
+                            <>
+                              <p>{fechaHoraCorta(d.solicitadoEn)}</p>
+                              {solicitudes.length > 1 && (
+                                <p className="text-[11px] text-ink-3" title={solicitudes.map((s) => `${s.tipo === "recordatorio" ? "Recordatorio" : "Solicitud"} · ${fechaHoraCorta(s.en)} · ${canalLegible(s.canal)}`).join("\n")}>
+                                  +{solicitudes.length - 1} recordatorio{solicitudes.length - 1 === 1 ? "" : "s"} · último {fechaHoraCorta(solicitudes[solicitudes.length - 1].en)}
+                                </p>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-ink-3">Sin solicitar</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-ink-2">{d.solicitadoCanal ? canalLegible(d.solicitadoCanal) : "—"}</td>
+                        <td className="px-3 py-2 text-ink-2">
+                          {d.recibidoEn ? (
+                            <>
+                              <p>{fechaHoraCorta(d.recibidoEn)}</p>
+                              <p className="text-[11px] text-ink-3">por {canalLegible(d.recibidoCanal || "")}{d.archivo ? ` · ${d.archivo}` : ""}</p>
+                            </>
+                          ) : (
+                            <span className="text-ink-3">—</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2">
+                          <span
+                            className={cn(
+                              "inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold",
+                              estado === "Recibido" ? "bg-good-soft text-good" : estado === "Rechazado" ? "bg-bad-soft text-bad" : "bg-warn-soft text-warn",
+                            )}
+                          >
+                            {estado}
+                          </span>
+                          {estado === "Recibido" && d.estado === "revision" && <p className="mt-0.5 text-[11px] text-ink-3">En revisión de RH</p>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}

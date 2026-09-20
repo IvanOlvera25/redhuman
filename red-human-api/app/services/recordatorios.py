@@ -60,10 +60,43 @@ def toca_recordar(e: Expediente, cfg: ConfiguracionSistema, ahora: datetime) -> 
     return "enviar"
 
 
+def canales_al_candidato(resultados) -> str:
+    """Canales por los que SÍ salió un mensaje al candidato («whatsapp», «correo», «whatsapp, correo»)."""
+    canales = []
+    for r in resultados or []:
+        if not isinstance(r, dict) or not r.get("enviado"):
+            continue
+        if str(r.get("destinatario") or "candidato").lower() not in ("candidato", ""):
+            continue
+        canal = str(r.get("canal") or "").lower()
+        if canal and canal not in canales:
+            canales.append(canal)
+    return ", ".join(canales)
+
+
+def marcar_solicitud_documentos(e: Expediente, resultados, actor: str, tipo: str = "solicitud") -> str:
+    """2026-09-20 (B3): deja huella en cada documento PENDIENTE de que se le pidió al candidato — primera
+    solicitud (`solicitado_en` + `solicitado_canal`) y un historial (`solicitudes`) que también acumula los
+    recordatorios. Solo si algún canal entregó; nunca toca la etapa de la postulación. Regresa los canales."""
+    canal = canales_al_candidato(resultados)
+    if not canal:
+        return ""
+    ahora = datetime.now(timezone.utc)
+    for d in e.documentos:
+        if d.entregado:
+            continue
+        if not d.solicitado_en:
+            d.solicitado_en = ahora
+            d.solicitado_canal = canal
+        d.solicitudes = [*(d.solicitudes or []), {"en": ahora.isoformat(), "canal": canal, "tipo": tipo, "por": actor}]
+    return canal
+
+
 def registrar_recordatorio_enviado(db: Session, e: Expediente, nivel: int, actor: str, resultados, automatico: bool = False) -> None:
     """Avanza el contador de niveles (2026-09-17) y deja bitácora; al mandar el DEFINITIVO se registra
     `recordatorios_agotados` para que RH tome el seguimiento (aparece en el tablero de Onboarding)."""
     e.recordatorios_enviados = (e.recordatorios_enviados or 0) + 1
+    marcar_solicitud_documentos(e, resultados, actor, "recordatorio")  # B3: trazabilidad por documento
     p = e.postulacion
     registrar(
         db, actor, "recordatorio_documentos_automatico" if automatico else "recordatorio_enviado", "expediente", str(e.id),

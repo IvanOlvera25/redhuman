@@ -799,6 +799,15 @@ class Documento(Base):
     revisado_por: Mapped[str] = mapped_column(String(150), default="")
     subido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+    # 2026-09-20 (B3, trazabilidad): cuándo y por qué canal se PIDIÓ el documento (primera solicitud +
+    # historial de solicitudes/recordatorios) y cuándo/por dónde se RECIBIÓ. Lo escriben
+    # `services.recordatorios.marcar_solicitud_documentos` y `contratacion._registrar_documento` /
+    # `marcar_documento`; nunca cambian la etapa de la postulación (B5).
+    solicitado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    solicitado_canal: Mapped[str] = mapped_column(String(40), default="")  # whatsapp | correo | whatsapp, correo
+    solicitudes: Mapped[list] = mapped_column(JSON, default=list)  # [{en, canal, tipo: solicitud|recordatorio, por}]
+    recibido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    recibido_canal: Mapped[str] = mapped_column(String(40), default="")  # whatsapp | liga | rh | fisico
 
     @property
     def entregado(self) -> bool:

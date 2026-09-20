@@ -29,6 +29,13 @@ export interface DocExpediente {
   subido?: string;
   revisadoPor?: string;
   validacion?: ValidacionDoc | null;
+  /** 2026-09-20 (B3): trazabilidad — cuándo/por qué canal se pidió y cuándo/por dónde se recibió. */
+  solicitadoEn?: string | null;
+  solicitadoCanal?: string;
+  solicitudes?: { en: string; canal: string; tipo: "solicitud" | "recordatorio"; por: string }[];
+  recibidoEn?: string | null;
+  recibidoCanal?: string;
+  estadoSimple?: "Pendiente" | "Recibido" | "Rechazado";
 }
 
 export interface NuevoIngreso {

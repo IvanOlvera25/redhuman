@@ -287,7 +287,19 @@ def documento_para_adjunto(db: Session, e: Expediente, pie: str, nombre_archivo:
     return nuevo
 
 
+def _canal_recepcion(subido_por: str) -> str:
+    """B3: canal por el que llegó el archivo — whatsapp (webhook), liga (expediente público) o rh (tablero)."""
+    s = (subido_por or "").lower()
+    if s.startswith("whatsapp"):
+        return "whatsapp"
+    if s == "candidato":
+        return "liga"
+    return "rh"
+
+
 def _registrar_documento(db: Session, e: Expediente, doc: Documento, validado, subido_por: str) -> dict:
+    """Registra el archivo recibido (validación IA/Modo Prueba) y su trazabilidad (B3: `recibido_en`, `recibido_canal`).
+    B5: NUNCA toca `postulacion.etapa` — el candidato sigue en Contratación/Onboarding hasta que RH lo mueva."""
     titular = e.candidato.nombre if e.candidato else ""
     if modo_prueba_activo(db):
         # 2026-09-18 (Modo Prueba TOTAL): se salta el OCR/IA y cualquier PDF o imagen queda válido de inmediato.
@@ -308,6 +320,12 @@ def _registrar_documento(db: Session, e: Expediente, doc: Documento, validado, s
     doc.validacion = v.model_dump()
     doc.estado, doc.notas_ia = _resolver_estado(v, con_ia)
     doc.revisado_por = ""  # vuelve a quedar pendiente de revisión humana
+    if doc.entregado:  # B3: recibido (o digital en revisión) → fecha/hora y canal de recepción
+        doc.recibido_en = doc.subido_en
+        doc.recibido_canal = _canal_recepcion(subido_por)
+    else:
+        doc.recibido_en = None
+        doc.recibido_canal = ""
 
     _sincronizar_estado(e)
     registrar(
@@ -378,6 +396,13 @@ def marcar_documento(
     doc.revisado_por = u.nombre
     if datos.notas:
         doc.notas_ia = datos.notas
+    # B3: trazabilidad de recepción también en la revisión manual (físico → «fisico»; con archivo conserva su canal)
+    if doc.entregado and not doc.recibido_en:
+        doc.recibido_en = datetime.now(timezone.utc)
+        doc.recibido_canal = doc.recibido_canal or ("fisico" if not doc.archivo else "rh")
+    elif not doc.entregado:
+        doc.recibido_en = None
+        doc.recibido_canal = ""
 
     _sincronizar_estado(e)
     registrar(
@@ -458,7 +483,7 @@ async def recordatorio(
                    "fecha_limite": e.documentos_hasta, "nivel": nivel},
             override=override_de(notificar),
         )
-    registrar_recordatorio_enviado(db, e, nivel, u.nombre, resultados)
+    registrar_recordatorio_enviado(db, e, nivel, u.nombre, resultados)  # B3: también marca la solicitud por documento
     e.ultimo_recordatorio_en = datetime.now(timezone.utc)
     db.commit()
     return {"enviado": True, "pendientes": pendientes, "nivel": nivel, "tono": NIVELES_RECORDATORIO[nivel], "notificaciones": resultados, "expediente": expediente_dict(e)}

@@ -669,6 +669,14 @@ def documento_dict(d: Documento) -> dict:
         "tamano": d.tamano or 0,
         "subido": hace(d.subido_en) if d.subido_en else "",
         "revisadoPor": d.revisado_por or "",
+        # 2026-09-20 (B3): trazabilidad — solicitud (fecha/hora + canal), recepción (fecha/hora + canal), historial
+        "solicitadoEn": iso(d.solicitado_en),
+        "solicitadoCanal": d.solicitado_canal or "",
+        "solicitudes": list(d.solicitudes or []),
+        "recibidoEn": iso(d.recibido_en),
+        "recibidoCanal": d.recibido_canal or "",
+        # Estado simple para la pestaña «CV y documentos»: Pendiente | Recibido (recibido o digital en revisión)
+        "estadoSimple": "Recibido" if d.entregado else ("Rechazado" if d.estado == "rechazado" else "Pendiente"),
         "validacion": {
             "tipoDetectado": v.get("tipo_detectado"),
             "coincideTipo": v.get("coincide_tipo"),
