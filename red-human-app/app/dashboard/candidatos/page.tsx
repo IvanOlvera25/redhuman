@@ -4464,6 +4464,7 @@ function PanelContratacion({
               className="ml-auto"
               onClick={() => enviarOnboarding()}
               disabled={Boolean(ocupado)}
+              title="B5: recibir o subir documentos nunca cambia la etapa; este botón es la única forma de pasar a Onboarding"
             >
               Enviar a Onboarding
             </Button>
