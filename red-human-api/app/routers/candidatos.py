@@ -343,6 +343,8 @@ def listar(
     )
     # B4 (decisión 2026-09-11): las cerradas (descartado/contratado/reinicio) se ocultan salvo
     # que RH active "Mostrar cerradas" o pida un filtro `activa` explícito.
+    # 2026-09-20 (B4): este filtro por defecto ES la base de `services.conteos.postulaciones_visibles` —
+    # si se cambia aquí hay que cambiarlo allá (los contadores de vacante/pipeline deben coincidir con esta lista).
     if activa is not None:
         q = q.filter(Postulacion.activa.is_(activa))
     elif not mostrar_cerradas:

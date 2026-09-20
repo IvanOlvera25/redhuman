@@ -3,8 +3,8 @@ import { ArrowRight, Download, Sparkles, Clock } from "lucide-react";
 import { Button, Card, Eyebrow, Avatar } from "@/components/ui";
 import { PageHeader, KpiCard, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
 import { ActividadChart, FuentesDonut, TiempoChart } from "@/components/dashboard/charts";
-import { kpis, actividadData, fuentesData, tiempoContratacion, funnelData, candidatos } from "@/lib/data";
-import { nombreEtapa } from "@/lib/api";
+import { kpis, actividadData, fuentesData, tiempoContratacion, candidatos } from "@/lib/data";
+import { EmbudoEtapas } from "@/components/dashboard/embudo-etapas";
 
 export default function Tablero() {
   const recientes = candidatos.slice(0, 5);
@@ -59,23 +59,9 @@ export default function Tablero() {
         {/* Embudo */}
         <Card className="p-5">
           <h3 className="font-display text-lg font-bold">Embudo de selección</h3>
-          <p className="text-sm text-ink-3">Conversión por etapa</p>
-          <div className="mt-5 space-y-3">
-            {funnelData.map((f) => (
-              <div key={f.etapa}>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-ink-2">{nombreEtapa(f.etapa)}</span>
-                  <span className="font-mono font-semibold tabular">{f.valor.toLocaleString("es-MX")}</span>
-                </div>
-                <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-surface-2">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-brand to-brand-2"
-                    style={{ width: `${f.pct}%` }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
+          <p className="text-sm text-ink-3">Candidatos activos por etapa · clic para abrir el Kanban filtrado</p>
+          {/* B4: datos reales (/metricas/pipeline → misma fuente que el Kanban y las vacantes), ya no mock */}
+          <EmbudoEtapas />
         </Card>
 
         {/* Tiempo de contratación */}

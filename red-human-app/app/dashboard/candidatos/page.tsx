@@ -391,6 +391,7 @@ function CandidatosContenido() {
   const datosFiltrados = useMemo(() => {
     let res = datos.filter((c) => {
       if (filtroVacante && c.vacanteId !== filtroVacante) return false;
+      if (columnaResaltada && c.etapa !== columnaResaltada) return false;  // B4: ?etapa= es un filtro exacto
       if (!coincideEstado(c, filtroEstado)) return false;
       if (
         busqueda.trim() &&
@@ -449,6 +450,7 @@ function CandidatosContenido() {
 
     return res;
   }, [
+    columnaResaltada,
     datos,
     filtroVacante,
     filtroEstado,
@@ -813,13 +815,14 @@ function CandidatosContenido() {
       {columnaResaltada && (
         <div className="mt-3 flex items-center justify-between rounded-xl border border-brand/40 bg-brand-soft/40 px-4 py-2 text-xs text-brand">
           <span>
-            Mostrando etapa enfocada: <strong>{columnaResaltada}</strong>
+            Filtro por etapa: <strong>{nombreEtapa(columnaResaltada)}</strong>
+            {filtroVacante ? <> · vacante <strong>{filtroVacante}</strong></> : null} · {datosFiltrados.length} candidato(s)
           </span>
           <button
             onClick={() => setColumnaResaltada(null)}
             className="flex items-center gap-1 font-semibold hover:underline"
           >
-            <X className="h-3.5 w-3.5" /> Quitar enfoque
+            <X className="h-3.5 w-3.5" /> Quitar filtro de etapa
           </button>
         </div>
       )}
@@ -847,8 +850,8 @@ function CandidatosContenido() {
 
       {/* VISTA 1: PIPELINE (Kanban) */}
       {!cargando && vista === "pipeline" && (
-        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-          {etapas.map((etapa) => {
+        <div className={cn("mt-6 grid gap-4", columnaResaltada ? "grid-cols-1 sm:max-w-md" : "sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6")}>
+          {etapas.filter((etapa) => !columnaResaltada || etapa === columnaResaltada).map((etapa) => {
             const cols = datosFiltrados.filter((c) => c.etapa === etapa);
             const esResaltada = columnaResaltada === etapa;
 
@@ -4456,7 +4459,12 @@ function PanelContratacion({
             <FileCheck2 className="h-4 w-4" /> Generar contrato
           </Button>
           {c.etapa === "Contratación" && (
-            <Button size="sm" className="ml-auto" onClick={() => enviarOnboarding()} disabled={Boolean(ocupado)}>
+            <Button
+              size="sm"
+              className="ml-auto"
+              onClick={() => enviarOnboarding()}
+              disabled={Boolean(ocupado)}
+            >
               Enviar a Onboarding
             </Button>
           )}
