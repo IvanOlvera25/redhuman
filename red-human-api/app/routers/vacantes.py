@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..services import notificaciones
+from ..services import conteos, notificaciones
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import (
     ENFOQUES_ENTREVISTA, MONEDAS_SUELDO, PERIODICIDADES_SUELDO, PLATAFORMAS, Cliente, Cuenta, Curso, Plantilla, Postulacion,
@@ -54,33 +54,20 @@ def _slug_unico(db: Session, titulo: str, vacante_id: int) -> str:
     return f"{base}-{vacante_id}" if tomado else base
 
 
-def _embudo(db: Session, vacante_id: int) -> dict:
-    """Conteo por etapa y por clasificación del agente — alimenta la tarjeta de la vacante."""
-    # 2026-09-13: el embudo cuenta SOLO postulaciones ACTIVAS (una descartada/contratada/cerrada ya
-    # no está "en" ninguna etapa) — mismo criterio que el Kanban (B4).
-    # 2026-09-15 (Fase 1): las de Modo Prueba TAMBIÉN cuentan — el Kanban las muestra y la ficha de
-    # la vacante marcaba 0 en todas las etapas cuando la demo corre con Modo Prueba. Las métricas
-    # globales (/metricas) siguen excluyéndolas.
-    filas = (
-        db.query(Postulacion.etapa, Postulacion.estado, func.count(Postulacion.id))
-        .filter(Postulacion.vacante_id == vacante_id, Postulacion.activa.is_(True))
-        .group_by(Postulacion.etapa, Postulacion.estado)
-        .all()
-    )
-    etapas: Dict[str, int] = {}
-    estados: Dict[str, int] = {}
-    for etapa, estado, n in filas:
-        etapas[etapa] = etapas.get(etapa, 0) + n
-        estados[estado] = estados.get(estado, 0) + n
-    return {"etapas": etapas, "estados": estados}
+def _embudo(db: Session, v: Vacante) -> dict:
+    """Conteo por etapa y por clasificación del agente — alimenta la tarjeta de la vacante.
+    2026-09-20 (B4): sale de `services.conteos` (postulaciones activas, personas no eliminadas, incluye
+    Modo Prueba) — la MISMA base que el Kanban y el pipeline global, así los contadores coinciden."""
+    return {"etapas": conteos.por_etapa(db, v.cuenta_id, v.id), "estados": conteos.por_estado(db, v.cuenta_id, v.id)}
 
 
 def _conteos(db: Session, v: Vacante):
-    total = db.query(Postulacion).filter(Postulacion.vacante_id == v.id).count()
+    """B4: `candidatos` = activos de la vacante (== suma del embudo == Kanban filtrado); `nuevos` = de esos,
+    los creados en las últimas 24 h."""
+    base = conteos.postulaciones_visibles(db, v.cuenta_id, v.id)
+    total = base.count()
     hace_24h = datetime.now(timezone.utc) - timedelta(days=1)
-    nuevos = db.query(Postulacion).filter(
-        Postulacion.vacante_id == v.id, Postulacion.creado_en >= hace_24h
-    ).count()
+    nuevos = base.filter(Postulacion.creado_en >= hace_24h).count()
     return total, nuevos
 
 
@@ -89,7 +76,7 @@ def _salida(db: Session, v: Vacante) -> dict:
     colaboradores = []
     if v.colaboradores_ids:
         colaboradores = [n for (n,) in db.query(Usuario.nombre).filter(Usuario.id.in_(v.colaboradores_ids)).all()]
-    return vacante_dict(v, total, nuevos, _embudo(db, v.id), colaboradores)
+    return vacante_dict(v, total, nuevos, _embudo(db, v), colaboradores)
 
 
 def _con_logo(db: Session, salida: dict, v: Vacante) -> dict:

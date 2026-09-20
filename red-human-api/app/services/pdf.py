@@ -78,7 +78,7 @@ def pdf_carta_intencion(d: dict) -> bytes:
         ("Ubicación de trabajo", d["ubicacion"]),
         ("Jefe directo", d["jefe"]),
         ("Fecha de ingreso", d["fecha_ingreso"]),
-    ]
+    ] + ([("Duración", d["duracion"]), ("Fecha de término", d["fecha_termino"])] if d.get("fecha_termino") else [])
     ancho = pdf.w - pdf.l_margin - pdf.r_margin
     col1 = ancho * 0.4
     pdf.set_draw_color(221, 221, 221)
@@ -239,7 +239,7 @@ def pdf_contrato(d: dict) -> bytes:
     filas = [
         ("Puesto", d["puesto"]), ("Sueldo", d["sueldo"]), ("Tipo de contratación", d["tipo_contratacion"]),
         ("Fecha de ingreso", d["fecha_ingreso"]), ("Lugar de trabajo", d["ubicacion"]), ("Jefe directo", d["jefe"]),
-    ]
+    ] + ([("Duración", d["duracion"]), ("Fecha de término", d["fecha_termino"])] if d.get("fecha_termino") else [])
     for etiqueta, valor in filas:
         pdf.set_font(_FUENTE, "B", 11)
         pdf.cell(55, 7, _latin(etiqueta), border="B")
@@ -248,7 +248,11 @@ def pdf_contrato(d: dict) -> bytes:
     pdf.ln(4)
     clausulas = [
         ("PRIMERA. Objeto.", f"El Colaborador se obliga a prestar sus servicios personales subordinados a la Empresa en el puesto de {d['puesto']}, desempeñando las funciones propias del mismo con la diligencia y cuidado apropiados."),
-        ("SEGUNDA. Duración.", f"El presente contrato es de tipo {d['tipo_contratacion']} y surtirá efectos a partir del {d['fecha_ingreso']}, conforme a la Ley Federal del Trabajo."),
+        ("SEGUNDA. Duración.", (
+            f"El presente contrato es por tiempo determinado con una duración de {d['duracion']}, surtirá efectos a partir del {d['fecha_ingreso']} y concluirá el {d['fecha_termino']}, conforme a la Ley Federal del Trabajo."
+            if d.get("fecha_termino") else
+            f"El presente contrato es de tipo {d['tipo_contratacion']} y surtirá efectos a partir del {d['fecha_ingreso']}, conforme a la Ley Federal del Trabajo."
+        )),
         ("TERCERA. Salario.", f"La Empresa pagará al Colaborador un sueldo de {d['sueldo']}, en los términos y periodicidad que marca la Ley, cubriendo las prestaciones legales correspondientes."),
         ("CUARTA. Lugar y jornada.", f"El Colaborador prestará sus servicios en {d['ubicacion']}, bajo la supervisión de {d['jefe']}, dentro de la jornada legal aplicable."),
         ("QUINTA. Confidencialidad y datos personales.", "El Colaborador guardará confidencialidad sobre la información de la Empresa. Sus datos personales se tratan conforme al Aviso de Privacidad de la Empresa (LFPDPPP)."),

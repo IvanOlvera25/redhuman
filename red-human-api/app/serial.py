@@ -431,6 +431,9 @@ def postulacion_dict(p: Postulacion, detalle: bool = False) -> dict:
             "fechaIngreso": iso(exp.fecha_ingreso),
             "instruccionesIngreso": exp.instrucciones_ingreso or "",  # Fase 5
             "empresa": exp.empresa or "",  # 2026-09-19
+            "duracionContrato": exp.duracion_contrato,  # 2026-09-20 (B2): solo Tiempo determinado
+            "duracionUnidad": exp.duracion_unidad or "",
+            "fechaTermino": iso(exp.fecha_termino),  # calculada, nunca capturada
             "guardadasEn": iso(exp.condiciones_guardadas_en),
             # listo para generar documentos: puesto + sueldo + tipo + fecha (lo mínimo de una carta/contrato)
             "completas": bool(exp.puesto and exp.sueldo and exp.tipo_contratacion and exp.fecha_ingreso),
@@ -666,6 +669,14 @@ def documento_dict(d: Documento) -> dict:
         "tamano": d.tamano or 0,
         "subido": hace(d.subido_en) if d.subido_en else "",
         "revisadoPor": d.revisado_por or "",
+        # 2026-09-20 (B3): trazabilidad — solicitud (fecha/hora + canal), recepción (fecha/hora + canal), historial
+        "solicitadoEn": iso(d.solicitado_en),
+        "solicitadoCanal": d.solicitado_canal or "",
+        "solicitudes": list(d.solicitudes or []),
+        "recibidoEn": iso(d.recibido_en),
+        "recibidoCanal": d.recibido_canal or "",
+        # Estado simple para la pestaña «CV y documentos»: Pendiente | Recibido (recibido o digital en revisión)
+        "estadoSimple": "Recibido" if d.entregado else ("Rechazado" if d.estado == "rechazado" else "Pendiente"),
         "validacion": {
             "tipoDetectado": v.get("tipo_detectado"),
             "coincideTipo": v.get("coincide_tipo"),

@@ -47,6 +47,7 @@ import { PageHeader } from "@/components/dashboard/parts";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import { Aviso, BotonCopiar } from "@/components/dashboard/subida";
 import type { Vacante } from "@/lib/data";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   crearVacante,
@@ -176,8 +177,9 @@ export default function Vacantes() {
   }
 
   /** Navega a Candidatos filtrando por vacante + etapa (Punto 17). */
-  function navegarAEtapa(vacanteId: string, etapa: string) {
-    const params = new URLSearchParams({ vacante: vacanteId, etapa });
+  // B4: clic en un contador → vista de Candidatos con el filtro EXACTO (vacante y/o etapa)
+  function navegarAEtapa(vacanteId: string, etapa?: string) {
+    const params = new URLSearchParams({ vacante: vacanteId, ...(etapa ? { etapa } : {}) });
     router.push(`/dashboard/candidatos?${params.toString()}`);
   }
 
@@ -493,9 +495,16 @@ export default function Vacantes() {
               {/* Fase C: pie con candidatos + fechas */}
               <div className="mt-auto flex items-end justify-between border-t border-border-faint pt-4">
                 <div className="flex items-center gap-2 text-sm">
-                  <Users className="h-4 w-4 text-ink-3" />
-                  <span className="font-semibold tabular">{v.candidatos}</span>
-                  <span className="text-ink-3">candidatos</span>
+                  {/* B4: el total = activos de la vacante (misma fuente que el embudo y el Kanban); clic → Kanban filtrado */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); navegarAEtapa(v.id); }}
+                    className="flex items-center gap-2 rounded-md px-1 py-0.5 transition hover:bg-brand-soft hover:text-brand"
+                    title="Ver todos los candidatos activos de esta vacante"
+                  >
+                    <Users className="h-4 w-4 text-ink-3" />
+                    <span className="font-semibold tabular">{v.candidatos}</span>
+                    <span className="text-ink-3">candidatos</span>
+                  </button>
                   {v.nuevos > 0 && (
                     <span className="rounded-full bg-human-soft px-2 py-0.5 text-[11px] font-semibold text-human">
                       {v.nuevos} nuevos
@@ -561,10 +570,14 @@ export default function Vacantes() {
                     <Badge tone={estadoTone[v.estado]} dot>{v.estado}</Badge>
                   </td>
                   <td className="px-4 py-3">
-                    <div className="flex items-center gap-1 text-ink-2">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); navegarAEtapa(v.id); }}
+                      className="flex items-center gap-1 rounded-md px-1 text-ink-2 transition hover:bg-brand-soft hover:text-brand"
+                      title="Ver todos los candidatos activos de esta vacante"
+                    >
                       <Users className="h-3.5 w-3.5 text-ink-3" />
                       <span className="font-semibold">{v.candidatos}</span>
-                    </div>
+                    </button>
                     {v.embudo?.etapas && (
                       <div className="mt-1 flex flex-wrap gap-1">
                         {Object.entries(v.embudo.etapas)
@@ -1595,15 +1608,23 @@ function DetalleVacante({
           </Aviso>
         )}
 
-        {/* Embudo de esta vacante — conecta con el pipeline de candidatos */}
+        {/* Embudo de esta vacante — conecta con el pipeline de candidatos (B4: clic → Kanban filtrado por vacante + etapa) */}
         <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
           {["Prefiltro", "Entrevista IA", "Evaluación", "Entrevista Humana", "Contratación", "Onboarding"].map((e) => (
-            <div key={e} className="rounded-xl border border-border-soft bg-surface p-3 text-center">
+            <Link
+              key={e}
+              href={`/dashboard/candidatos?${new URLSearchParams({ vacante: v.id, etapa: e }).toString()}`}
+              className="rounded-xl border border-border-soft bg-surface p-3 text-center transition hover:border-brand hover:bg-brand-soft/40"
+              title={`Ver candidatos de esta vacante en ${nombreEtapa(e)}`}
+            >
               <p className="font-display text-xl font-bold tabular">{embudo[e] ?? 0}</p>
               <p className="mt-0.5 text-[11px] text-ink-3">{nombreEtapa(e)}</p>
-            </div>
+            </Link>
           ))}
         </div>
+        <p className="-mt-1 text-[11px] text-ink-3">
+          {Object.values(embudo).reduce((a, b) => a + b, 0)} candidatos activos en total · misma cuenta que el tablero de Candidatos.
+        </p>
 
         {liga && (
           <div className="flex items-center gap-2 rounded-xl border border-border-soft bg-surface-2 px-3.5 py-2.5">

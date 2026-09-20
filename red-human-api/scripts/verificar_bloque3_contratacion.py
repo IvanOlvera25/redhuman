@@ -96,7 +96,7 @@ with TestClient(app) as client:
     })
     check(r.status_code == 200 and r.json()["expedienteCondiciones"]["completas"] is True, "condiciones guardadas y completas")
     cond = r.json()["expedienteCondiciones"]
-    check(cond["empresa"] and cond["guardadasEn"], f"empresa por default = la visible de la vacante («{cond['empresa']}») y fecha de captura")
+    check(cond["empresa"] and cond["guardadasEn"], f"empresa por default = la razón social de la Cuenta (B2) («{cond['empresa']}») y fecha de captura")
 
     print("\n--- 3. Carta: vista previa + WhatsApp + correo con PDF adjunto ---")
     r = client.get(f"/contratacion/expedientes/{EXP}/carta-intencion")

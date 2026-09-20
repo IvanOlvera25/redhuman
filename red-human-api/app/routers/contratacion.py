@@ -287,7 +287,19 @@ def documento_para_adjunto(db: Session, e: Expediente, pie: str, nombre_archivo:
     return nuevo
 
 
+def _canal_recepcion(subido_por: str) -> str:
+    """B3: canal por el que llegó el archivo — whatsapp (webhook), liga (expediente público) o rh (tablero)."""
+    s = (subido_por or "").lower()
+    if s.startswith("whatsapp"):
+        return "whatsapp"
+    if s == "candidato":
+        return "liga"
+    return "rh"
+
+
 def _registrar_documento(db: Session, e: Expediente, doc: Documento, validado, subido_por: str) -> dict:
+    """Registra el archivo recibido (validación IA/Modo Prueba) y su trazabilidad (B3: `recibido_en`, `recibido_canal`).
+    B5: NUNCA toca `postulacion.etapa` — el candidato sigue en Contratación/Onboarding hasta que RH lo mueva."""
     titular = e.candidato.nombre if e.candidato else ""
     if modo_prueba_activo(db):
         # 2026-09-18 (Modo Prueba TOTAL): se salta el OCR/IA y cualquier PDF o imagen queda válido de inmediato.
@@ -308,6 +320,12 @@ def _registrar_documento(db: Session, e: Expediente, doc: Documento, validado, s
     doc.validacion = v.model_dump()
     doc.estado, doc.notas_ia = _resolver_estado(v, con_ia)
     doc.revisado_por = ""  # vuelve a quedar pendiente de revisión humana
+    if doc.entregado:  # B3: recibido (o digital en revisión) → fecha/hora y canal de recepción
+        doc.recibido_en = doc.subido_en
+        doc.recibido_canal = _canal_recepcion(subido_por)
+    else:
+        doc.recibido_en = None
+        doc.recibido_canal = ""
 
     _sincronizar_estado(e)
     registrar(
@@ -378,6 +396,13 @@ def marcar_documento(
     doc.revisado_por = u.nombre
     if datos.notas:
         doc.notas_ia = datos.notas
+    # B3: trazabilidad de recepción también en la revisión manual (físico → «fisico»; con archivo conserva su canal)
+    if doc.entregado and not doc.recibido_en:
+        doc.recibido_en = datetime.now(timezone.utc)
+        doc.recibido_canal = doc.recibido_canal or ("fisico" if not doc.archivo else "rh")
+    elif not doc.entregado:
+        doc.recibido_en = None
+        doc.recibido_canal = ""
 
     _sincronizar_estado(e)
     registrar(
@@ -458,7 +483,7 @@ async def recordatorio(
                    "fecha_limite": e.documentos_hasta, "nivel": nivel},
             override=override_de(notificar),
         )
-    registrar_recordatorio_enviado(db, e, nivel, u.nombre, resultados)
+    registrar_recordatorio_enviado(db, e, nivel, u.nombre, resultados)  # B3: también marca la solicitud por documento
     e.ultimo_recordatorio_en = datetime.now(timezone.utc)
     db.commit()
     return {"enviado": True, "pendientes": pendientes, "nivel": nivel, "tono": NIVELES_RECORDATORIO[nivel], "notificaciones": resultados, "expediente": expediente_dict(e)}
@@ -508,6 +533,8 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
         "puesto": col.puesto, "sueldo": col.salario, "tipo_contratacion": col.tipo_contratacion,
         "fecha_ingreso": e.fecha_ingreso.isoformat() if e.fecha_ingreso else None, "ubicacion": col.ubicacion,
         "jefe_directo": col.jefe_directo, "empresa": col.empresa, "cliente_id": col.cliente_id,
+        "duracion_contrato": e.duracion_contrato, "duracion_unidad": e.duracion_unidad or "",
+        "fecha_termino": e.fecha_termino.isoformat() if e.fecha_termino else None,
         "vacante": vac.codigo if vac else None, "expediente": e.id, "postulacion": e.postulacion.codigo if e.postulacion else None,
         "condiciones_guardadas_en": e.condiciones_guardadas_en.isoformat() if e.condiciones_guardadas_en else None,
         "alta_por": u.nombre, "alta_en": datetime.now(timezone.utc).isoformat(),
@@ -634,13 +661,17 @@ def _datos_carta_intencion(e: Expediente) -> dict:
     vac = e.postulacion.vacante if e.postulacion else None
     return {
         "nombre": c.nombre if c else "[Nombre del colaborador]",
-        "empresa": (nombre_empresa_candidato(vac) if vac else "") or "la empresa",
+        # B2: la empresa contratante es la razón social elegida en las condiciones; fallback a la visible de la vacante
+        "empresa": e.empresa or (nombre_empresa_candidato(vac) if vac else "") or "la empresa",
         "puesto": e.puesto or (vac.titulo if vac else "") or "el puesto",
         "sueldo": e.sueldo or "por definir",
         "tipo_contratacion": e.tipo_contratacion or "por definir",
         "ubicacion": e.ubicacion or (c.ubicacion if c else "") or "por definir",
         "jefe": e.jefe_directo or "por definir",
         "fecha_ingreso": _fecha_larga(e.fecha_ingreso),
+        # B2: vigencia de «Tiempo determinado» (duración capturada + fecha de término calculada)
+        "duracion": f"{e.duracion_contrato} {e.duracion_unidad}" if e.duracion_contrato and e.duracion_unidad else "",
+        "fecha_termino": _fecha_larga(e.fecha_termino) if e.fecha_termino else "",
         "hoy": _fecha_larga(datetime.now(timezone.utc)),
     }
 

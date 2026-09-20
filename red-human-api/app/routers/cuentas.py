@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..seed import slug_cuenta_unico
-from ..deps import cuenta_actual, usuario_admin
+from ..deps import cuenta_actual, usuario_actual, usuario_admin
 from ..models import ROLES, Cliente, Cuenta, Usuario, UsuarioCuenta, registrar
 from .auth import CORREO_RE, crear_usuario_basico
 
@@ -283,6 +283,28 @@ async def _guardar_logo(db: Session, cu: Cuenta, archivo: UploadFile, admin: Usu
 def obtener(db: Session = Depends(get_db), _: Usuario = Depends(usuario_admin), cuenta: Cuenta = Depends(cuenta_actual)):
     """Datos de la Cuenta activa del usuario (solo administradores)."""
     return _ficha_dict(cuenta, cuenta.id)
+
+
+@router.get("/actual/razones-sociales")
+def razones_sociales(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """2026-09-20 (B2): razones sociales con las que ESTA Cuenta puede contratar — la de la Cuenta (primero,
+    es la predeterminada) y las de sus Clientes activos. Es la ÚNICA lista válida para «Empresa contratante»
+    en las condiciones de contratación (nunca texto libre). Cualquier sesión de la Cuenta puede leerla."""
+    return razones_sociales_de(db, cuenta)
+
+
+def razones_sociales_de(db: Session, cuenta: Cuenta) -> list:
+    from ..models import Cliente
+
+    salida = [{"razonSocial": (cuenta.razon_social or cuenta.nombre_visible).strip(), "origen": "cuenta", "clienteId": None, "predeterminada": True}]
+    vistas = {salida[0]["razonSocial"].lower()}
+    for c in db.query(Cliente).filter(Cliente.cuenta_id == cuenta.id, Cliente.estado == "Activo").order_by(Cliente.nombre).all():
+        rs = (c.razon_social or "").strip()
+        if not rs or rs.lower() in vistas:
+            continue
+        vistas.add(rs.lower())
+        salida.append({"razonSocial": rs, "origen": "cliente", "clienteId": c.id, "predeterminada": False})
+    return salida
 
 
 @router.patch("/actual")

@@ -97,14 +97,21 @@ class VacanteGenerada(BaseModel):
     occ: BloquePlataforma = Field(description="Publicación para OCC Mundial.")
     linkedin: BloquePlataforma = Field(description="Publicación para LinkedIn.")
     portal: BloquePlataforma = Field(description="Publicación para el portal propio de Red Human.")
-    preguntas_filtro: List[PreguntaFiltro] = Field(description="4 a 6 preguntas de prefiltro ligadas a los requisitos indispensables.")
+    preguntas_filtro: List[PreguntaFiltro] = Field(
+        description=(
+            "4 a 6 preguntas de prefiltro WEB ligadas a los requisitos indispensables. TODAS cerradas: se responden "
+            "ÚNICAMENTE con Sí / No / Parcial (tipo 'si_no'). Prohibido texto libre: nada de «Describe», «Explica», "
+            "«Cuéntanos», «Menciona». Un requisito numérico se convierte en umbral («¿Tienes al menos 2 años de experiencia en caja?»)."
+        )
+    )
     # 2026-09-16 (prefiltro dual): la IA elige SOLO los puntos críticos que vale la pena confirmar por chat.
     preguntas_filtro_whatsapp: List[PreguntaFiltro] = Field(
         default_factory=list,
         description=(
             "2 a 3 preguntas para WhatsApp que CONFIRMAN solo los puntos críticos (experiencia, ubicación/"
             "traslado, disponibilidad o el requisito eliminatorio principal), en tono conversacional; nunca "
-            "repiten toda la lista web."
+            "repiten toda la lista web. UNA pregunta por criterio: prohibido preguntar dos cosas en la misma frase "
+            "(años de experiencia Y uso de un software van en dos preguntas). Aquí sí se aceptan respuestas abiertas."
         ),
     )
 
@@ -149,11 +156,15 @@ _REGLAS = (
     "apariencia, origen étnico, condición de salud u orientación. Si el usuario los incluyó en los requisitos, "
     "reescríbelos en términos de competencias y regístralo en avisos_cumplimiento.\n"
     "4. Usa lenguaje incluyente con la forma «(a)» del español mexicano (Cajero(a), Repartidor(a)).\n"
-    "5. Las preguntas de prefiltro salen PRINCIPALMENTE de los requisitos indispensables (primero los capturados "
-    "por RH); deben responderse en una línea y marcar descarta=true SOLO cuando el requisito sea realmente "
-    "indispensable. Además, en `preguntas_filtro_whatsapp` elige SOLO 2 o 3 puntos críticos (experiencia, "
-    "ubicación/traslado, disponibilidad o el requisito eliminatorio principal) redactados como se preguntan "
-    "en una conversación de WhatsApp; el prefiltro web ya cubre el resto.\n"
+    "5. PREFILTRO WEB (`preguntas_filtro`): salen PRINCIPALMENTE de los requisitos indispensables (primero los "
+    "capturados por RH) y marcan descarta=true SOLO cuando el requisito sea realmente indispensable. REGLA ESTRICTA: "
+    "TODAS son preguntas CERRADAS que se responden únicamente con Sí / No / Parcial (tipo 'si_no'); está PROHIBIDO "
+    "el texto libre (no uses «Describe», «Explica», «Cuéntanos», «Menciona», «Detalla», «¿Qué…?», «¿Cómo…?»). Un "
+    "requisito numérico se pregunta como umbral cerrado («¿Tienes al menos 2 años de experiencia en caja?»).\n"
+    "5b. PREFILTRO WHATSAPP (`preguntas_filtro_whatsapp`): SOLO 2 o 3 puntos críticos (experiencia, ubicación/"
+    "traslado, disponibilidad o el requisito eliminatorio principal) redactados como en una conversación de "
+    "WhatsApp. REGLA ESTRICTA: UNA pregunta por criterio — prohibidas las preguntas compuestas (nunca «¿cuántos "
+    "años tienes de experiencia y has usado SAP?»: son dos preguntas). Aquí sí se permiten respuestas abiertas.\n"
     "6. Cada plataforma tiene su propio tono y formato: no repitas el mismo texto en las tres.\n"
     "7. Todo lo que escribas en `copy` y `page` lo lee el candidato. Nunca uses etiquetas internas como "
     "«indicado por RH», «según RH» o «no especificado»: escribe el sueldo directo («$10,500 mensuales») solo "
@@ -223,11 +234,72 @@ def _asegurar_capturado(salida: VacanteGenerada, ficha: FichaVacante) -> Vacante
     if not ficha.ubicacion:
         avisos.append("Ubicación no capturada: RH debe confirmarla antes de publicar.")
     salida.avisos_cumplimiento = avisos
-    for p in [*salida.preguntas_filtro, *salida.preguntas_filtro_whatsapp]:
-        if p.tipo == "numero" and not p.opciones:
-            p.opciones = _RANGO_ANOS_GENERICO
     if not salida.preguntas_filtro_whatsapp:
         salida.preguntas_filtro_whatsapp = puntos_criticos_whatsapp(salida.preguntas_filtro)
+    salida.preguntas_filtro = cerrar_preguntas_web(salida.preguntas_filtro)
+    salida.preguntas_filtro_whatsapp = separar_preguntas_whatsapp(salida.preguntas_filtro_whatsapp)
+    for p in salida.preguntas_filtro_whatsapp:
+        if p.tipo == "numero" and not p.opciones:
+            p.opciones = _RANGO_ANOS_GENERICO
+    return salida
+
+
+# 2026-09-20 (Bloque 1): reglas de prefiltro garantizadas en código, no solo en el prompt.
+_VERBOS_ABIERTOS = re.compile(r"^\s*¿?\s*(describe|explica|cu[eé]ntanos|cu[eé]ntame|menciona|detalla|platícanos|platica|qu[eé]\s|c[oó]mo\s|por qu[eé]\s|cu[aá]l(es)?\s)", re.IGNORECASE)
+OPCIONES_CERRADAS = ["Sí", "No", "Parcial"]
+
+
+def _pregunta_cerrada_desde_requisito(valida: str, pregunta: str) -> str:
+    base = (valida or "").strip().rstrip(".")
+    if base:
+        return f"¿Cumples con este requisito: {base}?"
+    limpio = re.sub(r"^\s*¿?\s*(describe|explica|cu[eé]ntanos|cu[eé]ntame|menciona|detalla|platícanos|platica)\s*", "", pregunta, flags=re.IGNORECASE).strip(" ?¿.")
+    return f"¿Cuentas con {limpio[0].lower() + limpio[1:] if limpio else 'este requisito'}?"
+
+
+def cerrar_preguntas_web(preguntas: List[PreguntaFiltro]) -> List[PreguntaFiltro]:
+    """Prefiltro WEB: todas cerradas (Sí / No / Parcial). Una pregunta abierta o numérica se reescribe como
+    umbral/cumplimiento del requisito que valida; el tipo queda 'si_no' con opciones fijas."""
+    salida: List[PreguntaFiltro] = []
+    for p in preguntas:
+        q = (p.pregunta or "").strip()
+        if p.tipo in ("texto_corto",) or _VERBOS_ABIERTOS.match(q) or not q.endswith("?"):
+            q = _pregunta_cerrada_desde_requisito(p.valida, q)
+        elif p.tipo == "numero":
+            # «¿Cuántos años de experiencia tienes…?» → umbral cerrado con la respuesta esperada
+            umbral = re.sub(r"[^0-9]", " ", p.respuesta_esperada or "").split()
+            n = umbral[0] if umbral else ""
+            tema = re.sub(r"^\s*¿?\s*cu[aá]ntos?\s+(años|anos|meses)\s+(de\s+)?", "", q, flags=re.IGNORECASE)
+            tema = re.sub(r"\b(tienes|llevas|cuentas|posees)\b\s*", "", tema, flags=re.IGNORECASE)
+            tema = re.sub(r"\s{2,}", " ", tema).strip(" ?¿")
+            unidad = "año" if n == "1" else "años"
+            q = f"¿Tienes al menos {n} {unidad} de {tema}?" if n and tema else _pregunta_cerrada_desde_requisito(p.valida, q)
+        if not q.startswith("¿"):
+            q = "¿" + q
+        p.pregunta = q
+        p.tipo = "si_no"
+        p.opciones = list(OPCIONES_CERRADAS)
+        if not p.respuesta_esperada or p.respuesta_esperada.lower() not in ("sí", "si", "no", "parcial"):
+            p.respuesta_esperada = "Sí"
+        salida.append(p)
+    return salida
+
+
+def separar_preguntas_whatsapp(preguntas: List[PreguntaFiltro]) -> List[PreguntaFiltro]:
+    """Prefiltro WHATSAPP: una pregunta por criterio. Una pregunta compuesta («¿…? ¿…?» o «¿… y …?» con dos
+    interrogaciones) se divide en preguntas independientes que validan el mismo requisito."""
+    salida: List[PreguntaFiltro] = []
+    for p in preguntas:
+        partes = [x.strip() for x in re.split(r"\?\s*(?=¿|[A-ZÁÉÍÓÚ])", (p.pregunta or "").strip()) if x.strip()]
+        partes = [x if x.endswith("?") else x + "?" for x in partes]
+        if len(partes) <= 1:
+            salida.append(p)
+            continue
+        for i, parte in enumerate(partes):
+            salida.append(PreguntaFiltro(
+                pregunta=parte if parte.startswith("¿") else "¿" + parte, tipo=p.tipo if i == 0 else "texto_corto", valida=p.valida,
+                respuesta_esperada=p.respuesta_esperada if i == 0 else "", descarta=p.descarta if i == 0 else False, opciones=p.opciones if i == 0 else [],
+            ))
     return salida
 
 
@@ -665,7 +737,7 @@ def prefiltro_turno(
             "Eres el agente de prefiltro de Red Human AI, hablas por WhatsApp con candidatos en México.\n"
             + "\n".join(lineas_contexto) + "\n"
             f"Criterios de prefiltro:\n{criterios_prefiltro(preguntas)}\n\n"
-            "Reglas: (1) una sola pregunta por mensaje, tono cálido y breve — hablas como un reclutador "
+            "Reglas: (1) una sola pregunta por mensaje y UN solo criterio por pregunta (nunca compuestas: «¿cuántos años tienes y has usado SAP?» son dos mensajes), tono cálido y breve — hablas como un reclutador "
             "humano, NO como un cuestionario robótico;" + saludo + " (2) recorre los criterios en orden "
             "y no repitas los que ya quedaron contestados — no es necesario agotarlos todos: en cuanto "
             "puedas clasificar con confianza, cierra antes (ver regla 5); (3) si el candidato pregunta "

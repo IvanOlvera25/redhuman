@@ -79,6 +79,8 @@ import {
   fetchMensajes,
   fetchVacantes,
   guardarCondicionesContratacion,
+  fetchRazonesSociales,
+  type RazonSocial,
   reiniciarPostulacionPrueba,
   type NotificarAccion,
   marcarEntrevistaHumanaRealizada,
@@ -162,6 +164,39 @@ const FILTROS_ESTADO: { key: FiltroEstado; label: string }[] = [
 const ETAPAS_YA_CONTRATADO: EtapaCandidato[] = ["Contratación", "Onboarding"];
 
 const TIPOS_CONTRATACION = ["Tiempo indeterminado", "Tiempo determinado", "Por obra o proyecto", "Honorarios"];
+// 2026-09-20 (B3): formato de la trazabilidad de documentos
+function fechaHoraCorta(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("es-MX", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+function canalLegible(canal: string): string {
+  return canal
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map((x) => ({ whatsapp: "WhatsApp", correo: "Correo", liga: "Liga pública", rh: "RH (tablero)", fisico: "Entrega física" }[x] ?? x))
+    .join(" + ") || "—";
+}
+// 2026-09-20 (B2): «Tiempo determinado» pide duración + unidad; la fecha de término se calcula (aquí solo como
+// vista previa; la que vale es la del servidor, `expedienteCondiciones.fechaTermino`).
+const UNIDADES_DURACION = ["días", "meses", "años"] as const;
+function fechaTerminoLocal(fechaIngreso: string, duracion: number, unidad: string): string {
+  if (!fechaIngreso || !duracion || duracion <= 0) return "";
+  const [y, m, d] = fechaIngreso.split("-").map(Number);
+  if (!y || !m || !d) return "";
+  let fin: Date;
+  if (unidad === "días") fin = new Date(Date.UTC(y, m - 1, d + duracion));
+  else {
+    const meses = unidad === "años" ? duracion * 12 : duracion;
+    const total = m - 1 + meses;
+    const anio = y + Math.floor(total / 12);
+    const mes = total % 12;
+    const ultimo = new Date(Date.UTC(anio, mes + 1, 0)).getUTCDate();
+    fin = new Date(Date.UTC(anio, mes, Math.min(d, ultimo)));
+  }
+  return fin.toISOString().slice(0, 10);
+}
 const MODALIDADES_ENTREVISTA_HUMANA: ModalidadEntrevistaHumana[] = ["Presencial", "Videollamada", "Llamada"];
 
 /** Usado tanto por PanelEntrevistaHumana (agenda/resultado) como por PestanaEvaluaciones
@@ -356,6 +391,7 @@ function CandidatosContenido() {
   const datosFiltrados = useMemo(() => {
     let res = datos.filter((c) => {
       if (filtroVacante && c.vacanteId !== filtroVacante) return false;
+      if (columnaResaltada && c.etapa !== columnaResaltada) return false;  // B4: ?etapa= es un filtro exacto
       if (!coincideEstado(c, filtroEstado)) return false;
       if (
         busqueda.trim() &&
@@ -414,6 +450,7 @@ function CandidatosContenido() {
 
     return res;
   }, [
+    columnaResaltada,
     datos,
     filtroVacante,
     filtroEstado,
@@ -778,13 +815,14 @@ function CandidatosContenido() {
       {columnaResaltada && (
         <div className="mt-3 flex items-center justify-between rounded-xl border border-brand/40 bg-brand-soft/40 px-4 py-2 text-xs text-brand">
           <span>
-            Mostrando etapa enfocada: <strong>{columnaResaltada}</strong>
+            Filtro por etapa: <strong>{nombreEtapa(columnaResaltada)}</strong>
+            {filtroVacante ? <> · vacante <strong>{filtroVacante}</strong></> : null} · {datosFiltrados.length} candidato(s)
           </span>
           <button
             onClick={() => setColumnaResaltada(null)}
             className="flex items-center gap-1 font-semibold hover:underline"
           >
-            <X className="h-3.5 w-3.5" /> Quitar enfoque
+            <X className="h-3.5 w-3.5" /> Quitar filtro de etapa
           </button>
         </div>
       )}
@@ -812,8 +850,8 @@ function CandidatosContenido() {
 
       {/* VISTA 1: PIPELINE (Kanban) */}
       {!cargando && vista === "pipeline" && (
-        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-          {etapas.map((etapa) => {
+        <div className={cn("mt-6 grid gap-4", columnaResaltada ? "grid-cols-1 sm:max-w-md" : "sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6")}>
+          {etapas.filter((etapa) => !columnaResaltada || etapa === columnaResaltada).map((etapa) => {
             const cols = datosFiltrados.filter((c) => c.etapa === etapa);
             const esResaltada = columnaResaltada === etapa;
 
@@ -2549,6 +2587,17 @@ function PestanaDocumentos({
 }) {
   const puedeDecidir = usePuedeDecidir();
   const [cargandoCV, setCargandoCV] = useState(false);
+  // 2026-09-20 (B3): documentos requeridos del expediente con su trazabilidad (solicitud → recepción)
+  const [expediente, setExpediente] = useState<NuevoIngreso | null>(null);
+  const cargarExpediente = useCallback(async () => {
+    if (!live || !c.expedienteId) return;
+    const e = await fetchExpediente(c.expedienteId);
+    if (e) setExpediente(e);
+  }, [c.expedienteId, live]);
+  useEffect(() => {
+    void cargarExpediente();
+  }, [cargarExpediente]);
+  usePolling(cargarExpediente, 10000);
 
   const cv = (c.cvDatos || {}) as Record<string, unknown>;
   const habilidades = (cv.habilidades as string[]) || [];
@@ -2645,6 +2694,82 @@ function PestanaDocumentos({
                 <li key={i} className="text-xs text-ink-3">• Dato faltante: {df}</li>
               ))}
             </ul>
+          )}
+        </div>
+      )}
+
+      {/* 2026-09-20 (B3): trazabilidad de los documentos requeridos del expediente */}
+      {c.expedienteId != null && (
+        <div>
+          <Eyebrow>Documentos requeridos · trazabilidad</Eyebrow>
+          {!expediente ? (
+            <p className="mt-2 text-xs text-ink-3">Cargando expediente…</p>
+          ) : (expediente.documentos ?? []).length === 0 ? (
+            <p className="mt-2 text-xs text-ink-3">El expediente todavía no tiene documentos requeridos.</p>
+          ) : (
+            <div className="scroll-x mt-2 rounded-2xl border border-border-soft">
+              <table className="w-full min-w-[640px] text-left text-xs">
+                <thead className="bg-surface-2 text-[11px] uppercase tracking-wide text-ink-3">
+                  <tr>
+                    <th className="px-3 py-2 font-semibold">Documento</th>
+                    <th className="px-3 py-2 font-semibold">Solicitado</th>
+                    <th className="px-3 py-2 font-semibold">Canal</th>
+                    <th className="px-3 py-2 font-semibold">Recibido</th>
+                    <th className="px-3 py-2 font-semibold">Estado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(expediente.documentos ?? []).map((d) => {
+                    const estado = d.estadoSimple ?? (d.estado === "recibido" || (d.estado === "revision" && d.tieneArchivo) ? "Recibido" : d.estado === "rechazado" ? "Rechazado" : "Pendiente");
+                    const solicitudes = d.solicitudes ?? [];
+                    return (
+                      <tr key={d.nombre} className="border-t border-border-soft align-top">
+                        <td className="px-3 py-2">
+                          <p className="font-semibold text-ink">{d.nombre}</p>
+                          {d.obligatorio === false && <p className="text-[11px] text-ink-3">Opcional</p>}
+                        </td>
+                        <td className="px-3 py-2 text-ink-2">
+                          {d.solicitadoEn ? (
+                            <>
+                              <p>{fechaHoraCorta(d.solicitadoEn)}</p>
+                              {solicitudes.length > 1 && (
+                                <p className="text-[11px] text-ink-3" title={solicitudes.map((s) => `${s.tipo === "recordatorio" ? "Recordatorio" : "Solicitud"} · ${fechaHoraCorta(s.en)} · ${canalLegible(s.canal)}`).join("\n")}>
+                                  +{solicitudes.length - 1} recordatorio{solicitudes.length - 1 === 1 ? "" : "s"} · último {fechaHoraCorta(solicitudes[solicitudes.length - 1].en)}
+                                </p>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-ink-3">Sin solicitar</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-ink-2">{d.solicitadoCanal ? canalLegible(d.solicitadoCanal) : "—"}</td>
+                        <td className="px-3 py-2 text-ink-2">
+                          {d.recibidoEn ? (
+                            <>
+                              <p>{fechaHoraCorta(d.recibidoEn)}</p>
+                              <p className="text-[11px] text-ink-3">por {canalLegible(d.recibidoCanal || "")}{d.archivo ? ` · ${d.archivo}` : ""}</p>
+                            </>
+                          ) : (
+                            <span className="text-ink-3">—</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2">
+                          <span
+                            className={cn(
+                              "inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold",
+                              estado === "Recibido" ? "bg-good-soft text-good" : estado === "Rechazado" ? "bg-bad-soft text-bad" : "bg-warn-soft text-warn",
+                            )}
+                          >
+                            {estado}
+                          </span>
+                          {estado === "Recibido" && d.estado === "revision" && <p className="mt-0.5 text-[11px] text-ink-3">En revisión de RH</p>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}
@@ -4103,7 +4228,25 @@ function PanelContratacion({
   const [ubicacion, setUbicacion] = useState(cond?.ubicacion ?? "");
   const [jefe, setJefe] = useState(cond?.jefeDirecto ?? "");
   const [instrucciones, setInstrucciones] = useState(cond?.instruccionesIngreso ?? "");
-  const [empresa, setEmpresa] = useState(cond?.empresa ?? c.empresaVisible ?? "");
+  const [empresa, setEmpresa] = useState(cond?.empresa ?? "");
+  // B2: Select de razones sociales de la Cuenta (predeterminada = la de la Cuenta); nunca texto libre
+  const [razones, setRazones] = useState<RazonSocial[]>([]);
+  const [duracion, setDuracion] = useState<string>(cond?.duracionContrato ? String(cond.duracionContrato) : "");
+  const [unidad, setUnidad] = useState<string>(cond?.duracionUnidad || "meses");
+  const esDeterminado = tipo === "Tiempo determinado";
+  const fechaTerminoPreview = esDeterminado ? fechaTerminoLocal(fechaIngreso, Number(duracion), unidad) : "";
+  useEffect(() => {
+    let vivo = true;
+    fetchRazonesSociales().then((lista) => {
+      if (!vivo || !lista) return;
+      setRazones(lista);
+      // precarga la razón social de la Cuenta si el expediente aún no tiene una válida
+      setEmpresa((actual) => (actual && lista.some((x) => x.razonSocial === actual) ? actual : lista.find((x) => x.predeterminada)?.razonSocial ?? lista[0]?.razonSocial ?? ""));
+    });
+    return () => {
+      vivo = false;
+    };
+  }, []);
   const [guardando, setGuardando] = useState(false);
   // 2026-09-19 (Bloque 3): vista previa en la misma pantalla de carta / contrato con 3 acciones
   const [docPreview, setDocPreview] = useState<null | "carta" | "contrato">(null);
@@ -4138,6 +4281,7 @@ function PanelContratacion({
   usePolling(cargarExpediente, 8000);
 
   async function guardar() {
+    if (esDeterminado && (!duracion || Number(duracion) <= 0)) return setAviso({ tono: "error", texto: "Tiempo determinado: captura la duración del contrato (número mayor a cero)." });
     setGuardando(true);
     const r = await guardarCondicionesContratacion(c.id, {
       puesto,
@@ -4148,6 +4292,8 @@ function PanelContratacion({
       jefeDirecto: jefe,
       instruccionesIngreso: instrucciones,
       empresa,
+      duracionContrato: esDeterminado ? Number(duracion) : null,
+      duracionUnidad: esDeterminado ? unidad : "",
     });
     setGuardando(false);
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
@@ -4211,9 +4357,63 @@ function PanelContratacion({
             className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
           />
         </label>
+        {esDeterminado && (
+          <>
+            {/* B2: duración (número + unidad) → fecha de término calculada, nunca capturada */}
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Duración del contrato</span>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  value={duracion}
+                  onChange={(e) => setDuracion(e.target.value)}
+                  placeholder="3"
+                  className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                />
+                <select
+                  value={unidad}
+                  onChange={(e) => setUnidad(e.target.value)}
+                  className="h-10 flex-1 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                >
+                  {UNIDADES_DURACION.map((u) => (
+                    <option key={u} value={u}>{u}</option>
+                  ))}
+                </select>
+              </div>
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Fecha de término</span>
+              <input
+                type="date"
+                value={fechaTerminoPreview || (cond?.fechaTermino ? cond.fechaTermino.slice(0, 10) : "")}
+                readOnly
+                disabled
+                title="Se calcula automáticamente: fecha de ingreso + duración"
+                className="h-10 rounded-xl border border-border-soft bg-surface-2 px-3 text-sm text-ink-2 outline-none"
+              />
+              <span className="text-[11px] text-ink-3">Calculada: fecha de ingreso + duración.</span>
+            </label>
+          </>
+        )}
         <CampoTexto label="Ubicación" value={ubicacion} onChange={setUbicacion} />
         <CampoTexto label="Jefe directo" value={jefe} onChange={setJefe} />
-        <CampoTexto label="Empresa contratante" value={empresa} onChange={setEmpresa} placeholder={c.empresaVisible || "Empresa"} />
+        <label className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium text-ink-2">Empresa contratante</span>
+          <select
+            value={empresa}
+            onChange={(e) => setEmpresa(e.target.value)}
+            className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+          >
+            {razones.length === 0 && <option value={empresa}>{empresa || "Cargando razones sociales…"}</option>}
+            {razones.map((r) => (
+              <option key={`${r.origen}-${r.clienteId ?? 0}`} value={r.razonSocial}>
+                {r.razonSocial}{r.origen === "cuenta" ? " (Cuenta)" : " (Cliente)"}
+              </option>
+            ))}
+          </select>
+          <span className="text-[11px] text-ink-3">Solo razones sociales configuradas en la Cuenta (Configuración → Cuenta / Clientes).</span>
+        </label>
         {/* Fase 5: se mandan por WhatsApp/correo automáticamente al dar de alta (evento instrucciones_ingreso) */}
         <label className="flex flex-col gap-1.5 sm:col-span-2">
           <span className="text-xs font-medium text-ink-2">Instrucciones de ingreso (primer día)</span>
@@ -4259,7 +4459,13 @@ function PanelContratacion({
             <FileCheck2 className="h-4 w-4" /> Generar contrato
           </Button>
           {c.etapa === "Contratación" && (
-            <Button size="sm" className="ml-auto" onClick={() => enviarOnboarding()} disabled={Boolean(ocupado)}>
+            <Button
+              size="sm"
+              className="ml-auto"
+              onClick={() => enviarOnboarding()}
+              disabled={Boolean(ocupado)}
+              title="B5: recibir o subir documentos nunca cambia la etapa; este botón es la única forma de pasar a Onboarding"
+            >
               Enviar a Onboarding
             </Button>
           )}

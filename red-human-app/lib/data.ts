@@ -163,6 +163,10 @@ export interface Candidato {
     instruccionesIngreso?: string;
     /** 2026-09-19 (Bloque 3): empresa contratante y estado de captura. */
     empresa?: string;
+    /** 2026-09-20 (B2): vigencia de «Tiempo determinado» (duración capturada, término calculado por el servidor). */
+    duracionContrato?: number | null;
+    duracionUnidad?: string;
+    fechaTermino?: string | null;
     guardadasEn?: string | null;
     completas?: boolean;
   } | null;
