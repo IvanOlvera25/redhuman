@@ -508,6 +508,8 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
         "puesto": col.puesto, "sueldo": col.salario, "tipo_contratacion": col.tipo_contratacion,
         "fecha_ingreso": e.fecha_ingreso.isoformat() if e.fecha_ingreso else None, "ubicacion": col.ubicacion,
         "jefe_directo": col.jefe_directo, "empresa": col.empresa, "cliente_id": col.cliente_id,
+        "duracion_contrato": e.duracion_contrato, "duracion_unidad": e.duracion_unidad or "",
+        "fecha_termino": e.fecha_termino.isoformat() if e.fecha_termino else None,
         "vacante": vac.codigo if vac else None, "expediente": e.id, "postulacion": e.postulacion.codigo if e.postulacion else None,
         "condiciones_guardadas_en": e.condiciones_guardadas_en.isoformat() if e.condiciones_guardadas_en else None,
         "alta_por": u.nombre, "alta_en": datetime.now(timezone.utc).isoformat(),
@@ -634,13 +636,17 @@ def _datos_carta_intencion(e: Expediente) -> dict:
     vac = e.postulacion.vacante if e.postulacion else None
     return {
         "nombre": c.nombre if c else "[Nombre del colaborador]",
-        "empresa": (nombre_empresa_candidato(vac) if vac else "") or "la empresa",
+        # B2: la empresa contratante es la razón social elegida en las condiciones; fallback a la visible de la vacante
+        "empresa": e.empresa or (nombre_empresa_candidato(vac) if vac else "") or "la empresa",
         "puesto": e.puesto or (vac.titulo if vac else "") or "el puesto",
         "sueldo": e.sueldo or "por definir",
         "tipo_contratacion": e.tipo_contratacion or "por definir",
         "ubicacion": e.ubicacion or (c.ubicacion if c else "") or "por definir",
         "jefe": e.jefe_directo or "por definir",
         "fecha_ingreso": _fecha_larga(e.fecha_ingreso),
+        # B2: vigencia de «Tiempo determinado» (duración capturada + fecha de término calculada)
+        "duracion": f"{e.duracion_contrato} {e.duracion_unidad}" if e.duracion_contrato and e.duracion_unidad else "",
+        "fecha_termino": _fecha_larga(e.fecha_termino) if e.fecha_termino else "",
         "hoy": _fecha_larga(datetime.now(timezone.utc)),
     }
 

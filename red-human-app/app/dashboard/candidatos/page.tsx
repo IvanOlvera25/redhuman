@@ -79,6 +79,8 @@ import {
   fetchMensajes,
   fetchVacantes,
   guardarCondicionesContratacion,
+  fetchRazonesSociales,
+  type RazonSocial,
   reiniciarPostulacionPrueba,
   type NotificarAccion,
   marcarEntrevistaHumanaRealizada,
@@ -162,6 +164,25 @@ const FILTROS_ESTADO: { key: FiltroEstado; label: string }[] = [
 const ETAPAS_YA_CONTRATADO: EtapaCandidato[] = ["Contratación", "Onboarding"];
 
 const TIPOS_CONTRATACION = ["Tiempo indeterminado", "Tiempo determinado", "Por obra o proyecto", "Honorarios"];
+// 2026-09-20 (B2): «Tiempo determinado» pide duración + unidad; la fecha de término se calcula (aquí solo como
+// vista previa; la que vale es la del servidor, `expedienteCondiciones.fechaTermino`).
+const UNIDADES_DURACION = ["días", "meses", "años"] as const;
+function fechaTerminoLocal(fechaIngreso: string, duracion: number, unidad: string): string {
+  if (!fechaIngreso || !duracion || duracion <= 0) return "";
+  const [y, m, d] = fechaIngreso.split("-").map(Number);
+  if (!y || !m || !d) return "";
+  let fin: Date;
+  if (unidad === "días") fin = new Date(Date.UTC(y, m - 1, d + duracion));
+  else {
+    const meses = unidad === "años" ? duracion * 12 : duracion;
+    const total = m - 1 + meses;
+    const anio = y + Math.floor(total / 12);
+    const mes = total % 12;
+    const ultimo = new Date(Date.UTC(anio, mes + 1, 0)).getUTCDate();
+    fin = new Date(Date.UTC(anio, mes, Math.min(d, ultimo)));
+  }
+  return fin.toISOString().slice(0, 10);
+}
 const MODALIDADES_ENTREVISTA_HUMANA: ModalidadEntrevistaHumana[] = ["Presencial", "Videollamada", "Llamada"];
 
 /** Usado tanto por PanelEntrevistaHumana (agenda/resultado) como por PestanaEvaluaciones
@@ -4103,7 +4124,25 @@ function PanelContratacion({
   const [ubicacion, setUbicacion] = useState(cond?.ubicacion ?? "");
   const [jefe, setJefe] = useState(cond?.jefeDirecto ?? "");
   const [instrucciones, setInstrucciones] = useState(cond?.instruccionesIngreso ?? "");
-  const [empresa, setEmpresa] = useState(cond?.empresa ?? c.empresaVisible ?? "");
+  const [empresa, setEmpresa] = useState(cond?.empresa ?? "");
+  // B2: Select de razones sociales de la Cuenta (predeterminada = la de la Cuenta); nunca texto libre
+  const [razones, setRazones] = useState<RazonSocial[]>([]);
+  const [duracion, setDuracion] = useState<string>(cond?.duracionContrato ? String(cond.duracionContrato) : "");
+  const [unidad, setUnidad] = useState<string>(cond?.duracionUnidad || "meses");
+  const esDeterminado = tipo === "Tiempo determinado";
+  const fechaTerminoPreview = esDeterminado ? fechaTerminoLocal(fechaIngreso, Number(duracion), unidad) : "";
+  useEffect(() => {
+    let vivo = true;
+    fetchRazonesSociales().then((lista) => {
+      if (!vivo || !lista) return;
+      setRazones(lista);
+      // precarga la razón social de la Cuenta si el expediente aún no tiene una válida
+      setEmpresa((actual) => (actual && lista.some((x) => x.razonSocial === actual) ? actual : lista.find((x) => x.predeterminada)?.razonSocial ?? lista[0]?.razonSocial ?? ""));
+    });
+    return () => {
+      vivo = false;
+    };
+  }, []);
   const [guardando, setGuardando] = useState(false);
   // 2026-09-19 (Bloque 3): vista previa en la misma pantalla de carta / contrato con 3 acciones
   const [docPreview, setDocPreview] = useState<null | "carta" | "contrato">(null);
@@ -4138,6 +4177,7 @@ function PanelContratacion({
   usePolling(cargarExpediente, 8000);
 
   async function guardar() {
+    if (esDeterminado && (!duracion || Number(duracion) <= 0)) return setAviso({ tono: "error", texto: "Tiempo determinado: captura la duración del contrato (número mayor a cero)." });
     setGuardando(true);
     const r = await guardarCondicionesContratacion(c.id, {
       puesto,
@@ -4148,6 +4188,8 @@ function PanelContratacion({
       jefeDirecto: jefe,
       instruccionesIngreso: instrucciones,
       empresa,
+      duracionContrato: esDeterminado ? Number(duracion) : null,
+      duracionUnidad: esDeterminado ? unidad : "",
     });
     setGuardando(false);
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
@@ -4211,9 +4253,63 @@ function PanelContratacion({
             className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
           />
         </label>
+        {esDeterminado && (
+          <>
+            {/* B2: duración (número + unidad) → fecha de término calculada, nunca capturada */}
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Duración del contrato</span>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  value={duracion}
+                  onChange={(e) => setDuracion(e.target.value)}
+                  placeholder="3"
+                  className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                />
+                <select
+                  value={unidad}
+                  onChange={(e) => setUnidad(e.target.value)}
+                  className="h-10 flex-1 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                >
+                  {UNIDADES_DURACION.map((u) => (
+                    <option key={u} value={u}>{u}</option>
+                  ))}
+                </select>
+              </div>
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Fecha de término</span>
+              <input
+                type="date"
+                value={fechaTerminoPreview || (cond?.fechaTermino ? cond.fechaTermino.slice(0, 10) : "")}
+                readOnly
+                disabled
+                title="Se calcula automáticamente: fecha de ingreso + duración"
+                className="h-10 rounded-xl border border-border-soft bg-surface-2 px-3 text-sm text-ink-2 outline-none"
+              />
+              <span className="text-[11px] text-ink-3">Calculada: fecha de ingreso + duración.</span>
+            </label>
+          </>
+        )}
         <CampoTexto label="Ubicación" value={ubicacion} onChange={setUbicacion} />
         <CampoTexto label="Jefe directo" value={jefe} onChange={setJefe} />
-        <CampoTexto label="Empresa contratante" value={empresa} onChange={setEmpresa} placeholder={c.empresaVisible || "Empresa"} />
+        <label className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium text-ink-2">Empresa contratante</span>
+          <select
+            value={empresa}
+            onChange={(e) => setEmpresa(e.target.value)}
+            className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+          >
+            {razones.length === 0 && <option value={empresa}>{empresa || "Cargando razones sociales…"}</option>}
+            {razones.map((r) => (
+              <option key={`${r.origen}-${r.clienteId ?? 0}`} value={r.razonSocial}>
+                {r.razonSocial}{r.origen === "cuenta" ? " (Cuenta)" : " (Cliente)"}
+              </option>
+            ))}
+          </select>
+          <span className="text-[11px] text-ink-3">Solo razones sociales configuradas en la Cuenta (Configuración → Cuenta / Clientes).</span>
+        </label>
         {/* Fase 5: se mandan por WhatsApp/correo automáticamente al dar de alta (evento instrucciones_ingreso) */}
         <label className="flex flex-col gap-1.5 sm:col-span-2">
           <span className="text-xs font-medium text-ink-2">Instrucciones de ingreso (primer día)</span>

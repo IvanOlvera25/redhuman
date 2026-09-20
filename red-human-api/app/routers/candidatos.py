@@ -28,6 +28,7 @@ from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_admin, usuario_decisor
 from ..models import (
+    TIPO_CONTRATACION_DETERMINADO, UNIDADES_DURACION, calcular_fecha_termino,
     DOCUMENTOS_BASE,
     ETAPAS_CANDIDATO,
     Archivo,
@@ -2238,7 +2239,9 @@ class CondicionesContratacionIn(BaseModel):
     ubicacion: str = ""
     jefe_directo: str = ""
     instrucciones_ingreso: str = ""  # Fase 5: van en la bienvenida automática al dar de alta
-    empresa: str = ""  # 2026-09-19: empresa contratante (default: la visible de la vacante)
+    empresa: str = ""  # 2026-09-20 (B2): razón social de la Cuenta o de un Cliente (vacío = la de la Cuenta); nunca libre
+    duracion_contrato: Optional[int] = None  # 2026-09-20 (B2): solo «Tiempo determinado»
+    duracion_unidad: str = ""  # días | meses | años
 
 
 @router.patch("/{codigo}/condiciones-contratacion")
@@ -2248,7 +2251,13 @@ def guardar_condiciones_contratacion(
 ):
     """Formulario de la etapa Contratación (puesto precargado pero editable, sueldo, tipo de
     contratación, fecha de ingreso, ubicación y jefe directo). Requiere que el expediente ya
-    exista — se abre solo al entrar a Contratación, ver mover_etapa/_abrir_expediente."""
+    exista — se abre solo al entrar a Contratación, ver mover_etapa/_abrir_expediente.
+
+    2026-09-20 (B2): es una ACTUALIZACIÓN PURA del expediente — no manda mensajes, no crea colaboradores
+    y no mueve la etapa. «Tiempo determinado» exige duración + unidad y CALCULA la fecha de término;
+    «Empresa contratante» solo acepta una razón social configurada en la Cuenta (Cuenta o Clientes)."""
+    from .cuentas import razones_sociales_de
+
     p = _por_codigo(db, codigo, cuenta.id)
     if not p.expediente:
         raise HTTPException(404, "La postulación todavía no tiene expediente de contratación.")
@@ -2261,20 +2270,41 @@ def guardar_condiciones_contratacion(
     exp.ubicacion = datos.ubicacion.strip()
     exp.jefe_directo = datos.jefe_directo.strip()
     exp.instrucciones_ingreso = datos.instrucciones_ingreso.strip()
-    exp.empresa = datos.empresa.strip() or (nombre_empresa_candidato(p.vacante) if p.vacante else "")
-    exp.condiciones_guardadas_en = datetime.now(timezone.utc)
+    razones = razones_sociales_de(db, cuenta)
+    empresa = datos.empresa.strip()
+    if empresa:
+        valida = next((r["razonSocial"] for r in razones if r["razonSocial"].lower() == empresa.lower()), None)
+        if not valida:
+            raise HTTPException(400, "La empresa contratante debe ser una razón social configurada en la Cuenta (Configuración → Cuenta o Clientes).")
+        exp.empresa = valida
+    else:
+        exp.empresa = razones[0]["razonSocial"]
     if datos.fecha_ingreso:
         try:
             exp.fecha_ingreso = datetime.fromisoformat(datos.fecha_ingreso).replace(tzinfo=timezone.utc)
         except ValueError:
             raise HTTPException(400, "fecha_ingreso inválida (usa ISO: 2026-09-15)")
+    if exp.tipo_contratacion == TIPO_CONTRATACION_DETERMINADO:
+        if not datos.duracion_contrato or datos.duracion_contrato <= 0:
+            raise HTTPException(400, "Tiempo determinado: indica la duración del contrato (número mayor a cero).")
+        if datos.duracion_unidad not in UNIDADES_DURACION:
+            raise HTTPException(400, "Tiempo determinado: la unidad debe ser días, meses o años.")
+        exp.duracion_contrato = int(datos.duracion_contrato)
+        exp.duracion_unidad = datos.duracion_unidad
+        exp.fecha_termino = calcular_fecha_termino(exp.fecha_ingreso, exp.duracion_contrato, exp.duracion_unidad)
+    else:
+        exp.duracion_contrato = None
+        exp.duracion_unidad = ""
+        exp.fecha_termino = None
+    exp.condiciones_guardadas_en = datetime.now(timezone.utc)
 
     registrar(
         db, u.nombre, "condiciones_contratacion_guardadas", "postulacion", p.codigo,
-        {"expediente": exp.id, "sueldo": exp.sueldo, "tipo_contratacion": exp.tipo_contratacion, "correo_rh": u.correo},
+        {"expediente": exp.id, "sueldo": exp.sueldo, "tipo_contratacion": exp.tipo_contratacion, "empresa": exp.empresa,
+         "duracion": f"{exp.duracion_contrato} {exp.duracion_unidad}" if exp.duracion_contrato else "", "correo_rh": u.correo},
     )
     _actualizar_ultima_actividad(p)
-    db.commit()
+    db.commit()  # B2: nada más — sin mensajes, sin colaborador, sin cambio de etapa
     return postulacion_dict(p, detalle=True)
 
 

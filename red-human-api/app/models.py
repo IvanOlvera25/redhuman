@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from datetime import date, datetime, timezone
+from datetime import timedelta, date, datetime, timezone
 from typing import List, Optional
 
 from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
@@ -663,6 +663,27 @@ DOCUMENTOS_BASE = [
 ]
 
 
+# 2026-09-20 (B2): tipo de contratación con vigencia y unidades de duración permitidas.
+TIPO_CONTRATACION_DETERMINADO = "Tiempo determinado"
+UNIDADES_DURACION = ("días", "meses", "años")
+
+
+def calcular_fecha_termino(fecha_ingreso: Optional[datetime], duracion: Optional[int], unidad: str) -> Optional[datetime]:
+    """Fecha de término = fecha de ingreso + duración. Meses/años se suman calendario (28 feb + 1 mes = 28 mar;
+    31 ene + 1 mes = 28/29 feb). None si falta cualquier dato."""
+    if not fecha_ingreso or not duracion or duracion <= 0 or unidad not in UNIDADES_DURACION:
+        return None
+    if unidad == "días":
+        return fecha_ingreso + timedelta(days=duracion)
+    meses = duracion if unidad == "meses" else duracion * 12
+    total = fecha_ingreso.month - 1 + meses
+    anio, mes = fecha_ingreso.year + total // 12, total % 12 + 1
+    import calendar as _cal
+
+    dia = min(fecha_ingreso.day, _cal.monthrange(anio, mes)[1])
+    return fecha_ingreso.replace(year=anio, month=mes, day=dia)
+
+
 class Expediente(Base):
     __tablename__ = "expedientes"
 
@@ -680,8 +701,15 @@ class Expediente(Base):
     jefe_directo: Mapped[str] = mapped_column(String(150), default="")
     fecha_ingreso: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # 2026-09-19 (Bloque 3): empresa contratante capturada en las condiciones (default: la visible de la vacante).
+    # 2026-09-20 (B2): SOLO una razón social configurada en la Cuenta (Cuenta.razon_social o la de un Cliente);
+    # nunca texto libre — ver routers.cuentas.razones_sociales / candidatos.guardar_condiciones_contratacion.
     empresa: Mapped[str] = mapped_column(String(200), default="")
     condiciones_guardadas_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 2026-09-20 (B2): «Tiempo determinado» = duración (número + unidad) y fecha de término CALCULADA
+    # (`calcular_fecha_termino`), nunca capturada a mano. Vacíos en los demás tipos de contratación.
+    duracion_contrato: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    duracion_unidad: Mapped[str] = mapped_column(String(10), default="")  # UNIDADES_DURACION
+    fecha_termino: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # --- preparación de ingreso (Onboarding, bloque 4) ---
     contrato: Mapped[str] = mapped_column(String(20), default="Pendiente")  # Pendiente | Firmado
     alta_administrativa: Mapped[str] = mapped_column(String(20), default="Pendiente")  # Pendiente | Realizada

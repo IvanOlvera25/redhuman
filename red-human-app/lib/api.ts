@@ -294,6 +294,18 @@ export function fetchCuentaActual() {
   return get<FichaCuenta>("/cuentas/actual");
 }
 
+/** 2026-09-20 (B2): razones sociales con las que la Cuenta puede contratar (Cuenta primero = predeterminada,
+ * luego Clientes activos). Única lista válida para «Empresa contratante»; el servidor rechaza texto libre. */
+export interface RazonSocial {
+  razonSocial: string;
+  origen: "cuenta" | "cliente";
+  clienteId: number | null;
+  predeterminada: boolean;
+}
+export function fetchRazonesSociales() {
+  return get<RazonSocial[]>("/cuentas/actual/razones-sociales");
+}
+
 export function actualizarCuenta(cambios: CamposCuenta) {
   return patch<FichaCuenta>("/cuentas/actual", cambios);
 }
@@ -1248,8 +1260,13 @@ export function enviarEvaluacionEntrevistaHumana(
 
 export function guardarCondicionesContratacion(
   codigo: string,
-  datos: { puesto?: string; sueldo?: string; tipoContratacion?: string; fechaIngreso?: string; ubicacion?: string; jefeDirecto?: string; instruccionesIngreso?: string; empresa?: string },
+  datos: {
+    puesto?: string; sueldo?: string; tipoContratacion?: string; fechaIngreso?: string; ubicacion?: string; jefeDirecto?: string; instruccionesIngreso?: string; empresa?: string;
+    /** 2026-09-20 (B2): solo «Tiempo determinado»; la fecha de término la calcula el servidor. */
+    duracionContrato?: number | null; duracionUnidad?: string;
+  },
 ) {
+  // B2: PATCH puro — el servidor solo actualiza el expediente (sin mensajes, sin colaborador, sin cambio de etapa)
   return patch<Candidato>(`/candidatos/${codigo}/condiciones-contratacion`, {
     puesto: datos.puesto ?? "",
     sueldo: datos.sueldo ?? "",
@@ -1259,6 +1276,8 @@ export function guardarCondicionesContratacion(
     jefe_directo: datos.jefeDirecto ?? "",
     instrucciones_ingreso: datos.instruccionesIngreso ?? "",  // Fase 5: van en la bienvenida automática al alta
     empresa: datos.empresa ?? "",  // 2026-09-19 (Bloque 3)
+    duracion_contrato: datos.duracionContrato ?? null,
+    duracion_unidad: datos.duracionUnidad ?? "",
   });
 }
 
