@@ -2,6 +2,19 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* 2026-09-21 — Modo Tótem (Expo, LCD táctil 55" vertical 1080×1920). Tailwind lee 1080 px como `lg`, así que
+   la orientación manda: `totem:` aplica en retrato grande (≥ 800×1400; un celular no califica) o con la clase
+   `.totem` forzada (`?totem=1`). Úsalo para forzar columnas, botones táctiles y tipografía grande sin tocar
+   escritorio ni móvil. `portrait:` (nativa de Tailwind) sigue disponible para cualquier retrato. */
+@custom-variant totem {
+  &:where(.totem, .totem *) {
+    @slot;
+  }
+  @media (orientation: portrait) and (min-width: 800px) and (min-height: 1400px) {
+    @slot;
+  }
+}
+
 /* ============ Design tokens ============
    Paleta de marca RedHuman: rojo #ee4444 + gris #58595b sobre neutros. */
 :root {
@@ -119,6 +132,29 @@ body {
 ::selection {
   background: var(--brand);
   color: var(--brand-ink);
+}
+
+/* Tótem: las salas públicas (`main.sala-publica`) crecen a 20 px de base — todo lo que usa rem (texto,
+   espaciados, botones) escala ~25 % para leerse a un metro; el resto de la app no cambia. */
+@media (orientation: portrait) and (min-width: 800px) and (min-height: 1400px) {
+  html:has(main.sala-publica) {
+    font-size: 20px;
+  }
+}
+html:has(main.sala-publica.totem) {
+  font-size: 20px;
+}
+/* Kiosco táctil: sin ratón no hay hover — los controles se ven siempre y el toque da feedback por escala. */
+main.sala-publica.totem button,
+main.sala-publica.totem a[role="button"],
+main.sala-publica.totem a.btn-touch {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+main.sala-publica.totem summary {
+  min-height: 4rem;
+  display: flex;
+  align-items: center;
 }
 
 /* Menús horizontales en móvil (2026-09-17): pestañas, chips de filtro y barras de acciones se

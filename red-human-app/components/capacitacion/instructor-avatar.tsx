@@ -13,7 +13,9 @@ import { iniciarInstructorCurso, preguntarInstructorCurso } from "@/lib/api";
 type Msg = { rol: "user" | "assistant"; texto: string };
 const ESPERA_AVATAR_SEG = 25;
 
-export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false }: { token: string; modulo: number; titulo: string; autoIniciar?: boolean }) {
+/** `totem` (2026-09-21): LCD vertical — el video ocupa la mayor parte de la pantalla (tamaño real, `object-cover`,
+ * centrado), controles de micrófono/cerrar siempre visibles y con área táctil ≥ 64 px, letra grande. */
+export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false, totem = false }: { token: string; modulo: number; titulo: string; autoIniciar?: boolean; totem?: boolean }) {
   const [estado, setEstado] = useState<"inactivo" | "conectando" | "avatar" | "texto">("inactivo");
   const [mensajes, setMensajes] = useState<Msg[]>([]);
   const [texto, setTexto] = useState("");
@@ -146,17 +148,35 @@ export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false }:
 
   return (
     <div className="flex flex-col overflow-hidden rounded-2xl border border-border-soft bg-surface">
-      <div className="flex items-center justify-between gap-2 border-b border-border-faint px-4 py-2.5">
-        <span className="flex items-center gap-1.5 text-sm font-semibold text-ink">
-          <Sparkles className="h-4 w-4 text-brand" /> Instructor Red Human
+      <div className={cn("flex items-center justify-between gap-2 border-b border-border-faint px-4 py-2.5", totem && "px-5 py-3")}>
+        <span className={cn("flex items-center gap-1.5 text-sm font-semibold text-ink", totem && "text-lg")}>
+          <Sparkles className={cn("h-4 w-4 text-brand", totem && "h-5 w-5")} /> Instructor Red Human
         </span>
         {estado === "avatar" && (
+          /* controles SIEMPRE visibles (sin hover): en tótem son botones táctiles con etiqueta */
           <div className="flex items-center gap-1.5">
-            <button type="button" onClick={alternarMic} title={micActivo ? "Silenciar micrófono" : "Activar micrófono"} className={cn("grid h-8 w-8 place-items-center rounded-lg transition", micActivo ? "bg-surface-2 text-ink" : "bg-warn-soft text-warn")}>
-              {micActivo ? <Mic className="h-4 w-4" /> : <MicOff className="h-4 w-4" />}
+            <button
+              type="button"
+              onClick={alternarMic}
+              aria-pressed={micActivo}
+              title={micActivo ? "Silenciar micrófono" : "Activar micrófono"}
+              className={cn(
+                "grid place-items-center rounded-lg transition active:scale-95",
+                totem ? "min-h-16 min-w-16 gap-1 px-4 text-sm font-semibold" : "h-8 w-8",
+                micActivo ? "bg-surface-2 text-ink" : "bg-warn-soft text-warn",
+              )}
+            >
+              {micActivo ? <Mic className={totem ? "h-7 w-7" : "h-4 w-4"} /> : <MicOff className={totem ? "h-7 w-7" : "h-4 w-4"} />}
+              {totem && (micActivo ? "Silenciar" : "Activar mic")}
             </button>
-            <button type="button" onClick={() => { void detener(); setEstado("texto"); }} title="Cerrar video" className="grid h-8 w-8 place-items-center rounded-lg bg-surface-2 text-ink transition hover:bg-bad-soft hover:text-bad">
-              <Square className="h-4 w-4" />
+            <button
+              type="button"
+              onClick={() => { void detener(); setEstado("texto"); }}
+              title="Cerrar video"
+              className={cn("grid place-items-center rounded-lg bg-surface-2 text-ink transition hover:bg-bad-soft hover:text-bad active:scale-95", totem ? "min-h-16 min-w-16 gap-1 px-4 text-sm font-semibold" : "h-8 w-8")}
+            >
+              <Square className={totem ? "h-7 w-7" : "h-4 w-4"} />
+              {totem && "Cerrar video"}
             </button>
           </div>
         )}
@@ -167,8 +187,8 @@ export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false }:
           <span className="grid h-14 w-14 place-items-center rounded-2xl bg-brand-soft text-brand"><Video className="h-6 w-6" /></span>
           <p className="text-sm text-ink-2">Deja que el instructor te explique «{titulo}» en video y pregúntale lo que quieras.</p>
           <div className="flex flex-wrap justify-center gap-2">
-            <Button size="sm" onClick={() => iniciar(false)}><Video className="h-4 w-4" /> Ver al instructor</Button>
-            <Button size="sm" variant="outline" onClick={() => iniciar(true)}><MessageCircle className="h-4 w-4" /> Preguntar por texto</Button>
+            <Button size={totem ? "lg" : "sm"} className={cn(totem && "min-h-16 rounded-2xl px-8 text-xl")} onClick={() => iniciar(false)}><Video className={totem ? "h-6 w-6" : "h-4 w-4"} /> Ver al instructor</Button>
+            <Button size={totem ? "lg" : "sm"} variant="outline" className={cn(totem && "min-h-16 rounded-2xl px-8 text-xl")} onClick={() => iniciar(true)}><MessageCircle className={totem ? "h-6 w-6" : "h-4 w-4"} /> Preguntar por texto</Button>
           </div>
           {aviso && <p className="text-xs text-warn">{aviso}</p>}
         </div>
@@ -182,12 +202,14 @@ export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false }:
       )}
 
       {estado === "avatar" && (
-        <div className="relative aspect-video bg-[#151517]">
-          <video id="instructor-video" autoPlay playsInline className="h-full w-full object-cover" />
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 space-y-1 bg-gradient-to-t from-black/70 to-transparent p-3 pt-8">
+        /* Tótem: el instructor a tamaño real — el contenedor toma la mayor parte del alto de la pantalla y el
+           <video> lo llena con object-cover (sin barras negras, avatar centrado). Escritorio/móvil: 16:9. */
+        <div className={cn("relative bg-[#151517]", totem ? "h-[62svh] min-h-[560px]" : "aspect-video")}>
+          <video id="instructor-video" autoPlay playsInline className="absolute inset-0 h-full w-full object-cover object-center" />
+          <div className={cn("pointer-events-none absolute inset-x-0 bottom-0 space-y-1 bg-gradient-to-t from-black/70 to-transparent p-3 pt-8", totem && "space-y-2 px-6 pb-6 pt-16")}>
             {mensajes.slice(-2).map((m, i) => (
-              <p key={i} className="text-[12px] leading-snug text-white/90">
-                <b>{m.rol === "assistant" ? "Instructor: " : "Tú: "}</b>{m.texto}
+              <p key={i} className={cn("text-[12px] leading-snug text-white/90", totem && "text-2xl")}>
+                <b className={cn(totem && (m.rol === "assistant" ? "text-brand" : "text-white/60"))}>{m.rol === "assistant" ? "Instructor: " : "Tú: "}</b>{m.texto}
               </p>
             ))}
           </div>
@@ -195,10 +217,10 @@ export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false }:
       )}
 
       {estado === "texto" && (
-        <div ref={chatRef} className="max-h-72 min-h-[9rem] space-y-2 overflow-y-auto p-4">
+        <div ref={chatRef} className={cn("max-h-72 min-h-[9rem] space-y-2 overflow-y-auto p-4", totem && "max-h-[50svh] min-h-[14rem]")}>
           {mensajes.map((m, i) => (
             <div key={i} className={cn("flex", m.rol === "user" ? "justify-end" : "justify-start")}>
-              <div className={cn("max-w-[88%] rounded-2xl px-3.5 py-2 text-[13px] leading-relaxed", m.rol === "user" ? "bg-brand text-white" : "bg-surface-2 text-ink")}>{m.texto}</div>
+              <div className={cn("max-w-[88%] rounded-2xl px-3.5 py-2 text-[13px] leading-relaxed", totem && "text-xl", m.rol === "user" ? "bg-brand text-white" : "bg-surface-2 text-ink")}>{m.texto}</div>
             </div>
           ))}
           {pensando && <p className="text-xs italic text-ink-3">El instructor está escribiendo…</p>}
@@ -212,9 +234,9 @@ export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false }:
             onChange={(e) => setTexto(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && preguntar()}
             placeholder="Pregúntale al instructor…"
-            className="h-10 flex-1 rounded-xl border border-border-soft bg-bg px-3 text-sm outline-none focus:border-brand"
+            className={cn("h-10 flex-1 rounded-xl border border-border-soft bg-bg px-3 text-sm outline-none focus:border-brand", totem && "min-h-16 text-xl")}
           />
-          <Button size="sm" onClick={preguntar} disabled={!texto.trim() || pensando}><Send className="h-4 w-4" /></Button>
+          <Button size="sm" className={cn(totem && "min-h-16 min-w-20 rounded-2xl")} onClick={preguntar} disabled={!texto.trim() || pensando}><Send className={totem ? "h-7 w-7" : "h-4 w-4"} /></Button>
         </div>
       )}
       {aviso && estado !== "inactivo" && <p className="border-t border-border-faint px-4 py-2 text-xs text-warn">{aviso}</p>}
