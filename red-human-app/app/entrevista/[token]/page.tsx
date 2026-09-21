@@ -23,6 +23,7 @@ import {
 import { Logo, Button, Card, Badge } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
+import { esTotem, perifericosDisponibles } from "@/lib/use-totem";
 import {
   fetchEntrevistaPublica,
   consentirEntrevista,
@@ -157,16 +158,22 @@ export default function SalaEntrevista() {
   );
 
   useEffect(() => {
-    const evaluar = () => {
-      const forzado = new URLSearchParams(window.location.search).get("totem");
-      if (forzado === "1") return setTotem(true);
-      if (forzado === "0") return setTotem(false);
-      const retrato = window.matchMedia("(orientation: portrait)").matches;
-      setTotem(retrato && window.innerWidth >= 800 && window.innerHeight >= 1400);
-    };
-    // Solo al montar: si cambiara a mitad de la sesión, el <video> se desmontaría y se perdería el stream.
-    evaluar();
+    // Solo al montar (regla compartida en lib/use-totem.ts): si cambiara a mitad de la sesión, el <video>
+    // se desmontaría y se perdería el stream.
+    setTotem(esTotem());
   }, []);
+
+  // 2026-09-21 (Tótem, periféricos USB): antes de iniciar se enumeran los micrófonos para avisar en grande si
+  // Windows no expone ninguno; el prompt de permisos lo dispara `getUserMedia` al tocar «Iniciar».
+  const [perifericos, setPerifericos] = useState<{ microfonos: number; camaras: number; soportado: boolean } | null>(null);
+  useEffect(() => {
+    if (!totem) return;
+    void perifericosDisponibles().then(setPerifericos);
+    const md = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+    const alCambiar = () => void perifericosDisponibles().then(setPerifericos);
+    md?.addEventListener?.("devicechange", alCambiar);
+    return () => md?.removeEventListener?.("devicechange", alCambiar);
+  }, [totem]);
 
   /** Tótem: micrófono (pista de audio local) y sonido del avatar (elemento de video). */
   const alternarMic = useCallback(() => {
@@ -490,7 +497,7 @@ export default function SalaEntrevista() {
   const salaTotem = totem && enSala && modo === "avatar";
 
   return (
-    <main className={cn("min-h-svh bg-bg", totem && "totem text-lg", salaTotem && "fixed inset-0 overflow-hidden")}>
+    <main className={cn("sala-publica min-h-svh bg-bg", totem && "totem text-lg", salaTotem && "fixed inset-0 overflow-hidden")}>
       <link rel="preconnect" href="https://api.anam.ai" />
       {!salaTotem && (
         <header className="border-b border-border-soft">
@@ -565,7 +572,7 @@ export default function SalaEntrevista() {
           <Card className="p-8 text-center">
             <h1 className="font-display text-xl font-bold">No pudimos iniciar tu entrevista</h1>
             <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">{errorTexto}</p>
-            <Button className="mt-5" onClick={() => setFase("consentimiento")}>
+            <Button className="mt-5 totem:min-h-16 totem:px-8 totem:text-xl" onClick={() => setFase("consentimiento")}>
               Intentar de nuevo
             </Button>
           </Card>
@@ -576,12 +583,13 @@ export default function SalaEntrevista() {
             <h1 className="font-display text-xl font-bold">Necesitamos tu micrófono</h1>
             <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">{errorTexto || MENSAJE_MICROFONO}</p>
             <div className="mt-5 flex flex-wrap justify-center gap-3">
-              <Button onClick={empezar}>
+              <Button onClick={empezar} className="totem:min-h-16 totem:px-8 totem:text-xl">
                 <Video className="h-4 w-4" />
                 Reintentar en video
               </Button>
               <Button
                 variant="secondary"
+                className="totem:min-h-16 totem:px-8 totem:text-xl"
                 onClick={() => {
                   setFase("conectando");
                   void entrarTexto(null);
@@ -640,7 +648,12 @@ export default function SalaEntrevista() {
                 </span>
               </label>
 
-              <Button className={cn("mt-5 w-full", totem && "h-20 rounded-3xl text-2xl")} size={totem ? "lg" : "md"} disabled={!acepto} onClick={empezar}>
+              {totem && perifericos?.soportado && perifericos.microfonos === 0 && (
+                <p className="mt-4 flex items-center gap-3 rounded-2xl border border-warn/40 bg-warn-soft px-5 py-4 text-xl font-semibold text-warn">
+                  <MicOff className="h-7 w-7 shrink-0" /> No se detecta ningún micrófono. Conecta el micrófono USB y espera un momento; esta pantalla se actualiza sola.
+                </p>
+              )}
+              <Button className={cn("mt-5 w-full", totem && "min-h-20 rounded-3xl text-2xl")} size={totem ? "lg" : "md"} disabled={!acepto} onClick={empezar}>
                 {info.avatar_disponible ? <Video className={totem ? "h-7 w-7" : "h-4 w-4"} /> : <MessageCircle className={totem ? "h-7 w-7" : "h-4 w-4"} />}
                 Comenzar entrevista
               </Button>
@@ -741,12 +754,12 @@ export default function SalaEntrevista() {
                 </div>
               </div>
             ) : (
-              <div ref={chatRef} className="h-[26rem] space-y-3 overflow-y-auto p-5">
+              <div ref={chatRef} className="h-[26rem] space-y-3 overflow-y-auto p-5 totem:h-[60svh]">
                 {mensajes.map((m, i) => (
                   <div key={i} className={cn("flex", m.rol === "user" ? "justify-end" : "justify-start")}>
                     <div
                       className={cn(
-                        "max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed",
+                        "max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed totem:text-xl",
                         m.rol === "user" ? "bg-brand text-white" : "bg-surface-2 text-ink",
                       )}
                     >
@@ -777,10 +790,10 @@ export default function SalaEntrevista() {
                     onKeyDown={(e) => e.key === "Enter" && enviar()}
                     placeholder="Escribe tu respuesta…"
                     disabled={fase === "finalizando"}
-                    className="h-11 flex-1 rounded-xl border border-border-soft bg-surface px-4 text-sm outline-none transition focus:border-brand"
+                    className="h-11 flex-1 rounded-xl border border-border-soft bg-surface px-4 text-sm outline-none transition focus:border-brand totem:min-h-16 totem:text-xl"
                   />
-                  <Button size="sm" onClick={enviar} disabled={!texto.trim() || fase === "finalizando"}>
-                    <Send className="h-4 w-4" />
+                  <Button size="sm" onClick={enviar} disabled={!texto.trim() || fase === "finalizando"} className="totem:min-h-16 totem:min-w-20 totem:text-xl">
+                    <Send className="h-4 w-4 totem:h-7 totem:w-7" />
                   </Button>
                 </>
               )}
@@ -789,7 +802,7 @@ export default function SalaEntrevista() {
                 size="sm"
                 onClick={terminar}
                 disabled={fase === "finalizando"}
-                className={cn(modo === "avatar" && "ml-auto")}
+                className={cn(modo === "avatar" && "ml-auto", "totem:min-h-16 totem:px-8 totem:text-xl")}
               >
                 {fase === "finalizando" ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
