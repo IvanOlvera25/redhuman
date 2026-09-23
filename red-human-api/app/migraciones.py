@@ -111,6 +111,62 @@ def sincronizar(engine: Engine, omitir: Optional[set] = None) -> List[str]:
     return cambios
 
 
+def relajar_not_null(engine: Engine, omitir: Optional[set] = None) -> List[str]:
+    """Quita el NOT NULL de las columnas que el modelo declara `nullable=True` y la base aún exige
+    (tablas creadas antes de que el modelo las relajara; p. ej. `asignaciones_curso.colaborador_id`,
+    que las asignaciones externas/demo dejan en NULL). `create_all` y `sincronizar` nunca alteran una
+    columna existente, por eso va aparte. Correr DESPUÉS de `sincronizar` (la tabla vieja ya trae todas
+    las columnas del modelo).
+
+    SQLite no tiene ALTER COLUMN: se reconstruye la tabla con el procedimiento oficial (tabla nueva con
+    el esquema del modelo → copiar renglones → DROP vieja → RENAME nueva → índices), con llaves foráneas
+    apagadas y en una sola transacción. Otros motores: `ALTER COLUMN … DROP NOT NULL`."""
+    from sqlalchemy.schema import CreateTable
+
+    insp = inspect(engine)
+    tablas = set(insp.get_table_names())
+    omitir = omitir or set()
+    cambios: List[str] = []
+
+    for tabla in Base.metadata.sorted_tables:
+        if tabla.name not in tablas or tabla.name in omitir:
+            continue
+        en_base = {c["name"]: c for c in insp.get_columns(tabla.name)}
+        relajar = [
+            col.name for col in tabla.columns
+            if col.nullable and not col.primary_key and col.name in en_base and not en_base[col.name]["nullable"]
+        ]
+        if not relajar:
+            continue
+
+        if engine.dialect.name != "sqlite":
+            with engine.begin() as con:
+                for nombre in relajar:
+                    con.execute(text(f"ALTER TABLE {tabla.name} ALTER COLUMN {nombre} DROP NOT NULL"))
+            cambios += [f"{tabla.name}.{n}" for n in relajar]
+            continue
+
+        nueva = f"{tabla.name}__nueva"
+        ddl = str(CreateTable(tabla).compile(engine)).strip()
+        ddl = ddl.replace(f"CREATE TABLE {tabla.name} (", f"CREATE TABLE {nueva} (", 1)
+        comunes = ", ".join(c.name for c in tabla.columns if c.name in en_base)
+        with engine.connect() as con:
+            # database.py nunca enciende `PRAGMA foreign_keys`; se asegura OFF (fuera de la transacción).
+            con.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            con.commit()  # cierra el autobegin de SQLAlchemy 2 antes de abrir la transacción real
+            with con.begin():
+                con.exec_driver_sql(f"DROP TABLE IF EXISTS {nueva}")
+                con.exec_driver_sql(ddl)
+                con.exec_driver_sql(f"INSERT INTO {nueva} ({comunes}) SELECT {comunes} FROM {tabla.name}")
+                con.exec_driver_sql(f"DROP TABLE {tabla.name}")
+                con.exec_driver_sql(f"ALTER TABLE {nueva} RENAME TO {tabla.name}")
+                for idx in tabla.indexes:
+                    idx.create(con)
+        cambios += [f"{tabla.name}.{n}" for n in relajar]
+
+    return cambios
+
+
 # ============================================================
 # Fase 2 — datos: de "un Candidato = una postulación" a Candidato (persona) + Postulacion
 # ============================================================
