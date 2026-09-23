@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import Base, SessionLocal, engine
-from .migraciones import crear_tablas_base, crear_tablas_conocimiento, crear_tablas_modulos_rh, candidatos_sin_postulacion, sincronizar
+from .migraciones import crear_tablas_base, crear_tablas_conocimiento, crear_tablas_modulos_rh, candidatos_sin_postulacion, relajar_not_null, sincronizar
 from .migraciones import asegurar_reglas_entrevistador
 from .routers import agente, auth, candidatos, capacitacion, clientes, clima, colaboradores, configuracion, conocimiento, contratacion, cuentas, desempeno, emails_preview, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
 from .seed import rellenar_slugs_cuentas, sembrar, sembrar_admin
@@ -57,6 +57,11 @@ async def lifespan(app: FastAPI):
     cambios = sincronizar(engine, omitir=omitir or None)  # columnas nuevas sobre una base ya existente
     if cambios:
         print(f"[esquema] columnas agregadas: {', '.join(cambios)}")
+    # Hotfix 2026-09-23: columnas que el modelo ya permite en NULL y la base vieja aún exige
+    # (asignaciones_curso.colaborador_id → la liga demo / asignaciones externas daban 500).
+    relajadas = relajar_not_null(engine, omitir=omitir or None)
+    if relajadas:
+        print(f"[esquema] NOT NULL retirado: {', '.join(relajadas)}", flush=True)
     with SessionLocal() as db:
         sembrar(db)
         sembrar_admin(db)
