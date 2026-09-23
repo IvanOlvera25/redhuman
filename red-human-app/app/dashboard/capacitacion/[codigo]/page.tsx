@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Download, Link2, Loader2, Pencil, Save, Send, Users, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Copy, Download, ExternalLink, Link2, Loader2, Pencil, RefreshCw, Save, Send, Sparkles, Users, X } from "lucide-react";
 import { Badge, Button, Card, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
 import { Aviso } from "@/components/dashboard/subida";
@@ -19,6 +19,7 @@ import {
   asignarCurso,
   editarCurso,
   fetchAsignacionesCurso,
+  generarLigaDemoCurso,
   fetchCandidatos,
   fetchColaboradores,
   fetchCurso,
@@ -62,6 +63,8 @@ export default function FichaCurso() {
   const [aviso, setAviso] = useState<{ tono: "ok" | "error" | "warn"; texto: string } | null>(null);
   const [ocupado, setOcupado] = useState("");
   const [asignar, setAsignar] = useState(false);
+  // 2026-09-23 (Expo): liga pública inmediata para demostrar el curso en el tótem
+  const [ligaDemo, setLigaDemo] = useState<{ liga: string; ligaTotem: string; reutilizada: boolean } | null>(null);
   const [editando, setEditando] = useState<null | "objetivo" | "modulos" | "evaluacion">(null);
 
   const recargar = useCallback(async () => {
@@ -83,6 +86,16 @@ export default function FichaCurso() {
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
     setCurso(r.data);
     setAviso({ tono: "ok", texto: "Curso publicado: ya se puede asignar." });
+  }
+
+  async function generarLigaDemo(nueva = false) {
+    if (!curso) return;
+    setOcupado("demo");
+    const r = await generarLigaDemoCurso(curso.id, nueva);
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    setLigaDemo({ liga: r.data.liga, ligaTotem: r.data.ligaTotem, reutilizada: r.data.reutilizada });
+    recargar();
   }
 
   async function archivar() {
@@ -115,6 +128,19 @@ export default function FichaCurso() {
         {puedeDecidir && curso.estado === "Publicado" && (
           <Button onClick={() => setAsignar(true)}>
             <Users className="h-4 w-4" /> Asignar
+          </Button>
+        )}
+        {/* Botón Mágico (Expo 2026-09-23): liga pública al instante, sin persona real ni WhatsApp.
+            Sirve aunque el curso siga en Borrador: en la Expo se genera y se enseña en el mismo minuto. */}
+        {puedeDecidir && curso.modulos > 0 && (
+          <Button
+            variant="secondary"
+            onClick={() => generarLigaDemo(false)}
+            disabled={Boolean(ocupado)}
+            title="Crea una liga pública de demostración (no asigna a nadie ni manda WhatsApp)"
+          >
+            {ocupado === "demo" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+            Generar Liga Directa (Modo Expo)
           </Button>
         )}
         {puedeDecidir && (
@@ -192,6 +218,16 @@ export default function FichaCurso() {
           )}
         </Plegable>
       </div>
+
+      {ligaDemo && (
+        <ModalLigaDemo
+          datos={ligaDemo}
+          curso={curso}
+          onOtra={() => generarLigaDemo(true)}
+          regenerando={ocupado === "demo"}
+          onClose={() => setLigaDemo(null)}
+        />
+      )}
 
       {asignar && (
         <AsignarCurso
@@ -456,6 +492,95 @@ function EditarCurso({ curso, que, onClose, onGuardado }: { curso: Curso; que: "
           <Button variant="outline" size="sm" onClick={onClose} disabled={guardando}>Cancelar</Button>
           <Button size="sm" onClick={guardar} disabled={guardando}>{guardando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Guardar</Button>
         </div>
+      </Card>
+    </div>
+  );
+}
+
+
+/* ============================================================
+   Liga directa de demostración (Expo 2026-09-23)
+   ============================================================ */
+
+function ModalLigaDemo({ datos, curso, onOtra, regenerando, onClose }: {
+  datos: { liga: string; ligaTotem: string; reutilizada: boolean };
+  curso: Curso;
+  onOtra: () => void;
+  regenerando: boolean;
+  onClose: () => void;
+}) {
+  const [copiada, setCopiada] = useState<"" | "totem" | "normal">("");
+
+  async function copiar(url: string, cual: "totem" | "normal") {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiada(cual);
+      setTimeout(() => setCopiada(""), 2500);
+    } catch {
+      window.prompt("Copia la liga:", url);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4" onClick={onClose}>
+      <Card className="flex h-[100dvh] w-full max-w-xl flex-col overflow-y-auto rounded-none p-5 sm:h-auto sm:rounded-2xl sm:p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="font-display text-lg font-bold">Liga directa · Modo Expo</h2>
+            <p className="mt-1 text-sm text-ink-2">
+              «{curso.titulo}» listo para demostrarse. No se asignó a ninguna persona y no salió ningún WhatsApp ni correo.
+            </p>
+          </div>
+          <button onClick={onClose} className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-ink-3 transition hover:bg-surface-2" aria-label="Cerrar">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {datos.reutilizada && (
+          <p className="mt-3 rounded-xl bg-surface-2 px-3.5 py-2.5 text-[12px] text-ink-2">
+            Se reutilizó la liga de demostración que ya existía para este curso (conserva el avance). Si quieres una
+            limpia, usa «Generar otra liga».
+          </p>
+        )}
+
+        {/* La liga del tótem es la principal: abre la interfaz vertical a pantalla completa */}
+        <div className="mt-4 rounded-2xl border border-brand/30 bg-brand-soft/30 p-4">
+          <Eyebrow>Para el tótem (1080×1920)</Eyebrow>
+          <p className="mt-2 break-all rounded-xl bg-surface px-3 py-2.5 font-mono text-[12px] text-ink">{datos.ligaTotem}</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => copiar(datos.ligaTotem, "totem")}>
+              {copiada === "totem" ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />} {copiada === "totem" ? "Copiada" : "Copiar Liga"}
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => window.open(datos.ligaTotem, "_blank", "noopener")}>
+              <ExternalLink className="h-4 w-4" /> Abrir en Tótem
+            </Button>
+          </div>
+          <p className="mt-2 text-[11px] text-ink-3">
+            El parámetro <code className="font-mono">?totem=1</code> fuerza la pantalla completa vertical: video a tamaño
+            real sin barras negras y botones táctiles grandes.
+          </p>
+        </div>
+
+        <div className="mt-3 rounded-2xl border border-border-soft p-4">
+          <Eyebrow>Para cualquier pantalla (celular o laptop)</Eyebrow>
+          <p className="mt-2 break-all rounded-xl bg-surface-2 px-3 py-2.5 font-mono text-[12px] text-ink-2">{datos.liga}</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={() => copiar(datos.liga, "normal")}>
+              {copiada === "normal" ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />} {copiada === "normal" ? "Copiada" : "Copiar liga normal"}
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-2">
+          <Button size="sm" variant="ghost" onClick={onOtra} disabled={regenerando}>
+            {regenerando ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Generar otra liga
+          </Button>
+          <Button size="sm" onClick={onClose}>Listo</Button>
+        </div>
+        <p className="mt-3 text-[11px] leading-relaxed text-ink-3">
+          La demostración aparece en el tablero de Capacitación como «{curso.titulo}» para <b>Demo Expo</b>, así se
+          distingue del avance real de los colaboradores.
+        </p>
       </Card>
     </div>
   );

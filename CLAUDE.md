@@ -244,3 +244,10 @@ hace falta para diagnosticar sin tocar el código:
   servidor trae la del plan vigente, y enumera los campos del `personaConfig` que se mandan a Anam.
 - `POST /entrevistas/publica/{token}/diagnostico` (público) queda disponible para recibir un reporte del
   navegador y dejarlo en el log (`[AVATAR][DIAGNOSTICO]`) y en bitácora; hoy NINGUNA pantalla lo llama.
+
+## Botón Mágico de Capacitación — liga directa (Expo, 2026-09-23)
+
+- `POST /capacitacion/{codigo}/demo` entrega una liga pública FUNCIONAL al instante: crea una `AsignacionCurso` de tipo `externo` con `externo_nombre="Invitado (demo)"` (por eso la sala no pide registro) y `externo_organizacion="Demo Expo"` (así se distingue del avance real en el tablero). **Nunca** llama a `_notificar`: no sale WhatsApp ni correo. **Nunca** crea un Colaborador — el roster sigue siendo la base maestra y no se contamina con datos de demo.
+- Funciona con el curso en Borrador (en la Expo se genera y se enseña en el mismo minuto); solo exige que ya tenga contenido (409 si no hay módulos). Por defecto REUTILIZA la liga de demo viva del curso (conserva el avance); `?nueva=true` entrega una limpia.
+- Regresa `liga` y `ligaTotem` (= `liga` + `?totem=1`, la interfaz vertical de 1080×1920 con video `object-cover` y botones táctiles). El frontend muestra el botón «Generar Liga Directa (Modo Expo)» en la ficha del curso en cuanto hay contenido, y un modal con ambas URLs, «Copiar Liga» y «Abrir en Tótem».
+- Regresión: `scripts/verificar_liga_demo_curso.py` (incluye que no salga ningún mensaje aunque WhatsApp esté configurado).

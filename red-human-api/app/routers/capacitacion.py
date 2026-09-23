@@ -444,6 +444,69 @@ async def asignar(codigo: str, datos: AsignarIn, db: Session = Depends(get_db), 
     return {"asignaciones": [asignacion_dict(a) for a in [*creadas, *reutilizadas]], "envios": envios, "noEncontrados": no_encontrados}
 
 
+# ------------------------------------------------------------
+# «Botón Mágico» de la Expo (2026-09-23) — liga pública al instante
+# ------------------------------------------------------------
+
+ORGANIZACION_DEMO = "Demo Expo"
+NOMBRE_INVITADO_DEMO = "Invitado (demo)"
+
+
+@router.post("/{codigo}/demo", status_code=201)
+def liga_demo(
+    codigo: str, nueva: bool = False, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Liga pública inmediata para demostrar el curso, SIN asignarlo a nadie real y SIN mandar
+    WhatsApp ni correo (nunca llama a `_notificar`).
+
+    Se crea una asignación de tipo «externo» con nombre de invitado: así la sala abre directo (no pide
+    registro) y NO se toca la tabla de Colaboradores — el roster es la base maestra y no se contamina
+    con datos de demo. Queda marcada con `externo_organizacion = "Demo Expo"` para distinguirla en el
+    tablero y en los reportes.
+
+    Funciona aunque el curso siga en Borrador (en la Expo se genera y se muestra en el mismo minuto);
+    `nueva=true` fuerza una liga limpia en vez de reutilizar la anterior."""
+    curso = _por_codigo(db, codigo, cuenta.id)
+    if not curso.modulos:
+        raise HTTPException(409, "El curso todavía no tiene contenido: genéralo antes de crear la liga de demostración.")
+
+    a = None
+    if not nueva:
+        # se reutiliza la liga de demo viva (no completada) para no llenar el tablero de ligas sueltas
+        a = (
+            db.query(AsignacionCurso)
+            .filter(
+                AsignacionCurso.curso_id == curso.id,
+                AsignacionCurso.tipo == "externo",
+                AsignacionCurso.externo_organizacion == ORGANIZACION_DEMO,
+                AsignacionCurso.estado != "completado",
+            )
+            .order_by(AsignacionCurso.id.desc())
+            .first()
+        )
+    reutilizada = a is not None
+    if a is None:
+        a = _nueva_asignacion(
+            db, curso, "externo", u.nombre,
+            externo_nombre=NOMBRE_INVITADO_DEMO, externo_organizacion=ORGANIZACION_DEMO,
+        )
+        registrar(db, u.nombre, "curso_liga_demo", "curso", curso.codigo,
+                  {"asignacion": a.codigo, "modo": "expo", "sin_notificacion": True, "correo_rh": u.correo})
+    db.commit()
+
+    liga = liga_asignacion(a)
+    return {
+        "asignacion": asignacion_dict(a),
+        "token": a.token,
+        "liga": liga,
+        # Modo Tótem (2026-09-21): pantalla vertical 1080×1920, video a tamaño real y botones táctiles.
+        "ligaTotem": f"{liga}?totem=1",
+        "reutilizada": reutilizada,
+        "estadoCurso": curso.estado,
+    }
+
+
 @router.get("/{codigo}/asignaciones")
 def asignaciones_curso(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
     curso = _por_codigo(db, codigo, cuenta.id)
