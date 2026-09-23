@@ -315,6 +315,7 @@ def _sintesis_global(p: Postulacion) -> dict:
         "respuestasWeb": a.get("respuestas_web") or [],
         "inconsistencias": a.get("inconsistencias") or [],
         "actividadesOmitidas": p.actividades_omitidas or [],
+        "historial": list(p.historial or []),  # 2026-09-22: notas de decisiones humanas (nunca se borran)
         # Capacitación universal: cursos de filtro cursados por el candidato (resultado en su evaluación)
         "capacitacion": a.get("capacitacion") or [],
         "entrevistaStatus": entrevista_status,

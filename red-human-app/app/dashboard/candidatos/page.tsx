@@ -86,6 +86,7 @@ import {
   marcarEntrevistaHumanaRealizada,
   modificarEntrevistaHumana,
   moverEtapaCandidato,
+  avanzarAEntrevistaHumana,
   programarEntrevistaHumana,
   reanalizarCvCandidato,
   recordatorioDocumentosCandidato,
@@ -162,6 +163,11 @@ const FILTROS_ESTADO: { key: FiltroEstado; label: string }[] = [
 ];
 
 const ETAPAS_YA_CONTRATADO: EtapaCandidato[] = ["Contratación", "Onboarding"];
+
+/** 2026-09-22 — «Avanzar a Entrevista Humana» (omitir la Entrevista Red Human). Solo tiene sentido
+ * mientras el candidato está en Prefiltro o en la propia Entrevista Red Human. */
+const ETAPAS_AVANCE_DIRECTO: EtapaCandidato[] = ["Prefiltro", "Entrevista IA"];
+const TEXTO_AVANCE_DIRECTO = "Este candidato avanzará a Entrevista Humana y se omitirá la Entrevista Red Human";
 
 const TIPOS_CONTRATACION = ["Tiempo indeterminado", "Tiempo determinado", "Por obra o proyecto", "Honorarios"];
 // 2026-09-20 (B3): formato de la trazabilidad de documentos
@@ -269,6 +275,9 @@ function CandidatosContenido() {
   const searchParams = useSearchParams();
 
   const [sel, setSel] = useState<Candidato | null>(null);
+  // 2026-09-22: «Avanzar a Entrevista Humana» desde la tarjeta del Kanban (misma confirmación que la ficha)
+  const [avanceKanban, setAvanceKanban] = useState<Candidato | null>(null);
+  const [avanzando, setAvanzando] = useState(false);
   useAnunciarContextoAgente(
     sel ? { pantalla: "candidato", entidad: { tipo: "candidato", codigo: sel.id } } : { pantalla: "candidatos" },
   );
@@ -890,10 +899,25 @@ function CandidatosContenido() {
                   {cols.map((c) => {
                     const esDup = duplicadosSet.has(c.id);
                     return (
+                      /* 2026-09-22: el menú «…» va FUERA del botón de la tarjeta (no se anidan botones);
+                         solo aparece donde tiene sentido avanzar directo a Entrevista Humana. */
+                      <div key={c.id} className="relative">
+                      {puedeDecidir && ETAPAS_AVANCE_DIRECTO.includes(c.etapa) && c.activa !== false && (
+                        <div className="absolute right-1.5 top-1.5 z-10">
+                          <MenuAcciones
+                            etiqueta={`Acciones de ${c.nombre}`}
+                            acciones={[{
+                              etiqueta: "Avanzar a Entrevista Humana",
+                              icono: <CalendarClock />,
+                              title: TEXTO_AVANCE_DIRECTO,
+                              onClick: () => setAvanceKanban(c),
+                            }]}
+                          />
+                        </div>
+                      )}
                       <button
-                        key={c.id}
                         onClick={() => abrir(c)}
-                        className="card-hover group rounded-xl border border-border-soft bg-surface p-3.5 text-left transition-all hover:border-brand/40 hover:shadow-md"
+                        className="card-hover group w-full rounded-xl border border-border-soft bg-surface p-3.5 text-left transition-all hover:border-brand/40 hover:shadow-md"
                       >
                         <div className="flex items-center gap-3">
                           <div className="relative">
@@ -1009,6 +1033,7 @@ function CandidatosContenido() {
                           </div>
                         )}
                       </button>
+                      </div>
                     );
                   })}
                   {cols.length === 0 && (
@@ -1183,6 +1208,37 @@ function CandidatosContenido() {
           }}
         />
       )}
+
+      {/* 2026-09-22: confirmación de «Avanzar a Entrevista Humana» desde la tarjeta del Kanban */}
+      {avanceKanban && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !avanzando && setAvanceKanban(null)}>
+          <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-display text-lg font-bold">Avanzar a Entrevista Humana</h3>
+            <p className="mt-2 text-sm leading-relaxed text-ink-2">{TEXTO_AVANCE_DIRECTO}.</p>
+            <p className="mt-2 text-xs text-ink-3">
+              {avanceKanban.nombre} · queda registrado en el historial del expediente; lo ya generado se conserva.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setAvanceKanban(null)} disabled={avanzando}>Cancelar</Button>
+              <Button
+                size="sm"
+                disabled={avanzando}
+                onClick={async () => {
+                  setAvanzando(true);
+                  const r = await avanzarAEntrevistaHumana(avanceKanban.id);
+                  setAvanzando(false);
+                  if (!r.ok) return;
+                  setAvanceKanban(null);
+                  if (sel?.id === r.data.id) setSel(r.data);
+                  recargar();
+                }}
+              >
+                {avanzando ? "Avanzando…" : "Avanzar"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1347,6 +1403,18 @@ function ModalCandidato({
   const [confirmacion, setConfirmacion] = useState<null | "solicitar" | "recordatorio" | "alta">(null);
   // 2026-09-16 (control manual de RH): «Mover a otra etapa» — selector simple + motivo opcional
   const [moverA, setMoverA] = useState<null | { etapa: EtapaCandidato | ""; motivo: string }>(null);
+  // 2026-09-22: confirmación de «Avanzar a Entrevista Humana» (omite la Entrevista Red Human)
+  const [avanceDirecto, setAvanceDirecto] = useState(false);
+  async function confirmarAvanceDirecto() {
+    if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
+    setOcupado("avance-directo");
+    const r = await avanzarAEntrevistaHumana(c.id);
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    setAvanceDirecto(false);
+    onCambio(r.data);
+    setAviso({ tono: "ok", texto: "Candidato en Entrevista Humana. La Entrevista Red Human quedó registrada como omitida manualmente." });
+  }
   async function moverManual() {
     if (!moverA?.etapa) return;
     if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
@@ -1690,6 +1758,15 @@ function ModalCandidato({
                       onClick: () => (etapa === "Entrevista Humana" ? setModalEntrevista(true) : enviarAEtapa(etapa)),
                       disabled: Boolean(ocupado),
                     })),
+                    ...(ETAPAS_AVANCE_DIRECTO.includes(c.etapa)
+                      ? [{
+                          etiqueta: "Avanzar a Entrevista Humana",
+                          icono: <CalendarClock />,
+                          title: TEXTO_AVANCE_DIRECTO,
+                          onClick: () => setAvanceDirecto(true),
+                          disabled: Boolean(ocupado),
+                        }]
+                      : []),
                     { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
                     ...(c.etapa === "Entrevista Humana"
                       ? [{ etiqueta: "Agendar otra Entrevista Humana", icono: <CalendarClock />, onClick: () => setModalEntrevista(true), disabled: Boolean(ocupado) }]
@@ -1784,6 +1861,23 @@ function ModalCandidato({
             </div>
           </div>
         )}
+      {avanceDirecto && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => ocupado !== "avance-directo" && setAvanceDirecto(false)}>
+          <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-display text-lg font-bold">Avanzar a Entrevista Humana</h3>
+            <p className="mt-2 text-sm leading-relaxed text-ink-2">{TEXTO_AVANCE_DIRECTO}.</p>
+            <p className="mt-2 text-xs text-ink-3">
+              Queda registrado en el historial del expediente ({c.nombre}); lo que ya se generó (chat, análisis de CV, entrevista parcial) se conserva.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setAvanceDirecto(false)} disabled={ocupado === "avance-directo"}>Cancelar</Button>
+              <Button size="sm" onClick={confirmarAvanceDirecto} disabled={ocupado === "avance-directo"}>
+                {ocupado === "avance-directo" ? "Avanzando…" : "Avanzar"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
       {moverA && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !ocupado && setMoverA(null)}>
             <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -2151,6 +2245,24 @@ function PestanaResumen({
         <p className="text-[11px] text-ink-3">
           Omitido manualmente: {c.actividadesOmitidas!.map((o) => `${nombreEtapa(o.actividad)} (${o.usuario}, ${fechaCorta(o.fecha)}${o.motivo ? `: ${o.motivo}` : ""})`).join(" · ")}
         </p>
+      )}
+
+      {/* 2026-09-22: historial del expediente — decisiones humanas registradas (nunca se borran) */}
+      {(c.historial?.length ?? 0) > 0 && (
+        <div>
+          <Eyebrow>Historial del expediente</Eyebrow>
+          <ul className="mt-2 space-y-1.5">
+            {c.historial!.map((h, i) => (
+              <li key={i} className="flex items-start gap-2 text-[12px] text-ink-2">
+                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-brand" />
+                <span>
+                  {h.texto}
+                  {h.motivo ? <span className="text-ink-3"> · {h.motivo}</span> : null}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {/* C2. Status de la Entrevista Red Human (2026-09-13) */}

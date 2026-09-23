@@ -281,6 +281,10 @@ class Postulacion(Base):
     # (Web vs WhatsApp, 2026-09-16) + flags de conversación
     analisis: Mapped[dict] = mapped_column(JSON, default=dict)
     prefiltro_completo: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 2026-09-22 («Avanzar a Entrevista Humana»): historial legible del expediente — notas de decisiones
+    # humanas que hay que poder leer en la ficha sin abrir la bitácora ([{evento, texto, usuario, fecha, …}]).
+    # SOLO se agrega: nunca se borra ni se reescribe lo ya generado (chat, entrevistas, análisis).
+    historial: Mapped[list] = mapped_column(JSON, default=list)
     # 2026-09-16 (control manual de RH): actividades que RH saltó al mover de etapa —
     # [{actividad, etapa, usuario, fecha, motivo}] — registro interno, nunca bloquea.
     actividades_omitidas: Mapped[list] = mapped_column(JSON, default=list)

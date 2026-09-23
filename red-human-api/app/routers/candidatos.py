@@ -1639,12 +1639,22 @@ def actividad_agente(db: Session = Depends(get_db), _: Usuario = Depends(usuario
     return {"prefiltrando": prefiltrando, "enPrefiltro": len(filas)}
 
 
+def _fecha_hora_mx(dt: datetime) -> str:
+    """«22/09/2026 14:35 h» en hora de México — para las leyendas del historial que lee RH."""
+    return dt.astimezone(TZ_MEXICO).strftime("%d/%m/%Y %H:%M") + " h"
+
+
 class EtapaIn(BaseModel):
     etapa: str
     comentario: str = ""
     # 2026-09-16 (control manual de RH): «Mover a otra etapa» — sin bloqueos de secuencia; lo que se salta
     # queda como «Omitida manualmente» (usuario, fecha, motivo = comentario).
     manual: bool = False
+    # 2026-09-22 («Avanzar a Entrevista Humana»): RH decide saltarse la Entrevista Red Human desde Prefiltro
+    # o desde la propia Entrevista IA. Implica `manual`, no bloquea por evaluaciones pendientes y deja la
+    # leyenda «Entrevista Red Human omitida manualmente por [usuario] — [fecha y hora]» en el historial.
+    # NADA de lo generado antes (chat, entrevista parcial, análisis de CV, score) se borra.
+    omitir_entrevista_ia: bool = False
 
 
 # Actividad esperada en cada etapa y cómo saber si YA se hizo (para marcar «Omitida manualmente»).
@@ -1736,10 +1746,13 @@ async def mover_etapa(
     p = _por_codigo(db, codigo, cuenta.id)
     if datos.etapa not in ETAPAS_CANDIDATO:
         raise HTTPException(400, f"Etapa inválida. Usa una de: {', '.join(ETAPAS_CANDIDATO)}")
-    libre = datos.manual or puede_forzar_prueba(db, forzar_prueba)
+    # «Avanzar a Entrevista Humana» (2026-09-22) es una decisión humana explícita: se comporta como manual.
+    omitiendo_ia = bool(datos.omitir_entrevista_ia) and datos.etapa == "Entrevista Humana"
+    manual = datos.manual or omitiendo_ia
+    libre = manual or puede_forzar_prueba(db, forzar_prueba)
     if datos.etapa == p.etapa:
         raise HTTPException(409, f"La postulación ya está en {datos.etapa}.")
-    if datos.etapa == "Entrevista Humana" and not datos.manual:
+    if datos.etapa == "Entrevista Humana" and not manual:
         raise HTTPException(409, "Para programar la Entrevista Humana usa POST /candidatos/{codigo}/entrevista-humana.")
     if datos.etapa == "Onboarding":
         if p.etapa != "Contratación" and not libre:
@@ -1748,7 +1761,7 @@ async def mover_etapa(
         raise HTTPException(409, "El candidato ya está en Onboarding; gestiona su expediente desde ese módulo.")
 
     # 2026-09-16 (control manual): lo que se salta queda como «Omitida manualmente» — registro interno.
-    omitidas = _actividades_pendientes(p, p.etapa, datos.etapa) if datos.manual else []
+    omitidas = _actividades_pendientes(p, p.etapa, datos.etapa) if manual else []
     if omitidas:
         ahora_iso = datetime.now(timezone.utc).isoformat()
         p.actividades_omitidas = list(p.actividades_omitidas or []) + [
@@ -1783,6 +1796,20 @@ async def mover_etapa(
             )
         _abrir_expediente(db, p, u)
 
+    # 2026-09-22: leyenda explícita en el historial del expediente/postulación. Solo se AGREGA: la
+    # entrevista IA parcial, el chat, el análisis de CV y el score se conservan tal cual.
+    if omitiendo_ia:
+        sello = datetime.now(timezone.utc)
+        nota = f"Entrevista Red Human omitida manualmente por {u.nombre} — {_fecha_hora_mx(sello)}"
+        p.historial = list(p.historial or []) + [
+            {"evento": "entrevista_ia_omitida", "texto": nota, "usuario": u.nombre, "fecha": sello.isoformat(),
+             "desde": p.etapa, "hacia": datos.etapa, "motivo": datos.comentario.strip()[:300]}
+        ]
+        registrar(
+            db, u.nombre, "entrevista_ia_omitida", "postulacion", p.codigo,
+            {"texto": nota, "desde": p.etapa, "motivo": datos.comentario.strip()[:300], "correo_rh": u.correo},
+        )
+
     anterior = p.etapa
     reabierta = not p.activa
     if reabierta:
@@ -1802,7 +1829,7 @@ async def mover_etapa(
     registrar(
         db, u.nombre, "etapa_movida", "postulacion", p.codigo,
         {"candidato": p.candidato.codigo, "de": anterior, "a": datos.etapa, "comentario": datos.comentario, "reabierta": reabierta,
-         "manual": datos.manual, "omitidas": omitidas, "correo_rh": u.correo},
+         "manual": manual, "omitidas": omitidas, "omitio_entrevista_ia": omitiendo_ia, "correo_rh": u.correo},
     )
     db.commit()
     return postulacion_dict(p, detalle=True)
