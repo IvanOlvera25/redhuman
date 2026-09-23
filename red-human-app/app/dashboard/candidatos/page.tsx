@@ -158,7 +158,7 @@ const FILTROS_ESTADO: { key: FiltroEstado; label: string }[] = [
   { key: "en_proceso", label: "En proceso" },
   { key: "aptos", label: "Aptos" },
   { key: "contratados", label: "Contratados" },
-  { key: "descartados", label: "Descartados" },
+  { key: "descartados", label: "No cumple" },  // recomendación del prefiltro; descartar sigue siendo decisión de RH
 ];
 
 const ETAPAS_YA_CONTRATADO: EtapaCandidato[] = ["Contratación", "Onboarding"];
@@ -240,7 +240,12 @@ function fechaCorta(iso: string | null | undefined): string | null {
   }
 }
 
-/** "Todos" excluye a los descartados a propósito: son un archivo aparte, no la vista por defecto. */
+/** HOTFIX 2026-09-22 — «Todos» muestra TODAS las postulaciones cargadas, incluidas las que el agente
+ * marcó «no cumple». `Postulacion.estado` es solo la RECOMENDACIÓN del prefiltro: la postulación sigue
+ * ACTIVA y en su etapa hasta que una persona de RH la descarte (LFPDPPP/HITL), y así la cuenta el backend
+ * (`services/conteos.py`, B4). Ocultarlas aquí dejaba tarjetas invisibles en Prefiltro mientras el contador
+ * de la vacante decía 3, 5, 12… Las cerradas siguen fuera hasta activar «Mostrar cerradas» (eso lo filtra
+ * la API, no esta función); el chip «No cumple» sigue disponible para revisarlas aparte. */
 function coincideEstado(c: Candidato, filtro: FiltroEstado): boolean {
   const yaContratado = ETAPAS_YA_CONTRATADO.includes(c.etapa);
   switch (filtro) {
@@ -254,7 +259,7 @@ function coincideEstado(c: Candidato, filtro: FiltroEstado): boolean {
       return c.estado === "no_cumple";
     case "todos":
     default:
-      return c.estado !== "no_cumple";
+      return true;
   }
 }
 

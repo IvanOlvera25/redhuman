@@ -14,6 +14,7 @@ Sin plataformas externas ni módulos separados de evaluación.
 
 import io
 import secrets
+import traceback
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -326,7 +327,11 @@ def _html_liga(nombre: str, curso: Curso, liga: str, tipo: str) -> str:
 
 
 async def _notificar(a: AsignacionCurso) -> dict:
-    """WhatsApp y/o correo con la liga; que un proveedor falle nunca tumba la asignación."""
+    """WhatsApp y/o correo con la liga; que un proveedor falle nunca tumba la asignación.
+
+    2026-09-22 (hotfix 500): además de los try/except por canal, TODO el armado del mensaje va protegido
+    (`notificar_seguro`): leer el curso (modalidad, duración, empresa), la persona o la liga nunca puede
+    tumbar la asignación — el aviso es un efecto secundario, la asignación es el dato."""
     curso = a.curso
     liga = liga_asignacion(a)
     salida = {"whatsapp": None, "correo": None}
@@ -352,6 +357,17 @@ async def _notificar(a: AsignacionCurso) -> dict:
     return salida
 
 
+async def notificar_seguro(a: AsignacionCurso) -> dict:
+    """Envoltura a prueba de fallos de `_notificar` (2026-09-22): cualquier excepción queda en el log y en
+    el resultado que ve RH, pero la asignación se guarda. Úsala SIEMPRE desde los endpoints."""
+    try:
+        return await _notificar(a)
+    except Exception as ex:  # noqa: BLE001
+        traceback.print_exc()
+        print(f"[capacitacion] ⚠️ No se pudo avisar de la asignación {a.codigo}: {ex}", flush=True)
+        return {"whatsapp": None, "correo": None, "error": f"No se pudo enviar el aviso: {str(ex)[:200]}"}
+
+
 def _nueva_asignacion(db: Session, curso: Curso, tipo: str, asignado_por: str, **campos) -> AsignacionCurso:
     a = AsignacionCurso(codigo="TMP", curso_id=curso.id, tipo=tipo, token=secrets.token_urlsafe(24), asignado_por=asignado_por, **campos)
     db.add(a)
@@ -367,7 +383,7 @@ async def asignar_a_postulacion(db: Session, p: Postulacion, curso: Curso, actor
     if existente:
         return existente
     a = _nueva_asignacion(db, curso, "candidato", actor, postulacion_id=p.id)
-    envio = await _notificar(a) if notificar else {}
+    envio = await notificar_seguro(a) if notificar else {}
     registrar(db, actor, "curso_asignado_candidato", "postulacion", p.codigo, {"curso": curso.codigo, "asignacion": a.codigo, "envio": envio})
     return a
 
@@ -421,7 +437,7 @@ async def asignar(codigo: str, datos: AsignarIn, db: Session = Depends(get_db), 
 
     envios = []
     for a in creadas:
-        envio = await _notificar(a) if datos.notificar and (a.telefono_persona or a.correo_persona) else {}
+        envio = await notificar_seguro(a) if datos.notificar and (a.telefono_persona or a.correo_persona) else {}
         envios.append({"asignacion": a.codigo, "tipo": a.tipo, "persona": a.nombre_persona, "liga": liga_asignacion(a), **envio})
     registrar(db, u.nombre, "curso_asignado", "curso", curso.codigo, {"creadas": [a.codigo for a in creadas], "reutilizadas": [a.codigo for a in reutilizadas], "no_encontrados": no_encontrados, "envios": envios})
     db.commit()

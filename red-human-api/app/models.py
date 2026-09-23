@@ -1242,13 +1242,17 @@ def registrar(db: Session, actor: str, accion: str, entidad: str, entidad_id: st
     prev = db.query(Bitacora).order_by(Bitacora.id.desc()).first()
     hash_prev = prev.hash if prev else "GENESIS"
     ts = ahora()
+    # 2026-09-22 (hotfix): `default=str` — un detalle con datetime/objeto raro (respuestas de proveedores,
+    # excepciones) ya no truena la acción completa con un 500 al escribir la bitácora.
+    detalle_seguro = json.loads(json.dumps(detalle or {}, default=str, ensure_ascii=False))
     payload = json.dumps(
-        {"ts": ts.isoformat(), "actor": actor, "accion": accion, "entidad": entidad, "entidad_id": entidad_id, "detalle": detalle or {}},
+        {"ts": ts.isoformat(), "actor": actor, "accion": accion, "entidad": entidad, "entidad_id": entidad_id, "detalle": detalle_seguro},
         sort_keys=True,
         ensure_ascii=False,
+        default=str,
     )
     h = hashlib.sha256((hash_prev + payload).encode("utf-8")).hexdigest()
-    ev = Bitacora(ts=ts, actor=actor, accion=accion, entidad=entidad, entidad_id=entidad_id, detalle=detalle or {}, hash_prev=hash_prev, hash=h)
+    ev = Bitacora(ts=ts, actor=actor, accion=accion, entidad=entidad, entidad_id=entidad_id, detalle=detalle_seguro, hash_prev=hash_prev, hash=h)
     db.add(ev)
     return ev
 

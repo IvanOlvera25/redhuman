@@ -554,7 +554,7 @@ def curso_dict(c: Curso, detalle: bool = False) -> dict:
         "titulo": c.titulo,
         "categoria": c.categoria,
         "duracionHoras": c.duracion_horas,
-        "duracion": c.duracion_texto or f"{c.duracion_horas:g} h",  # 2026-09-19: libre
+        "duracion": texto_duracion_curso(c),  # 2026-09-19: libre (hotfix 2026-09-22: cursos legado sin duración)
         "modalidad": c.modalidad or "autoguiado",
         "objetivo": c.objetivo,
         "estado": c.estado,
@@ -577,6 +577,20 @@ def curso_dict(c: Curso, detalle: bool = False) -> dict:
             for q in (c.evaluacion or [])
         ]
     return base
+
+
+def texto_duracion_curso(c) -> str:
+    """Duración legible de un curso. 2026-09-22 (hotfix): `modalidad`/`duracion_texto`/`duracion_horas` son
+    columnas agregadas después (migraciones.sincronizar) y en filas viejas pueden venir NULL — formatearlas
+    con `:g` reventaba la serialización (500) al abrir o asignar esos cursos."""
+    texto = (getattr(c, "duracion_texto", "") or "").strip()
+    if texto:
+        return texto
+    horas = getattr(c, "duracion_horas", None)
+    try:
+        return f"{float(horas):g} h" if horas else ""
+    except (TypeError, ValueError):
+        return ""
 
 
 def asignacion_dict(a: AsignacionCurso) -> dict:
@@ -625,7 +639,7 @@ def asignacion_publica_dict(a: AsignacionCurso) -> dict:
         "requiereRegistro": a.tipo == "externo" and not a.externo_nombre,
         "curso": curso.titulo if curso else "",
         "modalidad": (curso.modalidad or "autoguiado") if curso else "autoguiado",
-        "duracion": (curso.duracion_texto or f"{curso.duracion_horas:g} h") if curso else "",
+        "duracion": texto_duracion_curso(curso) if curso else "",
         "objetivo": curso.objetivo if curso else "",
         "categoria": curso.categoria if curso else "",
         "duracionHoras": curso.duracion_horas if curso else 0,
