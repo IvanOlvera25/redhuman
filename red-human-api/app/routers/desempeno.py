@@ -288,6 +288,24 @@ def resultados(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(
     evs = [e for e in c.evaluaciones if e.colaborador and e.colaborador.eliminado_en is None]
     completadas = [e for e in evs if e.estado == "completada"]
     calificadas = [e for e in completadas if e.calificacion is not None]
+    # Fortalezas: resultados con logro alto, agrupados por objetivo/KPI (lo que el equipo sí domina).
+    fortalezas: dict = {}
+    for e in completadas:
+        for r in e.resultados or []:
+            try:
+                logro = float(r.get("logro"))
+            except (TypeError, ValueError):
+                continue
+            if logro < 85:
+                continue
+            nombre = str(r.get("nombre") or "").strip() or "Sin nombre"
+            fila = fortalezas.setdefault(nombre, {"tema": nombre, "personas": 0, "promedio": 0.0, "_suma": 0.0})
+            fila["personas"] += 1
+            fila["_suma"] += logro
+            fila["promedio"] = round(fila["_suma"] / fila["personas"], 1)
+    for fila in fortalezas.values():
+        fila.pop("_suma", None)
+
     brechas: dict = {}
     for e in evs:
         for b in e.brechas or []:
@@ -312,4 +330,5 @@ def resultados(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(
         ],
         "pendientes": [evaluacion_desempeno_dict(e) for e in evs if e.estado != "completada"],
         "brechas": sorted(brechas.values(), key=lambda b: b["personas"], reverse=True),
+        "fortalezas": sorted(fortalezas.values(), key=lambda f: (f["personas"], f["promedio"]), reverse=True),
     }

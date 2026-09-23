@@ -132,6 +132,22 @@ async def subir(
     return [_doc_dict(d) for d in creados]
 
 
+class GenerarDocIn(BaseModel):
+    tema: str
+    tipo: str = "politica"
+    notas: str = ""
+
+
+@router.post("/generar")
+def generar(datos: GenerarDocIn, _: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Generar con Red Human»: redacta un BORRADOR editable (no lo guarda ni lo publica). RH revisa,
+    completa lo marcado como «[por definir]», define accesos y hasta entonces lo publica."""
+    if not datos.tema.strip():
+        raise HTTPException(400, "Dime de qué trata el documento.")
+    borrador, con_ia = ia.borrador_conocimiento(datos.tema, datos.tipo, datos.notas, empresa=cuenta.nombre_visible)
+    return {"titulo": borrador.titulo, "texto": borrador.texto, "avisos": list(borrador.avisos or []), "generadoConIa": con_ia}
+
+
 class PermisosDocIn(BaseModel):
     publicado: Optional[bool] = None
     areas: Optional[List[str]] = None    # vacío = todas las áreas

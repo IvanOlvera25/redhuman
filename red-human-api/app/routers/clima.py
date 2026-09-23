@@ -32,6 +32,9 @@ from ..models import (
     registrar,
 )
 from ..serial import medicion_clima_dict, medicion_clima_publica_dict
+from ..services import plantillas_correo
+from ..services.correo import enviar_correo
+from ..services.whatsapp import enviar_texto_sin_plantilla
 from ..services.modulos_rh import requiere_modulos_rh
 
 router = APIRouter(prefix="/clima", tags=["clima"], dependencies=[Depends(requiere_modulos_rh)])
@@ -240,6 +243,63 @@ def responder_publica(token: str, datos: ResponderIn = Body(...), db: Session = 
     _guardar_respuesta(db, m, datos, origen, col)
     db.commit()
     return {"guardada": True, "anonima": m.anonima}
+
+
+class InvitarIn(BaseModel):
+    colaborador_ids: List[str] = []  # códigos COL-#### del roster (nunca se capturan personas aquí)
+    mensaje: str = ""                # nota opcional de RH al inicio del aviso
+
+
+@router.post("/mediciones/{codigo}/invitar")
+async def invitar(codigo: str, datos: InvitarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Manda la liga de la medición a los colaboradores elegidos (correo y/o WhatsApp, con lo que tenga
+    cada quien en el roster). Que un proveedor falle NUNCA rompe la invitación: el resultado por persona
+    se le muestra a RH. No se guarda quién fue invitado como participante: la respuesta sigue su regla de
+    anonimato."""
+    m = _medicion(db, codigo, cuenta.id)
+    if m.estado != "abierta":
+        raise HTTPException(409, "Abre la medición antes de invitar (solo una medición abierta recibe respuestas).")
+    if not datos.colaborador_ids:
+        raise HTTPException(400, "Elige al menos un colaborador.")
+    liga = liga_publica(m)
+    nota = datos.mensaje.strip()
+    resultados, no_encontrados = [], []
+    for cod in datos.colaborador_ids:
+        col = db.query(Colaborador).filter(
+            Colaborador.codigo == cod, Colaborador.cuenta_id == cuenta.id,
+            Colaborador.eliminado_en.is_(None), Colaborador.activo.is_(True),
+        ).first()
+        if not col:
+            no_encontrados.append(cod)
+            continue
+        primer = (col.nombre or "").split(" ")[0]
+        texto = (
+            f"Hola {primer}, en {cuenta.nombre_visible} queremos saber cómo te sientes: contesta «{m.titulo}» en unos minutos. "
+            + (f"{nota} " if nota else "")
+            + ("Tus respuestas son ANÓNIMAS. " if m.anonima else "")
+            + f"Aquí está la liga: {liga}"
+        )
+        fila = {"colaborador": col.codigo, "nombre": col.nombre, "correo": None, "whatsapp": None}
+        if col.correo:
+            try:
+                asunto, html = plantillas_correo.html_aviso(
+                    f"Encuesta de clima: {m.titulo}", texto, cuenta.nombre_visible, [], ("Contestar la encuesta", liga),
+                )
+                fila["correo"] = await enviar_correo(col.correo, asunto, html)
+            except Exception as ex:  # noqa: BLE001
+                fila["correo"] = {"enviado": False, "proveedor": "error", "detalle": str(ex)[:200]}
+        if col.telefono:
+            try:
+                fila["whatsapp"] = await enviar_texto_sin_plantilla(col.telefono, texto)
+            except Exception as ex:  # noqa: BLE001
+                fila["whatsapp"] = {"enviado": False, "proveedor": "error", "detalle": str(ex)[:200]}
+        resultados.append(fila)
+    if not resultados:
+        raise HTTPException(404, "Ninguno de los colaboradores indicados existe o está activo.")
+    registrar(db, u.nombre, "clima_invitaciones", "clima", m.codigo,
+              {"invitados": [r["colaborador"] for r in resultados], "no_encontrados": no_encontrados, "correo_rh": u.correo})
+    db.commit()
+    return {"liga": liga, "invitados": resultados, "noEncontrados": no_encontrados}
 
 
 # ------------------------------------------------------------
