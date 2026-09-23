@@ -16,12 +16,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import Base, SessionLocal, engine
-from .migraciones import crear_tablas_base, crear_tablas_conocimiento, candidatos_sin_postulacion, sincronizar
+from .migraciones import crear_tablas_base, crear_tablas_conocimiento, crear_tablas_modulos_rh, candidatos_sin_postulacion, sincronizar
 from .migraciones import asegurar_reglas_entrevistador
-from .routers import agente, auth, candidatos, capacitacion, clientes, colaboradores, configuracion, conocimiento, contratacion, cuentas, emails_preview, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
+from .routers import agente, auth, candidatos, capacitacion, clientes, clima, colaboradores, configuracion, conocimiento, contratacion, cuentas, desempeno, emails_preview, empleados, entrevista_humana, entrevistas, expediente_publico, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
 from .seed import rellenar_slugs_cuentas, sembrar, sembrar_admin
-from .models import TABLAS_CONOCIMIENTO
-from .services import rag
+from .models import TABLAS_CONOCIMIENTO, TABLAS_MODULOS_RH
+from .services import modulos_rh, rag
 from .services.agenda import revisar_videollamadas_noshow
 from .services.recordatorios import revisar_recordatorios_documentos
 from .services.recordatorios_entrevista import revisar_recordatorios_entrevista
@@ -44,7 +44,17 @@ async def lifespan(app: FastAPI):
     rag.marcar_disponible(error_rag is None, error_rag or "")
     if error_rag:
         print(f"[conocimiento] ⚠️ Base de Conocimiento DESHABILITADA: no se pudieron crear sus tablas → {error_rag}", flush=True)
-    cambios = sincronizar(engine, omitir=set(TABLAS_CONOCIMIENTO) if error_rag else None)  # columnas nuevas sobre una base ya existente
+    # 2026-09-22 (andamiaje Desempeño/Clima): mismo trato que la Base de Conocimiento — nunca fatales.
+    error_modulos = crear_tablas_modulos_rh(engine)
+    modulos_rh.marcar_disponible(error_modulos is None, error_modulos or "")
+    if error_modulos:
+        print(f"[modulos-rh] ⚠️ Desempeño/Clima DESHABILITADOS: no se pudieron crear sus tablas → {error_modulos}", flush=True)
+    omitir = set()
+    if error_rag:
+        omitir |= set(TABLAS_CONOCIMIENTO)
+    if error_modulos:
+        omitir |= set(TABLAS_MODULOS_RH)
+    cambios = sincronizar(engine, omitir=omitir or None)  # columnas nuevas sobre una base ya existente
     if cambios:
         print(f"[esquema] columnas agregadas: {', '.join(cambios)}")
     with SessionLocal() as db:
@@ -168,6 +178,8 @@ app.include_router(cuentas.router)
 app.include_router(notificaciones.router)
 app.include_router(capacitacion.router)
 app.include_router(conocimiento.router)
+app.include_router(desempeno.router)
+app.include_router(clima.router)
 app.include_router(emails_preview.router)
 app.include_router(webhooks.router)
 app.include_router(agente.router)

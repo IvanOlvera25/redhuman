@@ -1859,3 +1859,75 @@ def validar_documento(
         text_format=DocumentoValidado,
     )
     return resp.output_parsed, True
+
+
+# ============================================================
+# Desempeño (andamiaje 2026-09-22) — «Crear evaluación con IA»
+# ============================================================
+#
+# La IA PROPONE objetivos y KPIs para un puesto/periodo; RH los edita y decide (HITL). Sin OPENAI_API_KEY
+# hay una propuesta demo determinista, igual que en vacantes y cursos. Nunca inventa metas numéricas de
+# negocio que RH no dio: cuando no hay dato, la meta queda como texto guía para que RH la ajuste.
+
+
+class ObjetivoDesempeno(BaseModel):
+    titulo: str = Field(description="Objetivo claro y medible, en una línea.")
+    descripcion: str = Field(default="", description="Qué se espera lograr y cómo se observa.")
+    peso: int = Field(default=0, description="Peso en % dentro de la evaluación (la suma de objetivos + KPIs es 100).")
+
+
+class KpiDesempeno(BaseModel):
+    nombre: str = Field(description="Indicador medible (ej. «Tickets resueltos a tiempo»).")
+    descripcion: str = Field(default="", description="Cómo se mide y de dónde sale el dato.")
+    unidad: str = Field(default="", description="%, piezas, pesos, días…")
+    meta: str = Field(default="", description="Meta esperada del periodo; vacía si RH no la definió.")
+    peso: int = Field(default=0, description="Peso en % dentro de la evaluación.")
+
+
+class PlanDesempeno(BaseModel):
+    objetivos: List[ObjetivoDesempeno]
+    kpis: List[KpiDesempeno]
+
+
+def _plan_desempeno_demo(puesto: str, periodo: str) -> PlanDesempeno:
+    p = puesto.strip() or "el puesto"
+    return PlanDesempeno(
+        objetivos=[
+            ObjetivoDesempeno(titulo=f"Cumplir las responsabilidades clave de {p}", descripcion="Entregar el trabajo del periodo en tiempo y forma, con la calidad acordada.", peso=30),
+            ObjetivoDesempeno(titulo="Colaboración y trabajo en equipo", descripcion="Apoya a su equipo, comparte información y participa en las juntas de seguimiento.", peso=20),
+            ObjetivoDesempeno(titulo="Desarrollo y capacitación", descripcion="Completa la capacitación asignada y aplica lo aprendido en su operación.", peso=10),
+        ],
+        kpis=[
+            KpiDesempeno(nombre="Cumplimiento de entregas", descripcion="Entregas completadas en la fecha comprometida.", unidad="%", meta="", peso=20),
+            KpiDesempeno(nombre="Calidad del trabajo", descripcion="Retrabajos o errores detectados en el periodo.", unidad="%", meta="", peso=10),
+            KpiDesempeno(nombre="Asistencia y puntualidad", descripcion="Días trabajados sin incidencias.", unidad="%", meta="", peso=10),
+        ],
+    )
+
+
+def plan_desempeno(puesto: str, periodo: str = "", contexto: str = "") -> Tuple[PlanDesempeno, bool]:
+    """Propuesta de objetivos y KPIs para un ciclo de desempeño. Regresa (plan, con_ia)."""
+    client = _client()
+    if client is None:
+        return _plan_desempeno_demo(puesto, periodo), False
+    try:
+        resp = client.responses.parse(
+            model=MODEL,
+            instructions=(
+                "Diseñas evaluaciones de desempeño para empresas en México (Red Human AI). A partir del puesto y el periodo "
+                "propones 3 a 5 OBJETIVOS observables y 3 a 5 KPIs medibles, con pesos en % que sumen 100 entre todos. "
+                "Reglas: (1) nada de datos sensibles (salud, embarazo, religión, estado civil, orientación) ni rasgos de "
+                "personalidad: solo conducta y resultados de trabajo; (2) si no te dieron una meta numérica real, deja `meta` "
+                "vacía — NUNCA inventes cifras de negocio; (3) lenguaje claro, español de México, sin anglicismos innecesarios; "
+                "(4) la evaluación la hace una persona de RH o la jefatura: tú solo propones el marco."
+            ),
+            input=f"Puesto: {puesto or 'general'}\nPeriodo: {periodo or 'sin especificar'}\nContexto de RH: {contexto.strip()[:2000] or 'sin contexto adicional'}",
+            text_format=PlanDesempeno,
+        )
+        plan = resp.output_parsed
+        if not plan.objetivos and not plan.kpis:
+            return _plan_desempeno_demo(puesto, periodo), False
+        return plan, True
+    except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea: RH captura a mano
+        print(f"[ia] plan de desempeño demo ({ex})", flush=True)
+        return _plan_desempeno_demo(puesto, periodo), False

@@ -1037,6 +1037,17 @@ export function decidirCandidato(codigo: string, accion: "descartar", comentario
 
 /** Botones explícitos del Kanban ("Enviar a X") — mueve la tarjeta a una etapa exacta.
  * `forzarPrueba` (Lote 4): inerte salvo que Modo Prueba esté activo en el servidor. */
+/** 2026-09-22 — «Avanzar a Entrevista Humana»: salta la Entrevista Red Human por decisión de RH. No se
+ * bloquea por evaluaciones pendientes y deja la leyenda en el historial; nada de lo generado se borra. */
+export function avanzarAEntrevistaHumana(codigo: string, motivo = "") {
+  return patch<Candidato>(`/candidatos/${codigo}/etapa`, {
+    etapa: "Entrevista Humana",
+    comentario: motivo,
+    manual: true,
+    omitir_entrevista_ia: true,
+  });
+}
+
 export function moverEtapaCandidato(codigo: string, etapa: string, comentario = "", forzarPrueba = false, manual = false) {
   // `manual` (2026-09-16): «Mover a otra etapa» — sin bloqueos de secuencia; lo que se salte queda
   // registrado como «Omitida manualmente» (usuario, fecha, motivo = comentario).

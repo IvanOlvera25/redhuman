@@ -196,6 +196,8 @@ export interface Candidato {
   respuestasWeb?: { pregunta: string; respuesta: string }[];
   inconsistencias?: { criterio: string; pregunta: string; web: string; whatsapp: string; detectada_en: string; aclarada: boolean; aclaracion: string }[];
   actividadesOmitidas?: { actividad: string; etapa: string; usuario: string; fecha: string; motivo: string; hacia: string }[];
+  /** 2026-09-22: notas del historial del expediente (decisiones humanas). Solo se agregan, nunca se borran. */
+  historial?: { evento: string; texto: string; usuario: string; fecha: string; desde?: string; hacia?: string; motivo?: string }[];
   /** Capacitación universal: cursos de filtro cursados (resultado en la evaluación del candidato). */
   capacitacion?: { curso: string; titulo: string; calificacion: number; aprobado: boolean; fecha: string; asignacion: string }[];
   /** 2026-09-13: status de la Entrevista Red Human (bloque propio). */

@@ -281,6 +281,10 @@ class Postulacion(Base):
     # (Web vs WhatsApp, 2026-09-16) + flags de conversación
     analisis: Mapped[dict] = mapped_column(JSON, default=dict)
     prefiltro_completo: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 2026-09-22 («Avanzar a Entrevista Humana»): historial legible del expediente — notas de decisiones
+    # humanas que hay que poder leer en la ficha sin abrir la bitácora ([{evento, texto, usuario, fecha, …}]).
+    # SOLO se agrega: nunca se borra ni se reescribe lo ya generado (chat, entrevistas, análisis).
+    historial: Mapped[list] = mapped_column(JSON, default=list)
     # 2026-09-16 (control manual de RH): actividades que RH saltó al mover de etapa —
     # [{actividad, etapa, usuario, fecha, motivo}] — registro interno, nunca bloquea.
     actividades_omitidas: Mapped[list] = mapped_column(JSON, default=list)
@@ -831,6 +835,9 @@ class Colaborador(Base):
     correo: Mapped[str] = mapped_column(String(200), default="")
     telefono: Mapped[str] = mapped_column(String(30), default="")
     puesto: Mapped[str] = mapped_column(String(200), default="")
+    # 2026-09-22: área/departamento — la usan los permisos de la Base de Conocimiento y los tableros de
+    # Desempeño y Clima. Se captura en el perfil del colaborador; nunca en otro módulo.
+    area: Mapped[str] = mapped_column(String(120), default="")
     salario: Mapped[str] = mapped_column(String(80), default="")
     empresa: Mapped[str] = mapped_column(String(150), default="")
     # 2026-09-19 (Bloque 3): condiciones FINALES de contratación tal como se guardaron en el expediente y
@@ -1204,6 +1211,11 @@ class DocumentoConocimiento(Base):
     fragmentos_total: Mapped[int] = mapped_column(Integer, default=0)
     con_embeddings: Mapped[bool] = mapped_column(Boolean, default=False)
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 2026-09-22 (permisos): la IA responde SOLO con documentos publicados; `areas`/`puestos` limitan
+    # quién los ve, usando el área y el puesto de `colaboradores` (ver puede_ver_conocimiento).
+    publicado: Mapped[bool] = mapped_column(Boolean, default=True)
+    areas: Mapped[list] = mapped_column(JSON, default=list)    # [str] vacío = todas las áreas
+    puestos: Mapped[list] = mapped_column(JSON, default=list)  # [str] vacío = todos los puestos
     creado_por: Mapped[str] = mapped_column(String(150), default="")
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
@@ -1242,13 +1254,17 @@ def registrar(db: Session, actor: str, accion: str, entidad: str, entidad_id: st
     prev = db.query(Bitacora).order_by(Bitacora.id.desc()).first()
     hash_prev = prev.hash if prev else "GENESIS"
     ts = ahora()
+    # 2026-09-22 (hotfix): `default=str` — un detalle con datetime/objeto raro (respuestas de proveedores,
+    # excepciones) ya no truena la acción completa con un 500 al escribir la bitácora.
+    detalle_seguro = json.loads(json.dumps(detalle or {}, default=str, ensure_ascii=False))
     payload = json.dumps(
-        {"ts": ts.isoformat(), "actor": actor, "accion": accion, "entidad": entidad, "entidad_id": entidad_id, "detalle": detalle or {}},
+        {"ts": ts.isoformat(), "actor": actor, "accion": accion, "entidad": entidad, "entidad_id": entidad_id, "detalle": detalle_seguro},
         sort_keys=True,
         ensure_ascii=False,
+        default=str,
     )
     h = hashlib.sha256((hash_prev + payload).encode("utf-8")).hexdigest()
-    ev = Bitacora(ts=ts, actor=actor, accion=accion, entidad=entidad, entidad_id=entidad_id, detalle=detalle or {}, hash_prev=hash_prev, hash=h)
+    ev = Bitacora(ts=ts, actor=actor, accion=accion, entidad=entidad, entidad_id=entidad_id, detalle=detalle_seguro, hash_prev=hash_prev, hash=h)
     db.add(ev)
     return ev
 
@@ -1493,3 +1509,145 @@ class IntegracionTeams(Base):
     conectado_por: Mapped[str] = mapped_column(String(150), default="")  # nombre de la persona de RH
     conectado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
     ultimo_error: Mapped[str] = mapped_column(Text, default="")
+
+
+# ============================================================
+# Ciclo de vida del Colaborador — Desempeño · Clima · Conocimiento (andamiaje 2026-09-22)
+# ============================================================
+#
+# REGLA DE ORO (inquebrantable): `colaboradores` es la BASE MAESTRA de las personas internas.
+# Ningún módulo de aquí en adelante captura personas ni crea otra tabla de usuarios internos:
+# todos apuntan a `Colaborador.id`. Si alguien no está en el roster, primero se da de alta
+# (contratacion.alta) — nunca se "recaptura" dentro del módulo.
+#
+# Igual que las tablas de conocimiento (hotfix 2026-09-18), estas llevan `cuenta_id` como entero
+# indexado SIN llave foránea a `cuentas` (el aislamiento lo da `cuenta_actual`) y se crean en el paso
+# NO fatal del arranque: si el motor de producción las rechaza, el resto de la plataforma arranca
+# igual y estos módulos responden 503 con el motivo.
+
+TABLAS_MODULOS_RH = ("ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima")
+
+# --- Desempeño ---
+ESTADOS_CICLO_DESEMPENO = ("borrador", "en_curso", "cerrado")
+ESTADOS_EVALUACION_DESEMPENO = ("pendiente", "en_curso", "completada")
+
+
+class CicloDesempeno(Base):
+    """Evaluación de desempeño de un periodo: los objetivos y KPIs que se van a evaluar (capturados por
+    RH o propuestos por la IA y SIEMPRE editables). Cada colaborador evaluado cuelga de aquí."""
+
+    __tablename__ = "ciclos_desempeno"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)  # DES-####
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)  # sin FK (ver nota arriba)
+    nombre: Mapped[str] = mapped_column(String(200))
+    periodo: Mapped[str] = mapped_column(String(60), default="")  # «2026-S2», «Q3 2026», «Anual 2026»
+    descripcion: Mapped[str] = mapped_column(Text, default="")
+    puesto_objetivo: Mapped[str] = mapped_column(String(200), default="")  # contexto para la IA (no filtra)
+    objetivos: Mapped[list] = mapped_column(JSON, default=list)  # [{titulo, descripcion, peso}]
+    kpis: Mapped[list] = mapped_column(JSON, default=list)       # [{nombre, descripcion, unidad, meta, peso}]
+    escala_maxima: Mapped[int] = mapped_column(Integer, default=100)  # calificación 0-100 por defecto
+    generado_con_ia: Mapped[bool] = mapped_column(Boolean, default=False)
+    estado: Mapped[str] = mapped_column(String(20), default="borrador")  # ver ESTADOS_CICLO_DESEMPENO
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    cerrado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    evaluaciones: Mapped[List["EvaluacionDesempeno"]] = relationship(back_populates="ciclo", cascade="all, delete-orphan")
+
+
+class EvaluacionDesempeno(Base):
+    """Evaluación de UN colaborador dentro de un ciclo. La persona SIEMPRE es un `Colaborador` que ya
+    existe (regla de oro): aquí solo viven sus resultados, su calificación y sus brechas."""
+
+    __tablename__ = "evaluaciones_desempeno"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)  # EVD-####
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    ciclo_id: Mapped[int] = mapped_column(ForeignKey("ciclos_desempeno.id"), index=True)
+    colaborador_id: Mapped[int] = mapped_column(ForeignKey("colaboradores.id"), index=True)
+    evaluador: Mapped[str] = mapped_column(String(150), default="")  # quién de RH/jefatura evalúa (HITL)
+    estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # ver ESTADOS_EVALUACION_DESEMPENO
+    resultados: Mapped[list] = mapped_column(JSON, default=list)  # [{tipo, nombre, meta, real, logro, peso, comentario}]
+    calificacion: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 0-escala_maxima
+    brechas: Mapped[list] = mapped_column(JSON, default=list)  # [{tema, brecha, accion_sugerida}] → plan de capacitación
+    comentarios: Mapped[str] = mapped_column(Text, default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    completada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    ciclo: Mapped["CicloDesempeno"] = relationship(back_populates="evaluaciones")
+    colaborador: Mapped["Colaborador"] = relationship()
+
+    __table_args__ = (UniqueConstraint("ciclo_id", "colaborador_id", name="uq_evaluacion_ciclo_colaborador"),)
+
+
+# --- Clima ---
+ESTADOS_MEDICION_CLIMA = ("borrador", "abierta", "cerrada")
+TIPOS_PREGUNTA_CLIMA = ("escala", "opcion", "abierta")
+
+
+class MedicionClima(Base):
+    """Medición de clima laboral: un cuestionario que se abre a los colaboradores y, si se quiere, a una
+    liga pública externa. `anonima=True` (default) significa que NUNCA se guarda quién respondió."""
+
+    __tablename__ = "mediciones_clima"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)  # CLI-####
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    titulo: Mapped[str] = mapped_column(String(200))
+    descripcion: Mapped[str] = mapped_column(Text, default="")
+    preguntas: Mapped[list] = mapped_column(JSON, default=list)  # [{id, texto, tipo, opciones, escala_max}]
+    anonima: Mapped[bool] = mapped_column(Boolean, default=True)
+    estado: Mapped[str] = mapped_column(String(20), default="borrador")  # ver ESTADOS_MEDICION_CLIMA
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # liga pública /clima/{token}
+    permite_externos: Mapped[bool] = mapped_column(Boolean, default=False)
+    abierta_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    cierra_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+    respuestas: Mapped[List["RespuestaClima"]] = relationship(back_populates="medicion", cascade="all, delete-orphan")
+
+
+class RespuestaClima(Base):
+    """Una respuesta al cuestionario. Si la medición es ANÓNIMA, `colaborador_id` queda NULL a propósito
+    (no se puede reconstruir quién contestó); si es identificada, apunta al Colaborador del roster."""
+
+    __tablename__ = "respuestas_clima"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    medicion_id: Mapped[int] = mapped_column(ForeignKey("mediciones_clima.id"), index=True)
+    colaborador_id: Mapped[Optional[int]] = mapped_column(ForeignKey("colaboradores.id"), nullable=True, index=True)
+    # participante externo por liga pública: se guarda el dato de contacto, NUNCA se crea una persona
+    externo_nombre: Mapped[str] = mapped_column(String(200), default="")
+    externo_correo: Mapped[str] = mapped_column(String(200), default="")
+    origen: Mapped[str] = mapped_column(String(20), default="colaborador")  # colaborador | externo
+    respuestas: Mapped[dict] = mapped_column(JSON, default=dict)  # {pregunta_id: valor}
+    enviado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+    medicion: Mapped["MedicionClima"] = relationship(back_populates="respuestas")
+    colaborador: Mapped[Optional["Colaborador"]] = relationship()
+
+
+def puede_ver_conocimiento(doc: "DocumentoConocimiento", colaborador: Optional["Colaborador"]) -> bool:
+    """Permisos de la Base de Conocimiento (2026-09-22) resueltos con la BASE MAESTRA: un documento
+    PUBLICADO se ve si no restringe áreas/puestos, o si el área (`Colaborador.area`) o el puesto de la
+    persona están en la lista. La sesión de RH (sin colaborador) ve todo. Un documento NO publicado solo
+    lo ve RH y NUNCA alimenta las respuestas de la IA."""
+    if not doc.activo:
+        return False
+    if colaborador is None:
+        return True  # sesión de RH en el dashboard
+    if not doc.publicado:
+        return False
+    areas = [str(a).strip().lower() for a in (doc.areas or []) if str(a).strip()]
+    puestos = [str(p).strip().lower() for p in (doc.puestos or []) if str(p).strip()]
+    if not areas and not puestos:
+        return True
+    area_col = (colaborador.area or "").strip().lower()
+    puesto_col = (colaborador.puesto or "").strip().lower()
+    return bool((area_col and area_col in areas) or (puesto_col and puesto_col in puestos))

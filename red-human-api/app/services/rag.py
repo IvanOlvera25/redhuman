@@ -195,15 +195,23 @@ class FragmentoEncontrado(BaseModel):
     puntaje: float
 
 
-def buscar(db: Session, cuenta_id: int, consulta: str, k: int = TOP_K) -> Tuple[List[FragmentoEncontrado], str]:
+def buscar(db: Session, cuenta_id: int, consulta: str, k: int = TOP_K, colaborador=None) -> Tuple[List[FragmentoEncontrado], str]:
     """Top-k fragmentos de la Cuenta para la consulta. Regresa (fragmentos, modo) con modo
-    'semantico' (vector + léxico) o 'lexico'."""
+    'semantico' (vector + léxico) o 'lexico'.
+
+    2026-09-22 (permisos): la IA responde SOLO con documentos PUBLICADOS, y si se indica `colaborador`
+    (una fila de la base maestra `colaboradores`) solo con los que su área o su puesto puede ver
+    (`models.puede_ver_conocimiento`). Un borrador nunca alimenta una respuesta."""
+    from ..models import puede_ver_conocimiento
+
     filas = (
         db.query(FragmentoConocimiento, DocumentoConocimiento)
         .join(DocumentoConocimiento, DocumentoConocimiento.id == FragmentoConocimiento.documento_id)
-        .filter(FragmentoConocimiento.cuenta_id == cuenta_id, DocumentoConocimiento.activo.is_(True))
+        .filter(FragmentoConocimiento.cuenta_id == cuenta_id, DocumentoConocimiento.activo.is_(True),
+                DocumentoConocimiento.publicado.is_(True))
         .all()
     )
+    filas = [(f, d) for f, d in filas if puede_ver_conocimiento(d, colaborador)]
     if not filas:
         return [], "sin_documentos"
     vector_q = None
@@ -267,9 +275,10 @@ def _respuesta_demo(pregunta: str, fragmentos: List[FragmentoEncontrado]) -> Res
     )
 
 
-def responder(db: Session, cuenta_id: int, pregunta: str, historial: Optional[List[dict]] = None, empresa: str = "") -> Tuple[RespuestaConocimiento, List[FragmentoEncontrado], str, bool]:
-    """(respuesta estructurada, fragmentos usados, modo de búsqueda, con_ia)."""
-    fragmentos, modo = buscar(db, cuenta_id, pregunta)
+def responder(db: Session, cuenta_id: int, pregunta: str, historial: Optional[List[dict]] = None, empresa: str = "", colaborador=None) -> Tuple[RespuestaConocimiento, List[FragmentoEncontrado], str, bool]:
+    """(respuesta estructurada, fragmentos usados, modo de búsqueda, con_ia). `colaborador` limita la
+    evidencia a lo que esa persona puede ver (permisos por área/puesto del roster maestro)."""
+    fragmentos, modo = buscar(db, cuenta_id, pregunta, colaborador=colaborador)
     client = ia._client()
     if client is None:
         return _respuesta_demo(pregunta, fragmentos), fragmentos, modo, False

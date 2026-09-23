@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
-from ..models import TIPOS_CONOCIMIENTO, ConsultaConocimiento, Cuenta, DocumentoConocimiento, Usuario, registrar
+from ..models import Colaborador, TIPOS_CONOCIMIENTO, ConsultaConocimiento, Cuenta, DocumentoConocimiento, Usuario, registrar
 from ..serial import iso
 from ..services import archivos as fs
 from ..services import ia, rag
@@ -40,6 +40,10 @@ def _doc_dict(d: DocumentoConocimiento) -> dict:
         "fragmentos": d.fragmentos_total,
         "conEmbeddings": d.con_embeddings,
         "activo": d.activo,
+        # 2026-09-22 (permisos con la base maestra): publicado + a qué áreas/puestos se les muestra
+        "publicado": bool(d.publicado),
+        "areas": list(d.areas or []),
+        "puestos": list(d.puestos or []),
         "creadoPor": d.creado_por,
         "creadoEn": iso(d.creado_en),
         "extracto": (d.texto or "")[:220],
@@ -128,6 +132,41 @@ async def subir(
     return [_doc_dict(d) for d in creados]
 
 
+class PermisosDocIn(BaseModel):
+    publicado: Optional[bool] = None
+    areas: Optional[List[str]] = None    # vacío = todas las áreas
+    puestos: Optional[List[str]] = None  # vacío = todos los puestos
+
+
+@router.patch("/documentos/{doc_id}/permisos")
+def permisos(doc_id: int, datos: PermisosDocIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """2026-09-22 — quién puede ver este documento, con las ÁREAS y PUESTOS de `colaboradores` (base
+    maestra; este módulo nunca define su propio padrón de personas). Sin áreas ni puestos = toda la
+    empresa. Un documento NO publicado solo lo ve RH y la IA jamás lo usa para responder."""
+    d = _doc(db, doc_id, cuenta.id)
+    if datos.publicado is not None:
+        d.publicado = bool(datos.publicado)
+    if datos.areas is not None:
+        d.areas = [a.strip() for a in datos.areas if a.strip()]
+    if datos.puestos is not None:
+        d.puestos = [p.strip() for p in datos.puestos if p.strip()]
+    registrar(db, u.nombre, "conocimiento_permisos", "conocimiento", str(d.id),
+              {"documento": d.titulo, "publicado": d.publicado, "areas": d.areas, "puestos": d.puestos, "correo_rh": u.correo})
+    db.commit()
+    return _doc_dict(d)
+
+
+@router.get("/areas")
+def areas_y_puestos(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Opciones REALES para los permisos: áreas y puestos que existen hoy en el roster de colaboradores."""
+    filas = db.query(Colaborador.area, Colaborador.puesto).filter(
+        Colaborador.cuenta_id == cuenta.id, Colaborador.eliminado_en.is_(None), Colaborador.activo.is_(True)
+    ).all()
+    areas = sorted({(a or "").strip() for a, _ in filas if (a or "").strip()})
+    puestos = sorted({(p or "").strip() for _, p in filas if (p or "").strip()})
+    return {"areas": areas, "puestos": puestos}
+
+
 @router.post("/documentos/{doc_id}/reindexar")
 def reindexar(doc_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
     d = _doc(db, doc_id, cuenta.id)
@@ -152,13 +191,16 @@ def buscar(q: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_a
     """Búsqueda semántica directa (sin redacción): los fragmentos más relevantes con su documento."""
     if not q.strip():
         return {"modo": "sin_consulta", "resultados": []}
-    frags, modo = rag.buscar(db, cuenta.id, q.strip())
+    frags, modo = rag.buscar(db, cuenta.id, q.strip())  # RH: solo publicados (ver rag.buscar)
     return {"modo": modo, "resultados": [f.model_dump() for f in frags]}
 
 
 class PreguntaIn(BaseModel):
     pregunta: str
     historial: Optional[List[dict]] = None  # [{rol, texto}] turnos previos del chat
+    # 2026-09-22: si la pregunta es «como» un colaborador (código COL-####), la IA solo usa los
+    # documentos publicados que su área/puesto puede ver. Sin código = sesión de RH (ve todo lo publicado).
+    colaborador_id: Optional[str] = None
 
 
 @router.post("/preguntar")
@@ -166,7 +208,14 @@ def preguntar(datos: PreguntaIn, db: Session = Depends(get_db), u: Usuario = Dep
     pregunta = datos.pregunta.strip()
     if not pregunta:
         raise HTTPException(400, "Escribe una pregunta.")
-    respuesta, frags, modo, con_ia = rag.responder(db, cuenta.id, pregunta, datos.historial, empresa=cuenta.nombre_visible)
+    col = None
+    if datos.colaborador_id:
+        col = db.query(Colaborador).filter(
+            Colaborador.codigo == datos.colaborador_id, Colaborador.cuenta_id == cuenta.id, Colaborador.eliminado_en.is_(None)
+        ).first()
+        if not col:
+            raise HTTPException(404, "Ese colaborador no existe en el roster.")
+    respuesta, frags, modo, con_ia = rag.responder(db, cuenta.id, pregunta, datos.historial, empresa=cuenta.nombre_visible, colaborador=col)
     db.add(ConsultaConocimiento(cuenta_id=cuenta.id, usuario=u.nombre, pregunta=pregunta, respuesta=respuesta.model_dump(), sin_evidencia=respuesta.sin_evidencia, modo=modo))
     db.commit()
     return {

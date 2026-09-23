@@ -246,7 +246,11 @@ function AsignarCurso({ curso, onClose, onAsignado }: { curso: Curso; onClose: (
   const toggle = (lista: string[], set: (v: string[]) => void, id: string) => set(lista.includes(id) ? lista.filter((x) => x !== id) : [...lista, id]);
 
   async function confirmar() {
-    const ext = ligaAbierta ? [{}] : externos.filter((e) => e.nombre.trim() || e.correo.trim() || e.telefono.trim());
+    // hotfix 2026-09-22: la liga abierta manda un externo con los 4 campos vacíos (nunca `{}`), para que el
+    // backend lo reciba con su forma completa y no dependa de los defaults del validador.
+    const ext = ligaAbierta
+      ? [{ nombre: "", correo: "", telefono: "", organizacion: "" }]
+      : externos.filter((e) => e.nombre.trim() || e.correo.trim() || e.telefono.trim());
     if (!selCol.length && !selPost.length && !ext.length) return setError("Elige al menos una persona o genera una liga abierta.");
     setOcupado(true);
     setError("");

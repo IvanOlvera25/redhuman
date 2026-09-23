@@ -315,6 +315,7 @@ def _sintesis_global(p: Postulacion) -> dict:
         "respuestasWeb": a.get("respuestas_web") or [],
         "inconsistencias": a.get("inconsistencias") or [],
         "actividadesOmitidas": p.actividades_omitidas or [],
+        "historial": list(p.historial or []),  # 2026-09-22: notas de decisiones humanas (nunca se borran)
         # Capacitación universal: cursos de filtro cursados por el candidato (resultado en su evaluación)
         "capacitacion": a.get("capacitacion") or [],
         "entrevistaStatus": entrevista_status,
@@ -554,7 +555,7 @@ def curso_dict(c: Curso, detalle: bool = False) -> dict:
         "titulo": c.titulo,
         "categoria": c.categoria,
         "duracionHoras": c.duracion_horas,
-        "duracion": c.duracion_texto or f"{c.duracion_horas:g} h",  # 2026-09-19: libre
+        "duracion": texto_duracion_curso(c),  # 2026-09-19: libre (hotfix 2026-09-22: cursos legado sin duración)
         "modalidad": c.modalidad or "autoguiado",
         "objetivo": c.objetivo,
         "estado": c.estado,
@@ -577,6 +578,20 @@ def curso_dict(c: Curso, detalle: bool = False) -> dict:
             for q in (c.evaluacion or [])
         ]
     return base
+
+
+def texto_duracion_curso(c) -> str:
+    """Duración legible de un curso. 2026-09-22 (hotfix): `modalidad`/`duracion_texto`/`duracion_horas` son
+    columnas agregadas después (migraciones.sincronizar) y en filas viejas pueden venir NULL — formatearlas
+    con `:g` reventaba la serialización (500) al abrir o asignar esos cursos."""
+    texto = (getattr(c, "duracion_texto", "") or "").strip()
+    if texto:
+        return texto
+    horas = getattr(c, "duracion_horas", None)
+    try:
+        return f"{float(horas):g} h" if horas else ""
+    except (TypeError, ValueError):
+        return ""
 
 
 def asignacion_dict(a: AsignacionCurso) -> dict:
@@ -625,7 +640,7 @@ def asignacion_publica_dict(a: AsignacionCurso) -> dict:
         "requiereRegistro": a.tipo == "externo" and not a.externo_nombre,
         "curso": curso.titulo if curso else "",
         "modalidad": (curso.modalidad or "autoguiado") if curso else "autoguiado",
-        "duracion": (curso.duracion_texto or f"{curso.duracion_horas:g} h") if curso else "",
+        "duracion": texto_duracion_curso(curso) if curso else "",
         "objetivo": curso.objetivo if curso else "",
         "categoria": curso.categoria if curso else "",
         "duracionHoras": curso.duracion_horas if curso else 0,
@@ -776,6 +791,7 @@ def colaborador_dict(col: Colaborador) -> dict:
         "correo": col.correo,
         "telefono": col.telefono,
         "puesto": col.puesto,
+        "area": col.area or "",  # 2026-09-22: permisos de Conocimiento y tableros de Desempeño/Clima
         "salario": col.salario,
         "empresa": col.empresa,
         "tipoContratacion": col.tipo_contratacion or "",  # 2026-09-19
@@ -820,5 +836,104 @@ def colaborador_detalle_dict(col: Colaborador) -> dict:
         "vacante": (
             {"codigo": exp.postulacion.vacante.codigo, "titulo": exp.postulacion.vacante.titulo}
             if exp and exp.postulacion and exp.postulacion.vacante else None
+        ),
+    }
+
+
+# ============================================================
+# Desempeño y Clima (andamiaje 2026-09-22) — la persona SIEMPRE viene de `colaboradores`
+# ============================================================
+
+
+def ciclo_desempeno_dict(c, detalle: bool = False) -> dict:
+    evs = [e for e in (c.evaluaciones or []) if e.colaborador and e.colaborador.eliminado_en is None]
+    completadas = [e for e in evs if e.estado == "completada"]
+    salida = {
+        "id": c.codigo,
+        "nombre": c.nombre,
+        "periodo": c.periodo or "",
+        "descripcion": c.descripcion or "",
+        "puestoObjetivo": c.puesto_objetivo or "",
+        "objetivos": list(c.objetivos or []),
+        "kpis": list(c.kpis or []),
+        "escalaMaxima": c.escala_maxima,
+        "generadoConIa": bool(c.generado_con_ia),
+        "estado": c.estado,
+        "participantes": len(evs),
+        "completadas": len(completadas),
+        "avance": round(len(completadas) / len(evs) * 100) if evs else 0,
+        "creadoPor": c.creado_por or "",
+        "creado": hace(c.creado_en),
+        "creadoEn": iso(c.creado_en),
+        "cerradoEn": iso(c.cerrado_en),
+    }
+    if detalle:
+        salida["evaluaciones"] = [evaluacion_desempeno_dict(e) for e in evs]
+    return salida
+
+
+def evaluacion_desempeno_dict(e, detalle: bool = False) -> dict:
+    col = e.colaborador
+    salida = {
+        "id": e.codigo,
+        "cicloId": e.ciclo.codigo if e.ciclo else "",
+        "ciclo": e.ciclo.nombre if e.ciclo else "",
+        "periodo": e.ciclo.periodo if e.ciclo else "",
+        # identidad SIEMPRE tomada del roster maestro (nunca se recaptura en el módulo)
+        "colaboradorId": col.codigo if col else None,
+        "colaborador": col.nombre if col else "",
+        "puesto": col.puesto if col else "",
+        "area": (col.area or "") if col else "",
+        "evaluador": e.evaluador or "",
+        "estado": e.estado,
+        "calificacion": e.calificacion,
+        "escalaMaxima": e.ciclo.escala_maxima if e.ciclo else 100,
+        "brechas": list(e.brechas or []),
+        "creadoEn": iso(e.creado_en),
+        "completadaEn": iso(e.completada_en),
+    }
+    if detalle:
+        salida["resultados"] = list(e.resultados or [])
+        salida["comentarios"] = e.comentarios or ""
+        salida["objetivos"] = list(e.ciclo.objetivos or []) if e.ciclo else []
+        salida["kpis"] = list(e.ciclo.kpis or []) if e.ciclo else []
+    return salida
+
+
+def medicion_clima_dict(m, liga: str = "", detalle: bool = False) -> dict:
+    salida = {
+        "id": m.codigo,
+        "titulo": m.titulo,
+        "descripcion": m.descripcion or "",
+        "anonima": bool(m.anonima),
+        "permiteExternos": bool(m.permite_externos),
+        "estado": m.estado,
+        "preguntas": len(m.preguntas or []),
+        "respuestas": len(m.respuestas or []),
+        "liga": liga,
+        "abiertaEn": iso(m.abierta_en),
+        "cierraEn": iso(m.cierra_en),
+        "creadoPor": m.creado_por or "",
+        "creado": hace(m.creado_en),
+    }
+    if detalle:
+        salida["cuestionario"] = list(m.preguntas or [])
+    return salida
+
+
+def medicion_clima_publica_dict(m) -> dict:
+    """Lo que ve quien abre la liga pública: nada de resultados ni de quién respondió."""
+    return {
+        "id": m.codigo,
+        "titulo": m.titulo,
+        "descripcion": m.descripcion or "",
+        "anonima": bool(m.anonima),
+        "permiteExternos": bool(m.permite_externos),
+        "abierta": m.estado == "abierta",
+        "preguntas": list(m.preguntas or []),
+        "aviso": (
+            "Tus respuestas son ANÓNIMAS: no se guarda quién contestó."
+            if m.anonima
+            else "Esta medición es identificada: tus respuestas quedan ligadas a tu nombre."
         ),
     }
