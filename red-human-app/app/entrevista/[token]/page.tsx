@@ -24,9 +24,11 @@ import { Logo, Button, Card, Badge } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 import { esTotem, perifericosDisponibles } from "@/lib/use-totem";
+import { armarReporte, instrumentarWebRTC, resumenRedActual, sondearStun } from "@/lib/diagnostico-avatar";
 import {
   fetchEntrevistaPublica,
   consentirEntrevista,
+  reportarDiagnosticoAvatar,
   iniciarEntrevista,
   turnoEntrevista,
   finalizarEntrevista,
@@ -48,7 +50,19 @@ const ESPERA_AVATAR_SEG = 60;
    el error crudo (código/razón de CONNECTION_CLOSED, error del SDK, timeout) se pinta en un bloque rojo en
    la sala, y arriba se muestra si el session_token llegó del backend, el contexto seguro (HTTPS) y la
    bitácora de eventos del SDK. Regresar a `false` cuando se encuentre la causa. */
-const DIAGNOSTICO_AVATAR = false;
+/* 2026-09-23 (incidente Expo) — el diagnóstico se enciende SIN recompilar, desde la propia liga:
+     /entrevista/<token>?debug=1   → panel en pantalla con el motivo, los eventos del SDK y el estado de
+                                     WebRTC/ICE, botón «Copiar diagnóstico» y SIN caída automática a texto
+                                     (para ver el error crudo en la Expo).
+     /entrevista/<token>?debug=red → igual, pero SÍ cae a texto: sirve para no dejar tirada la demo.
+   Sin el parámetro todo sigue como siempre (cae a texto en silencio) y el reporte igual se manda al
+   servidor, así que la evidencia queda en `journalctl -u redhuman-api` aunque nadie abra la consola. */
+function modoDiagnostico(): { activo: boolean; retener: boolean } {
+  if (typeof window === "undefined") return { activo: false, retener: false };
+  const v = (new URLSearchParams(window.location.search).get("debug") ?? new URLSearchParams(window.location.search).get("diagnostico") ?? "").toLowerCase();
+  if (!v || v === "0" || v === "false") return { activo: false, retener: false };
+  return { activo: true, retener: v !== "red" };  // ?debug=red → muestra el panel pero no se queda pegado
+}
 const MENSAJE_MICROFONO =
   "Para la entrevista en video necesitamos acceso a tu micrófono. Permítelo en tu navegador y vuelve a intentar, o continúa por chat.";
 type Msg = { rol: "assistant" | "user"; texto: string };
@@ -112,12 +126,39 @@ export default function SalaEntrevista() {
   const avatarRef = useRef<EstadoAvatar>("inactivo");
   const [errorAvatar, setErrorAvatar] = useState("");
   const [seguro, setSeguro] = useState<boolean | null>(null);
+  const [diag] = useState(() => modoDiagnostico());
+  const DIAGNOSTICO_AVATAR = diag.activo;
   const [debug, setDebug] = useState<{ modo?: string; token?: string; motivo?: string; eventos: string[] }>({ eventos: [] });
+  const eventosRef = useRef<string[]>([]);
+  const [copiado, setCopiado] = useState(false);
   const bitacora = useCallback((linea: string) => {
     const hora = new Date().toISOString().slice(11, 23);
-    console.info("[avatar]", linea);
-    setDebug((d) => ({ ...d, eventos: [...d.eventos, `${hora} ${linea}`].slice(-30) }));
+    // 2026-09-23: los eventos del avatar salen SIEMPRE a la consola (antes solo con la constante en true).
+    // Lo que huele a falla va como console.error para que salte en la consola del navegador.
+    const malo = /FALLA|ERROR|falló|CLOSED|failed|disconnected|ICE ERROR/i.test(linea);
+    (malo ? console.error : console.info)("[avatar]", linea);
+    eventosRef.current = [...eventosRef.current, `${hora} ${linea}`].slice(-60);
+    setDebug((d) => ({ ...d, eventos: eventosRef.current.slice(-30) }));
   }, []);
+
+  /** Manda al servidor lo que se vio (queda en el log de la API aunque nadie abra la consola). */
+  const reportar = useCallback(
+    (error: string) => {
+      const red = resumenRedActual();
+      void reportarDiagnosticoAvatar(token, {
+        donde: "entrevista",
+        modo: modoRef.current,
+        motivo: motivoRef.current,
+        error,
+        ice: { ...red.candidatos, ultimoIce: red.ultimoIce, ultimoConn: red.ultimoConn },
+        eventos: eventosRef.current,
+      });
+    },
+    [token],
+  );
+  const modoRef = useRef("");
+  const motivoRef = useRef("");
+  const restaurarWebRTCRef = useRef<null | (() => void)>(null);
   const microfonoRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
@@ -293,6 +334,8 @@ export default function SalaEntrevista() {
     if (!sesion.ok) return rechazoSesion(sesion.error);
     const s = sesion.data;
     if (s.modo === "texto" && s.motivo) console.warn("ℹ️ Entrevista en modo texto:", s.motivo);
+    modoRef.current = s.modo;
+    motivoRef.current = s.motivo || "";
     setDebug((d) => ({
       ...d,
       modo: s.modo,
@@ -300,6 +343,12 @@ export default function SalaEntrevista() {
       token: s.session_token ? `sí (${s.session_token.length} chars, ${s.session_token.slice(0, 12)}…)` : "VACÍO",
     }));
     bitacora(`POST /sesion → modo=${s.modo} session_token=${s.session_token ? "sí" : "NO"}${s.motivo ? " motivo=" + s.motivo : ""}`);
+    if (s.modo === "texto" && s.motivo) {
+      // El backend YA descartó el avatar: el motivo trae el status de Anam (401/402/403/404 = credencial
+      // o plan). Esto se ve sin tocar WebRTC, y se reporta igual al servidor.
+      console.error("❌ [avatar] El servidor no pudo crear la sesión de Anam →", s.motivo);
+      reportar(`backend descartó el avatar: ${s.motivo}`);
+    }
     if (DIAGNOSTICO_AVATAR && s.modo === "texto") {
       setErrorAvatar(`El backend NO regresó sesión de avatar (modo=texto). Motivo: ${s.motivo || "sin motivo"}`);
     }
@@ -320,6 +369,15 @@ export default function SalaEntrevista() {
       microfonoRef.current = microfono;
       bitacora("micrófono OK");
       try {
+        // 2026-09-23: instrumentar WebRTC ANTES de crear el cliente (el SDK abre su RTCPeerConnection
+        // dentro de streamToVideoElement) y, en paralelo, probar si esta red deja pasar WebRTC.
+        restaurarWebRTCRef.current = instrumentarWebRTC(bitacora);
+        void sondearStun(bitacora).then((r) => {
+          if (!r.srflx) {
+            setErrorAvatar((prev) => prev || "La red de este lugar bloquea WebRTC (no hay candidatos públicos/STUN). El avatar no puede conectar por Wi-Fi restringido.");
+            reportar("la red no devolvió candidatos srflx (UDP/STUN bloqueado)");
+          }
+        });
         const { createClient, AnamEvent } = await import("@anam-ai/js-sdk");
         const client = createClient(s.session_token);
         const anam = client as unknown as {
@@ -360,7 +418,11 @@ export default function SalaEntrevista() {
           if (vigilante) clearTimeout(vigilante);
           console.error("❌ Avatar no disponible, cayendo a texto:", motivo);
           bitacora("FALLA: " + describir(motivo));
-          if (DIAGNOSTICO_AVATAR) {
+          setErrorAvatar((prev) => prev || describir(motivo));
+          reportar(describir(motivo));
+          restaurarWebRTCRef.current?.();
+          restaurarWebRTCRef.current = null;
+          if (DIAGNOSTICO_AVATAR && diag.retener) {
             // DIAGNÓSTICO: NO se cae a texto — el error crudo queda en pantalla para verlo en la demo.
             setErrorAvatar(describir(motivo));
             return;
@@ -455,6 +517,10 @@ export default function SalaEntrevista() {
         console.error("❌ Error inicializando Anam:", err);
         const e = err as Error;
         bitacora(`init SDK falló: ${e?.name ?? ""} ${e?.message ?? String(err)}`);
+        setErrorAvatar((prev) => prev || `SDK de Anam: ${e?.name ?? ""} ${e?.message ?? String(err)}`);
+        reportar(`init SDK: ${e?.name ?? ""} ${e?.message ?? String(err)}`);
+        restaurarWebRTCRef.current?.();
+        restaurarWebRTCRef.current = null;
         microfonoRef.current?.getTracks().forEach((t) => t.stop());
         microfonoRef.current = null;
         if (DIAGNOSTICO_AVATAR) {
@@ -524,6 +590,30 @@ export default function SalaEntrevista() {
             <p className="font-bold">DIAGNÓSTICO AVATAR (temporal)</p>
             <p>secureContext: {seguro === null ? "?" : String(seguro)} · protocolo: {typeof window !== "undefined" ? window.location.protocol : "?"} · avatar_disponible (backend): {info ? String(info.avatar_disponible) : "?"}</p>
             <p>modo: {debug.modo ?? "—"} · session_token: {debug.token ?? "—"}{debug.motivo ? ` · motivo: ${debug.motivo}` : ""}</p>
+            {/* 2026-09-23: veredicto de red — sin candidatos «srflx» el Wi-Fi bloquea WebRTC */}
+            <p>
+              ICE: host={resumenRedActual().candidatos.host} · srflx={resumenRedActual().candidatos.srflx} · relay={resumenRedActual().candidatos.relay}
+              {" · "}estado={resumenRedActual().ultimoIce || "—"}/{resumenRedActual().ultimoConn || "—"}
+            </p>
+            <button
+              type="button"
+              onClick={async () => {
+                const texto = armarReporte({
+                  donde: "entrevista", token, modo: debug.modo, motivo: debug.motivo,
+                  sessionToken: debug.token, error: errorAvatar, eventos: debug.eventos,
+                });
+                try {
+                  await navigator.clipboard.writeText(texto);
+                  setCopiado(true);
+                  setTimeout(() => setCopiado(false), 2500);
+                } catch {
+                  console.error("[avatar] diagnóstico (copia manual):", texto);
+                }
+              }}
+              className="mt-1 rounded-md border border-amber-600/60 px-2 py-1 font-sans text-[11px] font-bold text-amber-700 dark:text-amber-300"
+            >
+              {copiado ? "✓ Copiado" : "Copiar diagnóstico"}
+            </button>
             {debug.eventos.length > 0 && (
               <ul className="mt-1 max-h-40 overflow-y-auto border-t border-amber-500/40 pt-1">
                 {debug.eventos.map((l, i) => (
