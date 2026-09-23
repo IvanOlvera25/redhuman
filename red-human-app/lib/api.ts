@@ -2141,6 +2141,8 @@ export interface Colaborador {
   correo: string;
   telefono: string;
   puesto: string;
+  /** 2026-09-22: área/departamento del roster maestro (permisos de Conocimiento, tableros de Desempeño y Clima). */
+  area?: string;
   salario: string;
   empresa: string;
   ubicacion: string;
@@ -2321,6 +2323,10 @@ export interface DocumentoConocimiento {
   creadoPor: string;
   creadoEn: string | null;
   extracto: string;
+  /** 2026-09-22 (permisos): publicado + a qué áreas/puestos se muestra (vacío = toda la empresa). */
+  publicado?: boolean;
+  areas?: string[];
+  puestos?: string[];
 }
 
 export interface EstadoConocimiento {
@@ -2370,10 +2376,224 @@ export function reindexarDocumentoConocimiento(id: number) {
   return post<DocumentoConocimiento>(`/conocimiento/documentos/${id}/reindexar`, {});
 }
 
-export function preguntarConocimiento(pregunta: string, historial: { rol: string; texto: string }[] = []) {
-  return post<RespuestaConocimiento>("/conocimiento/preguntar", { pregunta, historial });
+export function preguntarConocimiento(pregunta: string, historial: { rol: string; texto: string }[] = [], colaboradorId = "") {
+  // `colaboradorId` (COL-####) = responder con los permisos de esa persona; vacío = sesión de RH.
+  return post<RespuestaConocimiento>("/conocimiento/preguntar", { pregunta, historial, colaborador_id: colaboradorId || null });
 }
 
 export function fetchConsultasConocimiento() {
   return get<{ id: number; usuario: string; pregunta: string; sinEvidencia: boolean; modo: string; creadoEn: string | null }[]>("/conocimiento/consultas");
+}
+
+
+/* ============================================================
+   Desempeño · Clima · Conocimiento (permisos) — 2026-09-23
+   La persona SIEMPRE viene del roster de Colaboradores (base maestra): estos módulos solo mandan
+   códigos COL-####; nunca capturan gente.
+   ============================================================ */
+
+export interface ObjetivoDesempeno { titulo: string; descripcion?: string; peso?: number }
+export interface KpiDesempeno { nombre: string; descripcion?: string; unidad?: string; meta?: string; peso?: number }
+export interface CicloDesempeno {
+  id: string;
+  nombre: string;
+  periodo: string;
+  descripcion: string;
+  puestoObjetivo: string;
+  objetivos: ObjetivoDesempeno[];
+  kpis: KpiDesempeno[];
+  escalaMaxima: number;
+  generadoConIa: boolean;
+  estado: "borrador" | "en_curso" | "cerrado" | string;
+  participantes: number;
+  completadas: number;
+  avance: number;
+  creadoPor: string;
+  creado: string;
+  creadoEn: string | null;
+  cerradoEn: string | null;
+  evaluaciones?: EvaluacionDesempeno[];
+}
+export interface ResultadoDesempeno { tipo: "objetivo" | "kpi" | string; nombre: string; meta?: string; real?: string; logro?: number | null; peso?: number; comentario?: string }
+export interface BrechaDesempeno { tema: string; brecha?: string; accion_sugerida?: string }
+export interface EvaluacionDesempeno {
+  id: string;
+  cicloId: string;
+  ciclo: string;
+  periodo: string;
+  colaboradorId: string | null;
+  colaborador: string;
+  puesto: string;
+  area: string;
+  evaluador: string;
+  estado: "pendiente" | "en_curso" | "completada" | string;
+  calificacion: number | null;
+  escalaMaxima: number;
+  brechas: BrechaDesempeno[];
+  creadoEn: string | null;
+  completadaEn: string | null;
+  resultados?: ResultadoDesempeno[];
+  comentarios?: string;
+  objetivos?: ObjetivoDesempeno[];
+  kpis?: KpiDesempeno[];
+}
+export interface ResultadosCiclo {
+  ciclo: CicloDesempeno;
+  total: number;
+  completadas: number;
+  avance: number;
+  promedio: number | null;
+  escalaMaxima: number;
+  ranking: EvaluacionDesempeno[];
+  pendientes: EvaluacionDesempeno[];
+  brechas: { tema: string; personas: number; acciones: string[]; colaboradores: string[] }[];
+  fortalezas: { tema: string; personas: number; promedio: number }[];
+}
+
+export function generarPlanDesempeno(datos: { puesto?: string; periodo?: string; contexto?: string }) {
+  return post<{ objetivos: ObjetivoDesempeno[]; kpis: KpiDesempeno[]; generadoConIa: boolean }>("/desempeno/ciclos/generar", {
+    puesto: datos.puesto ?? "", periodo: datos.periodo ?? "", contexto: datos.contexto ?? "",
+  });
+}
+export function crearCicloDesempeno(datos: {
+  nombre: string; periodo?: string; descripcion?: string; puestoObjetivo?: string;
+  objetivos: ObjetivoDesempeno[]; kpis: KpiDesempeno[]; escalaMaxima?: number; generadoConIa?: boolean;
+}) {
+  return post<CicloDesempeno>("/desempeno/ciclos", {
+    nombre: datos.nombre, periodo: datos.periodo ?? "", descripcion: datos.descripcion ?? "",
+    puesto_objetivo: datos.puestoObjetivo ?? "", objetivos: datos.objetivos, kpis: datos.kpis,
+    escala_maxima: datos.escalaMaxima ?? 100, generado_con_ia: datos.generadoConIa ?? false,
+  });
+}
+export function fetchCiclosDesempeno() {
+  return get<CicloDesempeno[]>("/desempeno/ciclos");
+}
+export function fetchCicloDesempeno(codigo: string) {
+  return get<CicloDesempeno>(`/desempeno/ciclos/${codigo}`);
+}
+export function cambiarEstadoCiclo(codigo: string, estado: "borrador" | "en_curso" | "cerrado") {
+  return patch<CicloDesempeno>(`/desempeno/ciclos/${codigo}`, { estado });
+}
+export function agregarParticipantesDesempeno(codigo: string, colaboradorIds: string[], evaluador = "") {
+  return post<{ ciclo: CicloDesempeno; evaluaciones: EvaluacionDesempeno[]; noEncontrados: string[] }>(
+    `/desempeno/ciclos/${codigo}/participantes`, { colaborador_ids: colaboradorIds, evaluador },
+  );
+}
+export function fetchEvaluacionDesempeno(codigo: string) {
+  return get<EvaluacionDesempeno>(`/desempeno/evaluaciones/${codigo}`);
+}
+export function guardarEvaluacionDesempeno(codigo: string, datos: { resultados: ResultadoDesempeno[]; brechas?: BrechaDesempeno[]; comentarios?: string; completar?: boolean }) {
+  return patch<EvaluacionDesempeno>(`/desempeno/evaluaciones/${codigo}`, {
+    resultados: datos.resultados, brechas: datos.brechas ?? [], comentarios: datos.comentarios ?? "", completar: datos.completar ?? false,
+  });
+}
+export function fetchResultadosCiclo(codigo: string) {
+  return get<ResultadosCiclo>(`/desempeno/ciclos/${codigo}/resultados`);
+}
+
+/* -------------------- Clima -------------------- */
+
+export type TipoPreguntaClima = "escala" | "opcion" | "abierta";
+export interface PreguntaClima { id: string; texto: string; tipo: TipoPreguntaClima; opciones?: string[]; escala_max?: number }
+export interface MedicionClima {
+  id: string;
+  titulo: string;
+  descripcion: string;
+  anonima: boolean;
+  permiteExternos: boolean;
+  estado: "borrador" | "abierta" | "cerrada" | string;
+  preguntas: number;
+  respuestas: number;
+  liga: string;
+  abiertaEn: string | null;
+  cierraEn: string | null;
+  creadoPor: string;
+  creado: string;
+  cuestionario?: PreguntaClima[];
+}
+export interface ResultadosClima {
+  medicion: MedicionClima;
+  totalRespuestas: number;
+  colaboradoresActivos: number;
+  participacion: number | null;
+  externos: number;
+  porPregunta: {
+    id: string; texto: string; tipo: TipoPreguntaClima; respuestas: number;
+    promedio?: number | null; escalaMax?: number; distribucion?: Record<string, number>; textos?: string[];
+  }[];
+}
+
+export function crearMedicionClima(datos: { titulo: string; descripcion?: string; preguntas: PreguntaClima[]; anonima: boolean; permiteExternos: boolean; cierraEn?: string }) {
+  return post<MedicionClima>("/clima/mediciones", {
+    titulo: datos.titulo, descripcion: datos.descripcion ?? "", preguntas: datos.preguntas,
+    anonima: datos.anonima, permite_externos: datos.permiteExternos, cierra_en: datos.cierraEn || null,
+  });
+}
+export function fetchMedicionesClima() {
+  return get<MedicionClima[]>("/clima/mediciones");
+}
+export function fetchMedicionClima(codigo: string) {
+  return get<MedicionClima>(`/clima/mediciones/${codigo}`);
+}
+export function cambiarEstadoMedicion(codigo: string, estado: "borrador" | "abierta" | "cerrada") {
+  return patch<MedicionClima>(`/clima/mediciones/${codigo}/estado`, { estado });
+}
+export function regenerarLigaClima(codigo: string) {
+  return post<{ liga: string; medicion: MedicionClima }>(`/clima/mediciones/${codigo}/liga`, {});
+}
+export function invitarAClima(codigo: string, colaboradorIds: string[], mensaje = "") {
+  return post<{ liga: string; invitados: { colaborador: string; nombre: string; correo: { enviado: boolean; detalle?: string } | null; whatsapp: { enviado: boolean; detalle?: string } | null }[]; noEncontrados: string[] }>(
+    `/clima/mediciones/${codigo}/invitar`, { colaborador_ids: colaboradorIds, mensaje },
+  );
+}
+export function responderClimaInterno(codigo: string, datos: { respuestas: Record<string, unknown>; colaboradorId?: string }) {
+  return post<{ guardada: boolean; anonima: boolean }>(`/clima/mediciones/${codigo}/responder`, {
+    respuestas: datos.respuestas, colaborador_id: datos.colaboradorId ?? "",
+  });
+}
+export function fetchResultadosClima(codigo: string) {
+  return get<ResultadosClima>(`/clima/mediciones/${codigo}/resultados`);
+}
+
+/* -------------------- Conocimiento: generación y permisos -------------------- */
+
+export function generarDocumentoConocimiento(datos: { tema: string; tipo?: string; notas?: string }) {
+  return post<{ titulo: string; texto: string; avisos: string[]; generadoConIa: boolean }>("/conocimiento/generar", {
+    tema: datos.tema, tipo: datos.tipo ?? "politica", notas: datos.notas ?? "",
+  });
+}
+export function fetchAreasConocimiento() {
+  return get<{ areas: string[]; puestos: string[] }>("/conocimiento/areas");
+}
+export function guardarPermisosConocimiento(id: number, datos: { publicado?: boolean; areas?: string[]; puestos?: string[] }) {
+  return patch<DocumentoConocimiento>(`/conocimiento/documentos/${id}/permisos`, datos);
+}
+
+/* -------------------- Clima: liga pública (sin sesión) -------------------- */
+
+export interface MedicionClimaPublica {
+  id: string;
+  titulo: string;
+  descripcion: string;
+  anonima: boolean;
+  permiteExternos: boolean;
+  abierta: boolean;
+  preguntas: PreguntaClima[];
+  aviso: string;
+}
+
+export function fetchMedicionPublica(token: string) {
+  return get<MedicionClimaPublica>(`/clima/publica/${token}`);
+}
+
+export function responderClimaPublica(
+  token: string,
+  datos: { respuestas: Record<string, unknown>; colaboradorId?: string; externoNombre?: string; externoCorreo?: string },
+) {
+  return post<{ guardada: boolean; anonima: boolean }>(`/clima/publica/${token}/responder`, {
+    respuestas: datos.respuestas,
+    colaborador_id: datos.colaboradorId ?? "",
+    externo_nombre: datos.externoNombre ?? "",
+    externo_correo: datos.externoCorreo ?? "",
+  });
 }
