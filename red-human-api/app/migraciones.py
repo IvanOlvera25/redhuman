@@ -38,12 +38,35 @@ def _default_sql(col) -> str:
 
 
 def crear_tablas_base(engine: Engine) -> None:
-    """Tablas del núcleo (todas menos las de la Base de Conocimiento): si esto falla, la API NO arranca,
-    como siempre."""
-    from .models import TABLAS_CONOCIMIENTO
+    """Tablas del núcleo (todas menos las de la Base de Conocimiento y los módulos nuevos de RH): si esto
+    falla, la API NO arranca, como siempre."""
+    from .models import TABLAS_CONOCIMIENTO, TABLAS_MODULOS_RH
 
-    nucleo = [t for t in Base.metadata.sorted_tables if t.name not in TABLAS_CONOCIMIENTO]
+    aparte = set(TABLAS_CONOCIMIENTO) | set(TABLAS_MODULOS_RH)
+    nucleo = [t for t in Base.metadata.sorted_tables if t.name not in aparte]
     Base.metadata.create_all(bind=engine, tables=nucleo)
+
+
+def crear_tablas_modulos_rh(engine: Engine) -> Optional[str]:
+    """Tablas de Desempeño y Clima (andamiaje 2026-09-22), en el MISMO paso NO fatal que las de
+    conocimiento: si el motor de producción rechaza alguna, esos módulos responden 503 con el motivo y
+    el resto de la plataforma arranca normal. Regresa None si quedaron listas, o el error."""
+    from .models import TABLAS_MODULOS_RH
+
+    return _crear_una_por_una(engine, TABLAS_MODULOS_RH)
+
+
+def _crear_una_por_una(engine: Engine, nombres) -> Optional[str]:
+    errores = []
+    for nombre in nombres:
+        tabla = Base.metadata.tables.get(nombre)
+        if tabla is None:
+            continue
+        try:
+            Base.metadata.create_all(bind=engine, tables=[tabla])
+        except Exception as ex:  # noqa: BLE001 — se reporta, nunca tumba el arranque
+            errores.append(f"{nombre}: {str(ex).splitlines()[0][:300]}")
+    return "; ".join(errores) if errores else None
 
 
 def crear_tablas_conocimiento(engine: Engine) -> Optional[str]:

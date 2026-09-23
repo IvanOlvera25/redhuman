@@ -791,6 +791,7 @@ def colaborador_dict(col: Colaborador) -> dict:
         "correo": col.correo,
         "telefono": col.telefono,
         "puesto": col.puesto,
+        "area": col.area or "",  # 2026-09-22: permisos de Conocimiento y tableros de Desempeño/Clima
         "salario": col.salario,
         "empresa": col.empresa,
         "tipoContratacion": col.tipo_contratacion or "",  # 2026-09-19
@@ -835,5 +836,104 @@ def colaborador_detalle_dict(col: Colaborador) -> dict:
         "vacante": (
             {"codigo": exp.postulacion.vacante.codigo, "titulo": exp.postulacion.vacante.titulo}
             if exp and exp.postulacion and exp.postulacion.vacante else None
+        ),
+    }
+
+
+# ============================================================
+# Desempeño y Clima (andamiaje 2026-09-22) — la persona SIEMPRE viene de `colaboradores`
+# ============================================================
+
+
+def ciclo_desempeno_dict(c, detalle: bool = False) -> dict:
+    evs = [e for e in (c.evaluaciones or []) if e.colaborador and e.colaborador.eliminado_en is None]
+    completadas = [e for e in evs if e.estado == "completada"]
+    salida = {
+        "id": c.codigo,
+        "nombre": c.nombre,
+        "periodo": c.periodo or "",
+        "descripcion": c.descripcion or "",
+        "puestoObjetivo": c.puesto_objetivo or "",
+        "objetivos": list(c.objetivos or []),
+        "kpis": list(c.kpis or []),
+        "escalaMaxima": c.escala_maxima,
+        "generadoConIa": bool(c.generado_con_ia),
+        "estado": c.estado,
+        "participantes": len(evs),
+        "completadas": len(completadas),
+        "avance": round(len(completadas) / len(evs) * 100) if evs else 0,
+        "creadoPor": c.creado_por or "",
+        "creado": hace(c.creado_en),
+        "creadoEn": iso(c.creado_en),
+        "cerradoEn": iso(c.cerrado_en),
+    }
+    if detalle:
+        salida["evaluaciones"] = [evaluacion_desempeno_dict(e) for e in evs]
+    return salida
+
+
+def evaluacion_desempeno_dict(e, detalle: bool = False) -> dict:
+    col = e.colaborador
+    salida = {
+        "id": e.codigo,
+        "cicloId": e.ciclo.codigo if e.ciclo else "",
+        "ciclo": e.ciclo.nombre if e.ciclo else "",
+        "periodo": e.ciclo.periodo if e.ciclo else "",
+        # identidad SIEMPRE tomada del roster maestro (nunca se recaptura en el módulo)
+        "colaboradorId": col.codigo if col else None,
+        "colaborador": col.nombre if col else "",
+        "puesto": col.puesto if col else "",
+        "area": (col.area or "") if col else "",
+        "evaluador": e.evaluador or "",
+        "estado": e.estado,
+        "calificacion": e.calificacion,
+        "escalaMaxima": e.ciclo.escala_maxima if e.ciclo else 100,
+        "brechas": list(e.brechas or []),
+        "creadoEn": iso(e.creado_en),
+        "completadaEn": iso(e.completada_en),
+    }
+    if detalle:
+        salida["resultados"] = list(e.resultados or [])
+        salida["comentarios"] = e.comentarios or ""
+        salida["objetivos"] = list(e.ciclo.objetivos or []) if e.ciclo else []
+        salida["kpis"] = list(e.ciclo.kpis or []) if e.ciclo else []
+    return salida
+
+
+def medicion_clima_dict(m, liga: str = "", detalle: bool = False) -> dict:
+    salida = {
+        "id": m.codigo,
+        "titulo": m.titulo,
+        "descripcion": m.descripcion or "",
+        "anonima": bool(m.anonima),
+        "permiteExternos": bool(m.permite_externos),
+        "estado": m.estado,
+        "preguntas": len(m.preguntas or []),
+        "respuestas": len(m.respuestas or []),
+        "liga": liga,
+        "abiertaEn": iso(m.abierta_en),
+        "cierraEn": iso(m.cierra_en),
+        "creadoPor": m.creado_por or "",
+        "creado": hace(m.creado_en),
+    }
+    if detalle:
+        salida["cuestionario"] = list(m.preguntas or [])
+    return salida
+
+
+def medicion_clima_publica_dict(m) -> dict:
+    """Lo que ve quien abre la liga pública: nada de resultados ni de quién respondió."""
+    return {
+        "id": m.codigo,
+        "titulo": m.titulo,
+        "descripcion": m.descripcion or "",
+        "anonima": bool(m.anonima),
+        "permiteExternos": bool(m.permite_externos),
+        "abierta": m.estado == "abierta",
+        "preguntas": list(m.preguntas or []),
+        "aviso": (
+            "Tus respuestas son ANÓNIMAS: no se guarda quién contestó."
+            if m.anonima
+            else "Esta medición es identificada: tus respuestas quedan ligadas a tu nombre."
         ),
     }
