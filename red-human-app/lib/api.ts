@@ -1502,27 +1502,6 @@ export interface EntrevistaPublica {
   duracion_max_seg?: number;
 }
 
-/** 2026-09-23 (incidente Expo): manda el diagnóstico del avatar al servidor. En un tótem no se puede
- * abrir la consola del navegador, así que la evidencia viaja al log de la API. Nunca lanza. */
-export async function reportarDiagnosticoAvatar(
-  token: string,
-  datos: { donde: string; modo?: string; motivo?: string; error?: string; ice?: Record<string, unknown>; eventos?: string[] },
-) {
-  try {
-    return await post<{ recibido: boolean; veredicto: string }>(`/entrevistas/publica/${token}/diagnostico`, {
-      donde: datos.donde,
-      modo: datos.modo ?? "",
-      motivo: datos.motivo ?? "",
-      error: datos.error ?? "",
-      ice: datos.ice ?? {},
-      eventos: datos.eventos ?? [],
-      navegador: typeof navigator !== "undefined" ? navigator.userAgent : "",
-    });
-  } catch {
-    return { ok: false as const, error: "no se pudo enviar el diagnóstico" };
-  }
-}
-
 export function fetchEntrevistaPublica(token: string) {
   return get<EntrevistaPublica>(`/entrevistas/publica/${token}`);
 }

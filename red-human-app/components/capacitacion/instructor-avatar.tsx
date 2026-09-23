@@ -9,7 +9,6 @@ import { Loader2, Mic, MicOff, Send, Sparkles, Video, MessageCircle, Square } fr
 import { Button } from "@/components/ui";
 import { cn } from "@/lib/utils";
 import { iniciarInstructorCurso, preguntarInstructorCurso } from "@/lib/api";
-import { instrumentarWebRTC, resumenRedActual, sondearStun } from "@/lib/diagnostico-avatar";
 
 type Msg = { rol: "user" | "assistant"; texto: string };
 const ESPERA_AVATAR_SEG = 25;
@@ -24,16 +23,6 @@ export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false, t
   const [micActivo, setMicActivo] = useState(true);
   const [aviso, setAviso] = useState("");
   const anamRef = useRef<{ stopStreaming?: () => Promise<void>; talk?: (t: string) => Promise<void> } | null>(null);
-  /* 2026-09-23 (incidente Expo): todo lo del avatar queda en consola con prefijo [instructor]; lo que
-     huele a falla va como console.error. `?debug=1` en la liga del curso además lo muestra en pantalla. */
-  const depurar = typeof window !== "undefined" && ["1", "true", "red"].includes((new URLSearchParams(window.location.search).get("debug") ?? "").toLowerCase());
-  const [diagnostico, setDiagnostico] = useState<string[]>([]);
-  const restaurarWebRTCRef = useRef<null | (() => void)>(null);
-  const log = useCallback((linea: string) => {
-    const malo = /FALLA|ERROR|falló|CLOSED|failed|disconnected|ICE ERROR/i.test(linea);
-    (malo ? console.error : console.info)("[instructor]", linea);
-    setDiagnostico((d) => [...d, `${new Date().toISOString().slice(11, 19)} ${linea}`].slice(-25));
-  }, []);
   const microfonoRef = useRef<MediaStream | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
 
@@ -87,10 +76,6 @@ export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false, t
       return;
     }
     try {
-      restaurarWebRTCRef.current = instrumentarWebRTC(log);
-      void sondearStun(log).then((r) => {
-        if (!r.srflx) setAviso("La red de este lugar bloquea el video (WebRTC): seguimos con el instructor por texto.");
-      });
       const { createClient, AnamEvent } = await import("@anam-ai/js-sdk");
       const client = createClient(r.data.session_token);
       const anam = client as unknown as {
@@ -108,22 +93,13 @@ export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false, t
       anam.addListener(AnamEvent.SESSION_READY, () => {
         listo = true;
       });
-      anam.addListener(AnamEvent.CONNECTION_CLOSED, (...args: unknown[]) => {
-        log(`CONNECTION_CLOSED code=${String(args[0] ?? "?")} reason=${String(args[1] ?? "")}`);
+      anam.addListener(AnamEvent.CONNECTION_CLOSED, () => {
         if (anamRef.current) setAviso("El video del instructor se cerró. Puedes seguir preguntando por texto.");
-        restaurarWebRTCRef.current?.();
-        restaurarWebRTCRef.current = null;
         setEstado("texto");
       });
-      anam.addListener("SERVER_WARNING", (msg: unknown) => log("SERVER_WARNING: " + JSON.stringify(msg)));
-      for (const ev of ["CONNECTION_ESTABLISHED", "SESSION_READY", "VIDEO_PLAY_STARTED", "MIC_PERMISSION_DENIED"]) {
-        anam.addListener(ev, () => log(ev));
-      }
       try {
         microfonoRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (err) {
-        console.error("❌ [instructor] Micrófono no disponible:", err);
-        log(`getUserMedia falló: ${(err as Error)?.name ?? ""} ${(err as Error)?.message ?? String(err)}`);
+      } catch {
         microfonoRef.current = null; // sin micrófono el avatar igual explica; las dudas van por texto
       }
       setEstado("avatar");
@@ -137,13 +113,7 @@ export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false, t
         }
       }, ESPERA_AVATAR_SEG * 1000);
     } catch (e) {
-      const err = e as Error;
-      console.error("❌ [instructor] Avatar no disponible:", err);
-      const red = resumenRedActual();
-      log(`FALLA init SDK: ${err?.name ?? ""} ${err?.message ?? String(e)} · ICE host=${red.candidatos.host} srflx=${red.candidatos.srflx} relay=${red.candidatos.relay}`);
-      setAviso(`El video del instructor no pudo iniciar (${err?.name || "error"}: ${err?.message || String(e)}). Seguimos por texto.`);
-      restaurarWebRTCRef.current?.();
-      restaurarWebRTCRef.current = null;
+      console.warn("Avatar del instructor no disponible:", e);
       await detener();
       setEstado("texto");
     }
@@ -270,14 +240,6 @@ export function InstructorAvatar({ token, modulo, titulo, autoIniciar = false, t
         </div>
       )}
       {aviso && estado !== "inactivo" && <p className="border-t border-border-faint px-4 py-2 text-xs text-warn">{aviso}</p>}
-      {depurar && diagnostico.length > 0 && (
-        <div className="border-t border-amber-500/50 bg-amber-500/10 px-4 py-2 font-mono text-[10px] leading-snug text-ink">
-          <p className="font-bold">DIAGNÓSTICO DEL INSTRUCTOR (?debug=1)</p>
-          <ul className="mt-1 max-h-32 overflow-y-auto">
-            {diagnostico.map((l, i) => <li key={i} className="break-all">{l}</li>)}
-          </ul>
-        </div>
-      )}
     </div>
   );
 }

@@ -231,7 +231,16 @@ Plataforma SaaS de agente de IA de RH para México. `red-human-app` (Next.js 15)
 
 ## Diagnóstico del avatar (incidente Expo, 2026-09-23)
 
-- La sala de entrevista y el instructor de capacitación registran SIEMPRE los eventos del avatar en consola (`[avatar]` / `[instructor]`, `console.error` en las fallas) y mandan el reporte al servidor con `POST /entrevistas/publica/{token}/diagnostico` (público, no cambia nada de la entrevista): queda en `journalctl -u redhuman-api` con la etiqueta `[AVATAR][DIAGNOSTICO]` y en la bitácora (`avatar_diagnostico`). En un tótem no se puede abrir DevTools: por eso la evidencia viaja al backend sola.
-- `?debug=1` en la liga (`/entrevista/<token>?debug=1`) enciende el panel en pantalla (motivo del backend, session_token, eventos del SDK, resumen ICE) y NO cae a texto, para ver el error crudo; `?debug=red` muestra el panel pero sí cae a texto (no deja tirada la demo). Ya no existe la constante `DIAGNOSTICO_AVATAR` hardcodeada.
-- `lib/diagnostico-avatar.ts`: `instrumentarWebRTC` envuelve `RTCPeerConnection` mientras dura el intento (candidatos host/srflx/relay, ICE/DTLS, `icecandidateerror`) y se restaura al terminar; `sondearStun` prueba la red contra STUN público — **sin candidatos `srflx` el Wi-Fi bloquea UDP/WebRTC y ningún cambio de plan lo arregla**.
-- Backend: `AvatarError` lleva `status` y `request_id` de Anam y `es_de_plan` (401/402/403/404/429 = credencial o plan). El `motivo` que viaja al navegador y el log incluyen ese status; `GET /entrevistas/avatar/diagnostico` (con sesión de RH) clasifica la causa (`autenticacion_o_plan` | `payload_o_red` | `red_servidor`), muestra la HUELLA de la clave (nunca la clave) y los campos del `personaConfig` para revisar compatibilidad de plan.
+El incidente se resolvió solo (propagación del proveedor tras el cambio de plan) y la instrumentación del
+FRONTEND se revirtió: la sala de entrevista y el instructor de capacitación volvieron a su versión previa
+(`DIAGNOSTICO_AVATAR = false`, sin `?debug=1`, sin sonda de WebRTC). En el servidor SÍ se conservó lo que
+hace falta para diagnosticar sin tocar el código:
+
+- `AvatarError` lleva `status` y `request_id` de Anam y la propiedad `es_de_plan` (401/402/403/404/429 =
+  credencial o plan). El `motivo` que viaja al navegador y el log `[ERROR][AVATAR]` incluyen ese status, así
+  que un rechazo por credencial ya no se confunde con una falla de red.
+- `GET /entrevistas/avatar/diagnostico` (con sesión de RH) clasifica la causa (`autenticacion_o_plan` |
+  `payload_o_red` | `red_servidor`), muestra la HUELLA de la API key (nunca la clave) para confirmar que el
+  servidor trae la del plan vigente, y enumera los campos del `personaConfig` que se mandan a Anam.
+- `POST /entrevistas/publica/{token}/diagnostico` (público) queda disponible para recibir un reporte del
+  navegador y dejarlo en el log (`[AVATAR][DIAGNOSTICO]`) y en bitácora; hoy NINGUNA pantalla lo llama.
