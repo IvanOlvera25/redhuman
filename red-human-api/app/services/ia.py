@@ -1931,3 +1931,55 @@ def plan_desempeno(puesto: str, periodo: str = "", contexto: str = "") -> Tuple[
     except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea: RH captura a mano
         print(f"[ia] plan de desempeño demo ({ex})", flush=True)
         return _plan_desempeno_demo(puesto, periodo), False
+
+
+# ============================================================
+# Base de Conocimiento — «Generar con Red Human» (2026-09-23)
+# ============================================================
+
+
+class BorradorConocimiento(BaseModel):
+    titulo: str = Field(description="Título del documento, claro y corto.")
+    texto: str = Field(description="Documento completo en texto plano con encabezados y viñetas simples.")
+    avisos: List[str] = Field(default_factory=list, description="Datos que RH debe confirmar o llenar antes de publicar.")
+
+
+def borrador_conocimiento(tema: str, tipo: str = "politica", notas: str = "", empresa: str = "") -> Tuple[BorradorConocimiento, bool]:
+    """Redacta un BORRADOR de política/proceso/manual para la base de conocimiento. Nunca inventa cifras,
+    montos ni plazos que RH no haya dado: los deja marcados como «[por definir]» y los lista en `avisos`.
+    El documento SIEMPRE lo revisa y publica una persona (HITL). Regresa (borrador, con_ia)."""
+    etiqueta = {"politica": "política interna", "proceso": "proceso de RH", "manual": "manual", "reglamento": "reglamento interno", "faq": "preguntas frecuentes"}.get(tipo, "documento interno")
+    client = _client()
+    if client is None:
+        cuerpo = (
+            f"# {tema.strip() or etiqueta.capitalize()}\n\n"
+            f"## Objetivo\nDejar por escrito {etiqueta} de {empresa or 'la empresa'} para que cualquier colaborador sepa cómo aplica.\n\n"
+            "## Alcance\nAplica a [por definir: áreas o puestos].\n\n"
+            "## Lineamientos\n- [por definir]\n- [por definir]\n\n"
+            "## Responsables\n- Recursos Humanos\n\n"
+            f"## Vigencia\nA partir de [por definir].\n\n{notas.strip()}"
+        )
+        return BorradorConocimiento(titulo=tema.strip() or etiqueta.capitalize(), texto=cuerpo,
+                                    avisos=["Sin OPENAI_API_KEY: este es un esqueleto. Completa lo marcado como «[por definir]» antes de publicar."]), False
+    try:
+        resp = client.responses.parse(
+            model=MODEL,
+            instructions=(
+                f"Redactas documentos internos de Recursos Humanos para {empresa or 'una empresa'} en México (Red Human AI). "
+                f"Escribe un BORRADOR de {etiqueta} claro, en español mexicano, con encabezados cortos y viñetas, listo para que RH lo "
+                "revise. Reglas: (1) NUNCA inventes montos, días, plazos, porcentajes ni nombres: si falta un dato escribe «[por definir]» "
+                "y enlístalo en `avisos`; (2) apégate a la Ley Federal del Trabajo y a la LFPDPPP cuando apliquen, sin citar artículos que "
+                "no conozcas con certeza; (3) nada de datos sensibles ni de discriminación; (4) sin relleno ni frases de marketing."
+            ),
+            input=f"Tema: {tema}\nTipo: {etiqueta}\nNotas de RH: {notas.strip()[:3000] or 'sin notas'}",
+            text_format=BorradorConocimiento,
+        )
+        b = resp.output_parsed
+        if not b.texto.strip():
+            raise ValueError("borrador vacío")
+        return b, True
+    except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea: RH puede pegar el texto a mano
+        print(f"[ia] borrador de conocimiento demo ({ex})", flush=True)
+        return borrador_conocimiento(tema, tipo, notas, empresa) if False else (BorradorConocimiento(
+            titulo=tema.strip() or "Documento interno", texto=notas.strip() or "[por definir]",
+            avisos=[f"La IA no respondió ({str(ex)[:120]}). Captura el contenido a mano."]), False)

@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.database import Base, SessionLocal  # noqa: E402
 from app.deps import cuenta_actual, usuario_actual, usuario_decisor  # noqa: E402
 from app.main import app  # noqa: E402
+from app.routers import clima as rclima  # noqa: E402
 from app.models import (  # noqa: E402
     TABLAS_MODULOS_RH,
     Colaborador,
@@ -41,6 +42,21 @@ from app.models import (  # noqa: E402
 )
 
 OK = 0
+ENVIOS = []
+
+
+async def _fake_correo(destino, asunto, html, adjuntos=None):
+    ENVIOS.append(("correo", destino, asunto))
+    return {"enviado": True, "proveedor": "resend", "detalle": 200}
+
+
+async def _fake_wa(tel, texto, *a, **k):
+    ENVIOS.append(("whatsapp", tel, texto))
+    return {"enviado": True, "proveedor": "meta", "detalle": 200}
+
+
+rclima.enviar_correo = _fake_correo
+rclima.enviar_texto_sin_plantilla = _fake_wa
 
 
 def check(cond, msg):
@@ -190,6 +206,29 @@ with TestClient(app) as client:
     r = client.post("/conocimiento/preguntar", json={"pregunta": "¿A qué hora es la comida?"}).json()
     check(all(f["documentoId"] != DOC for f in r["fragmentos"]), "un documento NO publicado nunca alimenta la respuesta de la IA")
     check(client.post("/conocimiento/preguntar", json={"pregunta": "x", "colaborador_id": "COL-999"}).status_code == 404, "un colaborador inexistente no se inventa: 404")
+    print("\n--- 4. Lo que consumen las pantallas: fortalezas, invitaciones y borrador con IA ---")
+    res = client.get(f"/desempeno/ciclos/{CICLO}/resultados").json()
+    check(any(f["tema"] == "Cumplir responsabilidades" for f in res["fortalezas"]), f"el dashboard recibe FORTALEZAS (logro >= 85 %) además de brechas: {[f['tema'] for f in res['fortalezas']]}")
+    check(res["fortalezas"][0]["personas"] >= 1 and res["fortalezas"][0]["promedio"] >= 85, "cada fortaleza trae cuántas personas y su promedio")
+
+    ENVIOS.clear()
+    r = client.post(f"/clima/mediciones/{MED}/invitar", json={"colaborador_ids": ["COL-1", "COL-2", "COL-3"], "mensaje": "Nos ayuda mucho."})
+    check(r.status_code == 200, f"«Invitar colaboradores» manda la liga ({r.status_code}: {r.text[:160]})")
+    check(len(r.json()["invitados"]) == 2 and "COL-3" in r.json()["noEncontrados"], "solo se invita a colaboradores ACTIVOS del roster")
+    check(any(e[0] == "correo" for e in ENVIOS) and any(e[0] == "whatsapp" for e in ENVIOS), "sale por correo y WhatsApp con lo que cada quien tenga en el roster")
+    check(all("/clima/" in e[2] for e in ENVIOS if e[0] == "whatsapp"), "el mensaje lleva la liga pública")
+    check(client.post(f"/clima/mediciones/{MED}/invitar", json={"colaborador_ids": []}).status_code == 400, "invitar sin nadie seleccionado → 400")
+    client.patch(f"/clima/mediciones/{MED2}/estado", json={"estado": "cerrada"})
+    check(client.post(f"/clima/mediciones/{MED2}/invitar", json={"colaborador_ids": ["COL-1"]}).status_code == 409, "no se invita a una medición cerrada")
+    db.expire_all()
+    med = db.query(MedicionClima).filter_by(codigo=MED).one()
+    check(db.query(RespuestaClima).filter(RespuestaClima.medicion_id == med.id).count() == 2, "invitar NO crea respuestas ni participantes")
+
+    r = client.post("/conocimiento/generar", json={"tema": "Política de home office", "tipo": "politica", "notas": "Aplica a administrativos"})
+    check(r.status_code == 200 and r.json()["texto"], f"«Generar con Red Human» regresa un borrador editable ({r.status_code})")
+    check(bool(r.json()["avisos"]), "el borrador dice qué falta confirmar antes de publicar")
+    check(db.query(DocumentoConocimiento).filter(DocumentoConocimiento.titulo.ilike("%home office%")).count() == 0, "generar NO guarda ni publica nada: RH revisa primero")
+    check(client.post("/conocimiento/generar", json={"tema": "  "}).status_code == 400, "sin tema → 400")
     db.close()
 
 print(f"\n🎉 Bloque 3 (Desempeño · Clima · Conocimiento) verificado: {OK} comprobaciones OK.")
