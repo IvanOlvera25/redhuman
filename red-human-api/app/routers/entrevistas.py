@@ -19,7 +19,7 @@ from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import CIERRES_COMPLETOS, CIERRES_ENTREVISTA, Candidato, Cuenta, Entrevista, Usuario, Vacante, registrar
 from ..serial import entrevista_dict, nombre_empresa_candidato
 from ..services import ia
-from ..services.avatar import avatar_activo, crear_sesion_avatar, probar_avatar
+from ..services.avatar import AvatarError, avatar_activo, crear_sesion_avatar, probar_avatar
 from ..services.configuracion import modo_prueba_activo
 from ..services.entrevistas import crear_entrevista_para_candidato, reabrir_entrevista
 from ..services.whatsapp import enviar_mensaje
@@ -78,6 +78,47 @@ def metricas(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual)
         "recomendaciones": recomendaciones,
         "avatar_activo": avatar_activo(),
     }
+
+
+class DiagnosticoNavegadorIn(BaseModel):
+    """Lo que el navegador vio (2026-09-23, incidente Expo). Solo texto de diagnóstico, sin datos del
+    candidato: en un tótem no se puede abrir la consola, así que el reporte llega aquí y queda en el log
+    del servidor y en la bitácora."""
+
+    donde: str = "entrevista"   # entrevista | capacitacion
+    modo: str = ""
+    motivo: str = ""
+    error: str = ""
+    ice: dict = {}              # {host, srflx, relay, ultimoIce, ultimoConn}
+    eventos: List[str] = []
+    navegador: str = ""
+
+
+@router.post("/publica/{token}/diagnostico")
+def diagnostico_navegador(token: str, datos: DiagnosticoNavegadorIn, db: Session = Depends(get_db)):
+    """Recibe el diagnóstico del avatar desde la sala pública (sin sesión). No cambia nada de la
+    entrevista: solo deja la evidencia donde soporte pueda leerla (`journalctl -u redhuman-api`)."""
+    e = db.query(Entrevista).filter(Entrevista.token == token).first()
+    codigo = e.codigo if e else "(liga desconocida)"
+    ice = datos.ice or {}
+    sin_srflx = str(ice.get("srflx", "")) in ("0", "False", "false", "")
+    veredicto = (
+        "RED: el dispositivo no obtuvo candidatos públicos (srflx) — el Wi-Fi bloquea UDP/STUN y WebRTC no puede conectar"
+        if sin_srflx and datos.modo == "avatar"
+        else "revisar eventos"
+    )
+    print(
+        f"[AVATAR][DIAGNOSTICO] {codigo} donde={datos.donde} modo={datos.modo} motivo={datos.motivo[:160]!r} "
+        f"error={datos.error[:200]!r} ice={ice} veredicto={veredicto} navegador={datos.navegador[:120]!r}",
+        flush=True,
+    )
+    for linea in (datos.eventos or [])[-40:]:
+        print(f"[AVATAR][DIAGNOSTICO] {codigo}   {linea}", flush=True)
+    registrar(db, "sistema", "avatar_diagnostico", "entrevista", codigo,
+              {"donde": datos.donde, "modo": datos.modo, "motivo": datos.motivo[:300], "error": datos.error[:300],
+               "ice": ice, "veredicto": veredicto, "eventos": (datos.eventos or [])[-20:]})
+    db.commit()
+    return {"recibido": True, "veredicto": veredicto}
 
 
 @router.get("/avatar/diagnostico")
@@ -299,9 +340,15 @@ async def sesion(token: str, datos: Optional[SesionIn] = None, db: Session = Dep
     else:
         try:
             ses = await crear_sesion_avatar("Red Human", _system_prompt(e), saludo)
-        except Exception as ex:  # el avatar nunca debe tumbar la entrevista: cae a texto
+        except AvatarError as ex:  # el avatar nunca debe tumbar la entrevista: cae a texto
+            # 2026-09-23: el motivo viaja con el STATUS para distinguir credencial/plan de todo lo demás.
+            motivo = f"Anam {ex.status or '?'} rechazó la sesión ({'credencial o plan' if ex.es_de_plan else 'payload o red del servidor'}): {str(ex)[:300]}"
+            print(f"[ERROR][AVATAR] crear_sesion_avatar falló ({e.codigo}) status={ex.status} request-id={ex.request_id}: {str(ex)}", flush=True)
+            registrar(db, "sistema", "avatar_error", "entrevista", e.codigo,
+                      {"error": str(ex)[:300], "status": ex.status, "request_id": ex.request_id, "causa": "autenticacion_o_plan" if ex.es_de_plan else "payload_o_red"})
+        except Exception as ex:  # noqa: BLE001
             motivo = f"Anam rechazó la sesión: {str(ex)[:300]}"
-            print(f"[ERROR] crear_sesion_avatar falló ({e.codigo}): {str(ex)}", flush=True)
+            print(f"[ERROR][AVATAR] crear_sesion_avatar falló ({e.codigo}): {str(ex)}", flush=True)
             registrar(db, "sistema", "avatar_error", "entrevista", e.codigo, {"error": str(ex)[:300]})
 
     if ses is None:

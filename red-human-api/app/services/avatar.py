@@ -30,6 +30,13 @@ def avatar_activo() -> bool:
     return bool(_limpio(settings.anam_api_key) and _limpio(settings.anam_avatar_id) and _limpio(settings.anam_llm_id))
 
 
+def campos_persona() -> dict:
+    """Qué lleva hoy el `personaConfig` (sin valores sensibles) — para revisar compatibilidad con el
+    plan contratado sin tener que leer el código en producción."""
+    persona = persona_config("Red Human", "prompt", "hola")
+    return {"campos": sorted(persona.keys()), "con_voz": "voiceId" in persona, "con_llm_propio": "llmId" in persona}
+
+
 def estado_avatar() -> dict:
     """Qué variables de Anam ve el proceso (presencia, nunca valores) — para el log de arranque y
     el diagnóstico de RH. Si en producción "cae a texto", esto dice si es configuración o Anam."""
@@ -40,12 +47,37 @@ def estado_avatar() -> dict:
         "ANAM_LLM_ID": bool(_limpio(settings.anam_llm_id)),
         "ANAM_VOICE_ID": bool(_limpio(settings.anam_voice_id)),
         "max_sesion_seg": settings.anam_max_sesion_seg,
+        "endpoint": ANAM_SESSION_URL,
+        # 2026-09-23: huella de la clave (primeros/últimos caracteres) — permite confirmar por teléfono
+        # que el servidor trae la clave NUEVA del plan sin exponerla.
+        "api_key_huella": _huella(_limpio(settings.anam_api_key)),
+        "persona": campos_persona() if _limpio(settings.anam_avatar_id) else {},
     }
+
+
+def _huella(clave: str) -> str:
+    if not clave:
+        return ""
+    return f"{clave[:4]}…{clave[-4:]} ({len(clave)} caracteres)"
 
 
 class AvatarError(RuntimeError):
     """Anam rechazó la sesión: el mensaje trae status + cuerpo de la respuesta (antes solo se veía
-    "400 Bad Request" en el log y era imposible saber por qué caía a texto)."""
+    "400 Bad Request" en el log y era imposible saber por qué caía a texto).
+
+    2026-09-23 (incidente Expo): además lleva `status` y `request_id` como atributos para poder
+    distinguir de un vistazo AUTENTICACIÓN/PLAN (401/402/403/404) de un problema de red o de payload."""
+
+    def __init__(self, mensaje: str, status: Optional[int] = None, request_id: str = "", cuerpo: str = ""):
+        super().__init__(mensaje)
+        self.status = status
+        self.request_id = request_id
+        self.cuerpo = cuerpo
+
+    @property
+    def es_de_plan(self) -> bool:
+        """True si Anam rechazó por credencial/plan (no por red ni por el contenido del personaConfig)."""
+        return self.status in (401, 402, 403, 404, 429)
 
 
 def persona_config(nombre_persona: str, system_prompt: str, mensaje_inicial: str, extras: Optional[dict] = None) -> dict:
@@ -86,13 +118,26 @@ async def crear_sesion_avatar(
             headers={"Authorization": f"Bearer {_limpio(settings.anam_api_key)}"},
             json={"personaConfig": persona},
         )
+        # Anam manda un identificador de petición en la respuesta: es lo primero que pide su soporte.
+        pedido = r.headers.get("x-request-id") or r.headers.get("x-amzn-requestid") or ""
         if r.status_code >= 400:
-            raise AvatarError(f"Anam {r.status_code} en session-token: {r.text[:400]}")
+            pista = {
+                401: "credencial inválida o revocada (ANAM_API_KEY)",
+                402: "plan sin saldo o pago pendiente",
+                403: "la clave no tiene permiso para este avatar/plan",
+                404: "recurso inexistente (avatarId, voiceId o llmId ya no existen en esta cuenta)",
+                429: "límite de sesiones del plan alcanzado",
+            }.get(r.status_code, "rechazo de Anam")
+            raise AvatarError(
+                f"Anam {r.status_code} en session-token ({pista}): {r.text[:400]}"
+                + (f" [request-id {pedido}]" if pedido else ""),
+                status=r.status_code, request_id=pedido, cuerpo=r.text[:400],
+            )
         datos = r.json()
         token = datos.get("sessionToken")
         if not token:
-            raise AvatarError(f"Anam no regresó sessionToken: {str(datos)[:300]}")
-        return {"session_token": token, "proveedor": "anam"}
+            raise AvatarError(f"Anam no regresó sessionToken: {str(datos)[:300]}", status=r.status_code, request_id=pedido)
+        return {"session_token": token, "proveedor": "anam", "request_id": pedido}
 
 
 async def probar_avatar() -> dict:
@@ -103,6 +148,16 @@ async def probar_avatar() -> dict:
         return {**estado, "ok": False, "detalle": "Faltan variables de Anam en el servidor (ver banderas)."}
     try:
         ses = await crear_sesion_avatar("Red Human", "Eres Red Human. Responde en una frase.", "Hola, soy Red Human.")
-        return {**estado, "ok": bool(ses), "detalle": "Anam emitió un session token." if ses else "Sin respuesta."}
+        return {
+            **estado, "ok": bool(ses),
+            "detalle": "Anam emitió un session token: la credencial y el plan están bien; si la sala sigue cayendo a texto, el problema es de RED (WebRTC) en el dispositivo." if ses else "Sin respuesta.",
+            "request_id": (ses or {}).get("request_id", ""),
+        }
+    except AvatarError as ex:
+        return {
+            **estado, "ok": False, "status": ex.status, "request_id": ex.request_id,
+            "causa": "autenticacion_o_plan" if ex.es_de_plan else "payload_o_red",
+            "detalle": str(ex)[:500],
+        }
     except Exception as ex:  # noqa: BLE001 — se reporta tal cual a RH
-        return {**estado, "ok": False, "detalle": str(ex)[:500]}
+        return {**estado, "ok": False, "causa": "red_servidor", "detalle": str(ex)[:500]}

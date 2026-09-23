@@ -1718,6 +1718,19 @@ export function asignarCurso(
   });
 }
 
+/** «Botón Mágico» de la Expo (2026-09-23): liga pública al instante, sin asignar a nadie real y sin
+ * mandar WhatsApp/correo. `nueva=true` fuerza una liga limpia en vez de reutilizar la anterior. */
+export function generarLigaDemoCurso(codigo: string, nueva = false) {
+  return post<{
+    asignacion: AsignacionCurso;
+    token: string;
+    liga: string;
+    ligaTotem: string;
+    reutilizada: boolean;
+    estadoCurso: string;
+  }>(`/capacitacion/${codigo}/demo${nueva ? "?nueva=true" : ""}`, {});
+}
+
 export function fetchAsignacionesCurso(codigo: string) {
   return get<AsignacionCurso[]>(`/capacitacion/${codigo}/asignaciones`);
 }

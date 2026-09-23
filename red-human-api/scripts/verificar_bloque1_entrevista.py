@@ -30,6 +30,7 @@ from app.deps import cuenta_actual, usuario_actual, usuario_decisor  # noqa: E40
 from app.main import app  # noqa: E402
 from app.models import Archivo, Cliente, ClienteContacto, Cuenta, EntrevistaHumana, Usuario, UsuarioCuenta, Vacante  # noqa: E402
 from app.services import notificaciones as sn  # noqa: E402
+from app.services.notificaciones import TZ_MEXICO  # noqa: E402
 from app.services import recordatorios_entrevista as sre  # noqa: E402
 from app.services.configuracion import obtener  # noqa: E402
 
@@ -96,6 +97,11 @@ with TestClient(app) as client:
 
     # ================= 2. Entrevista humana: HTML en todos los eventos + liga con expediente =================
     print("\n--- 2. Liga del entrevistador con expediente completo ---")
+    # 2026-09-23: la cita se calcula SIEMPRE 5 h en el futuro EN HORA DE MÉXICO (que es como la captura
+    # RH). Antes era la fecha de «dentro de 5 h» con la hora fija 10:00, así que la prueba fallaba sola
+    # al correrla después de las 10:00 de México: la cita quedaba en el pasado y el job no mandaba nada.
+    _cita = datetime.now(TZ_MEXICO) + timedelta(hours=5)
+    _cita_en_5h = (_cita.strftime("%Y-%m-%d"), _cita.strftime("%H:%M"))
     r = client.post("/candidatos", json={"nombre": "Carlos Hernández", "telefono": "5512345678", "correo": "carlos@correo.mx", "vacante": VAC, "consentimiento": True, "fuente": "RH"})
     P = r.json()["id"]
     from app.models import Postulacion  # noqa: E402
@@ -107,7 +113,7 @@ with TestClient(app) as client:
     db.commit()
     client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Evaluación", "manual": True})
     CORREOS.clear()
-    r = client.post(f"/candidatos/{P}/entrevista-humana", json={"tipo_entrevistador": "interno", "entrevistador_usuario_id": admin.id, "fecha": (datetime.now(timezone.utc) + timedelta(hours=5)).strftime("%Y-%m-%d"), "hora": "10:00", "modalidad": "Llamada", "notificar": {"cliente_correo": False, "cliente_whatsapp": False}})
+    r = client.post(f"/candidatos/{P}/entrevista-humana", json={"tipo_entrevistador": "interno", "entrevistador_usuario_id": admin.id, "fecha": _cita_en_5h[0], "hora": _cita_en_5h[1], "modalidad": "Llamada", "notificar": {"cliente_correo": False, "cliente_whatsapp": False}})
     check(r.status_code == 201, "entrevista humana programada")
     db.expire_all()
     eh = db.query(EntrevistaHumana).order_by(EntrevistaHumana.id.desc()).first()

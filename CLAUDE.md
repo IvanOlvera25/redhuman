@@ -228,3 +228,26 @@ Plataforma SaaS de agente de IA de RH para México. `red-human-app` (Next.js 15)
 - **Clima** (`/dashboard/clima`): crear encuesta con cuestionario base editable y elección visual Anónima / Identificada; en el detalle, liga pública siempre visible (copiar / «Generar liga externa nueva»), «Invitar colaboradores» (selección del roster → `POST /clima/mediciones/{codigo}/invitar`, manda la liga por correo y WhatsApp con lo que cada quien tenga; un canal caído nunca rompe la invitación) y dashboard con índice de clima, participación sobre el roster activo, dimensiones por pregunta y hallazgos (focos < 70 %, fortalezas ≥ 80 %). Sala pública en `app/clima/[token]/page.tsx` (sin sesión, compatible con Modo Tótem): avisa si es anónima y solo pide identificación cuando la medición es identificada.
 - **Base de Conocimiento** (`/dashboard/conocimiento`): dos vistas en pestañas. «Documentos y accesos» = tabla con tipo, quién lo ve, estado (Publicado / Borrador), botones Accesos y Publicar/Despublicar, y «Nuevo documento» con tres modos: subir archivo, pegar texto o **Generar con Red Human** (`POST /conocimiento/generar` → borrador editable con avisos de «[por definir]»; no guarda nada hasta que RH lo revisa). «Consultar a Red Human» = chat que cita fuentes publicadas, con selector **«Ver como»** para preguntar con los permisos de un colaborador del roster y comprobar los accesos.
 - Regresión (API que consumen estas pantallas): `scripts/verificar_modulos_rh.py`.
+
+## Diagnóstico del avatar (incidente Expo, 2026-09-23)
+
+El incidente se resolvió solo (propagación del proveedor tras el cambio de plan) y la instrumentación del
+FRONTEND se revirtió: la sala de entrevista y el instructor de capacitación volvieron a su versión previa
+(`DIAGNOSTICO_AVATAR = false`, sin `?debug=1`, sin sonda de WebRTC). En el servidor SÍ se conservó lo que
+hace falta para diagnosticar sin tocar el código:
+
+- `AvatarError` lleva `status` y `request_id` de Anam y la propiedad `es_de_plan` (401/402/403/404/429 =
+  credencial o plan). El `motivo` que viaja al navegador y el log `[ERROR][AVATAR]` incluyen ese status, así
+  que un rechazo por credencial ya no se confunde con una falla de red.
+- `GET /entrevistas/avatar/diagnostico` (con sesión de RH) clasifica la causa (`autenticacion_o_plan` |
+  `payload_o_red` | `red_servidor`), muestra la HUELLA de la API key (nunca la clave) para confirmar que el
+  servidor trae la del plan vigente, y enumera los campos del `personaConfig` que se mandan a Anam.
+- `POST /entrevistas/publica/{token}/diagnostico` (público) queda disponible para recibir un reporte del
+  navegador y dejarlo en el log (`[AVATAR][DIAGNOSTICO]`) y en bitácora; hoy NINGUNA pantalla lo llama.
+
+## Botón Mágico de Capacitación — liga directa (Expo, 2026-09-23)
+
+- `POST /capacitacion/{codigo}/demo` entrega una liga pública FUNCIONAL al instante: crea una `AsignacionCurso` de tipo `externo` con `externo_nombre="Invitado (demo)"` (por eso la sala no pide registro) y `externo_organizacion="Demo Expo"` (así se distingue del avance real en el tablero). **Nunca** llama a `_notificar`: no sale WhatsApp ni correo. **Nunca** crea un Colaborador — el roster sigue siendo la base maestra y no se contamina con datos de demo.
+- Funciona con el curso en Borrador (en la Expo se genera y se enseña en el mismo minuto); solo exige que ya tenga contenido (409 si no hay módulos). Por defecto REUTILIZA la liga de demo viva del curso (conserva el avance); `?nueva=true` entrega una limpia.
+- Regresa `liga` y `ligaTotem` (= `liga` + `?totem=1`, la interfaz vertical de 1080×1920 con video `object-cover` y botones táctiles). El frontend muestra el botón «Generar Liga Directa (Modo Expo)» en la ficha del curso en cuanto hay contenido, y un modal con ambas URLs, «Copiar Liga» y «Abrir en Tótem».
+- Regresión: `scripts/verificar_liga_demo_curso.py` (incluye que no salga ningún mensaje aunque WhatsApp esté configurado).
