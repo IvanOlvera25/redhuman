@@ -8,7 +8,8 @@
 
 import { useEffect, useRef } from "react";
 
-export const INTERVALO_TABLERO_MS = 15000;
+// Hotfix concurrencia 2026-09-24: 15 s → 30 s en todos los tableros (al volver a la pestaña se recarga igual).
+export const INTERVALO_TABLERO_MS = 30000;
 
 export function usePolling(recargar: () => void | Promise<unknown>, intervaloMs: number = INTERVALO_TABLERO_MS, activo = true) {
   const ref = useRef(recargar);

@@ -60,7 +60,7 @@ export default function Clima() {
   useEffect(() => {
     void recargar();
   }, [recargar]);
-  usePolling(recargar, 20000);
+  usePolling(recargar);
 
   if (abierta) {
     return <DetalleMedicion codigo={abierta} puedeDecidir={puedeDecidir} onVolver={() => { setAbierta(null); void recargar(); }} />;
@@ -257,7 +257,7 @@ function DetalleMedicion({ codigo, puedeDecidir, onVolver }: { codigo: string; p
   useEffect(() => {
     void recargar();
   }, [recargar]);
-  usePolling(recargar, 15000);
+  usePolling(recargar);
 
   async function cambiarEstado(estado: "abierta" | "cerrada") {
     setOcupado("estado");

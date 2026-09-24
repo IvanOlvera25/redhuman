@@ -10,6 +10,7 @@ Esa es exactamente la base de `GET /candidatos` sin filtros, así que la suma po
 == número de tarjetas del Kanban filtrado por esa vacante, y el pipeline global == Kanban completo.
 """
 
+from datetime import datetime
 from typing import Dict, Optional
 
 from sqlalchemy import func
@@ -54,3 +55,38 @@ def por_estado(db: Session, cuenta_id: int, vacante_id: Optional[int] = None) ->
 
 def total(db: Session, cuenta_id: int, vacante_id: Optional[int] = None) -> int:
     return postulaciones_visibles(db, cuenta_id, vacante_id).count()
+
+
+def resumen_por_vacante(db: Session, cuenta_id: int, desde_nuevos: datetime) -> Dict[int, dict]:
+    """Hotfix concurrencia 2026-09-24: los contadores de TODAS las vacantes de la Cuenta en tres
+    consultas agrupadas (antes eran ~5 por vacante en el listado). MISMA base `postulaciones_visibles`,
+    así cada número sigue siendo idéntico a `por_etapa`/`por_estado`/`total` de esa vacante.
+    Regresa {vacante_id: {"etapas", "estados", "total", "nuevos"}}; una vacante sin postulaciones no aparece."""
+    base = postulaciones_visibles(db, cuenta_id).filter(Postulacion.vacante_id.isnot(None))
+    res: Dict[int, dict] = {}
+
+    def fila(vid: int) -> dict:
+        return res.setdefault(vid, {"etapas": {}, "estados": {}, "total": 0, "nuevos": 0})
+
+    for vid, etapa, n in (
+        base.with_entities(Postulacion.vacante_id, Postulacion.etapa, func.count(Postulacion.id))
+        .group_by(Postulacion.vacante_id, Postulacion.etapa)
+        .all()
+    ):
+        f = fila(vid)
+        f["etapas"][etapa] = int(n)
+        f["total"] += int(n)
+    for vid, estado, n in (
+        base.with_entities(Postulacion.vacante_id, Postulacion.estado, func.count(Postulacion.id))
+        .group_by(Postulacion.vacante_id, Postulacion.estado)
+        .all()
+    ):
+        fila(vid)["estados"][estado] = int(n)
+    for vid, n in (
+        base.filter(Postulacion.creado_en >= desde_nuevos)
+        .with_entities(Postulacion.vacante_id, func.count(Postulacion.id))
+        .group_by(Postulacion.vacante_id)
+        .all()
+    ):
+        fila(vid)["nuevos"] = int(n)
+    return res

@@ -22,7 +22,7 @@ from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadF
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from ..config import settings
 from ..database import get_db
@@ -391,7 +391,23 @@ def listar(
             .having(func.count(Candidato.id) > 1)
         ).scalar_subquery()
         q = q.filter(or_(Candidato.telefono.in_(tel_dup), func.lower(Candidato.correo).in_(correo_dup)))
-    return [postulacion_dict(p) for p in q.all()]
+    # Hotfix concurrencia 2026-09-24 (N+1): todo lo que lee `postulacion_dict` se trae en un puñado
+    # de consultas por listado, no ~10 por tarjeta. Los mensajes solo se CUENTAN (una consulta agrupada).
+    postulaciones = q.options(
+        joinedload(Postulacion.candidato).selectinload(Candidato.postulaciones),
+        joinedload(Postulacion.candidato).selectinload(Candidato.archivos),
+        joinedload(Postulacion.vacante).joinedload(Vacante.cliente),
+        selectinload(Postulacion.expediente).selectinload(Expediente.documentos),
+        selectinload(Postulacion.entrevistas),
+        selectinload(Postulacion.entrevistas_humanas),
+    ).all()
+    n_mensajes = dict(
+        db.query(Mensaje.postulacion_id, func.count(Mensaje.id))
+        .filter(Mensaje.postulacion_id.in_([p.id for p in postulaciones]))
+        .group_by(Mensaje.postulacion_id)
+        .all()
+    ) if postulaciones else {}
+    return [postulacion_dict(p, n_mensajes=n_mensajes.get(p.id, 0)) for p in postulaciones]
 
 
 @router.post("/prueba/eliminar")
