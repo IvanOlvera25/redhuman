@@ -39,7 +39,7 @@ import {
   type MetricasEntrevistas,
 } from "@/lib/api";
 import type { Candidato, Vacante } from "@/lib/data";
-import { usePolling } from "@/lib/use-polling";
+import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
 
 const proximasMock = [
   { nombre: "Luis Ángel Torres", puesto: "Desarrollador Full-Stack", tipo: "Video", hora: "Hoy · 12:30", estado: "Confirmada" },
@@ -63,7 +63,7 @@ const recomendacionUI: Record<EvaluacionEntrevista["recomendacion"], { label: st
   no_avanzar: { label: "no avanzar", clase: "text-bad" },
 };
 
-const REFRESCO_MS = 8000;
+const REFRESCO_MS = INTERVALO_TABLERO_MS;
 
 export default function Entrevistas() {
   const [entrevistas, setEntrevistas] = useState<Entrevista[]>([]);

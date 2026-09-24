@@ -15,7 +15,7 @@ export function EmbudoEtapas() {
     const p = await fetchPipeline();
     if (p) setPorEtapa(p.candidatos.por_etapa ?? {});
   }, []);
-  usePolling(cargar, 15000);
+  usePolling(cargar);
 
   const total = Object.values(porEtapa ?? {}).reduce((a, b) => a + b, 0);
   const max = Math.max(1, ...ETAPAS.map((e) => porEtapa?.[e] ?? 0));

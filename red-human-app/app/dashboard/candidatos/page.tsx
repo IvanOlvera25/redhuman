@@ -2714,7 +2714,7 @@ function PestanaDocumentos({
   useEffect(() => {
     void cargarExpediente();
   }, [cargarExpediente]);
-  usePolling(cargarExpediente, 10000);
+  usePolling(cargarExpediente, 20000);
 
   const cv = (c.cvDatos || {}) as Record<string, unknown>;
   const habilidades = (cv.habilidades as string[]) || [];
@@ -4395,7 +4395,7 @@ function PanelContratacion({
   useEffect(() => {
     void cargarExpediente();
   }, [cargarExpediente]);
-  usePolling(cargarExpediente, 8000);
+  usePolling(cargarExpediente, 20000);
 
   async function guardar() {
     if (esDeterminado && (!duracion || Number(duracion) <= 0)) return setAviso({ tono: "error", texto: "Tiempo determinado: captura la duración del contrato (número mayor a cero)." });

@@ -55,7 +55,7 @@ export default function Desempeno() {
   useEffect(() => {
     void recargar();
   }, [recargar]);
-  usePolling(recargar, 20000);
+  usePolling(recargar);
 
   if (abierto) {
     return <DetalleCiclo codigo={abierto} onVolver={() => { setAbierto(null); void recargar(); }} puedeDecidir={puedeDecidir} />;
@@ -268,7 +268,7 @@ function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVo
   useEffect(() => {
     void recargar();
   }, [recargar]);
-  usePolling(recargar, 15000);
+  usePolling(recargar);
 
   async function abrirEvaluacion(e: EvaluacionDesempeno) {
     const completa = await fetchEvaluacionDesempeno(e.id);

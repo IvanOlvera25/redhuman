@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from ..config import settings
 from ..database import get_db
@@ -158,7 +158,21 @@ def listar(
         q = q.filter(Vacante.area.ilike(f"%{area.strip()}%"))
     if ubicacion:
         q = q.filter(Vacante.ubicacion.ilike(f"%{ubicacion.strip()}%"))
-    return [_salida(db, v) for v in q.all()]
+    # Hotfix concurrencia 2026-09-24 (N+1): relaciones precargadas, contadores de todas las vacantes en
+    # tres consultas agrupadas y nombres de colaboradores en una sola — antes ~7 consultas por vacante.
+    vacantes = q.options(
+        selectinload(Vacante.cliente), selectinload(Vacante.responsable),
+        selectinload(Vacante.cuenta), selectinload(Vacante.curso_filtro),
+    ).all()
+    resumen = conteos.resumen_por_vacante(db, cuenta.id, datetime.now(timezone.utc) - timedelta(days=1))
+    ids_colab = {uid for v in vacantes for uid in (v.colaboradores_ids or [])}
+    nombres = dict(db.query(Usuario.id, Usuario.nombre).filter(Usuario.id.in_(ids_colab)).all()) if ids_colab else {}
+    salida = []
+    for v in vacantes:
+        r = resumen.get(v.id) or {"etapas": {}, "estados": {}, "total": 0, "nuevos": 0}
+        colaboradores = [nombres[uid] for uid in (v.colaboradores_ids or []) if uid in nombres]
+        salida.append(vacante_dict(v, r["total"], r["nuevos"], {"etapas": r["etapas"], "estados": r["estados"]}, colaboradores))
+    return salida
 
 
 # ------------------------------------------------------------

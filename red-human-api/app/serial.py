@@ -367,10 +367,11 @@ def _postulacion_resumen_dict(p: Postulacion) -> dict:
     }
 
 
-def postulacion_dict(p: Postulacion, detalle: bool = False) -> dict:
+def postulacion_dict(p: Postulacion, detalle: bool = False, n_mensajes: Optional[int] = None) -> dict:
     """La tarjeta del Kanban (decisión P4: una por Postulación). `id` es el código P-####
     — es lo que el frontend manda a /candidatos/{codigo}/...; los datos de persona vienen
-    aplanados (nombre, teléfono…) por compatibilidad y también en `candidato`."""
+    aplanados (nombre, teléfono…) por compatibilidad y también en `candidato`.
+    `n_mensajes`: conteo ya calculado por el listado (evita cargar el chat completo por tarjeta)."""
     c = p.candidato
     v = p.vacante
     exp = p.expediente
@@ -447,7 +448,7 @@ def postulacion_dict(p: Postulacion, detalle: bool = False) -> dict:
         "entrevistaMatch": (ultima.evaluacion or {}).get("match_perfil") if ultima else None,
         "entrevistaRecomendacion": (ultima.evaluacion or {}).get("recomendacion") if ultima else None,
         "archivos": len(c.archivos),
-        "mensajes": len(p.mensajes),
+        "mensajes": n_mensajes if n_mensajes is not None else len(p.mensajes),
         # --- Fase C ---
         "ultimaActividadEn": iso(p.ultima_actividad_en),
         "resultadoApto": p.resultado_apto,
