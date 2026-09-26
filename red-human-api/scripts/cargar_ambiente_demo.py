@@ -55,7 +55,7 @@ except Exception:  # noqa: BLE001
     pass
 
 import openpyxl  # noqa: E402
-from sqlalchemy import func, inspect as sa_inspect, or_, select  # noqa: E402
+from sqlalchemy import event, func, inspect as sa_inspect, or_, select  # noqa: E402
 
 from app.database import Base, SessionLocal, engine, get_db  # noqa: E402
 from app.deps import usuario_actual  # noqa: E402
@@ -701,6 +701,56 @@ def cargar(db, x: dict, overrides: dict, base: datetime) -> tuple:
 
 
 # ============================================================
+# Ids del ambiente demo: nunca reutilizar uno al que ya apunte una fila real
+# ============================================================
+
+# SQLite asigna max(id)+1: si una fila se borró FÍSICAMENTE (p. ej. «Eliminar candidatos de prueba» borra
+# en cascada postulaciones y expedientes), una fila real puede seguir guardando ese id (colaboradores.
+# expediente_id, …) y el primer registro demo lo heredaría: el colaborador real quedaría apuntando a un
+# expediente simulado. Por eso cada fila demo nace con un id por ENCIMA del mayor id existente y de toda
+# referencia que exista hacia esa tabla (llaves foráneas y columnas `*_id` sin llave, como `cuenta_id`).
+MODELOS_DEMO = (Cuenta, UsuarioCuenta, Cliente, ClienteContacto, Vacante, Candidato, Postulacion,
+                Entrevista, EntrevistaHumana, Expediente, Documento)
+COLUMNA_A_TABLA = {
+    "cuenta_id": "cuentas", "cliente_id": "clientes", "vacante_id": "vacantes", "candidato_id": "candidatos",
+    "candidato_origen_id": "candidatos", "postulacion_id": "postulaciones", "expediente_id": "expedientes",
+    "contacto_id": "cliente_contactos", "entrevista_id": "entrevistas", "documento_id": "documentos",
+}
+
+
+def pisos_de_ids(db) -> dict:
+    """{tabla: id más alto ocupado o referenciado} para las tablas donde la carga crea filas."""
+    tablas_db = set(sa_inspect(db.get_bind()).get_table_names())
+    piso = {m.__table__.name: db.query(func.max(m.__table__.c.id)).scalar() or 0 for m in MODELOS_DEMO}
+    for tabla in Base.metadata.sorted_tables:
+        if tabla.name not in tablas_db:
+            continue
+        for col in tabla.columns:
+            destinos = {fk.column.table.name for fk in col.foreign_keys}
+            if col.name in COLUMNA_A_TABLA:
+                destinos.add(COLUMNA_A_TABLA[col.name])
+            for destino in destinos & piso.keys():
+                if destino == tabla.name and col.primary_key:
+                    continue
+                maximo = db.execute(select(func.max(col))).scalar()
+                if isinstance(maximo, int) and maximo > piso[destino]:
+                    piso[destino] = maximo
+    return piso
+
+
+def instalar_asignador_ids(db, pisos: dict) -> None:
+    siguiente = dict(pisos)
+
+    @event.listens_for(db, "before_flush")
+    def _asignar(session, _ctx, _instancias):
+        for obj in session.new:
+            tabla = getattr(getattr(obj, "__table__", None), "name", None)
+            if tabla in siguiente and getattr(obj, "id", None) is None:
+                siguiente[tabla] += 1
+                obj.id = siguiente[tabla]
+
+
+# ============================================================
 # Huellas: datos reales intactos e idempotencia
 # ============================================================
 
@@ -729,6 +779,7 @@ def huella(db, solo_reales: bool) -> dict:
         pk = list(tabla.primary_key.columns)
         h = hashlib.sha256()
         n = 0
+        filas = {}
         for fila in db.execute(select(*cols).order_by(*pk)).mappings():
             if tabla.name == "bitacora" and fila.get("accion") == "carga_ambiente_demo":
                 continue
@@ -742,9 +793,33 @@ def huella(db, solo_reales: bool) -> dict:
                 or (tabla.name != "vacantes" and fila.get("cliente_id") in demo["clientes"])
             ):
                 continue
-            h.update(json.dumps({k: _comparable(v) for k, v in fila.items()}, sort_keys=True, default=str).encode())
+            texto = json.dumps({k: _comparable(v) for k, v in fila.items()}, sort_keys=True, default=str).encode()
+            h.update(texto)
             n += 1
-        salida[tabla.name] = (n, h.hexdigest())
+            if solo_reales:
+                filas[tuple(fila[c.name] for c in pk)] = hashlib.sha256(texto).hexdigest()
+        salida[tabla.name] = (n, h.hexdigest(), filas)
+    return salida
+
+
+def diferencias(antes: dict, despues: dict) -> list:
+    """Qué filas reales cambiaron, por tabla: desaparecidas (o que ahora parecen demo), nuevas o modificadas."""
+    salida = []
+    for t in antes:
+        if antes[t][:2] == (despues.get(t) or (None, None))[:2]:
+            continue
+        a, d = antes[t][2], (despues.get(t) or (0, "", {}))[2]
+        faltan = sorted(set(a) - set(d))
+        nuevas = sorted(set(d) - set(a))
+        cambiadas = sorted(k for k in set(a) & set(d) if a[k] != d[k])
+        detalle = []
+        if faltan:
+            detalle.append(f"{len(faltan)} fila(s) real(es) ahora clasificadas como demo o ausentes {faltan[:10]}")
+        if nuevas:
+            detalle.append(f"{len(nuevas)} fila(s) nuevas fuera del ambiente demo {nuevas[:10]}")
+        if cambiadas:
+            detalle.append(f"{len(cambiadas)} fila(s) modificadas {cambiadas[:10]}")
+        salida.append(f"{t}: " + "; ".join(detalle))
     return salida
 
 
@@ -952,6 +1027,7 @@ def main() -> int:
     db = SessionLocal()
     val = Validador()
     try:
+        instalar_asignador_ids(db, pisos_de_ids(db))
         reales_antes = huella(db, solo_reales=True)
         mk, cuentas, admins = cargar(db, x, overrides, base)
         db.flush()
@@ -972,8 +1048,10 @@ def main() -> int:
         distintas = [t for t in todo_1 if todo_1[t] != todo_2.get(t)]
         val.check(not distintas, "repetir la carga no modifica ninguna fila" + (f" (cambió: {distintas})" if distintas else ""))
         reales_despues = huella(db, solo_reales=True)
-        tocadas = [t for t in reales_antes if reales_antes[t] != reales_despues.get(t)]
-        val.check(not tocadas, "datos reales intactos (huella de todas las tablas fuera del ambiente demo)" + (f" — cambió: {tocadas}" if tocadas else ""))
+        tocadas = diferencias(reales_antes, reales_despues)
+        val.check(not tocadas, "datos reales intactos (huella de todas las tablas fuera del ambiente demo)")
+        for linea in tocadas:
+            print(f"     ↳ {linea}")
 
         validar(db, x, esperado, cuentas, admins, val)
         print("\n— Comunicaciones")
