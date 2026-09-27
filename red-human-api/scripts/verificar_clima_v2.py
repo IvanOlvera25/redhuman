@@ -2,7 +2,8 @@
 
     .venv/Scripts/python.exe scripts/verificar_clima_v2.py
 
-Cubre: generación de encuesta con Red Human (propuesta, no guarda nada).
+Cubre: generación de encuesta con Red Human (propuesta, no guarda nada) y el motor de cálculos
+(participación, % favorable, dimensiones, índice; prueba y externas siempre fuera).
 """
 
 import os
@@ -71,5 +72,65 @@ with TestClient(app) as client:
     r = client.post("/clima/mediciones", json={"titulo": g["titulo"], "dimensiones": g["dimensiones"], "preguntas": g["preguntas"]})
     check(r.status_code == 201 and r.json()["estado"] == "borrador" and r.json()["dimensiones"] == g["dimensiones"],
           "la propuesta se guarda tal cual como borrador")
+
+    print("\n--- Fase 3 · Motor de cálculos ---")
+    preguntas = [
+        {"texto": "Mi jefe me apoya", "tipo": "escala", "dimension": "Liderazgo"},
+        {"texto": "Recibo retroalimentación", "tipo": "escala", "dimension": "Liderazgo"},
+        {"texto": "Mi equipo colabora", "tipo": "escala", "dimension": "Equipo"},
+        {"texto": "Hay confianza en el equipo", "tipo": "escala", "dimension": "Equipo"},  # nadie la responde
+        {"texto": "¿Te quedarías un año más?", "tipo": "opcion", "dimension": "Permanencia", "opciones": ["Sí", "No", "No sé"]},
+        {"texto": "¿Qué mejorarías?", "tipo": "abierta", "dimension": "Comentarios"},
+        {"texto": "Tengo equilibrio vida-trabajo", "tipo": "escala", "dimension": "Bienestar"},  # dimensión sin respuestas
+    ]
+    r = client.post("/clima/mediciones", json={"titulo": "Motor", "preguntas": preguntas, "permite_externos": True,
+                                               "cierra_en": "2099-12-31T18:00"})
+    MED = r.json()["id"]
+    vacio = client.get(f"/clima/mediciones/{MED}/resultados").json()["calculo"]
+    check(vacio["indice"]["estado"] == "sin_respuestas" and vacio["indice"]["valor"] is None
+          and vacio["indice"]["etiqueta"] == "Aún no hay respuestas reales", "sin respuestas reales: «Aún no hay respuestas reales», nunca 0 %")
+    client.post(f"/clima/mediciones/{MED}/prueba/responder", json={"respuestas": {"p1": 1, "p2": 1, "p3": 1}})
+    client.patch(f"/clima/mediciones/{MED}/estado", json={"estado": "abierta"})
+    client.post(f"/clima/mediciones/{MED}/invitar", json={"colaborador_ids": ["COL-1", "COL-2", "COL-3", "COL-4"]})
+    db.expire_all()
+    tokens = [p.token for p in db.query(MedicionClima).filter_by(codigo=MED).one().participaciones]
+    for tok, resp in zip(tokens, [
+        {"p1": 5, "p2": 3, "p3": 4, "p5": "Sí", "p6": "Más capacitación"},
+        {"p1": 4, "p2": 2, "p3": 2, "p5": "No"},
+        {"p1": 2, "p2": 5, "p3": 5, "p6": "Mejor comunicación"},
+    ]):
+        check(client.post(f"/clima/publica/{tok}/responder", json={"respuestas": resp}).status_code == 201, "un invitado responde con su liga personal")
+    externa = db.query(MedicionClima).filter_by(codigo=MED).one().token
+    client.post(f"/clima/publica/{externa}/responder", json={"respuestas": {"p1": 1, "p2": 1, "p3": 1}})
+    c = client.get(f"/clima/mediciones/{MED}/resultados").json()["calculo"]
+    dims = {d["nombre"]: d for d in c["dimensiones"]}
+    lid = {q["texto"]: q for q in dims["Liderazgo"]["preguntas"]}
+    check(c["participacion"] == {"invitados": 4, "respondieron": 3, "faltan": 1, "porcentaje": 75.0}, f"participación 3/4 = 75 % ({c['participacion']})")
+    check(c["resumenParticipacion"].startswith("3 de 4 respondieron · faltan 1 · cierra el 31/12/2099"), f"texto dinámico: {c['resumenParticipacion']}")
+    check(c["respuestasConsideradas"] == 3 and c["externas"] == 1 and c["pruebas"] == 1, "solo cuentan las 3 reales; la externa y la de prueba van aparte")
+    check(lid["Mi jefe me apoya"]["favorable"] == 66.7 and lid["Recibo retroalimentación"]["favorable"] == 33.3,
+          "% favorable = respuestas 4 o 5 / respuestas válidas (2/3 y 1/3)")
+    check(dims["Liderazgo"]["favorable"] == 50.0, "dimensión = promedio de los % de sus preguntas (66.7 y 33.3 → 50)")
+    check(dims["Equipo"]["favorable"] == 66.7 and dims["Equipo"]["preguntasConResultado"] == 1, "la pregunta sin respuestas se omite del promedio de su dimensión")
+    check(dims["Bienestar"]["favorable"] is None and dims["Permanencia"]["favorable"] is None and dims["Comentarios"]["favorable"] is None,
+          "dimensiones sin escala con respuestas quedan sin resultado (no 0 %)")
+    check(c["indice"] == {"valor": 58.3, "estado": "calculado", "etiqueta": "Índice de clima", "dimensionesConsideradas": 2},
+          f"índice = promedio simple de las dimensiones con resultado ((50 + 66.7) / 2 = 58.3): {c['indice']}")
+    per = dims["Permanencia"]["preguntas"][0]
+    com = dims["Comentarios"]["preguntas"][0]
+    check(per["distribucion"] == {"Sí": 1, "No": 1, "No sé": 0} and "favorable" not in per, "opción múltiple: distribución, sin convertir a puntaje")
+    check(set(com["comentarios"]) == {"Más capacitación", "Mejor comunicación"} and "favorable" not in com, "abiertas: comentarios tal cual, sin autor ni puntaje")
+    cp = client.get(f"/clima/mediciones/{MED}/resultados?prueba=true").json()["calculo"]
+    check(cp["fuente"] == "prueba" and cp["respuestasConsideradas"] == 1 and cp["indice"]["valor"] == 0.0,
+          "la vista de prueba usa SOLO las respuestas de prueba (1 respuesta, todo desfavorable)")
+    r = client.post("/clima/mediciones", json={"titulo": "Solo comentarios", "preguntas": [{"texto": "¿Algo que decir?", "tipo": "abierta"}], "permite_externos": True})
+    MED2 = r.json()["id"]
+    client.patch(f"/clima/mediciones/{MED2}/estado", json={"estado": "abierta"})
+    client.post(f"/clima/mediciones/{MED2}/invitar", json={"colaborador_ids": ["COL-1"]})
+    db.expire_all()
+    tok2 = db.query(MedicionClima).filter_by(codigo=MED2).one().participaciones[0].token
+    client.post(f"/clima/publica/{tok2}/responder", json={"respuestas": {"p1": "Todo bien"}})
+    i2 = client.get(f"/clima/mediciones/{MED2}/resultados").json()["calculo"]["indice"]
+    check(i2 == {"valor": None, "estado": "pendiente", "etiqueta": "Índice pendiente"}, f"con respuestas pero sin escalas calculables: «Índice pendiente» ({i2})")
 
 print(f"\n🎉 Clima v2 verificado: {OK} comprobaciones OK.")

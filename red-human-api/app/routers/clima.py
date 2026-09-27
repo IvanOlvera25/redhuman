@@ -42,7 +42,7 @@ from ..models import (
     registrar,
 )
 from ..serial import medicion_clima_dict, medicion_clima_publica_dict
-from ..services import ia, plantillas_correo
+from ..services import clima_resultados, ia, plantillas_correo
 from ..services.correo import enviar_correo
 from ..services.whatsapp import enviar_texto_sin_plantilla
 from ..services.modulos_rh import requiere_modulos_rh
@@ -552,38 +552,40 @@ async def invitar(codigo: str, datos: InvitarIn, db: Session = Depends(get_db), 
 
 
 @router.get("/mediciones/{codigo}/resultados")
-def resultados(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
-    """Agregados por pregunta, SOLO con respuestas reales internas (sin prueba ni externas). En una
-    medición anónima NUNCA se regresa quién respondió; las abiertas vienen sin autor."""
+def resultados(codigo: str, prueba: bool = False, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Indicadores en tiempo real (`services.clima_resultados`, única fuente): participación sobre
+    invitados, % favorable por pregunta, dimensiones e índice de clima. `prueba=true` = SOLO respuestas de
+    prueba (vista «Probar encuesta»); por defecto, SOLO reales internas. En una medición anónima NUNCA se
+    regresa quién respondió; las abiertas vienen sin autor."""
     m = _medicion(db, codigo, cuenta.id)
-    respuestas = [r for r in m.respuestas if not r.es_prueba and not r.es_externa and r.origen != "externo"]
-    invitados = len(m.participaciones)
-    respondieron = sum(1 for p in m.participaciones if p.respondio)
+    fuente = "prueba" if prueba else "reales"
+    calculo = clima_resultados.calcular(m, fuente)
+    respuestas = clima_resultados.respuestas_de(m, fuente)
     total_roster = db.query(Colaborador).filter(
         Colaborador.cuenta_id == cuenta.id, Colaborador.eliminado_en.is_(None), Colaborador.activo.is_(True)
     ).count()
+    # vista plana por pregunta (compatibilidad del tablero anterior); lo nuevo vive en `calculo`
     por_pregunta = []
-    for p in m.preguntas or []:
-        valores = [r.respuestas.get(p["id"]) for r in respuestas if r.respuestas and r.respuestas.get(p["id"]) not in (None, "")]
-        fila = {"id": p["id"], "texto": p["texto"], "tipo": p["tipo"], "respuestas": len(valores)}
-        if p["tipo"] == "escala":
-            numeros = [float(v) for v in valores if str(v).replace(".", "", 1).isdigit()]
-            fila["promedio"] = round(sum(numeros) / len(numeros), 2) if numeros else None
-            fila["escalaMax"] = p.get("escala_max", ESCALA_CLIMA)
-            fila["distribucion"] = {str(n): numeros.count(n) for n in sorted(set(numeros))}
-        elif p["tipo"] == "opcion":
-            fila["distribucion"] = {o: [str(v) for v in valores].count(o) for o in p.get("opciones", [])}
-        else:
-            fila["textos"] = [str(v)[:500] for v in valores]  # sin autor, siempre
-        por_pregunta.append(fila)
+    for d in calculo["dimensiones"]:
+        for f in d["preguntas"]:
+            fila = {k: v for k, v in f.items() if k != "comentarios"}
+            fila["dimension"] = d["nombre"]
+            if f["tipo"] == "escala":
+                fila["distribucion"] = {k: v for k, v in f["distribucion"].items() if v}
+            if f["tipo"] == "abierta":
+                fila["textos"] = f["comentarios"]
+            por_pregunta.append(fila)
+    part = calculo["participacion"]
     return {
         "medicion": medicion_clima_dict(m, liga=liga_publica(m)),
+        "fuente": fuente,
         "totalRespuestas": len(respuestas),
         "colaboradoresActivos": total_roster,  # compatibilidad del tablero actual (Fase 4 lo reemplaza)
-        "invitados": invitados,
-        "respondieron": respondieron,
-        "participacion": round(respondieron / invitados * 100) if invitados else None,
-        "externos": sum(1 for r in m.respuestas if not r.es_prueba and (r.es_externa or r.origen == "externo")),
-        "pruebas": sum(1 for r in m.respuestas if r.es_prueba),
+        "invitados": part["invitados"],
+        "respondieron": part["respondieron"],
+        "participacion": None if part["porcentaje"] is None else round(part["porcentaje"]),
+        "externos": calculo["externas"],
+        "pruebas": calculo["pruebas"],
         "porPregunta": por_pregunta,
+        "calculo": calculo,
     }
