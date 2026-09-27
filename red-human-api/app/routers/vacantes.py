@@ -369,9 +369,10 @@ def crear(
         db, cuenta, datos.cliente_id, datos.responsable_id, datos.colaboradores_ids, datos.plantilla_id
     )
 
-    plataformas = [p for p in datos.plataformas if p in PLATAFORMAS]
+    # 2026-09-26: la selección se guarda SIEMPRE (también en Borrador); el estado decide si se publica.
+    plataformas = _unir_plataformas([], datos.plataformas)
     if datos.publicar and not plataformas:
-        plataformas = ["WhatsApp", "Portal"]
+        plataformas = ["Portal", "WhatsApp"]
     if datos.enfoque_entrevista not in ENFOQUES_ENTREVISTA:
         raise HTTPException(400, f"Enfoque de entrevista inválido. Usa uno de: {', '.join(ENFOQUES_ENTREVISTA)}")
     _validar_sueldo(datos)
@@ -405,7 +406,7 @@ def crear(
         texto_bolsa=datos.texto_bolsa,
         preguntas_filtro=datos.preguntas_filtro,
         preguntas_filtro_whatsapp=datos.preguntas_filtro_whatsapp,
-        plataformas=plataformas if datos.publicar else [],
+        plataformas=plataformas,
         resumen=datos.resumen,
         perfil_ideal=datos.perfil_ideal,
         responsabilidades=datos.responsabilidades,
@@ -661,7 +662,18 @@ def regenerar(
 
 
 class PublicarIn(BaseModel):
-    plataformas: List[str] = ["WhatsApp", "Portal"]
+    plataformas: List[str] = ["Portal", "WhatsApp"]
+
+
+def _unir_plataformas(actuales: List[str], nuevas: List[str]) -> List[str]:
+    """Une la selección nueva (solo valores del catálogo `PLATAFORMAS`) con la ya guardada, sin
+    duplicados y en el orden del catálogo. Valores viejos que ya no están en el catálogo (p. ej. «OCC»
+    de vacantes previas) se conservan al final: nunca se borran en silencio ni rompen el orden."""
+    validas = {p for p in nuevas if p in PLATAFORMAS}
+    previas = list(dict.fromkeys(actuales or []))
+    union = set(previas) | validas
+    del_catalogo = [p for p in PLATAFORMAS if p in union]
+    return del_catalogo + [p for p in previas if p not in PLATAFORMAS]
 
 
 @router.post("/{codigo}/publicar")
@@ -670,14 +682,13 @@ async def publicar(
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     v = _no_eliminada(_por_codigo(db, codigo, cuenta.id))
-    plataformas = [p for p in datos.plataformas if p in PLATAFORMAS]
-    if not plataformas:
+    if not any(p in PLATAFORMAS for p in datos.plataformas):
         raise HTTPException(400, f"Elige al menos una plataforma válida: {', '.join(PLATAFORMAS)}")
     if not (v.publicaciones or v.descripcion):
         raise HTTPException(409, "La vacante no tiene contenido. Genera la publicación antes de distribuirla.")
 
     v.estado = "Publicada"
-    v.plataformas = sorted(set((v.plataformas or []) + plataformas), key=PLATAFORMAS.index)
+    v.plataformas = _unir_plataformas(v.plataformas, datos.plataformas)
     if not v.slug:
         v.slug = _slug_unico(db, v.titulo, v.id)
     # Fase C: estampar fecha de primera publicación (solo la primera vez; no sobreescribir en
