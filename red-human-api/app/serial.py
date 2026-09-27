@@ -909,11 +909,19 @@ def medicion_clima_dict(m, liga: str = "", detalle: bool = False) -> dict:
         "anonima": bool(m.anonima),
         "permiteExternos": bool(m.permite_externos),
         "estado": m.estado,
+        "estadoEtiqueta": {"borrador": "Borrador", "abierta": "Abierta", "cerrada": "Cerrada"}.get(m.estado, m.estado),
         "preguntas": len(m.preguntas or []),
-        "respuestas": len(m.respuestas or []),
+        "dimensiones": list(m.dimensiones or []),
+        # Clima v2: `respuestas` = reales internas (sin prueba ni externas); las demás van aparte
+        "respuestas": sum(1 for r in (m.respuestas or []) if not r.es_prueba and not r.es_externa and r.origen != "externo"),
+        "respuestasPrueba": sum(1 for r in (m.respuestas or []) if r.es_prueba),
+        "respuestasExternas": sum(1 for r in (m.respuestas or []) if not r.es_prueba and (r.es_externa or r.origen == "externo")),
+        "invitados": len(m.participaciones or []),
+        "respondieron": sum(1 for p in (m.participaciones or []) if p.respondio),
         "liga": liga,
         "abiertaEn": iso(m.abierta_en),
         "cierraEn": iso(m.cierra_en),
+        "cerradaEn": iso(m.cerrada_en),
         "creadoPor": m.creado_por or "",
         "creado": hace(m.creado_en),
     }
@@ -932,6 +940,7 @@ def medicion_clima_publica_dict(m) -> dict:
         "permiteExternos": bool(m.permite_externos),
         "abierta": m.estado == "abierta",
         "preguntas": list(m.preguntas or []),
+        "dimensiones": list(m.dimensiones or []),
         "aviso": (
             "Tus respuestas son ANÓNIMAS: no se guarda quién contestó."
             if m.anonima
