@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..config import settings
 from ..database import get_db
-from ..services import conteos, notificaciones
+from ..services import bolsas, conteos, notificaciones
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import (
     ENFOQUES_ENTREVISTA, MONEDAS_SUELDO, PERIODICIDADES_SUELDO, PLATAFORMAS, Cliente, Cuenta, Curso, Plantilla, Postulacion,
@@ -454,6 +454,17 @@ def por_slug(slug: str, db: Session = Depends(get_db)):
     if v.estado != "Publicada":
         raise HTTPException(410, "Esta vacante ya no está recibiendo postulaciones.")
     return _con_logo(db, _salida(db, v), v)
+
+
+@router.get("/slug/{slug}/jobposting")
+def jobposting_por_slug(slug: str, db: Session = Depends(get_db)):
+    """JSON-LD `JobPosting` (Schema.org) para Google Empleos — público, sin sesión (solo datos de la
+    vacante). 404 si la vacante no existe, no está Publicada, su Cuenta no está activa o RH no marcó
+    «Google Empleos»: así, al apagarla, Google deja de ver el marcado y la desindexa."""
+    v = db.query(Vacante).filter(Vacante.slug == slug).first()
+    if not v or not bolsas.publicable_en(v, bolsas.GOOGLE_EMPLEOS):
+        raise HTTPException(404, "Vacante no disponible en Google Empleos")
+    return bolsas.jobposting(v)
 
 
 def _cuenta_publica(db: Session, cuenta: str) -> Optional[Cuenta]:
