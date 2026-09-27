@@ -37,6 +37,7 @@ import {
 import { invalidarReglasNotificacion } from "@/components/dashboard/linea-notificar";
 import { BotonCargaMasiva } from "@/components/dashboard/carga-masiva";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
+import { SeccionPlantillasClima } from "@/components/dashboard/clima/seccion-plantillas-clima";
 import {
   actualizarCliente,
   actualizarConfiguracion,
@@ -97,7 +98,7 @@ import { cn } from "@/lib/utils";
    1. Cuentas (gestión completa: listado, alta, ficha con usuarios/clientes/portal)
    2. Usuarios y permisos (Cuenta actual)
    3. Clientes y contactos
-   4. Plantillas (administradas aquí, mismo formulario que Nueva vacante)
+   4. Plantillas (administradas aquí, mismo formulario que Nueva vacante) + Plantillas de clima (Clima v2)
    5. Notificaciones (configuración predeterminada + botón Guardar)
    6. Modo prueba (switch, ventana configurable, borrado de prueba)
    ============================================================ */
@@ -121,6 +122,7 @@ export default function Configuracion() {
       <SeccionUsuarios />
       <SeccionClientes />
       <SeccionPlantillas />
+      <SeccionPlantillasClima />
       <SeccionNotificaciones />
       <SeccionIntegraciones />
       <SeccionModoPrueba />

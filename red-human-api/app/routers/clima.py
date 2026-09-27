@@ -826,7 +826,8 @@ async def importar_plantilla(
         preguntas.append({"texto": texto, "tipo": tipo, "dimension": f.get("dimension") or "",
                           "opciones": masivo.lista(f.get("opciones") or ""), "orden": f.get("orden") or n})
     if errores:
-        raise HTTPException(422, {"mensaje": "Corrige estas filas y vuelve a subir el archivo.", "errores": errores})
+        detalle = "; ".join(f"fila {e['fila']}: {e['error']}" for e in errores[:10])
+        raise HTTPException(422, f"No se guardó nada. Corrige y vuelve a subir el archivo — {detalle}")
     base = nombre.strip() or (archivo.filename or "Plantilla de clima").rsplit(".", 1)[0]
     p = _crear_plantilla_clima(db, cuenta.id, PlantillaClimaIn(nombre=base, descripcion=descripcion, preguntas=preguntas), u.nombre)
     registrar(db, u.nombre, "plantilla_clima_importada", "clima", str(p.id), {"nombre": p.nombre, "preguntas": len(p.preguntas), "correo_rh": u.correo})

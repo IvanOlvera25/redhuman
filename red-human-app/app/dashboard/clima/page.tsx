@@ -1,103 +1,181 @@
 "use client";
 
-/* Módulo de Clima laboral (2026-09-23). Crear encuesta (anónima o identificada) → invitar colaboradores
-   del roster y/o generar liga externa → dashboard de resultados por dimensión con hallazgos.
+/* Módulo de Clima laboral — Clima v2 (2026-09-27).
+
+   Inicio: «¿Qué quieres saber de tu equipo?» → «Crear encuesta con Red Human» (acción principal),
+   «Usar plantilla» y «Crear manualmente». Borrador: editar/reordenar dimensiones y preguntas, «Probar
+   encuesta» (respuestas de prueba, nunca mezcladas con las reales, se pueden reiniciar) y «Enviar
+   encuesta» (modal: destinatarios por sede/área, fecha y hora de cierre, Anónima/Identificada). Abierta /
+   Cerrada: «X de Y respondieron · faltan Z · cierra el …», resultados por Dimensión → Preguntas (motor
+   del backend, sin prueba ni externas) y «Analizar resultados con Red Human» a demanda (no hay hallazgos
+   automáticos). Flujo estricto de ida: Borrador → Abierta → Cerrada (nunca se reabre).
 
    REGLA DE ORO: los participantes internos SON los colaboradores del roster; aquí nunca se captura gente.
-   Privacidad: en una medición anónima no se guarda ni se muestra quién respondió (LFPDPPP). */
+   Privacidad: en una encuesta anónima no se guarda ni se muestra quién respondió (LFPDPPP). */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
-  ArrowLeft, BarChart3, Check, Copy, Eye, EyeOff, Link2, Loader2, MessageSquare, Play, Plus, Search,
-  Send, ShieldCheck, Square, Users,
+  ArrowLeft, BarChart3, BellRing, CalendarClock, Check, Copy, Eye, EyeOff, FlaskConical, LayoutTemplate, Link2,
+  Loader2, MessageSquare, PenLine, RotateCcw, Save, Send, ShieldCheck, Sparkles, Square, Users,
 } from "lucide-react";
 import { Badge, Button, Card, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
-import { AvisoLinea, CampoRH, Cargando, KpiRH, ListaEditable, ModalMarco, inputRH, type AvisoRH } from "@/components/dashboard/modulos-rh";
+import { AvisoLinea, CampoRH, Cargando, KpiRH, ModalMarco, inputRH, type AvisoRH } from "@/components/dashboard/modulos-rh";
+import { MenuAcciones, type AccionMenu } from "@/components/dashboard/menu-acciones";
+import { EditorCuestionario, cuestionarioParaGuardar } from "@/components/dashboard/clima/editor-cuestionario";
+import { FormularioRespuestas, contarContestadas } from "@/components/clima/formulario-respuestas";
 import { usePuedeDecidir } from "@/components/sesion";
 import { usePolling } from "@/lib/use-polling";
 import { cn } from "@/lib/utils";
 import {
-  cambiarEstadoMedicion,
-  crearMedicionClima,
-  fetchColaboradores,
-  fetchMedicionClima,
-  fetchMedicionesClima,
-  fetchResultadosClima,
-  invitarAClima,
-  regenerarLigaClima,
-  type Colaborador,
-  type MedicionClima,
-  type PreguntaClima,
-  type ResultadosClima,
-  type TipoPreguntaClima,
+  abrirMedicionClima, analizarClima, cerrarMedicionClima, crearMedicionClima, editarMedicionClima, fetchDestinatariosClima,
+  fetchMedicionClima, fetchMedicionesClima, fetchPlantillasClima, fetchResultadosClima, generarEncuestaClima, recordarClima,
+  regenerarLigaClima, reiniciarPruebaClima, responderPruebaClima, usarPlantillaClima,
+  type AnalisisClima, type CalculoClima, type DestinatariosClima, type EnvioClima, type MedicionClima, type PlantillaClima,
+  type PreguntaClima, type PropuestaClima, type ResultadosClima,
 } from "@/lib/api";
 
 const ESTADO_TONO: Record<string, "neutral" | "good" | "brand"> = { borrador: "neutral", abierta: "good", cerrada: "brand" };
 const ESTADO_LABEL: Record<string, string> = { borrador: "Borrador", abierta: "Abierta", cerrada: "Cerrada" };
 
-/** Cuestionario base para arrancar rápido: las 6 dimensiones clásicas de clima, en escala 1-5. */
-const PLANTILLA_BASE: PreguntaClima[] = [
-  { id: "p1", texto: "Me siento a gusto en mi equipo de trabajo", tipo: "escala", escala_max: 5 },
-  { id: "p2", texto: "Tengo claro lo que se espera de mí en mi puesto", tipo: "escala", escala_max: 5 },
-  { id: "p3", texto: "Mi jefe directo me da retroalimentación útil", tipo: "escala", escala_max: 5 },
-  { id: "p4", texto: "Cuento con las herramientas para hacer bien mi trabajo", tipo: "escala", escala_max: 5 },
-  { id: "p5", texto: "Veo oportunidades de crecer en la empresa", tipo: "escala", escala_max: 5 },
-  { id: "p6", texto: "¿Qué cambiarías para que trabajar aquí sea mejor?", tipo: "abierta" },
-];
+function fechaLocal(iso: string | null | undefined) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleString("es-MX", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+/** «X de Y respondieron · faltan Z · cierra el …» con la hora LOCAL de quien mira. */
+function textoParticipacion(m: MedicionClima, c: CalculoClima) {
+  const p = c.participacion;
+  if (!p.invitados) return "Aún no hay colaboradores invitados.";
+  const partes = [`${p.respondieron} de ${p.invitados} respondieron`, `faltan ${p.faltan}`];
+  if (m.estado === "cerrada") partes.push(`cerró el ${fechaLocal(m.cerradaEn ?? m.cierraEn)}`);
+  else if (m.cierraEn) partes.push(`cierra el ${fechaLocal(m.cierraEn)}`);
+  return partes.join(" · ");
+}
+
+function resumenEnvios(envios: EnvioClima[]) {
+  const nuevos = envios.filter((e) => !e.yaRespondio);
+  const fallidos = nuevos.filter((e) => !(e.correo?.enviado || e.whatsapp?.enviado));
+  return {
+    texto: `Liga personal enviada a ${nuevos.length - fallidos.length} de ${nuevos.length} colaborador(es).` +
+      (fallidos.length ? ` No salió para: ${fallidos.map((f) => f.nombre).join(", ")} (revisa su correo o WhatsApp en el roster).` : ""),
+    tono: (fallidos.length ? "warn" : "ok") as "warn" | "ok",
+  };
+}
 
 export default function Clima() {
+  return (
+    <Suspense fallback={<div className="mx-auto max-w-7xl px-4 py-16"><Cargando /></div>}>
+      <ClimaInner />
+    </Suspense>
+  );
+}
+
+type Vista = { tipo: "inicio" } | { tipo: "nueva"; propuesta: PropuestaClima | null } | { tipo: "medicion"; codigo: string };
+
+function ClimaInner() {
   const puedeDecidir = usePuedeDecidir();
+  const params = useSearchParams();
+  const [vista, setVista] = useState<Vista>(() => {
+    const cod = params.get("medicion");
+    return cod ? { tipo: "medicion", codigo: cod } : { tipo: "inicio" };
+  });
+
+  if (vista.tipo === "nueva") {
+    return (
+      <EditorBorrador
+        propuesta={vista.propuesta}
+        onVolver={() => setVista({ tipo: "inicio" })}
+        onGuardada={(m) => setVista({ tipo: "medicion", codigo: m.id })}
+      />
+    );
+  }
+  if (vista.tipo === "medicion") {
+    return <Medicion codigo={vista.codigo} puedeDecidir={puedeDecidir} onVolver={() => setVista({ tipo: "inicio" })} />;
+  }
+  return (
+    <Inicio
+      puedeDecidir={puedeDecidir}
+      onAbrir={(codigo) => setVista({ tipo: "medicion", codigo })}
+      onNueva={(propuesta) => setVista({ tipo: "nueva", propuesta })}
+    />
+  );
+}
+
+/* ============================================================
+   Inicio
+   ============================================================ */
+
+function Inicio({ puedeDecidir, onAbrir, onNueva }: {
+  puedeDecidir: boolean; onAbrir: (codigo: string) => void; onNueva: (p: PropuestaClima | null) => void;
+}) {
   const [mediciones, setMediciones] = useState<MedicionClima[] | null>(null);
-  const [abierta, setAbierta] = useState<string | null>(null);
-  const [crear, setCrear] = useState(false);
+  const [prompt, setPrompt] = useState("");
+  const [generando, setGenerando] = useState(false);
+  const [plantillas, setPlantillas] = useState(false);
   const [aviso, setAviso] = useState<AvisoRH>(null);
 
-  const recargar = useCallback(async () => {
-    const m = await fetchMedicionesClima();
-    setMediciones(m ?? []);
-  }, []);
+  const recargar = useCallback(async () => setMediciones((await fetchMedicionesClima()) ?? []), []);
   useEffect(() => {
     void recargar();
   }, [recargar]);
   usePolling(recargar);
 
-  if (abierta) {
-    return <DetalleMedicion codigo={abierta} puedeDecidir={puedeDecidir} onVolver={() => { setAbierta(null); void recargar(); }} />;
+  async function crearConRedHuman() {
+    if (!prompt.trim()) return setAviso({ tono: "warn", texto: "Escribe qué quieres saber de tu equipo." });
+    setGenerando(true);
+    setAviso(null);
+    const r = await generarEncuestaClima(prompt);
+    setGenerando(false);
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    onNueva(r.data);
   }
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
-      <PageHeader title="Clima laboral" subtitle="Encuestas anónimas o identificadas para los colaboradores, con liga externa opcional y resultados por dimensión.">
-        {puedeDecidir && <Button size="sm" onClick={() => setCrear(true)}><Plus className="h-4 w-4" /> Nueva encuesta</Button>}
-      </PageHeader>
+      <PageHeader title="Clima laboral" subtitle="Encuestas anónimas o identificadas para tus colaboradores, con resultados por dimensión." />
 
-      {aviso && <AvisoLinea aviso={aviso} onCerrar={() => setAviso(null)} />}
+      {puedeDecidir && (
+        <Card className="mt-6 p-5 sm:p-7">
+          <label htmlFor="prompt-clima" className="font-display text-xl font-bold sm:text-2xl">¿Qué quieres saber de tu equipo?</label>
+          <textarea
+            id="prompt-clima"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            rows={3}
+            placeholder="Ej. Quiero saber cómo se sienten con su jefe directo, la carga de trabajo y si ven oportunidades de crecer."
+            className="mt-3 w-full rounded-2xl border border-border-soft bg-surface px-4 py-3 text-base outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+          />
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <Button onClick={crearConRedHuman} disabled={generando}>
+              {generando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              {generando ? "Red Human está diseñando tu encuesta…" : "Crear encuesta con Red Human"}
+            </Button>
+            <Button variant="outline" onClick={() => setPlantillas(true)} disabled={generando}><LayoutTemplate className="h-4 w-4" /> Usar plantilla</Button>
+            <Button variant="ghost" onClick={() => onNueva(null)} disabled={generando}><PenLine className="h-4 w-4" /> Crear manualmente</Button>
+          </div>
+          {aviso && <AvisoLinea aviso={aviso} onCerrar={() => setAviso(null)} />}
+        </Card>
+      )}
 
+      <h2 className="font-display mt-8 text-lg font-bold">Tus encuestas</h2>
       {mediciones === null ? (
         <Cargando />
       ) : mediciones.length === 0 ? (
-        <Card className="mt-6 p-10 text-center">
-          <span className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-brand-soft text-brand"><BarChart3 className="h-7 w-7" /></span>
-          <h2 className="font-display mt-4 text-xl font-bold">Todavía no hay mediciones de clima</h2>
-          <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">
-            Crea una encuesta —puedes partir del cuestionario base—, ábrela e invita a tu equipo. Las respuestas
-            anónimas no guardan quién contestó.
-          </p>
-          {puedeDecidir && <Button className="mt-5" onClick={() => setCrear(true)}><Plus className="h-4 w-4" /> Crear la primera encuesta</Button>}
-        </Card>
+        <p className="mt-3 text-sm text-ink-3">Todavía no hay encuestas de clima.</p>
       ) : (
-        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {mediciones.map((m) => (
             <button
               key={m.id}
-              onClick={() => setAbierta(m.id)}
+              onClick={() => onAbrir(m.id)}
               className="card-hover group flex flex-col rounded-2xl border border-border-soft bg-surface p-5 text-left transition-all hover:border-brand/40 hover:shadow-md"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="truncate font-display text-lg font-bold group-hover:text-brand">{m.titulo}</p>
-                  <p className="font-mono text-[11px] text-ink-3">{m.id} · {m.preguntas} preguntas</p>
+                  <p className="font-mono text-[11px] text-ink-3">{m.id} · {m.preguntas} preguntas · {m.dimensiones.length} dimensiones</p>
                 </div>
                 <Badge tone={ESTADO_TONO[m.estado] ?? "neutral"} dot>{ESTADO_LABEL[m.estado] ?? m.estado}</Badge>
               </div>
@@ -105,132 +183,210 @@ export default function Clima() {
                 <span className={cn("inline-flex items-center gap-1 rounded-lg px-2 py-1 font-semibold", m.anonima ? "bg-human-soft text-human" : "bg-surface-2 text-ink-2")}>
                   {m.anonima ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />} {m.anonima ? "Anónima" : "Identificada"}
                 </span>
-                {m.permiteExternos && <span className="rounded-lg bg-surface-2 px-2 py-1 text-ink-2">Acepta externos</span>}
               </div>
-              <div className="mt-auto flex items-baseline justify-between pt-4">
-                <span className="text-xs text-ink-3">{m.respuestas} respuesta(s)</span>
-                <span className="text-[11px] text-ink-3">{m.creado}</span>
+              <div className="mt-auto flex items-baseline justify-between pt-4 text-xs text-ink-3">
+                <span>{m.estado === "borrador" ? `${m.respuestasPrueba} respuesta(s) de prueba` : `${m.respondieron} de ${m.invitados} respondieron`}</span>
+                <span className="text-[11px]">{m.estado === "abierta" && m.cierraEn ? `cierra ${fechaLocal(m.cierraEn)}` : m.creado}</span>
               </div>
             </button>
           ))}
         </div>
       )}
 
-      {crear && (
-        <ModalCrearMedicion
-          onClose={() => setCrear(false)}
-          onCreada={(m) => { setCrear(false); void recargar(); setAbierta(m.id); }}
+      {plantillas && (
+        <ModalUsarPlantilla
+          onClose={() => setPlantillas(false)}
+          onCreada={(m) => { setPlantillas(false); onAbrir(m.id); }}
         />
       )}
     </div>
   );
 }
 
-/* ============================================================
-   Crear encuesta
-   ============================================================ */
-
-function ModalCrearMedicion({ onClose, onCreada }: { onClose: () => void; onCreada: (m: MedicionClima) => void }) {
-  const [titulo, setTitulo] = useState("");
-  const [descripcion, setDescripcion] = useState("");
-  const [anonima, setAnonima] = useState(true);
-  const [permiteExternos, setPermiteExternos] = useState(false);
-  const [preguntas, setPreguntas] = useState<PreguntaClima[]>(PLANTILLA_BASE);
-  const [ocupado, setOcupado] = useState(false);
+function ModalUsarPlantilla({ onClose, onCreada }: { onClose: () => void; onCreada: (m: MedicionClima) => void }) {
+  const [lista, setLista] = useState<PlantillaClima[] | null>(null);
+  const [ocupado, setOcupado] = useState<number | null>(null);
   const [error, setError] = useState("");
+  useEffect(() => {
+    fetchPlantillasClima().then((p) => setLista(p ?? []));
+  }, []);
 
-  async function guardar() {
-    const limpias = preguntas
-      .filter((p) => p.texto.trim())
-      .map((p, i) => ({ ...p, id: p.id || `p${i + 1}`, texto: p.texto.trim() }));
-    if (!titulo.trim()) return setError("Ponle título a la encuesta.");
-    if (!limpias.length) return setError("Captura al menos una pregunta.");
-    setOcupado(true);
+  async function usar(id: number) {
+    setOcupado(id);
     setError("");
-    const r = await crearMedicionClima({ titulo, descripcion, preguntas: limpias, anonima, permiteExternos });
-    setOcupado(false);
+    const r = await usarPlantillaClima(id);
+    setOcupado(null);
     if (!r.ok) return setError(r.error);
     onCreada(r.data);
   }
 
   return (
-    <ModalMarco titulo="Nueva encuesta de clima" subtitulo="Define cómo se responde y qué vas a preguntar. Puedes editar el cuestionario base." onClose={onClose} ancho="max-w-3xl">
-      <div className="grid gap-3 sm:grid-cols-2">
-        <CampoRH label="Título"><input value={titulo} onChange={(e) => setTitulo(e.target.value)} placeholder="Ej. Clima 2026 · Sucursal Centro" className={inputRH} /></CampoRH>
-        <CampoRH label="Descripción (opcional)"><input value={descripcion} onChange={(e) => setDescripcion(e.target.value)} placeholder="Para qué es y hasta cuándo está abierta" className={inputRH} /></CampoRH>
-      </div>
+    <ModalMarco titulo="Usar plantilla" subtitulo="Se crea un borrador con una copia de sus dimensiones y preguntas; la plantilla no cambia." onClose={onClose}>
+      {lista === null ? (
+        <Cargando />
+      ) : lista.length === 0 ? (
+        <p className="py-6 text-center text-sm text-ink-3">No hay plantillas de clima. Créalas o súbelas en Configuración → Plantillas de clima.</p>
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {lista.map((p) => (
+            <li key={p.id} className="flex items-center justify-between gap-3 rounded-2xl border border-border-soft p-4">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold">{p.nombre}</p>
+                <p className="truncate text-[11px] text-ink-3">{p.preguntas} preguntas · {p.dimensiones.join(", ")}</p>
+              </div>
+              <Button size="sm" onClick={() => usar(p.id)} disabled={ocupado !== null}>
+                {ocupado === p.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <LayoutTemplate className="h-4 w-4" />} Usar
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
+    </ModalMarco>
+  );
+}
 
-      {/* Anónima vs identificada — decisión visible y explicada */}
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        <button
-          type="button"
-          onClick={() => setAnonima(true)}
-          className={cn("rounded-2xl border p-4 text-left transition", anonima ? "border-brand bg-brand-soft/40 ring-2 ring-brand/20" : "border-border-soft bg-surface hover:border-brand/40")}
-        >
-          <span className="flex items-center gap-2 text-sm font-bold"><EyeOff className="h-4 w-4 text-human" /> Anónima</span>
-          <p className="mt-1.5 text-[12px] leading-relaxed text-ink-2">
-            No se guarda quién respondió, ni siquiera si la persona entra con su liga. Da respuestas más honestas.
-          </p>
-        </button>
-        <button
-          type="button"
-          onClick={() => setAnonima(false)}
-          className={cn("rounded-2xl border p-4 text-left transition", !anonima ? "border-brand bg-brand-soft/40 ring-2 ring-brand/20" : "border-border-soft bg-surface hover:border-brand/40")}
-        >
-          <span className="flex items-center gap-2 text-sm font-bold"><Eye className="h-4 w-4 text-brand" /> Identificada</span>
-          <p className="mt-1.5 text-[12px] leading-relaxed text-ink-2">
-            Cada respuesta queda ligada a la persona. Útil para dar seguimiento uno a uno; se le avisa antes de contestar.
-          </p>
-        </button>
-      </div>
+/* ============================================================
+   Borrador: crear / editar / probar
+   ============================================================ */
 
-      <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-xl border border-border-soft p-3.5 transition hover:border-brand/40">
-        <input type="checkbox" checked={permiteExternos} onChange={(e) => setPermiteExternos(e.target.checked)} className="mt-0.5 h-4 w-4 rounded border-border-soft text-brand" />
-        <span className="text-[13px] text-ink-2">
-          <b className="text-ink">Permitir participantes externos</b> por la liga pública (proveedores, personal de agencia…).
-          Sus respuestas se guardan con el nombre que escriban; nunca se crea un colaborador.
-        </span>
-      </label>
+function EditorBorrador({ medicion, propuesta, onVolver, onGuardada, onEnviar, onProbar, pruebas }: {
+  medicion?: MedicionClima;
+  propuesta?: PropuestaClima | null;
+  onVolver: () => void;
+  onGuardada: (m: MedicionClima) => void;
+  onEnviar?: () => void;
+  onProbar?: () => void;
+  pruebas?: React.ReactNode;
+}) {
+  const [titulo, setTitulo] = useState(medicion?.titulo ?? propuesta?.titulo ?? "");
+  const [descripcion, setDescripcion] = useState(medicion?.descripcion ?? propuesta?.descripcion ?? "");
+  const [dimensiones, setDimensiones] = useState<string[]>(medicion?.dimensiones ?? propuesta?.dimensiones ?? ["General"]);
+  const [preguntas, setPreguntas] = useState<PreguntaClima[]>(
+    medicion?.cuestionario ?? propuesta?.preguntas ?? [{ id: "p1", texto: "", tipo: "escala", dimension: "General", escala_max: 5 }],
+  );
+  const [sucio, setSucio] = useState(!medicion);
+  const [ocupado, setOcupado] = useState(false);
+  const [aviso, setAviso] = useState<AvisoRH>(null);
 
-      <ListaEditable
-        titulo="Preguntas"
-        filas={preguntas}
-        onCambio={setPreguntas}
-        nuevo={() => ({ id: `p${preguntas.length + 1}`, texto: "", tipo: "escala" as TipoPreguntaClima, escala_max: 5 })}
-        render={(p, set) => (
+  async function guardar(): Promise<MedicionClima | null> {
+    const limpias = cuestionarioParaGuardar(preguntas);
+    if (!titulo.trim()) {
+      setAviso({ tono: "warn", texto: "Ponle nombre a la encuesta." });
+      return null;
+    }
+    if (!limpias.length) {
+      setAviso({ tono: "warn", texto: "Captura al menos una pregunta." });
+      return null;
+    }
+    setOcupado(true);
+    const r = medicion
+      ? await editarMedicionClima(medicion.id, { titulo, descripcion, dimensiones, preguntas: limpias })
+      : await crearMedicionClima({ titulo, descripcion, dimensiones, preguntas: limpias });
+    setOcupado(false);
+    if (!r.ok) {
+      setAviso({ tono: "error", texto: r.error });
+      return null;
+    }
+    setSucio(false);
+    setAviso({ tono: "ok", texto: "Borrador guardado." });
+    onGuardada(r.data);
+    return r.data;
+  }
+
+  /** Enviar y Probar trabajan sobre lo guardado: si hay cambios, se guardan primero. */
+  async function guardarY(accion?: () => void) {
+    if (sucio && !(await guardar())) return;
+    accion?.();
+  }
+
+  const secundarias: AccionMenu[] = medicion
+    ? [
+        { etiqueta: "Probar encuesta", icono: <FlaskConical className="h-4 w-4" />, onClick: () => void guardarY(onProbar) },
+        { etiqueta: "Guardar cambios", icono: <Save className="h-4 w-4" />, onClick: () => void guardar(), disabled: !sucio },
+      ]
+    : [];
+
+  return (
+    <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-8">
+      <button onClick={onVolver} className="mb-4 inline-flex items-center gap-1.5 text-sm font-semibold text-ink-2 transition hover:text-brand">
+        <ArrowLeft className="h-4 w-4" /> Clima laboral
+      </button>
+      <PageHeader title={medicion ? medicion.titulo : "Nueva encuesta"} subtitle={medicion ? `${medicion.id} · Borrador` : "Borrador sin guardar"}>
+        <Badge tone="neutral" dot>Borrador</Badge>
+        {medicion ? (
           <>
-            <input value={p.texto} onChange={(e) => set({ ...p, texto: e.target.value })} placeholder="Redacta la pregunta" className={cn(inputRH, "sm:col-span-3")} />
-            <select
-              value={p.tipo}
-              onChange={(e) => {
-                const tipo = e.target.value as TipoPreguntaClima;
-                set({ ...p, tipo, escala_max: tipo === "escala" ? (p.escala_max ?? 5) : undefined, opciones: tipo === "opcion" ? (p.opciones ?? ["Buena", "Regular", "Mala"]) : undefined });
-              }}
-              className={cn(inputRH, "sm:col-span-1")}
-            >
-              <option value="escala">Escala 1-5</option>
-              <option value="opcion">Opción múltiple</option>
-              <option value="abierta">Respuesta abierta</option>
-            </select>
-            {p.tipo === "opcion" ? (
-              <input
-                value={(p.opciones ?? []).join(", ")}
-                onChange={(e) => set({ ...p, opciones: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })}
-                placeholder="Opciones separadas por coma"
-                className={cn(inputRH, "sm:col-span-1")}
-              />
-            ) : (
-              <span className="hidden sm:block" />
-            )}
+            <Button size="sm" onClick={() => void guardarY(onEnviar)} disabled={ocupado}><Send className="h-4 w-4" /> Enviar encuesta</Button>
+            <MenuAcciones acciones={secundarias} />
           </>
+        ) : (
+          <Button size="sm" onClick={() => void guardar()} disabled={ocupado}>
+            {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Guardar borrador
+          </Button>
         )}
-      />
+      </PageHeader>
 
+      {propuesta && !medicion && (
+        <AvisoLinea
+          aviso={{ tono: "ok", texto: propuesta.ia ? "Propuesta de Red Human: revísala, ajústala y guárdala como borrador." : "Cuestionario base (sin IA disponible): ajústalo y guárdalo como borrador." }}
+          onCerrar={() => undefined}
+        />
+      )}
+      {aviso && <AvisoLinea aviso={aviso} onCerrar={() => setAviso(null)} />}
+
+      {/* Índice oculto en borrador: solo hay respuestas de prueba */}
+      <Card className="mt-4 flex items-center gap-3 border-dashed p-4 text-sm text-ink-3">
+        <BarChart3 className="h-5 w-5 shrink-0" /> Índice de clima: <b className="text-ink-2">Aún no hay respuestas reales</b>
+      </Card>
+
+      <Card className="mt-4 p-5">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <CampoRH label="Nombre de la encuesta"><input value={titulo} onChange={(e) => { setTitulo(e.target.value); setSucio(true); }} className={inputRH} /></CampoRH>
+          <CampoRH label="Descripción para quien responde (opcional)"><input value={descripcion} onChange={(e) => { setDescripcion(e.target.value); setSucio(true); }} className={inputRH} /></CampoRH>
+        </div>
+        <div className="mt-5">
+          <EditorCuestionario
+            dimensiones={dimensiones}
+            preguntas={preguntas}
+            onCambio={(d, p) => { setDimensiones(d); setPreguntas(p); setSucio(true); }}
+          />
+        </div>
+        {medicion && sucio && (
+          <div className="mt-4 flex justify-end">
+            <Button size="sm" variant="secondary" onClick={() => void guardar()} disabled={ocupado}>
+              {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Guardar cambios
+            </Button>
+          </div>
+        )}
+      </Card>
+
+      {pruebas}
+    </div>
+  );
+}
+
+function ModalProbar({ medicion, onClose, onGuardada }: { medicion: MedicionClima; onClose: () => void; onGuardada: () => void }) {
+  const [respuestas, setRespuestas] = useState<Record<string, unknown>>({});
+  const [ocupado, setOcupado] = useState(false);
+  const [error, setError] = useState("");
+
+  async function enviar() {
+    if (!contarContestadas(respuestas)) return setError("Contesta al menos una pregunta.");
+    setOcupado(true);
+    const r = await responderPruebaClima(medicion.id, respuestas);
+    setOcupado(false);
+    if (!r.ok) return setError(r.error);
+    onGuardada();
+  }
+
+  return (
+    <ModalMarco titulo="Probar encuesta" subtitulo="Así la verá tu equipo. Esta respuesta es de PRUEBA: nunca se mezcla con las reales." onClose={onClose} ancho="max-w-3xl">
+      <FormularioRespuestas preguntas={medicion.cuestionario ?? []} respuestas={respuestas} onCambio={setRespuestas} />
       {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
       <div className="mt-5 flex justify-end gap-2">
         <Button variant="outline" size="sm" onClick={onClose} disabled={ocupado}>Cancelar</Button>
-        <Button size="sm" onClick={guardar} disabled={ocupado}>
-          {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />} Crear encuesta
+        <Button size="sm" onClick={enviar} disabled={ocupado}>
+          {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />} Guardar respuesta de prueba
         </Button>
       </div>
     </ModalMarco>
@@ -238,324 +394,522 @@ function ModalCrearMedicion({ onClose, onCreada }: { onClose: () => void; onCrea
 }
 
 /* ============================================================
-   Detalle: invitar, liga externa y resultados
+   Medición guardada: borrador o activa/cerrada
    ============================================================ */
 
-function DetalleMedicion({ codigo, puedeDecidir, onVolver }: { codigo: string; puedeDecidir: boolean; onVolver: () => void }) {
+function Medicion({ codigo, puedeDecidir, onVolver }: { codigo: string; puedeDecidir: boolean; onVolver: () => void }) {
   const [medicion, setMedicion] = useState<MedicionClima | null>(null);
   const [datos, setDatos] = useState<ResultadosClima | null>(null);
+  const [probar, setProbar] = useState(false);
+  const [enviar, setEnviar] = useState(false);
   const [aviso, setAviso] = useState<AvisoRH>(null);
-  const [invitar, setInvitar] = useState(false);
-  const [ocupado, setOcupado] = useState("");
-  const [copiada, setCopiada] = useState(false);
+  const [version, setVersion] = useState(0);
 
   const recargar = useCallback(async () => {
-    const [m, r] = await Promise.all([fetchMedicionClima(codigo), fetchResultadosClima(codigo)]);
-    if (m) setMedicion(m);
-    if (r) setDatos(r);
+    const m = await fetchMedicionClima(codigo);
+    if (!m) return;
+    setMedicion(m);
+    setDatos(await fetchResultadosClima(codigo, m.estado === "borrador"));
   }, [codigo]);
   useEffect(() => {
     void recargar();
   }, [recargar]);
-  usePolling(recargar);
-
-  async function cambiarEstado(estado: "abierta" | "cerrada") {
-    setOcupado("estado");
-    const r = await cambiarEstadoMedicion(codigo, estado);
-    setOcupado("");
-    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
-    setMedicion(r.data);
-    setAviso({ tono: "ok", texto: estado === "abierta" ? "Encuesta abierta: ya puede recibir respuestas." : "Encuesta cerrada: los resultados quedan congelados." });
-    void recargar();
-  }
-
-  async function nuevaLiga() {
-    setOcupado("liga");
-    const r = await regenerarLigaClima(codigo);
-    setOcupado("");
-    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
-    setMedicion(r.data.medicion);
-    setAviso({ tono: "warn", texto: "Liga nueva generada: la anterior dejó de funcionar." });
-  }
-
-  async function copiarLiga() {
-    if (!medicion) return;
-    try {
-      await navigator.clipboard.writeText(medicion.liga);
-      setCopiada(true);
-      setTimeout(() => setCopiada(false), 2000);
-    } catch {
-      setAviso({ tono: "warn", texto: "No pude copiar automáticamente; copia la liga a mano." });
-    }
-  }
+  usePolling(recargar, undefined, medicion?.estado !== "borrador");
 
   if (!medicion || !datos) return <div className="mx-auto max-w-7xl px-4 py-16"><Cargando /></div>;
 
-  const escalas = datos.porPregunta.filter((p) => p.tipo === "escala");
-  const abiertas = datos.porPregunta.filter((p) => p.tipo === "abierta");
-  const opciones = datos.porPregunta.filter((p) => p.tipo === "opcion");
-  const indice = escalas.length
-    ? Math.round((escalas.reduce((a, p) => a + ((p.promedio ?? 0) / (p.escalaMax ?? 5)) * 100, 0) / escalas.length))
-    : null;
-  const focos = escalas.filter((p) => p.promedio !== null && p.promedio !== undefined && (p.promedio / (p.escalaMax ?? 5)) < 0.7);
-  const fuertes = escalas.filter((p) => p.promedio !== null && p.promedio !== undefined && (p.promedio / (p.escalaMax ?? 5)) >= 0.8);
-
-  return (
-    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
-      <button onClick={onVolver} className="mb-4 inline-flex items-center gap-1.5 text-sm font-semibold text-ink-2 transition hover:text-brand">
-        <ArrowLeft className="h-4 w-4" /> Todas las encuestas
-      </button>
-
-      <PageHeader title={medicion.titulo} subtitle={`${medicion.id} · ${medicion.preguntas} preguntas · ${medicion.anonima ? "respuestas anónimas" : "respuestas identificadas"}`}>
-        <Badge tone={ESTADO_TONO[medicion.estado] ?? "neutral"} dot>{ESTADO_LABEL[medicion.estado] ?? medicion.estado}</Badge>
-        {puedeDecidir && medicion.estado !== "abierta" && (
-          <Button size="sm" onClick={() => cambiarEstado("abierta")} disabled={ocupado === "estado"}><Play className="h-4 w-4" /> Abrir encuesta</Button>
-        )}
-        {puedeDecidir && medicion.estado === "abierta" && (
-          <>
-            <Button size="sm" onClick={() => setInvitar(true)}><Send className="h-4 w-4" /> Invitar colaboradores</Button>
-            <Button size="sm" variant="secondary" onClick={() => cambiarEstado("cerrada")} disabled={ocupado === "estado"}><Square className="h-4 w-4" /> Cerrar</Button>
-          </>
-        )}
-      </PageHeader>
-
-      {aviso && <AvisoLinea aviso={aviso} onCerrar={() => setAviso(null)} />}
-
-      {/* Liga externa */}
-      <Card className="mt-6 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <Eyebrow><span className="inline-flex items-center gap-1.5"><Link2 className="h-3.5 w-3.5" /> Liga para contestar</span></Eyebrow>
-            <p className="mt-1.5 truncate font-mono text-xs text-ink-2" title={medicion.liga}>{medicion.liga}</p>
-            <p className="mt-1 text-[11px] text-ink-3">
-              {medicion.permiteExternos
-                ? "Abierta a colaboradores y a participantes externos (proveedores, agencia…)."
-                : "Solo para colaboradores del roster; un externo que la abra no podrá enviar respuestas."}
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" onClick={copiarLiga}>
-              {copiada ? <Check className="h-4 w-4 text-good" /> : <Copy className="h-4 w-4" />} {copiada ? "Copiada" : "Copiar liga"}
-            </Button>
-            {puedeDecidir && (
-              <Button size="sm" variant="secondary" onClick={nuevaLiga} disabled={ocupado === "liga"}>
-                {ocupado === "liga" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />} Generar liga externa nueva
-              </Button>
-            )}
-          </div>
-        </div>
-      </Card>
-
-      {/* Indicadores */}
-      <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <KpiRH etiqueta="Índice de clima" valor={indice === null ? "—" : `${indice}%`} pie="promedio de las escalas" icono={<BarChart3 className="h-4 w-4" />} />
-        <KpiRH etiqueta="Respuestas" valor={String(datos.totalRespuestas)} pie={`${datos.externos} externas`} icono={<MessageSquare className="h-4 w-4" />} />
-        <KpiRH etiqueta="Participación" valor={datos.participacion === null ? "—" : `${datos.participacion}%`} pie={`sobre ${datos.colaboradoresActivos} colaboradores activos`} icono={<Users className="h-4 w-4" />} />
-        <KpiRH etiqueta="Focos de atención" valor={String(focos.length)} pie="dimensiones por debajo del 70%" icono={<ShieldCheck className="h-4 w-4" />} />
-      </div>
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-3">
-        {/* Dimensiones */}
-        <Card className="p-5 lg:col-span-2">
-          <h3 className="font-display text-lg font-bold">Dimensiones</h3>
-          <p className="text-sm text-ink-3">Promedio por pregunta de escala</p>
-          {escalas.length === 0 ? (
-            <p className="mt-4 text-sm text-ink-3">Esta encuesta no tiene preguntas de escala.</p>
-          ) : (
-            <div className="mt-5 space-y-4">
-              {escalas.map((p) => {
-                const max = p.escalaMax ?? 5;
-                const pct = p.promedio ? (p.promedio / max) * 100 : 0;
-                return (
-                  <div key={p.id}>
-                    <div className="flex items-baseline justify-between gap-3 text-sm">
-                      <span className="min-w-0 text-ink-2">{p.texto}</span>
-                      <span className="shrink-0 font-mono font-bold tabular">{p.promedio ?? "—"}<span className="text-ink-3">/{max}</span></span>
-                    </div>
-                    <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-surface-2">
-                      <div className={cn("h-full rounded-full", pct >= 80 ? "bg-good" : pct >= 70 ? "bg-brand" : "bg-warn")} style={{ width: `${pct}%` }} />
-                    </div>
-                    <p className="mt-1 text-[10px] text-ink-3">{p.respuestas} respuesta(s)</p>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {opciones.length > 0 && (
-            <div className="mt-6 space-y-4 border-t border-border-faint pt-5">
-              {opciones.map((p) => (
-                <div key={p.id}>
-                  <p className="text-sm text-ink-2">{p.texto}</p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {Object.entries(p.distribucion ?? {}).map(([op, n]) => (
-                      <span key={op} className="rounded-lg bg-surface-2 px-2.5 py-1 text-xs text-ink-2">
-                        {op}: <b className="font-mono tabular">{n}</b>
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
-
-        {/* Hallazgos */}
-        <div className="flex flex-col gap-4">
-          <Card className="p-5">
-            <Eyebrow>Hallazgos</Eyebrow>
-            {datos.totalRespuestas === 0 ? (
-              <p className="mt-3 text-sm text-ink-3">Aún no hay respuestas. Invita a tu equipo o comparte la liga.</p>
-            ) : (
-              <div className="mt-3 space-y-2.5">
-                {focos.map((p) => (
-                  <div key={p.id} className="rounded-xl border border-warn/30 bg-warn-soft/40 p-3">
-                    <p className="text-[13px] font-semibold text-warn">Foco de atención</p>
-                    <p className="mt-0.5 text-[13px] text-ink-2">{p.texto}</p>
-                    <p className="mt-1 font-mono text-[11px] text-ink-3">{p.promedio}/{p.escalaMax ?? 5}</p>
-                  </div>
-                ))}
-                {fuertes.map((p) => (
-                  <div key={p.id} className="rounded-xl border border-good/30 bg-good-soft/40 p-3">
-                    <p className="text-[13px] font-semibold text-good">Fortaleza</p>
-                    <p className="mt-0.5 text-[13px] text-ink-2">{p.texto}</p>
-                    <p className="mt-1 font-mono text-[11px] text-ink-3">{p.promedio}/{p.escalaMax ?? 5}</p>
-                  </div>
-                ))}
-                {focos.length === 0 && fuertes.length === 0 && (
-                  <p className="text-sm text-ink-3">Sin señales marcadas: todas las dimensiones están en rango medio.</p>
-                )}
-              </div>
-            )}
-          </Card>
-
-          {abiertas.map((p) => (
-            <Card key={p.id} className="p-5">
-              <Eyebrow>{p.texto}</Eyebrow>
-              {(p.textos ?? []).length === 0 ? (
-                <p className="mt-3 text-sm text-ink-3">Sin comentarios todavía.</p>
-              ) : (
-                <ul className="mt-3 max-h-64 space-y-2 overflow-y-auto">
-                  {(p.textos ?? []).map((t, i) => (
-                    <li key={i} className="rounded-xl bg-surface-2 px-3 py-2 text-[13px] leading-relaxed text-ink-2">«{t}»</li>
-                  ))}
-                </ul>
-              )}
-              <p className="mt-3 flex items-start gap-1.5 text-[11px] text-ink-3">
-                <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0 text-human" />
-                {medicion.anonima ? "Comentarios anónimos: no se guarda quién los escribió." : "Encuesta identificada: el detalle por persona vive en la bitácora."}
-              </p>
-            </Card>
-          ))}
-        </div>
-      </div>
-
-      {invitar && (
-        <ModalInvitar
-          codigo={codigo}
-          onClose={() => setInvitar(false)}
-          onListo={(texto, tono) => { setInvitar(false); setAviso({ tono, texto }); void recargar(); }}
+  if (medicion.estado === "borrador") {
+    return (
+      <>
+        <EditorBorrador
+          key={version}
+          medicion={medicion}
+          onVolver={onVolver}
+          onGuardada={(m) => { setMedicion({ ...medicion, ...m }); void recargar(); }}
+          onProbar={() => setProbar(true)}
+          onEnviar={() => setEnviar(true)}
+          pruebas={
+            <ResultadosPrueba
+              medicion={medicion}
+              calculo={datos.calculo}
+              onReiniciar={async () => {
+                const r = await reiniciarPruebaClima(codigo);
+                setAviso(r.ok ? { tono: "ok", texto: `Se borraron ${r.data.borradas} respuesta(s) de prueba.` } : { tono: "error", texto: r.error });
+                void recargar();
+              }}
+              aviso={aviso}
+              onCerrarAviso={() => setAviso(null)}
+            />
+          }
         />
+        {probar && (
+          <ModalProbar
+            medicion={medicion}
+            onClose={() => setProbar(false)}
+            onGuardada={() => { setProbar(false); setAviso({ tono: "ok", texto: "Respuesta de prueba guardada: ya aparece en los resultados de prueba." }); void recargar(); }}
+          />
+        )}
+        {enviar && (
+          <ModalEnvio
+            medicion={medicion}
+            onClose={() => setEnviar(false)}
+            onEnviada={(texto, tono) => { setEnviar(false); setAviso({ tono, texto }); setVersion((v) => v + 1); void recargar(); }}
+          />
+        )}
+      </>
+    );
+  }
+
+  return <DetalleActiva medicion={medicion} datos={datos} puedeDecidir={puedeDecidir} onVolver={onVolver} onRecargar={recargar} avisoInicial={aviso} />;
+}
+
+function ResultadosPrueba({ medicion, calculo, onReiniciar, aviso, onCerrarAviso }: {
+  medicion: MedicionClima; calculo: CalculoClima; onReiniciar: () => void; aviso: AvisoRH; onCerrarAviso: () => void;
+}) {
+  return (
+    <Card className="mt-4 border-warn/30 p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <Eyebrow><span className="inline-flex items-center gap-1.5"><FlaskConical className="h-3.5 w-3.5" /> Resultados de prueba</span></Eyebrow>
+          <p className="mt-1 text-sm text-ink-2">{calculo.respuestasConsideradas} respuesta(s) de prueba · no cuentan en los resultados reales.</p>
+        </div>
+        {medicion.respuestasPrueba > 0 && (
+          <Button size="sm" variant="outline" onClick={onReiniciar}><RotateCcw className="h-4 w-4" /> Reiniciar respuestas de prueba</Button>
+        )}
+      </div>
+      {aviso && <AvisoLinea aviso={aviso} onCerrar={onCerrarAviso} />}
+      {calculo.respuestasConsideradas > 0 && (
+        <div className="mt-4">
+          {calculo.indice.valor !== null && (
+            <p className="mb-3 text-sm text-ink-2">Índice de prueba: <b className="font-mono">{calculo.indice.valor}%</b></p>
+          )}
+          <ResultadosPorDimension calculo={calculo} anonima />
+        </div>
       )}
-    </div>
+    </Card>
   );
 }
 
-/* ---------- Invitar colaboradores del roster ---------- */
+/* ---------- Modal de envío ---------- */
 
-function ModalInvitar({ codigo, onClose, onListo }: {
-  codigo: string; onClose: () => void; onListo: (texto: string, tono: "ok" | "warn" | "error") => void;
+function cierrePorDefecto() {
+  const d = new Date();
+  d.setDate(d.getDate() + 7);
+  d.setHours(18, 0, 0, 0);
+  const z = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}T18:00`;
+}
+
+function ModalEnvio({ medicion, onClose, onEnviada }: {
+  medicion: MedicionClima; onClose: () => void; onEnviada: (texto: string, tono: "ok" | "warn") => void;
 }) {
-  const [roster, setRoster] = useState<Colaborador[] | null>(null);
-  const [busqueda, setBusqueda] = useState("");
+  const [opciones, setOpciones] = useState<DestinatariosClima | null>(null);
+  const [areas, setAreas] = useState<string[]>([]);
+  const [sedes, setSedes] = useState<string[]>([]);
+  const [filtrados, setFiltrados] = useState<DestinatariosClima["colaboradores"] | null>(null);
   const [sel, setSel] = useState<string[]>([]);
+  const [cierre, setCierre] = useState(cierrePorDefecto());
+  const [anonima, setAnonima] = useState(medicion.anonima);
+  const [externos, setExternos] = useState(medicion.permiteExternos);
   const [mensaje, setMensaje] = useState("");
   const [ocupado, setOcupado] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    fetchColaboradores(true).then((c) => setRoster(c ?? []));
+    fetchDestinatariosClima().then((d) => setOpciones(d));
   }, []);
+  useEffect(() => {
+    fetchDestinatariosClima({ areas, sedes }).then((d) => {
+      const lista = d?.colaboradores ?? [];
+      setFiltrados(lista);
+      setSel(lista.map((c) => c.id));
+    });
+  }, [areas, sedes]);
 
-  const filtrados = useMemo(() => {
-    const q = busqueda.trim().toLowerCase();
-    return (roster ?? []).filter((c) => !q || c.nombre.toLowerCase().includes(q) || (c.puesto ?? "").toLowerCase().includes(q) || (c.area ?? "").toLowerCase().includes(q));
-  }, [roster, busqueda]);
-  const todos = filtrados.length > 0 && filtrados.every((c) => sel.includes(c.id));
+  const alternar = (lista: string[], set: (x: string[]) => void, v: string) => set(lista.includes(v) ? lista.filter((x) => x !== v) : [...lista, v]);
 
   async function enviar() {
+    if (!sel.length) return setError("Elige al menos un destinatario.");
+    const fecha = new Date(cierre);
+    if (!cierre || Number.isNaN(fecha.getTime()) || fecha <= new Date()) return setError("Elige una fecha y hora de cierre en el futuro.");
     setOcupado(true);
     setError("");
-    const r = await invitarAClima(codigo, sel, mensaje);
+    const r = await abrirMedicionClima(medicion.id, {
+      colaboradorIds: sel, areas, sedes, cierraEn: fecha.toISOString(), anonima, permiteExternos: externos, mensaje,
+    });
     setOcupado(false);
     if (!r.ok) return setError(r.error);
-    const fallidos = r.data.invitados.filter((i) => !(i.correo?.enviado || i.whatsapp?.enviado));
-    onListo(
-      `Invitación enviada a ${r.data.invitados.length - fallidos.length} de ${r.data.invitados.length} colaborador(es).` +
-      (fallidos.length ? ` No salió para: ${fallidos.map((f) => f.nombre).join(", ")} (revisa correo/WhatsApp).` : ""),
-      fallidos.length ? "warn" : "ok",
-    );
+    const res = resumenEnvios(r.data.invitados);
+    onEnviada(`Encuesta abierta. ${res.texto}`, res.tono);
   }
 
   return (
-    <ModalMarco titulo="Invitar colaboradores" subtitulo="Se les manda la liga por correo y WhatsApp, con lo que cada quien tenga en el roster." onClose={onClose}>
-      <label className="relative block">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
-        <input value={busqueda} onChange={(e) => setBusqueda(e.target.value)} placeholder="Buscar por nombre, puesto o área…" className={cn(inputRH, "pl-9")} />
-      </label>
+    <ModalMarco titulo="Enviar encuesta" subtitulo="Cada destinatario recibe su liga personal por correo y/o WhatsApp. Al enviar, la encuesta queda Abierta." onClose={onClose} ancho="max-w-3xl">
+      {opciones === null ? <Cargando /> : (
+        <>
+          <p className="text-xs font-medium text-ink-2">Destinatarios</p>
+          {(opciones.sedes.length > 0 || opciones.areas.length > 0) && (
+            <div className="mt-2 flex flex-col gap-2">
+              {opciones.sedes.length > 0 && (
+                <div className="scroll-x flex gap-1.5">
+                  <span className="shrink-0 self-center text-[11px] text-ink-3">Sede:</span>
+                  {opciones.sedes.map((s) => (
+                    <button key={s} onClick={() => alternar(sedes, setSedes, s)} className={cn("shrink-0 rounded-full border px-3 py-1 text-xs", sedes.includes(s) ? "border-brand bg-brand-soft text-ink" : "border-border-soft text-ink-2")}>{s}</button>
+                  ))}
+                </div>
+              )}
+              {opciones.areas.length > 0 && (
+                <div className="scroll-x flex gap-1.5">
+                  <span className="shrink-0 self-center text-[11px] text-ink-3">Área:</span>
+                  {opciones.areas.map((a) => (
+                    <button key={a} onClick={() => alternar(areas, setAreas, a)} className={cn("shrink-0 rounded-full border px-3 py-1 text-xs", areas.includes(a) ? "border-brand bg-brand-soft text-ink" : "border-border-soft text-ink-2")}>{a}</button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="mt-2 flex items-center justify-between text-xs text-ink-3">
+            <span>{sel.length} de {filtrados?.length ?? 0} seleccionado(s)</span>
+            {filtrados && filtrados.length > 0 && (
+              <button className="font-semibold text-brand hover:underline" onClick={() => setSel(sel.length === filtrados.length ? [] : filtrados.map((c) => c.id))}>
+                {sel.length === filtrados.length ? "Quitar todos" : "Seleccionar todos"}
+              </button>
+            )}
+          </div>
+          <div className="mt-2 max-h-[30vh] overflow-y-auto rounded-2xl border border-border-soft">
+            {filtrados === null ? <Cargando /> : filtrados.length === 0 ? (
+              <p className="px-4 py-8 text-center text-sm text-ink-3">No hay colaboradores activos con esos filtros.</p>
+            ) : (
+              <ul className="divide-y divide-border-faint">
+                {filtrados.map((c) => (
+                  <li key={c.id}>
+                    <label className="flex cursor-pointer items-center gap-3 px-4 py-2.5 hover:bg-surface-2/60">
+                      <input type="checkbox" checked={sel.includes(c.id)} onChange={() => alternar(sel, setSel, c.id)} className="h-4 w-4 rounded border-border-soft text-brand" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-semibold">{c.nombre}</p>
+                        <p className="truncate text-[11px] text-ink-3">{[c.area, c.sede, c.puesto].filter(Boolean).join(" · ") || "Sin área"}</p>
+                      </div>
+                      {!c.tieneCorreo && !c.tieneWhatsapp && <span className="shrink-0 text-[11px] font-semibold text-warn">Sin contacto</span>}
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
 
-      <div className="mt-2 flex items-center justify-between">
-        <span className="text-xs text-ink-3">{sel.length} seleccionado(s) de {filtrados.length}</span>
-        <button
-          onClick={() => setSel(todos ? sel.filter((x) => !filtrados.some((c) => c.id === x)) : [...new Set([...sel, ...filtrados.map((c) => c.id)])])}
-          className="text-xs font-semibold text-brand hover:underline"
-        >
-          {todos ? "Quitar todos" : "Seleccionar todos"}
-        </button>
-      </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <CampoRH label="Cierra el" ayuda="Podrás ampliarla mientras esté abierta.">
+              <input type="datetime-local" value={cierre} onChange={(e) => setCierre(e.target.value)} className={inputRH} />
+            </CampoRH>
+            <CampoRH label="Nota para el mensaje (opcional)">
+              <input value={mensaje} onChange={(e) => setMensaje(e.target.value)} placeholder="Ej. Nos ayuda mucho tu opinión." className={inputRH} />
+            </CampoRH>
+          </div>
 
-      <div className="mt-2 max-h-[40vh] overflow-y-auto rounded-2xl border border-border-soft">
-        {roster === null ? (
-          <Cargando texto="Cargando el roster…" />
-        ) : filtrados.length === 0 ? (
-          <p className="px-4 py-10 text-center text-sm text-ink-3">No hay colaboradores activos que coincidan.</p>
-        ) : (
-          <ul className="divide-y divide-border-faint">
-            {filtrados.map((c) => {
-              const marcado = sel.includes(c.id);
-              return (
-                <li key={c.id}>
-                  <label className="flex cursor-pointer items-center gap-3 px-4 py-3 transition hover:bg-surface-2/60">
-                    <input type="checkbox" checked={marcado} onChange={() => setSel(marcado ? sel.filter((x) => x !== c.id) : [...sel, c.id])} className="h-4 w-4 rounded border-border-soft text-brand" />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-semibold text-ink">{c.nombre}</p>
-                      <p className="truncate text-[11px] text-ink-3">
-                        {[c.area, c.puesto].filter(Boolean).join(" · ") || "Sin puesto"}
-                        {c.correo ? ` · ${c.correo}` : ""}{c.telefono ? ` · ${c.telefono}` : ""}
-                      </p>
-                    </div>
-                    {!c.correo && !c.telefono && <span className="shrink-0 text-[11px] font-semibold text-warn">Sin contacto</span>}
-                  </label>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-
-      <div className="mt-3">
-        <CampoRH label="Nota para el mensaje (opcional)" ayuda="Se agrega al aviso antes de la liga.">
-          <input value={mensaje} onChange={(e) => setMensaje(e.target.value)} placeholder="Ej. Nos ayuda muchísimo que la contestes esta semana." className={inputRH} />
-        </CampoRH>
-      </div>
-
+          <p className="mt-4 text-xs font-medium text-ink-2">Modalidad</p>
+          <div className="mt-2 inline-flex rounded-xl border border-border-soft p-1" role="radiogroup" aria-label="Modalidad">
+            {[{ v: true, t: "Anónima", i: <EyeOff className="h-4 w-4" /> }, { v: false, t: "Identificada", i: <Eye className="h-4 w-4" /> }].map((o) => (
+              <button
+                key={o.t}
+                role="radio"
+                aria-checked={anonima === o.v}
+                onClick={() => setAnonima(o.v)}
+                className={cn("inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-semibold transition", anonima === o.v ? "bg-brand text-white" : "text-ink-2 hover:bg-surface-2")}
+              >
+                {o.i} {o.t}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1.5 text-[12px] text-ink-3">
+            {anonima ? "No se guarda quién respondió; solo sabemos quién ya contestó para no repetir recordatorios." : "Cada respuesta queda ligada a la persona; se le avisa antes de contestar."} La modalidad queda fija al enviar.
+          </p>
+          <label className="mt-3 flex cursor-pointer items-start gap-3 text-[13px] text-ink-2">
+            <input type="checkbox" checked={externos} onChange={(e) => setExternos(e.target.checked)} className="mt-0.5 h-4 w-4 rounded border-border-soft text-brand" />
+            Aceptar respuestas externas por la liga compartida (no suman a la participación).
+          </label>
+        </>
+      )}
       {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
       <div className="mt-5 flex justify-end gap-2">
         <Button variant="outline" size="sm" onClick={onClose} disabled={ocupado}>Cancelar</Button>
-        <Button size="sm" onClick={enviar} disabled={!sel.length || ocupado}>
-          {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Enviar invitación
+        <Button size="sm" onClick={enviar} disabled={ocupado || !sel.length}>
+          {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Enviar a {sel.length}
         </Button>
       </div>
     </ModalMarco>
+  );
+}
+
+/* ---------- Abierta / Cerrada ---------- */
+
+function DetalleActiva({ medicion, datos, puedeDecidir, onVolver, onRecargar, avisoInicial }: {
+  medicion: MedicionClima; datos: ResultadosClima; puedeDecidir: boolean; onVolver: () => void; onRecargar: () => Promise<void>; avisoInicial: AvisoRH;
+}) {
+  const [aviso, setAviso] = useState<AvisoRH>(avisoInicial);
+  const [ocupado, setOcupado] = useState("");
+  const [modal, setModal] = useState<"" | "fecha" | "cerrar">("");
+  const [analisis, setAnalisis] = useState<AnalisisClima | null>(datos.analisis);
+  const c = datos.calculo;
+  const abierta = medicion.estado === "abierta";
+
+  useEffect(() => {
+    setAnalisis(datos.analisis);
+  }, [datos.analisis]);
+
+  async function analizar() {
+    setOcupado("analizar");
+    const r = await analizarClima(medicion.id);
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    setAnalisis(r.data);
+  }
+
+  async function copiar(texto: string) {
+    try {
+      await navigator.clipboard.writeText(texto);
+      setAviso({ tono: "ok", texto: "Liga externa copiada." });
+    } catch {
+      setAviso({ tono: "warn", texto: `Copia la liga a mano: ${texto}` });
+    }
+  }
+
+  const secundarias: AccionMenu[] = [];
+  if (puedeDecidir && abierta) {
+    secundarias.push(
+      {
+        etiqueta: "Recordar a quien no ha respondido", icono: <BellRing className="h-4 w-4" />, disabled: !c.participacion.faltan,
+        onClick: async () => {
+          const r = await recordarClima(medicion.id);
+          if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+          setAviso({ tono: "ok", texto: `Recordatorio enviado a ${r.data.recordados} persona(s).` });
+        },
+      },
+      { etiqueta: "Cambiar fecha de cierre", icono: <CalendarClock className="h-4 w-4" />, onClick: () => setModal("fecha") },
+    );
+    if (medicion.permiteExternos) {
+      secundarias.push(
+        { etiqueta: "Copiar liga externa", icono: <Copy className="h-4 w-4" />, onClick: () => void copiar(medicion.liga) },
+        {
+          etiqueta: "Generar liga externa nueva", icono: <Link2 className="h-4 w-4" />,
+          onClick: async () => {
+            const r = await regenerarLigaClima(medicion.id);
+            if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+            setAviso({ tono: "warn", texto: "Liga externa nueva generada: la anterior dejó de funcionar. Las ligas personales no cambian." });
+            void onRecargar();
+          },
+        },
+      );
+    }
+    secundarias.push({ etiqueta: "Cerrar encuesta ahora", icono: <Square className="h-4 w-4" />, peligrosa: true, onClick: () => setModal("cerrar") });
+  }
+
+  return (
+    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
+      <button onClick={onVolver} className="mb-4 inline-flex items-center gap-1.5 text-sm font-semibold text-ink-2 transition hover:text-brand">
+        <ArrowLeft className="h-4 w-4" /> Clima laboral
+      </button>
+      <PageHeader title={medicion.titulo} subtitle={textoParticipacion(medicion, c)}>
+        <Badge tone={ESTADO_TONO[medicion.estado]} dot>{ESTADO_LABEL[medicion.estado]}</Badge>
+        <Badge tone={medicion.anonima ? "good" : "neutral"}>{medicion.anonima ? "Anónima" : "Identificada"}</Badge>
+        {puedeDecidir && (
+          <Button size="sm" onClick={analizar} disabled={ocupado === "analizar" || !c.respuestasConsideradas}>
+            {ocupado === "analizar" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />} Analizar resultados con Red Human
+          </Button>
+        )}
+        {secundarias.length > 0 && <MenuAcciones acciones={secundarias} />}
+      </PageHeader>
+
+      {aviso && <AvisoLinea aviso={aviso} onCerrar={() => setAviso(null)} />}
+
+      <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <KpiRH
+          etiqueta="Índice de clima"
+          valor={c.indice.valor === null ? "—" : `${c.indice.valor}%`}
+          pie={c.indice.valor === null ? c.indice.etiqueta : `promedio de ${c.indice.dimensionesConsideradas} dimensión(es)`}
+          icono={<BarChart3 className="h-4 w-4" />}
+        />
+        <KpiRH
+          etiqueta="Participación"
+          valor={c.participacion.porcentaje === null ? "—" : `${Math.round(c.participacion.porcentaje)}%`}
+          pie={`${c.participacion.respondieron} de ${c.participacion.invitados} invitados`}
+          icono={<Users className="h-4 w-4" />}
+        />
+        <KpiRH etiqueta="Respuestas reales" valor={String(c.respuestasConsideradas)} pie="sin prueba ni externas" icono={<MessageSquare className="h-4 w-4" />} />
+        <KpiRH etiqueta="Externas" valor={String(c.externas)} pie="no suman a participación" icono={<Link2 className="h-4 w-4" />} />
+      </div>
+
+      {analisis && <TarjetaAnalisis a={analisis} />}
+
+      <div className="mt-4">
+        {c.respuestasConsideradas === 0 ? (
+          <Card className="p-8 text-center text-sm text-ink-3">Aún no hay respuestas reales. Los resultados aparecerán aquí en cuanto el equipo conteste.</Card>
+        ) : (
+          <ResultadosPorDimension calculo={c} anonima={medicion.anonima} />
+        )}
+      </div>
+
+      {modal === "fecha" && (
+        <ModalFechaCierre
+          medicion={medicion}
+          onClose={() => setModal("")}
+          onListo={() => { setModal(""); setAviso({ tono: "ok", texto: "Fecha de cierre actualizada." }); void onRecargar(); }}
+        />
+      )}
+      {modal === "cerrar" && (
+        <ModalMarco titulo="Cerrar encuesta" subtitulo="Dejará de recibir respuestas y los resultados quedan congelados. Una encuesta cerrada no se vuelve a abrir." onClose={() => setModal("")}>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setModal("")}>Cancelar</Button>
+            <Button
+              size="sm"
+              onClick={async () => {
+                const r = await cerrarMedicionClima(medicion.id);
+                setModal("");
+                if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+                setAviso({ tono: "ok", texto: "Encuesta cerrada." });
+                void onRecargar();
+              }}
+            >
+              <Square className="h-4 w-4" /> Cerrar encuesta
+            </Button>
+          </div>
+        </ModalMarco>
+      )}
+    </div>
+  );
+}
+
+function ModalFechaCierre({ medicion, onClose, onListo }: { medicion: MedicionClima; onClose: () => void; onListo: () => void }) {
+  const inicial = useMemo(() => {
+    if (!medicion.cierraEn) return cierrePorDefecto();
+    const d = new Date(medicion.cierraEn);
+    const z = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}T${z(d.getHours())}:${z(d.getMinutes())}`;
+  }, [medicion.cierraEn]);
+  const [valor, setValor] = useState(inicial);
+  const [error, setError] = useState("");
+
+  async function guardar() {
+    const fecha = new Date(valor);
+    if (Number.isNaN(fecha.getTime()) || fecha <= new Date()) return setError("La nueva fecha de cierre debe estar en el futuro.");
+    const r = await editarMedicionClima(medicion.id, { cierraEn: fecha.toISOString() });
+    if (!r.ok) return setError(r.error);
+    onListo();
+  }
+
+  return (
+    <ModalMarco titulo="Cambiar fecha de cierre" onClose={onClose}>
+      <CampoRH label="Cierra el"><input type="datetime-local" value={valor} onChange={(e) => setValor(e.target.value)} className={inputRH} /></CampoRH>
+      {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
+      <div className="mt-5 flex justify-end gap-2">
+        <Button variant="outline" size="sm" onClick={onClose}>Cancelar</Button>
+        <Button size="sm" onClick={guardar}><Check className="h-4 w-4" /> Guardar</Button>
+      </div>
+    </ModalMarco>
+  );
+}
+
+function TarjetaAnalisis({ a }: { a: AnalisisClima }) {
+  const tono = a.estado === "Favorable" ? "good" : a.estado === "Requiere atención" ? "warn" : "neutral";
+  const bloques: [string, string[], string][] = [
+    ["Fortalezas", a.fortalezas, "text-good"],
+    ["Focos de atención", a.focosAtencion, "text-warn"],
+    ["Puntos por validar", a.puntosPorValidar, "text-ink-2"],
+    ["Acciones sugeridas", a.accionesSugeridas, "text-brand"],
+  ];
+  return (
+    <Card className="mt-4 p-5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Eyebrow><span className="inline-flex items-center gap-1.5"><Sparkles className="h-3.5 w-3.5" /> Análisis de Red Human</span></Eyebrow>
+        <Badge tone={tono as "good" | "warn" | "neutral"} dot>{a.estado}</Badge>
+        {a.alcance === "preliminar" && <Badge tone="neutral">Preliminar · encuesta abierta</Badge>}
+      </div>
+      <p className="mt-1 text-[11px] text-ink-3">
+        {fechaLocal(a.fecha)} · {a.respuestasConsideradas} respuesta(s) consideradas · pedido por {a.solicitadoPor}{a.ia ? "" : " · sin IA disponible (cálculo directo)"}
+      </p>
+      <p className="mt-3 text-sm leading-relaxed text-ink-2">{a.resumen}</p>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        {bloques.map(([t, items, color]) => (
+          <div key={t}>
+            <p className={cn("text-[13px] font-semibold", color)}>{t}</p>
+            <ul className="mt-1.5 space-y-1.5">
+              {items.map((x, i) => <li key={i} className="text-[13px] leading-relaxed text-ink-2">• {x}</li>)}
+            </ul>
+          </div>
+        ))}
+      </div>
+      <p className="mt-4 flex items-start gap-1.5 text-[11px] text-ink-3">
+        <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0 text-human" /> Recomendación de Red Human: las decisiones las toma una persona de RH.
+      </p>
+    </Card>
+  );
+}
+
+/* ---------- Resultados: Dimensiones → Preguntas ---------- */
+
+function ResultadosPorDimension({ calculo, anonima }: { calculo: CalculoClima; anonima: boolean }) {
+  return (
+    <div className="flex flex-col gap-4">
+      {calculo.dimensiones.map((d) => (
+        <Card key={d.nombre} className="p-5">
+          <div className="flex items-baseline justify-between gap-3">
+            <h3 className="font-display text-lg font-bold">{d.nombre}</h3>
+            <span className="shrink-0 font-mono text-sm font-bold tabular">
+              {d.favorable === null ? <span className="text-ink-3">Sin resultado</span> : `${d.favorable}% favorable`}
+            </span>
+          </div>
+          <div className="mt-4 space-y-4">
+            {d.preguntas.map((p) => (
+              <div key={p.id}>
+                <div className="flex items-baseline justify-between gap-3 text-sm">
+                  <span className="min-w-0 text-ink-2">{p.texto}</span>
+                  <span className="shrink-0 text-[11px] text-ink-3">{p.respuestas} resp.</span>
+                </div>
+                {p.tipo === "escala" && (
+                  p.favorable === null || p.favorable === undefined ? (
+                    <p className="mt-1 text-[11px] text-ink-3">Sin respuestas todavía (no cuenta en la dimensión).</p>
+                  ) : (
+                    <>
+                      <div className="mt-1.5 flex items-center gap-2">
+                        <div className="h-2 flex-1 overflow-hidden rounded-full bg-surface-2">
+                          <div className={cn("h-full rounded-full", p.favorable >= 80 ? "bg-good" : p.favorable >= 60 ? "bg-brand" : "bg-warn")} style={{ width: `${p.favorable}%` }} />
+                        </div>
+                        <span className="w-24 shrink-0 text-right font-mono text-xs font-bold tabular">{p.favorable}% fav.</span>
+                      </div>
+                      <p className="mt-1 text-[10px] text-ink-3">
+                        {Object.entries(p.distribucion ?? {}).map(([k, n]) => `${k}: ${n}`).join(" · ")}
+                      </p>
+                    </>
+                  )
+                )}
+                {p.tipo === "opcion" && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {Object.entries(p.distribucion ?? {}).map(([op, n]) => (
+                      <span key={op} className="rounded-lg bg-surface-2 px-2.5 py-1 text-xs text-ink-2">{op}: <b className="font-mono tabular">{n}</b></span>
+                    ))}
+                  </div>
+                )}
+                {p.tipo === "abierta" && (
+                  (p.comentarios ?? []).length === 0 ? (
+                    <p className="mt-1 text-[11px] text-ink-3">Sin comentarios todavía.</p>
+                  ) : (
+                    <ul className="mt-2 max-h-64 space-y-2 overflow-y-auto">
+                      {(p.comentarios ?? []).map((t, i) => (
+                        <li key={i} className="rounded-xl bg-surface-2 px-3 py-2 text-[13px] leading-relaxed text-ink-2">«{t}»</li>
+                      ))}
+                    </ul>
+                  )
+                )}
+              </div>
+            ))}
+          </div>
+          {d.preguntas.some((p) => p.tipo === "abierta") && (
+            <p className="mt-3 flex items-start gap-1.5 text-[11px] text-ink-3">
+              <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0 text-human" />
+              {anonima ? "Comentarios anónimos: no se guarda quién los escribió." : "Encuesta identificada."} Los comentarios no se convierten en puntaje.
+            </p>
+          )}
+        </Card>
+      ))}
+    </div>
   );
 }
