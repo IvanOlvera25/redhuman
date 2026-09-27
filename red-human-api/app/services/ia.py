@@ -1983,3 +1983,160 @@ def borrador_conocimiento(tema: str, tipo: str = "politica", notas: str = "", em
         return borrador_conocimiento(tema, tipo, notas, empresa) if False else (BorradorConocimiento(
             titulo=tema.strip() or "Documento interno", texto=notas.strip() or "[por definir]",
             avisos=[f"La IA no respondió ({str(ex)[:120]}). Captura el contenido a mano."]), False)
+
+
+# ============================================================
+# Clima laboral v2 (2026-09-27): encuesta con Red Human y análisis a demanda
+# ============================================================
+
+
+class PreguntaClimaIA(BaseModel):
+    texto: str = Field(description="Pregunta o afirmación breve, en español de México, de tú a tú.")
+    tipo: Literal["escala", "opcion", "abierta"] = Field(
+        description="escala = afirmación que se califica de 1 (totalmente en desacuerdo) a 5 (totalmente de acuerdo); "
+        "opcion = opción múltiple; abierta = comentario libre."
+    )
+    dimension: str = Field(description="Dimensión de clima a la que pertenece (debe ser una de `dimensiones`).")
+    opciones: List[str] = Field(default_factory=list, description="SOLO para tipo=opcion: 3 a 5 opciones cortas.")
+
+
+class EncuestaClimaIA(BaseModel):
+    titulo: str = Field(description="Nombre corto de la encuesta.")
+    descripcion: str = Field(description="1-2 frases para quien responde: para qué es y que toma pocos minutos.")
+    dimensiones: List[str] = Field(description="3 a 6 dimensiones de clima, en el orden en que se presentan.")
+    preguntas: List[PreguntaClimaIA] = Field(description="8 a 18 preguntas agrupadas por dimensión.")
+
+
+_BASE_CLIMA_DEMO = [
+    ("Liderazgo", "Mi jefe o jefa directa me da retroalimentación útil sobre mi trabajo."),
+    ("Liderazgo", "Confío en las decisiones de mi jefe o jefa directa."),
+    ("Comunicación", "Recibo a tiempo la información que necesito para hacer mi trabajo."),
+    ("Comunicación", "Me siento con libertad de expresar mis ideas y opiniones."),
+    ("Trabajo en equipo", "En mi equipo nos apoyamos cuando hay mucha carga de trabajo."),
+    ("Trabajo en equipo", "Hay colaboración entre mi área y las demás áreas."),
+    ("Reconocimiento y desarrollo", "Mi esfuerzo se reconoce cuando hago un buen trabajo."),
+    ("Reconocimiento y desarrollo", "Tengo oportunidades para aprender y crecer aquí."),
+    ("Bienestar", "Mi carga de trabajo me permite equilibrar mi vida personal."),
+    ("Bienestar", "Recomendaría esta empresa como un buen lugar para trabajar."),
+]
+
+
+def _encuesta_clima_demo(prompt: str) -> EncuestaClimaIA:
+    preguntas = [PreguntaClimaIA(texto=t, tipo="escala", dimension=d) for d, t in _BASE_CLIMA_DEMO]
+    preguntas.append(PreguntaClimaIA(
+        texto="¿Qué es lo que más valoras de trabajar aquí?", tipo="opcion", dimension="Bienestar",
+        opciones=["El equipo", "El liderazgo", "El aprendizaje", "Las prestaciones", "La estabilidad"],
+    ))
+    preguntas.append(PreguntaClimaIA(texto="¿Qué cambiarías para trabajar mejor?", tipo="abierta", dimension="Bienestar"))
+    dims = list(dict.fromkeys(p.dimension for p in preguntas))
+    return EncuestaClimaIA(
+        titulo="Encuesta de clima laboral",
+        descripcion="Queremos saber cómo te sientes en tu trabajo. Toma unos 5 minutos.",
+        dimensiones=dims, preguntas=preguntas,
+    )
+
+
+def encuesta_clima(prompt: str, empresa: str = "") -> Tuple[EncuestaClimaIA, bool]:
+    """«¿Qué quieres saber de tu equipo?» → encuesta propuesta (nombre, dimensiones y preguntas). Es solo
+    una PROPUESTA: RH la edita y la guarda. Nunca pide datos sensibles ni datos que identifiquen a quien
+    responde. Regresa (encuesta, con_ia)."""
+    client = _client()
+    if client is None:
+        return _encuesta_clima_demo(prompt), False
+    try:
+        resp = client.responses.parse(
+            model=MODEL,
+            instructions=(
+                "Diseñas encuestas de CLIMA LABORAL para empresas en México (Red Human AI). A partir de lo que RH quiere "
+                "saber de su equipo propones: un nombre corto, 3 a 6 dimensiones y 8 a 18 preguntas agrupadas por dimensión. "
+                "Reglas: (1) prefiere tipo `escala` redactada como AFIRMACIÓN en primera persona que se califica de 1 a 5 "
+                "(desacuerdo → acuerdo), en sentido positivo para que 4-5 sea favorable; (2) usa `opcion` solo cuando aporte "
+                "(3 a 5 opciones) y 1 o 2 `abierta` al final; (3) cada pregunta mide UNA sola cosa; (4) NUNCA preguntes ni "
+                f"insinúes datos sensibles ({DATOS_SENSIBLES_PROHIBIDOS}); (5) NUNCA pidas datos que identifiquen a la "
+                "persona (nombre, puesto exacto, antigüedad exacta, jefe específico): la encuesta puede ser anónima; "
+                "(6) español de México, claro y sin anglicismos; (7) cada `dimension` de una pregunta debe estar en `dimensiones`."
+            ),
+            input=f"Empresa: {empresa or 'no indicada'}\nLo que RH quiere saber de su equipo: {prompt.strip()[:2000]}",
+            text_format=EncuestaClimaIA,
+        )
+        enc = resp.output_parsed
+        if not enc or not enc.preguntas:
+            return _encuesta_clima_demo(prompt), False
+        return enc, True
+    except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea: RH puede usar plantilla o crear a mano
+        print(f"[ia] encuesta de clima demo ({ex})", flush=True)
+        return _encuesta_clima_demo(prompt), False
+
+
+class AnalisisClimaIA(BaseModel):
+    estado: Literal["Favorable", "En observación", "Requiere atención"] = Field(
+        description="Diagnóstico general del clima según las métricas (no según suposiciones)."
+    )
+    resumen: str = Field(description="2-3 frases para RH con lo más importante, citando cifras que SÍ vienen en las métricas.")
+    fortalezas: List[str] = Field(description="2 a 4 fortalezas con evidencia (dimensión/pregunta y su % favorable).")
+    focos_atencion: List[str] = Field(description="2 a 4 focos de atención con evidencia (dimensión/pregunta y su %).")
+    puntos_por_validar: List[str] = Field(
+        description="Lo que los datos NO alcanzan a confirmar (poca participación, pocas respuestas, dimensiones sin resultado, comentarios aislados)."
+    )
+    acciones_sugeridas: List[str] = Field(description="3 a 5 acciones concretas y realistas para RH, ligadas a los focos.")
+
+
+def _analisis_clima_demo(m: dict) -> AnalisisClimaIA:
+    dims = [d for d in m.get("dimensiones", []) if d.get("favorable") is not None]
+    fuertes = [d for d in dims if d["favorable"] >= 80]
+    focos = [d for d in dims if d["favorable"] < 60]
+    indice = (m.get("indice") or {}).get("valor")
+    part = (m.get("participacion") or {}).get("porcentaje")
+    estado = "En observación" if indice is None else ("Favorable" if indice >= 75 else "En observación" if indice >= 60 else "Requiere atención")
+    validar = []
+    if part is not None and part < 60:
+        validar.append(f"Participación de {part}%: los resultados podrían no representar a todo el equipo.")
+    if m.get("respuestasConsideradas", 0) < 5:
+        validar.append(f"Solo {m.get('respuestasConsideradas', 0)} respuestas reales: tómalos como una primera lectura.")
+    sin = [d["nombre"] for d in m.get("dimensiones", []) if d.get("favorable") is None]
+    if sin:
+        validar.append("Dimensiones sin resultado en escala: " + ", ".join(sin) + ".")
+    return AnalisisClimaIA(
+        estado=estado,
+        resumen=(f"Índice de clima de {indice}% con {m.get('respuestasConsideradas', 0)} respuestas reales." if indice is not None
+                 else "Aún no hay dimensiones con resultado suficiente para un índice de clima."),
+        fortalezas=[f"{d['nombre']}: {d['favorable']}% favorable." for d in fuertes] or ["Sin dimensiones por arriba del 80% favorable todavía."],
+        focos_atencion=[f"{d['nombre']}: {d['favorable']}% favorable." for d in focos] or ["Sin dimensiones por debajo del 60% favorable."],
+        puntos_por_validar=validar or ["Sin puntos críticos por validar con los datos actuales."],
+        acciones_sugeridas=[f"Conversar con los equipos sobre «{d['nombre']}» y acordar 1-2 acciones con fecha." for d in focos][:4]
+        or ["Compartir los resultados con los equipos y reconocer lo que funciona."],
+    )
+
+
+def analisis_clima(metricas: dict, titulo: str = "", empresa: str = "") -> Tuple[AnalisisClimaIA, bool]:
+    """«Analizar resultados con Red Human» (a demanda, nunca automático). Recibe SOLO las métricas
+    agregadas del motor (`services.clima_resultados.calcular`) — sin identidades — y redacta el
+    diagnóstico. Nunca inventa cifras ni intenta identificar a nadie por sus comentarios. Regresa
+    (analisis, con_ia)."""
+    client = _client()
+    if client is None:
+        return _analisis_clima_demo(metricas), False
+    try:
+        import json as _json
+
+        resp = client.responses.parse(
+            model=MODEL,
+            instructions=(
+                "Eres analista de CLIMA LABORAL de Red Human AI (México). Recibes las métricas agregadas de una encuesta: "
+                "participación, índice de clima, % favorable (respuestas 4-5 de 5) por dimensión y por pregunta, "
+                "distribuciones de opción múltiple y comentarios abiertos anónimos. Reglas: (1) usa SOLO las cifras que "
+                "vienen en las métricas; nunca inventes datos ni porcentajes; (2) si la participación es baja o hay pocas "
+                "respuestas, dilo en `puntos_por_validar`; (3) NUNCA intentes identificar a una persona por sus comentarios "
+                "ni menciones datos sensibles; (4) acciones concretas, realistas y en español de México; (5) es una "
+                "recomendación: las decisiones las toma una persona de RH."
+            ),
+            input=f"Encuesta: {titulo}\nEmpresa: {empresa}\nMétricas (JSON):\n{_json.dumps(metricas, ensure_ascii=False)[:30000]}",
+            text_format=AnalisisClimaIA,
+        )
+        a = resp.output_parsed
+        if not a:
+            return _analisis_clima_demo(metricas), False
+        return a, True
+    except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea
+        print(f"[ia] análisis de clima demo ({ex})", flush=True)
+        return _analisis_clima_demo(metricas), False

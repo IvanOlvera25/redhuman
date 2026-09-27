@@ -2504,42 +2504,155 @@ export function fetchResultadosCiclo(codigo: string) {
   return get<ResultadosCiclo>(`/desempeno/ciclos/${codigo}/resultados`);
 }
 
-/* -------------------- Clima -------------------- */
+/* -------------------- Clima (v2, 2026-09-27) -------------------- */
 
 export type TipoPreguntaClima = "escala" | "opcion" | "abierta";
-export interface PreguntaClima { id: string; texto: string; tipo: TipoPreguntaClima; opciones?: string[]; escala_max?: number }
+export type EstadoMedicionClima = "borrador" | "abierta" | "cerrada";
+/** Pregunta del cuestionario: escala 1-5 (favorable = 4 o 5), opción múltiple o abierta. `orden` 1..n. */
+export interface PreguntaClima {
+  id: string;
+  texto: string;
+  tipo: TipoPreguntaClima;
+  dimension: string;
+  orden?: number;
+  opciones?: string[];
+  escala_max?: number;
+}
+export interface AnalisisClima {
+  fecha: string;
+  respuestasConsideradas: number;
+  estadoMedicion: EstadoMedicionClima;
+  alcance: "preliminar" | "final";
+  indice: number | null;
+  estado: "Favorable" | "En observación" | "Requiere atención";
+  resumen: string;
+  fortalezas: string[];
+  focosAtencion: string[];
+  puntosPorValidar: string[];
+  accionesSugeridas: string[];
+  ia: boolean;
+  solicitadoPor: string;
+}
 export interface MedicionClima {
   id: string;
   titulo: string;
   descripcion: string;
   anonima: boolean;
   permiteExternos: boolean;
-  estado: "borrador" | "abierta" | "cerrada" | string;
+  estado: EstadoMedicionClima;
+  estadoEtiqueta: string;
   preguntas: number;
+  dimensiones: string[];
+  /** Respuestas REALES internas (sin prueba ni externas). */
   respuestas: number;
+  respuestasPrueba: number;
+  respuestasExternas: number;
+  invitados: number;
+  respondieron: number;
+  /** Liga EXTERNA (compartida); los invitados reciben su liga personal. */
   liga: string;
   abiertaEn: string | null;
   cierraEn: string | null;
+  cerradaEn: string | null;
   creadoPor: string;
   creado: string;
   cuestionario?: PreguntaClima[];
 }
+export interface PreguntaResultadoClima {
+  id: string;
+  texto: string;
+  tipo: TipoPreguntaClima;
+  orden?: number;
+  respuestas: number;
+  favorable?: number | null;
+  favorables?: number;
+  promedio?: number | null;
+  escalaMax?: number;
+  distribucion?: Record<string, number>;
+  comentarios?: string[];
+}
+export interface DimensionResultadoClima {
+  nombre: string;
+  favorable: number | null;
+  preguntasConResultado: number;
+  preguntas: PreguntaResultadoClima[];
+}
+export interface CalculoClima {
+  fuente: "reales" | "prueba";
+  calculadoEn: string;
+  respuestasConsideradas: number;
+  externas: number;
+  pruebas: number;
+  participacion: { invitados: number; respondieron: number; faltan: number; porcentaje: number | null };
+  resumenParticipacion: string;
+  indice: { valor: number | null; estado: "sin_respuestas" | "pendiente" | "calculado"; etiqueta: string; dimensionesConsideradas?: number };
+  dimensiones: DimensionResultadoClima[];
+}
 export interface ResultadosClima {
   medicion: MedicionClima;
+  fuente: "reales" | "prueba";
   totalRespuestas: number;
-  colaboradoresActivos: number;
+  invitados: number;
+  respondieron: number;
   participacion: number | null;
   externos: number;
-  porPregunta: {
-    id: string; texto: string; tipo: TipoPreguntaClima; respuestas: number;
-    promedio?: number | null; escalaMax?: number; distribucion?: Record<string, number>; textos?: string[];
-  }[];
+  pruebas: number;
+  calculo: CalculoClima;
+  analisis: AnalisisClima | null;
+}
+export interface PropuestaClima {
+  ia: boolean;
+  titulo: string;
+  descripcion: string;
+  dimensiones: string[];
+  preguntas: PreguntaClima[];
+}
+export interface EnvioClima {
+  colaborador: string;
+  nombre: string;
+  correo?: { enviado: boolean; detalle?: string } | null;
+  whatsapp?: { enviado: boolean; detalle?: string } | null;
+  yaRespondio?: boolean;
+}
+export interface DestinatariosClima {
+  areas: string[];
+  sedes: string[];
+  colaboradores: { id: string; nombre: string; area: string; sede: string; puesto: string; tieneCorreo: boolean; tieneWhatsapp: boolean }[];
+}
+export interface PlantillaClima {
+  id: number;
+  nombre: string;
+  descripcion: string;
+  dimensiones: string[];
+  preguntas: number;
+  tipos: TipoPreguntaClima[];
+  activa: boolean;
+  creadoPor: string;
+  actualizada: string | null;
+  cuestionario?: PreguntaClima[];
 }
 
-export function crearMedicionClima(datos: { titulo: string; descripcion?: string; preguntas: PreguntaClima[]; anonima: boolean; permiteExternos: boolean; cierraEn?: string }) {
+export function generarEncuestaClima(prompt: string) {
+  return post<PropuestaClima>("/clima/generar", { prompt });
+}
+export function crearMedicionClima(datos: {
+  titulo: string; descripcion?: string; dimensiones: string[]; preguntas: PreguntaClima[]; anonima?: boolean; permiteExternos?: boolean;
+}) {
   return post<MedicionClima>("/clima/mediciones", {
-    titulo: datos.titulo, descripcion: datos.descripcion ?? "", preguntas: datos.preguntas,
-    anonima: datos.anonima, permite_externos: datos.permiteExternos, cierra_en: datos.cierraEn || null,
+    titulo: datos.titulo, descripcion: datos.descripcion ?? "", dimensiones: datos.dimensiones, preguntas: datos.preguntas,
+    anonima: datos.anonima ?? true, permite_externos: datos.permiteExternos ?? false,
+  });
+}
+export function editarMedicionClima(codigo: string, datos: {
+  titulo?: string; descripcion?: string; dimensiones?: string[]; preguntas?: PreguntaClima[]; permiteExternos?: boolean; cierraEn?: string;
+}) {
+  return patch<MedicionClima>(`/clima/mediciones/${codigo}`, {
+    ...(datos.titulo !== undefined ? { titulo: datos.titulo } : {}),
+    ...(datos.descripcion !== undefined ? { descripcion: datos.descripcion } : {}),
+    ...(datos.dimensiones !== undefined ? { dimensiones: datos.dimensiones } : {}),
+    ...(datos.preguntas !== undefined ? { preguntas: datos.preguntas } : {}),
+    ...(datos.permiteExternos !== undefined ? { permite_externos: datos.permiteExternos } : {}),
+    ...(datos.cierraEn !== undefined ? { cierra_en: datos.cierraEn } : {}),
   });
 }
 export function fetchMedicionesClima() {
@@ -2548,24 +2661,70 @@ export function fetchMedicionesClima() {
 export function fetchMedicionClima(codigo: string) {
   return get<MedicionClima>(`/clima/mediciones/${codigo}`);
 }
-export function cambiarEstadoMedicion(codigo: string, estado: "borrador" | "abierta" | "cerrada") {
-  return patch<MedicionClima>(`/clima/mediciones/${codigo}/estado`, { estado });
+/** Flujo de ida: solo sirve para CERRAR (abrir se hace con `abrirMedicionClima`). */
+export function cerrarMedicionClima(codigo: string) {
+  return patch<MedicionClima>(`/clima/mediciones/${codigo}/estado`, { estado: "cerrada" });
 }
 export function regenerarLigaClima(codigo: string) {
   return post<{ liga: string; medicion: MedicionClima }>(`/clima/mediciones/${codigo}/liga`, {});
 }
-export function invitarAClima(codigo: string, colaboradorIds: string[], mensaje = "") {
-  return post<{ liga: string; invitados: { colaborador: string; nombre: string; correo: { enviado: boolean; detalle?: string } | null; whatsapp: { enviado: boolean; detalle?: string } | null }[]; noEncontrados: string[] }>(
-    `/clima/mediciones/${codigo}/invitar`, { colaborador_ids: colaboradorIds, mensaje },
-  );
+export function fetchDestinatariosClima(filtros: { areas?: string[]; sedes?: string[] } = {}) {
+  const q = new URLSearchParams();
+  if (filtros.areas?.length) q.set("areas", filtros.areas.join(","));
+  if (filtros.sedes?.length) q.set("sedes", filtros.sedes.join(","));
+  return get<DestinatariosClima>(`/clima/destinatarios${q.toString() ? `?${q}` : ""}`);
 }
-export function responderClimaInterno(codigo: string, datos: { respuestas: Record<string, unknown>; colaboradorId?: string }) {
-  return post<{ guardada: boolean; anonima: boolean }>(`/clima/mediciones/${codigo}/responder`, {
-    respuestas: datos.respuestas, colaborador_id: datos.colaboradorId ?? "",
+export function abrirMedicionClima(codigo: string, datos: {
+  colaboradorIds: string[]; areas: string[]; sedes: string[]; cierraEn: string; anonima: boolean; permiteExternos: boolean; mensaje?: string;
+}) {
+  return post<{ medicion: MedicionClima; invitados: EnvioClima[]; noEncontrados: string[] }>(`/clima/mediciones/${codigo}/abrir`, {
+    colaborador_ids: datos.colaboradorIds, areas: datos.areas, sedes: datos.sedes, cierra_en: datos.cierraEn,
+    anonima: datos.anonima, permite_externos: datos.permiteExternos, mensaje: datos.mensaje ?? "",
   });
 }
-export function fetchResultadosClima(codigo: string) {
-  return get<ResultadosClima>(`/clima/mediciones/${codigo}/resultados`);
+export function recordarClima(codigo: string) {
+  return post<{ recordados: number; envios: EnvioClima[] }>(`/clima/mediciones/${codigo}/recordatorio`, {});
+}
+export function responderPruebaClima(codigo: string, respuestas: Record<string, unknown>) {
+  return post<{ guardada: boolean; prueba: boolean }>(`/clima/mediciones/${codigo}/prueba/responder`, { respuestas });
+}
+export function reiniciarPruebaClima(codigo: string) {
+  return eliminar<{ borradas: number }>(`/clima/mediciones/${codigo}/prueba`);
+}
+export function fetchResultadosClima(codigo: string, prueba = false) {
+  return get<ResultadosClima>(`/clima/mediciones/${codigo}/resultados${prueba ? "?prueba=true" : ""}`);
+}
+export function analizarClima(codigo: string) {
+  return post<AnalisisClima>(`/clima/mediciones/${codigo}/analizar`, {});
+}
+
+/* Plantillas de clima (Configuración) */
+export function fetchPlantillasClima(incluirInactivas = false) {
+  return get<PlantillaClima[]>(`/clima/plantillas${incluirInactivas ? "?incluir_inactivas=true" : ""}`);
+}
+export function fetchPlantillaClima(id: number) {
+  return get<PlantillaClima>(`/clima/plantillas/${id}`);
+}
+export function crearPlantillaClima(datos: { nombre: string; descripcion?: string; dimensiones: string[]; preguntas: PreguntaClima[] }) {
+  return post<PlantillaClima>("/clima/plantillas", { ...datos, descripcion: datos.descripcion ?? "" });
+}
+export function editarPlantillaClima(id: number, datos: { nombre?: string; descripcion?: string; dimensiones?: string[]; preguntas?: PreguntaClima[]; activa?: boolean }) {
+  return patch<PlantillaClima>(`/clima/plantillas/${id}`, datos);
+}
+export function desactivarPlantillaClima(id: number) {
+  return eliminar<PlantillaClima>(`/clima/plantillas/${id}`);
+}
+export function importarPlantillaClima(archivo: File, nombre = "") {
+  const form = new FormData();
+  form.append("archivo", archivo);
+  form.append("nombre", nombre);
+  return subir<PlantillaClima>("/clima/plantillas/importar", form);
+}
+export function usarPlantillaClima(id: number) {
+  return post<MedicionClima>(`/clima/plantillas/${id}/usar`, {});
+}
+export function urlFormatoPlantillaClima() {
+  return `${API}/clima/plantillas/formato`;
 }
 
 /* -------------------- Conocimiento: generación y permisos -------------------- */
@@ -2592,7 +2751,12 @@ export interface MedicionClimaPublica {
   permiteExternos: boolean;
   abierta: boolean;
   preguntas: PreguntaClima[];
+  dimensiones: string[];
   aviso: string;
+  /** personal = liga del invitado (una sola respuesta); externa = liga compartida para externos. */
+  tipoLiga: "personal" | "externa";
+  yaRespondio: boolean;
+  aceptaRespuestas: boolean;
 }
 
 export function fetchMedicionPublica(token: string) {
@@ -2601,11 +2765,10 @@ export function fetchMedicionPublica(token: string) {
 
 export function responderClimaPublica(
   token: string,
-  datos: { respuestas: Record<string, unknown>; colaboradorId?: string; externoNombre?: string; externoCorreo?: string },
+  datos: { respuestas: Record<string, unknown>; externoNombre?: string; externoCorreo?: string },
 ) {
   return post<{ guardada: boolean; anonima: boolean }>(`/clima/publica/${token}/responder`, {
     respuestas: datos.respuestas,
-    colaborador_id: datos.colaboradorId ?? "",
     externo_nombre: datos.externoNombre ?? "",
     externo_correo: datos.externoCorreo ?? "",
   });

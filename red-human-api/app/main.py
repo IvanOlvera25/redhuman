@@ -26,6 +26,7 @@ from .services.agenda import revisar_videollamadas_noshow
 from .services.recordatorios import revisar_recordatorios_documentos
 from .services.recordatorios_entrevista import revisar_recordatorios_entrevista
 from .routers.entrevistas import cerrar_entrevistas_inactivas
+from .services.clima_cierre import cerrar_mediciones_vencidas
 from .services.avatar import avatar_activo, estado_avatar
 from .services.ia import ia_activa
 from .services.whatsapp import proveedor as whatsapp_proveedor, whatsapp_activo
@@ -126,6 +127,12 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         cerrar_entrevistas_inactivas, "interval", minutes=5,
         id="entrevistas_inactivas", replace_existing=True,
+        max_instances=1, coalesce=True, misfire_grace_time=120,
+    )
+    # 2026-09-27 (Clima v2): una medición abierta pasa a cerrada al llegar su fecha de cierre.
+    scheduler.add_job(
+        cerrar_mediciones_vencidas, "interval", minutes=5,
+        id="clima_cierre", replace_existing=True,
         max_instances=1, coalesce=True, misfire_grace_time=120,
     )
     scheduler.start()

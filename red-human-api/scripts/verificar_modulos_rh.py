@@ -70,7 +70,8 @@ def check(cond, msg):
 
 print("\n--- 0. Regla de oro: ninguna tabla nueva de personas ---")
 nuevas = set(TABLAS_MODULOS_RH)
-check(nuevas == {"ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima"}, "solo 4 tablas nuevas, ninguna de personas")
+check(nuevas == {"ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima", "participaciones_clima", "plantillas_clima"},
+      "solo 6 tablas nuevas (Clima v2 agrega participación y plantillas), ninguna de personas")
 for nombre in sorted(nuevas):
     columnas = set(Base.metadata.tables[nombre].columns.keys())
     # una tabla de personas tendría datos de contacto propios; `nombre`/`titulo` describen al ciclo o a
@@ -147,23 +148,40 @@ with TestClient(app) as client:
     r = client.post(f"/clima/mediciones/{MED}/responder", json={"respuestas": {"p1": 4}})
     check(r.status_code == 409, "cerrada/borrador no recibe respuestas")
     check(client.patch(f"/clima/mediciones/{MED}/estado", json={"estado": "abierta"}).status_code == 200, "RH la abre")
+    check(client.patch(f"/clima/mediciones/{MED}/estado", json={"estado": "borrador"}).status_code == 409, "flujo de ida: una abierta no regresa a borrador")
+    check(client.patch(f"/clima/mediciones/{MED}", json={"titulo": "Otro"}).status_code == 409, "abierta: solo se puede mover la fecha de cierre")
+    r = client.post(f"/clima/mediciones/{MED}/responder", json={"respuestas": {"p1": 5}, "colaborador_id": "COL-1"})
+    check(r.status_code == 409, "RH no captura la respuesta de alguien NO invitado (control de participación)")
+    client.post(f"/clima/mediciones/{MED}/invitar", json={"colaborador_ids": ["COL-1"]})
     r = client.post(f"/clima/mediciones/{MED}/responder", json={"respuestas": {"p1": 5, "p2": "Más capacitación", "p3": "Buena"}, "colaborador_id": "COL-1"})
-    check(r.status_code == 201 and r.json()["anonima"], "un colaborador del roster responde")
+    check(r.status_code == 201 and r.json()["anonima"], "un colaborador invitado responde")
+    check(client.post(f"/clima/mediciones/{MED}/responder", json={"respuestas": {"p1": 1}, "colaborador_id": "COL-1"}).status_code == 409,
+          "no se aceptan respuestas duplicadas del mismo colaborador")
     db.expire_all()
     guardada = db.query(RespuestaClima).order_by(RespuestaClima.id.desc()).first()
     check(guardada.colaborador_id is None and not guardada.externo_nombre, "ANÓNIMA: no se guarda quién respondió, ni aunque el cliente mande el código")
+    check((guardada.enviado_en.hour, guardada.enviado_en.minute, guardada.enviado_en.second) == (0, 0, 0),
+          "ANÓNIMA: la respuesta guarda solo el día (no la hora) para no cruzarla con la participación")
+    columnas_part = set(Base.metadata.tables["participaciones_clima"].columns.keys())
+    check(not {c for c in columnas_part if "respuesta" in c or "respondido_en" in c},
+          "la participación no apunta a la respuesta ni guarda cuándo se respondió")
     pub = client.get(f"/clima/publica/{TOKEN}").json()
-    check(pub["abierta"] and len(pub["preguntas"]) == 3 and "ANÓNIMAS" in pub["aviso"], "la liga pública muestra el cuestionario y el aviso de anonimato")
+    check(pub["abierta"] and len(pub["preguntas"]) == 3 and "ANÓNIMAS" in pub["aviso"] and pub["tipoLiga"] == "externa",
+          "la liga compartida es la EXTERNA y muestra el cuestionario y el aviso de anonimato")
     r = client.post(f"/clima/publica/{TOKEN}/responder", json={"respuestas": {"p1": 3}, "externo_nombre": "Externo X"})
-    check(r.status_code == 403, "sin «permite externos», la liga solo acepta colaboradores")
+    check(r.status_code == 403, "sin «permite externos», la liga compartida no acepta respuestas")
     r = client.post(f"/clima/publica/{TOKEN}/responder", json={"respuestas": {"p1": 3, "p3": "Regular"}, "colaborador_id": "COL-2"})
-    check(r.status_code == 201, "un colaborador responde por la liga pública, sin sesión")
+    check(r.status_code == 403, "un colaborador no invitado no entra por la liga compartida escribiendo un código")
+    check(client.post(f"/clima/mediciones/{MED}/prueba/responder", json={"respuestas": {"p1": 1, "p2": "prueba"}}).status_code == 201,
+          "«Probar encuesta» guarda una respuesta de prueba")
     res = client.get(f"/clima/mediciones/{MED}/resultados").json()
-    check(res["totalRespuestas"] == 2 and res["colaboradoresActivos"] == 2 and res["participacion"] == 100, f"participación sobre el roster activo ({res['participacion']}%)")
+    check(res["totalRespuestas"] == 1 and res["pruebas"] == 1 and res["invitados"] == 1 and res["participacion"] == 100,
+          f"la prueba NO se mezcla con lo real; participación sobre invitados ({res['participacion']}%)")
     p1 = next(p for p in res["porPregunta"] if p["id"] == "p1")
-    check(p1["promedio"] == 4.0 and p1["escalaMax"] == 5, f"promedio de la escala ({p1['promedio']})")
+    check(p1["promedio"] == 5.0 and p1["escalaMax"] == 5, f"promedio de la escala sin la prueba ({p1['promedio']})")
     p2 = next(p for p in res["porPregunta"] if p["id"] == "p2")
     check(p2["textos"] == ["Más capacitación"] and "autor" not in str(p2), "las respuestas abiertas salen sin autor")
+    check(client.delete(f"/clima/mediciones/{MED}/prueba").json()["borradas"] == 1, "reiniciar la prueba borra solo las de prueba")
     # identificada + externos
     r = client.post("/clima/mediciones", json={"titulo": "Pulso proveedores", "anonima": False, "permite_externos": True,
                                                "preguntas": [{"texto": "¿Cómo nos calificas?", "tipo": "escala"}]})
@@ -175,7 +193,10 @@ with TestClient(app) as client:
     check(r.status_code == 201, "con «permite externos» la liga acepta a alguien de fuera")
     db.expire_all()
     ext = db.query(RespuestaClima).order_by(RespuestaClima.id.desc()).first()
-    check(ext.origen == "externo" and ext.colaborador_id is None and ext.externo_nombre == "Proveedor X", "el externo queda como dato de la respuesta; NUNCA se crea un colaborador")
+    check(ext.origen == "externo" and ext.es_externa and ext.colaborador_id is None and ext.externo_nombre == "Proveedor X",
+          "el externo queda marcado como externo, como dato de la respuesta; NUNCA se crea un colaborador")
+    r2 = client.get(f"/clima/mediciones/{MED2}/resultados").json()
+    check(r2["totalRespuestas"] == 0 and r2["externos"] == 1 and r2["participacion"] is None, "las externas no suman a la participación ni a los resultados internos")
     check(db.query(Colaborador).filter(Colaborador.cuenta_id == cuenta.id).count() == 3, "el roster sigue con las 3 personas de siempre")
 
     print("\n--- 3. Base de Conocimiento: permisos por área/puesto del roster ---")
@@ -215,14 +236,25 @@ with TestClient(app) as client:
     r = client.post(f"/clima/mediciones/{MED}/invitar", json={"colaborador_ids": ["COL-1", "COL-2", "COL-3"], "mensaje": "Nos ayuda mucho."})
     check(r.status_code == 200, f"«Invitar colaboradores» manda la liga ({r.status_code}: {r.text[:160]})")
     check(len(r.json()["invitados"]) == 2 and "COL-3" in r.json()["noEncontrados"], "solo se invita a colaboradores ACTIVOS del roster")
+    check(any(x.get("yaRespondio") for x in r.json()["invitados"]), "a quien ya respondió no se le vuelve a escribir")
     check(any(e[0] == "correo" for e in ENVIOS) and any(e[0] == "whatsapp" for e in ENVIOS), "sale por correo y WhatsApp con lo que cada quien tenga en el roster")
-    check(all("/clima/" in e[2] for e in ENVIOS if e[0] == "whatsapp"), "el mensaje lleva la liga pública")
+    db.expire_all()
+    med = db.query(MedicionClima).filter_by(codigo=MED).one()
+    beto_part = next(p for p in med.participaciones if p.colaborador.codigo == "COL-2")
+    check(all(beto_part.token in e[2] for e in ENVIOS if e[0] == "whatsapp"), "el mensaje lleva la liga PERSONAL del invitado")
+    check(client.get(f"/clima/publica/{beto_part.token}").json()["tipoLiga"] == "personal", "la liga personal se reconoce como personal")
+    check(client.post(f"/clima/publica/{beto_part.token}/responder", json={"respuestas": {"p1": 3}}).status_code == 201, "el invitado responde con su liga, sin sesión")
+    check(client.post(f"/clima/publica/{beto_part.token}/responder", json={"respuestas": {"p1": 3}}).status_code == 409, "su liga personal no acepta una segunda respuesta")
+    res = client.get(f"/clima/mediciones/{MED}/resultados").json()
+    check(res["invitados"] == 2 and res["respondieron"] == 2 and res["participacion"] == 100 and res["totalRespuestas"] == 2,
+          f"participación = respondieron / invitados ({res['respondieron']}/{res['invitados']})")
     check(client.post(f"/clima/mediciones/{MED}/invitar", json={"colaborador_ids": []}).status_code == 400, "invitar sin nadie seleccionado → 400")
     client.patch(f"/clima/mediciones/{MED2}/estado", json={"estado": "cerrada"})
     check(client.post(f"/clima/mediciones/{MED2}/invitar", json={"colaborador_ids": ["COL-1"]}).status_code == 409, "no se invita a una medición cerrada")
+    check(client.patch(f"/clima/mediciones/{MED2}/estado", json={"estado": "abierta"}).status_code == 409, "una medición cerrada nunca se reabre")
     db.expire_all()
     med = db.query(MedicionClima).filter_by(codigo=MED).one()
-    check(db.query(RespuestaClima).filter(RespuestaClima.medicion_id == med.id).count() == 2, "invitar NO crea respuestas ni participantes")
+    check(db.query(RespuestaClima).filter(RespuestaClima.medicion_id == med.id).count() == 2, "invitar NO crea respuestas (la participación vive en su propia tabla)")
 
     r = client.post("/conocimiento/generar", json={"tema": "Política de home office", "tipo": "politica", "notas": "Aplica a administrativos"})
     check(r.status_code == 200 and r.json()["texto"], f"«Generar con Red Human» regresa un borrador editable ({r.status_code})")

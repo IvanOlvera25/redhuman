@@ -1,20 +1,27 @@
-"""Módulo de Clima laboral — andamiaje 2026-09-22.
+"""Módulo de Clima laboral — andamiaje 2026-09-22, Clima v2 2026-09-27.
 
 REGLA DE ORO: los participantes internos SON los `Colaborador` del roster maestro; este módulo nunca
-captura personas ni crea usuarios. Además se puede abrir una liga pública (`/clima/{token}`) para que
-respondan sin sesión — ahí un participante externo deja solo nombre/correo en la respuesta, jamás se
-crea un colaborador.
+captura personas ni crea usuarios.
 
-Privacidad (LFPDPPP): si la medición es ANÓNIMA (default), la respuesta se guarda SIN `colaborador_id`
-— no hay forma de reconstruir quién contestó, ni siquiera desde la bitácora. Si es identificada, se
-guarda a quién pertenece y el candado lo sabe la persona antes de responder.
+Clima v2 (decisiones del usuario, 2026-09-27):
+  * Estados ESTRICTOS de ida: borrador → abierta → cerrada. En borrador se edita todo; abierta solo
+    admite mover la fecha de cierre; cerrada queda congelada (nunca se reabre).
+  * Preguntas con dimensión, tipo (escala 1-5 | opción | abierta) y orden numérico.
+  * Liga PERSONAL por invitado (`ParticipacionClima.token`): al responder se marca «respondió» en la tabla
+    de participación, SEPARADA de las respuestas (sin llave entre ellas y sin hora de respuesta). La liga
+    compartida de la medición (`MedicionClima.token`) es la liga EXTERNA: sus respuestas llevan
+    `es_externa` y no suman a la participación; solo funciona con «permite externos».
+  * Anonimato estricto: en una medición anónima la respuesta no guarda quién la dio (ni aunque el cliente
+    lo mande) y solo guarda el DÍA, no la hora.
+  * «Probar encuesta»: respuestas con `es_prueba`, jamás mezcladas con las reales; se pueden reiniciar.
 """
 
+import copy
 import secrets
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -22,17 +29,22 @@ from ..config import settings
 from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import (
+    DIMENSION_CLIMA_DEFAULT,
+    ESCALA_CLIMA,
     ESTADOS_MEDICION_CLIMA,
     TIPOS_PREGUNTA_CLIMA,
+    TRANSICIONES_CLIMA,
     Colaborador,
     Cuenta,
     MedicionClima,
+    ParticipacionClima,
+    PlantillaClima,
     RespuestaClima,
     Usuario,
     registrar,
 )
-from ..serial import medicion_clima_dict, medicion_clima_publica_dict
-from ..services import plantillas_correo
+from ..serial import medicion_clima_dict, medicion_clima_publica_dict, plantilla_clima_dict
+from ..services import clima_resultados, ia, masivo, plantillas_correo
 from ..services.correo import enviar_correo
 from ..services.whatsapp import enviar_texto_sin_plantilla
 from ..services.modulos_rh import requiere_modulos_rh
@@ -47,37 +59,96 @@ def _medicion(db: Session, codigo: str, cuenta_id: int) -> MedicionClima:
     return m
 
 
-def _por_token(db: Session, token: str) -> MedicionClima:
+def _resolver_token(db: Session, token: str) -> Tuple[MedicionClima, Optional[ParticipacionClima]]:
+    """Liga personal (participación) → (medición, participación); liga externa (de la medición) →
+    (medición, None)."""
+    part = db.query(ParticipacionClima).filter(ParticipacionClima.token == token).first()
+    if part:
+        return part.medicion, part
     m = db.query(MedicionClima).filter(MedicionClima.token == token).first()
     if not m:
         raise HTTPException(404, "Esta liga no existe o fue dada de baja.")
-    return m
+    return m, None
 
 
 def liga_publica(m: MedicionClima) -> str:
+    """Liga EXTERNA (compartida) de la medición."""
     return f"{settings.app_url}/clima/{m.token}"
 
 
-def _normalizar_preguntas(preguntas: List[dict]) -> List[dict]:
-    """Cada pregunta queda con id, texto y tipo válidos (escala | opcion | abierta)."""
-    salida = []
-    for i, p in enumerate(preguntas, start=1):
+def liga_personal(p: ParticipacionClima) -> str:
+    return f"{settings.app_url}/clima/{p.token}"
+
+
+def _utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _fecha_iso(texto: Optional[str], campo: str = "cierra_en") -> Optional[datetime]:
+    if not texto:
+        return None
+    try:
+        dt = datetime.fromisoformat(texto)
+    except ValueError:
+        raise HTTPException(400, f"{campo} inválida (usa ISO: 2026-10-15T18:00)")
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def normalizar_cuestionario(preguntas: List[dict], dimensiones: Optional[List[str]] = None) -> Tuple[List[dict], List[str]]:
+    """Cada pregunta queda con id estable, texto, tipo válido, dimensión y orden 1..n (ordenadas por el
+    `orden` que mande RH). La escala es SIEMPRE 1-5. Regresa (preguntas, dimensiones en orden)."""
+    crudas = []
+    for i, p in enumerate(preguntas or []):
         texto = str(p.get("texto") or "").strip()
         if not texto:
             continue
+        try:
+            orden = float(p.get("orden")) if p.get("orden") not in (None, "") else float(i + 1)
+        except (TypeError, ValueError):
+            orden = float(i + 1)
+        crudas.append((orden, i, p, texto))
+    crudas.sort(key=lambda x: (x[0], x[1]))
+
+    usados = {str(p.get("id")) for _, _, p, _ in crudas if p.get("id")}
+    salida = []
+    for n, (_, i, p, texto) in enumerate(crudas, start=1):
         tipo = str(p.get("tipo") or "escala").strip()
         if tipo not in TIPOS_PREGUNTA_CLIMA:
             raise HTTPException(400, f"Tipo de pregunta inválido «{tipo}». Usa: {', '.join(TIPOS_PREGUNTA_CLIMA)}")
-        fila = {"id": str(p.get("id") or f"p{i}"), "texto": texto, "tipo": tipo}
+        pid = str(p.get("id") or "")
+        if not pid:
+            pid = f"p{i + 1}"
+            while pid in usados:
+                pid = f"p{secrets.token_hex(3)}"
+            usados.add(pid)
+        fila = {
+            "id": pid, "texto": texto, "tipo": tipo, "orden": n,
+            "dimension": str(p.get("dimension") or "").strip() or DIMENSION_CLIMA_DEFAULT,
+        }
         if tipo == "escala":
-            fila["escala_max"] = int(p.get("escala_max") or 5)
+            fila["escala_max"] = ESCALA_CLIMA
         if tipo == "opcion":
             opciones = [str(o).strip() for o in (p.get("opciones") or []) if str(o).strip()]
             if len(opciones) < 2:
                 raise HTTPException(400, f"La pregunta «{texto}» es de opción y necesita al menos 2 opciones.")
             fila["opciones"] = opciones
         salida.append(fila)
-    return salida
+    if len({p["id"] for p in salida}) != len(salida):
+        raise HTTPException(400, "Hay preguntas con el mismo id.")
+
+    orden_dims = [str(d).strip() for d in (dimensiones or []) if str(d).strip()]
+    for p in salida:
+        if p["dimension"] not in orden_dims:
+            orden_dims.append(p["dimension"])
+    return salida, list(dict.fromkeys(orden_dims))
+
+
+def _momento(m: MedicionClima) -> datetime:
+    """Marca de tiempo de una respuesta: en anónimas solo el día (anonimato estricto)."""
+    ahora = datetime.now(timezone.utc)
+    return ahora.replace(hour=0, minute=0, second=0, microsecond=0) if m.anonima else ahora
 
 
 # ------------------------------------------------------------
@@ -89,34 +160,53 @@ class MedicionIn(BaseModel):
     titulo: str
     descripcion: str = ""
     preguntas: List[dict] = []
+    dimensiones: List[str] = []
     anonima: bool = True
     permite_externos: bool = False
     cierra_en: Optional[str] = None  # ISO
+    plantilla_id: Optional[int] = None
 
 
 @router.post("/mediciones", status_code=201)
 def crear_medicion(datos: MedicionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
     if not datos.titulo.strip():
         raise HTTPException(400, "El título de la medición es obligatorio.")
-    preguntas = _normalizar_preguntas(datos.preguntas)
+    preguntas, dimensiones = normalizar_cuestionario(datos.preguntas, datos.dimensiones)
     if not preguntas:
         raise HTTPException(400, "Captura al menos una pregunta.")
     m = MedicionClima(
         codigo="TMP", cuenta_id=cuenta.id, titulo=datos.titulo.strip(), descripcion=datos.descripcion.strip(),
-        preguntas=preguntas, anonima=bool(datos.anonima), permite_externos=bool(datos.permite_externos),
-        estado="borrador", token=secrets.token_urlsafe(24), creado_por=u.nombre,
+        preguntas=preguntas, dimensiones=dimensiones, anonima=bool(datos.anonima), permite_externos=bool(datos.permite_externos),
+        estado="borrador", token=secrets.token_urlsafe(24), creado_por=u.nombre, plantilla_id=datos.plantilla_id,
+        cierra_en=_fecha_iso(datos.cierra_en),
     )
-    if datos.cierra_en:
-        try:
-            m.cierra_en = datetime.fromisoformat(datos.cierra_en).replace(tzinfo=timezone.utc)
-        except ValueError:
-            raise HTTPException(400, "cierra_en inválida (usa ISO: 2026-10-15)")
     db.add(m)
     db.flush()
     m.codigo = f"CLI-{900 + m.id}"
     registrar(db, u.nombre, "medicion_clima_creada", "clima", m.codigo, {"titulo": m.titulo, "anonima": m.anonima, "preguntas": len(preguntas), "correo_rh": u.correo})
     db.commit()
     return medicion_clima_dict(m, liga=liga_publica(m))
+
+
+class GenerarClimaIn(BaseModel):
+    prompt: str  # «¿Qué quieres saber de tu equipo?»
+
+
+@router.post("/generar")
+def generar_encuesta(datos: GenerarClimaIn, u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Crear encuesta con Red Human»: propone nombre, dimensiones y preguntas a partir de lo que RH quiere
+    saber. NO guarda nada: RH revisa y edita, y luego crea la medición con POST /mediciones."""
+    if not datos.prompt.strip():
+        raise HTTPException(400, "Escribe qué quieres saber de tu equipo.")
+    enc, con_ia = ia.encuesta_clima(datos.prompt, cuenta.nombre_visible)
+    crudas = []
+    for p in enc.preguntas:
+        fila = p.model_dump()
+        if fila["tipo"] == "opcion" and len([o for o in fila.get("opciones") or [] if str(o).strip()]) < 2:
+            fila["tipo"], fila["opciones"] = "abierta", []  # opción mal formada: se conserva como abierta
+        crudas.append(fila)
+    preguntas, dimensiones = normalizar_cuestionario(crudas, enc.dimensiones)
+    return {"ia": con_ia, "titulo": enc.titulo, "descripcion": enc.descripcion, "dimensiones": dimensiones, "preguntas": preguntas}
 
 
 @router.get("/mediciones")
@@ -133,20 +223,87 @@ def ver_medicion(codigo: str, db: Session = Depends(get_db), _: Usuario = Depend
     return medicion_clima_dict(m, liga=liga_publica(m), detalle=True)
 
 
+class EditarMedicionIn(BaseModel):
+    titulo: Optional[str] = None
+    descripcion: Optional[str] = None
+    preguntas: Optional[List[dict]] = None
+    dimensiones: Optional[List[str]] = None
+    anonima: Optional[bool] = None
+    permite_externos: Optional[bool] = None
+    cierra_en: Optional[str] = None
+
+
+@router.patch("/mediciones/{codigo}")
+def editar_medicion(codigo: str, datos: EditarMedicionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Borrador: se edita todo (reordenar, dimensiones, tipos, modalidad). Abierta: SOLO la fecha de cierre
+    (y debe quedar en el futuro). Cerrada: nada."""
+    m = _medicion(db, codigo, cuenta.id)
+    campos = datos.model_dump(exclude_unset=True)
+    if m.estado == "cerrada":
+        raise HTTPException(409, "La medición está cerrada: sus resultados quedan congelados.")
+    if m.estado == "abierta":
+        if set(campos) - {"cierra_en"}:
+            raise HTTPException(409, "Con la medición abierta solo se puede cambiar la fecha de cierre.")
+        nueva = _fecha_iso(datos.cierra_en)
+        if nueva is None or nueva <= datetime.now(timezone.utc):
+            raise HTTPException(400, "La nueva fecha de cierre debe estar en el futuro.")
+        m.cierra_en = nueva
+    else:
+        if datos.titulo is not None:
+            if not datos.titulo.strip():
+                raise HTTPException(400, "El título de la medición es obligatorio.")
+            m.titulo = datos.titulo.strip()
+        if datos.descripcion is not None:
+            m.descripcion = datos.descripcion.strip()
+        if datos.preguntas is not None or datos.dimensiones is not None:
+            preguntas, dimensiones = normalizar_cuestionario(
+                datos.preguntas if datos.preguntas is not None else list(m.preguntas or []),
+                datos.dimensiones if datos.dimensiones is not None else list(m.dimensiones or []),
+            )
+            if not preguntas:
+                raise HTTPException(400, "Captura al menos una pregunta.")
+            m.preguntas, m.dimensiones = preguntas, dimensiones
+        if datos.anonima is not None:
+            m.anonima = bool(datos.anonima)
+        if datos.permite_externos is not None:
+            m.permite_externos = bool(datos.permite_externos)
+        if "cierra_en" in campos:
+            m.cierra_en = _fecha_iso(datos.cierra_en)
+    registrar(db, u.nombre, "medicion_clima_editada", "clima", m.codigo, {"campos": sorted(campos), "correo_rh": u.correo})
+    db.commit()
+    return medicion_clima_dict(m, liga=liga_publica(m), detalle=True)
+
+
 class EstadoMedicionIn(BaseModel):
     estado: str  # borrador | abierta | cerrada
 
 
+def cerrar_medicion(m: MedicionClima, por: str) -> None:
+    m.estado = "cerrada"
+    m.cerrada_en = datetime.now(timezone.utc)
+    m.cerrada_por = por
+
+
 @router.patch("/mediciones/{codigo}/estado")
 def cambiar_estado(codigo: str, datos: EstadoMedicionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
-    """Abrir = empieza a recibir respuestas (por la liga y desde el tablero). Cerrar = deja de recibirlas
-    y los resultados quedan congelados."""
+    """Flujo estricto de ida: borrador → abierta → cerrada. Abrir = empieza a recibir respuestas reales;
+    cerrar = deja de recibirlas y los resultados quedan congelados (nunca se reabre)."""
     m = _medicion(db, codigo, cuenta.id)
     if datos.estado not in ESTADOS_MEDICION_CLIMA:
         raise HTTPException(400, f"Estado inválido. Usa uno de: {', '.join(ESTADOS_MEDICION_CLIMA)}")
-    m.estado = datos.estado
-    if datos.estado == "abierta" and not m.abierta_en:
-        m.abierta_en = datetime.now(timezone.utc)
+    if datos.estado == m.estado:
+        return medicion_clima_dict(m, liga=liga_publica(m), detalle=True)
+    if datos.estado not in TRANSICIONES_CLIMA.get(m.estado, ()):
+        raise HTTPException(409, f"Una medición {m.estado} no puede pasar a {datos.estado} (flujo: borrador → abierta → cerrada).")
+    if datos.estado == "abierta":
+        if not m.preguntas:
+            raise HTTPException(400, "La medición no tiene preguntas.")
+        if m.cierra_en and _utc(m.cierra_en) <= datetime.now(timezone.utc):
+            raise HTTPException(400, "La fecha de cierre ya pasó: cámbiala antes de abrir.")
+        m.estado = "abierta"
+        m.abierta_en = m.abierta_en or datetime.now(timezone.utc)
+    else:
+        cerrar_medicion(m, u.nombre)
     registrar(db, u.nombre, "medicion_clima_estado", "clima", m.codigo, {"estado": m.estado, "correo_rh": u.correo})
     db.commit()
     return medicion_clima_dict(m, liga=liga_publica(m), detalle=True)
@@ -154,7 +311,7 @@ def cambiar_estado(codigo: str, datos: EstadoMedicionIn, db: Session = Depends(g
 
 @router.post("/mediciones/{codigo}/liga")
 def regenerar_liga(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
-    """Genera una liga pública nueva (la anterior deja de funcionar)."""
+    """Genera una liga EXTERNA nueva (la anterior deja de funcionar). Las ligas personales no cambian."""
     m = _medicion(db, codigo, cuenta.id)
     m.token = secrets.token_urlsafe(24)
     registrar(db, u.nombre, "medicion_clima_liga", "clima", m.codigo, {"correo_rh": u.correo})
@@ -169,31 +326,57 @@ def regenerar_liga(codigo: str, db: Session = Depends(get_db), u: Usuario = Depe
 
 class ResponderIn(BaseModel):
     respuestas: Dict[str, object] = {}
-    colaborador_id: str = ""   # código COL-#### (solo si la medición NO es anónima)
-    externo_nombre: str = ""   # solo liga pública con externos permitidos
+    colaborador_id: str = ""   # código COL-#### (solo captura de RH desde el tablero)
+    externo_nombre: str = ""   # solo liga externa en medición identificada
     externo_correo: str = ""
 
 
 def _validar_respuestas(m: MedicionClima, respuestas: Dict[str, object]) -> dict:
-    ids = {p["id"] for p in (m.preguntas or [])}
-    limpias = {k: v for k, v in respuestas.items() if k in ids and v not in (None, "")}
+    """Solo preguntas del cuestionario; la escala debe ser un entero 1-5 y la opción una de las listadas."""
+    preguntas = {p["id"]: p for p in (m.preguntas or [])}
+    limpias = {}
+    for k, v in (respuestas or {}).items():
+        p = preguntas.get(k)
+        if p is None or v in (None, ""):
+            continue
+        if p["tipo"] == "escala":
+            try:
+                n = int(float(v))
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"«{p['texto']}» se responde con un número del 1 al {ESCALA_CLIMA}.")
+            if not 1 <= n <= int(p.get("escala_max") or ESCALA_CLIMA):
+                raise HTTPException(400, f"«{p['texto']}» se responde con un número del 1 al {ESCALA_CLIMA}.")
+            limpias[k] = n
+        elif p["tipo"] == "opcion":
+            if str(v) not in (p.get("opciones") or []):
+                raise HTTPException(400, f"«{v}» no es una opción de «{p['texto']}».")
+            limpias[k] = str(v)
+        else:
+            limpias[k] = str(v).strip()[:2000]
     if not limpias:
         raise HTTPException(400, "No llegó ninguna respuesta válida.")
     return limpias
 
 
-def _guardar_respuesta(db: Session, m: MedicionClima, datos: ResponderIn, origen: str, colaborador: Optional[Colaborador]) -> RespuestaClima:
+def _exigir_abierta(m: MedicionClima) -> None:
     if m.estado != "abierta":
         raise HTTPException(409, "Esta medición no está recibiendo respuestas.")
-    if m.cierra_en and datetime.now(timezone.utc) > m.cierra_en.replace(tzinfo=m.cierra_en.tzinfo or timezone.utc):
+    if m.cierra_en and datetime.now(timezone.utc) > _utc(m.cierra_en):
         raise HTTPException(409, "El periodo para responder esta medición ya terminó.")
+
+
+def _guardar_respuesta(
+    db: Session, m: MedicionClima, datos: ResponderIn, *, origen: str, colaborador: Optional[Colaborador] = None,
+    es_externa: bool = False, es_prueba: bool = False,
+) -> RespuestaClima:
     r = RespuestaClima(
-        cuenta_id=m.cuenta_id, medicion_id=m.id, origen=origen,
+        cuenta_id=m.cuenta_id, medicion_id=m.id, origen=origen, es_externa=es_externa, es_prueba=es_prueba,
         # ANÓNIMA: nunca se guarda a quién pertenece (ni siquiera si el frontend lo manda).
-        colaborador_id=None if m.anonima else (colaborador.id if colaborador else None),
-        externo_nombre="" if m.anonima else datos.externo_nombre.strip()[:200],
-        externo_correo="" if m.anonima else datos.externo_correo.strip().lower()[:200],
+        colaborador_id=None if (m.anonima or es_prueba) else (colaborador.id if colaborador else None),
+        externo_nombre="" if (m.anonima or not es_externa) else datos.externo_nombre.strip()[:200],
+        externo_correo="" if (m.anonima or not es_externa) else datos.externo_correo.strip().lower()[:200],
         respuestas=_validar_respuestas(m, datos.respuestas),
+        enviado_en=_momento(m),
     )
     db.add(r)
     return r
@@ -201,46 +384,80 @@ def _guardar_respuesta(db: Session, m: MedicionClima, datos: ResponderIn, origen
 
 @router.post("/mediciones/{codigo}/responder", status_code=201)
 def responder_interno(codigo: str, datos: ResponderIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
-    """Respuesta desde el dashboard (RH captura la de un colaborador o responde la persona en sesión).
-    El participante SIEMPRE se elige del roster: `colaborador_id` es un código COL-####."""
+    """RH captura la respuesta de un colaborador INVITADO desde el tablero. El participante se elige del
+    roster (COL-####) y debe estar invitado: así se controla la participación y no hay duplicados."""
     m = _medicion(db, codigo, cuenta.id)
-    col = None
-    if datos.colaborador_id:
-        col = db.query(Colaborador).filter(
-            Colaborador.codigo == datos.colaborador_id, Colaborador.cuenta_id == cuenta.id, Colaborador.eliminado_en.is_(None)
-        ).first()
-        if not col:
-            raise HTTPException(404, "Ese colaborador no existe en el roster.")
-    elif not m.anonima:
-        raise HTTPException(400, "Esta medición es identificada: indica el colaborador (COL-####).")
-    _guardar_respuesta(db, m, datos, "colaborador", col)
-    registrar(db, u.nombre, "clima_respuesta", "clima", m.codigo, {"anonima": m.anonima, "colaborador": None if m.anonima else (col.codigo if col else None)})
+    _exigir_abierta(m)
+    if not datos.colaborador_id:
+        raise HTTPException(400, "Indica el colaborador (COL-####) que responde.")
+    col = db.query(Colaborador).filter(
+        Colaborador.codigo == datos.colaborador_id, Colaborador.cuenta_id == cuenta.id, Colaborador.eliminado_en.is_(None)
+    ).first()
+    if not col:
+        raise HTTPException(404, "Ese colaborador no existe en el roster.")
+    part = db.query(ParticipacionClima).filter(ParticipacionClima.medicion_id == m.id, ParticipacionClima.colaborador_id == col.id).first()
+    if not part:
+        raise HTTPException(409, "Ese colaborador no está invitado a esta medición: invítalo primero.")
+    if part.respondio:
+        raise HTTPException(409, "Ese colaborador ya respondió esta medición.")
+    _guardar_respuesta(db, m, datos, origen="colaborador", colaborador=col)
+    part.respondio = True
+    registrar(db, u.nombre, "clima_respuesta", "clima", m.codigo, {"anonima": m.anonima, "colaborador": None if m.anonima else col.codigo})
     db.commit()
     return {"guardada": True, "anonima": m.anonima}
 
 
+@router.post("/mediciones/{codigo}/prueba/responder", status_code=201)
+def responder_prueba(codigo: str, datos: ResponderIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Probar encuesta»: guarda una respuesta de PRUEBA (borrador o abierta). Nunca cuenta en los
+    resultados reales ni en la participación; se ve solo en los resultados de prueba."""
+    m = _medicion(db, codigo, cuenta.id)
+    if m.estado == "cerrada":
+        raise HTTPException(409, "La medición está cerrada.")
+    _guardar_respuesta(db, m, datos, origen="prueba", es_prueba=True)
+    db.commit()
+    return {"guardada": True, "prueba": True}
+
+
+@router.delete("/mediciones/{codigo}/prueba")
+def reiniciar_prueba(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Borra SOLO las respuestas de prueba (las reales jamás se tocan)."""
+    m = _medicion(db, codigo, cuenta.id)
+    n = db.query(RespuestaClima).filter(RespuestaClima.medicion_id == m.id, RespuestaClima.es_prueba.is_(True)).delete(synchronize_session=False)
+    registrar(db, u.nombre, "clima_prueba_reiniciada", "clima", m.codigo, {"borradas": n, "correo_rh": u.correo})
+    db.commit()
+    return {"borradas": n}
+
+
 @router.get("/publica/{token}")
 def ver_publica(token: str, db: Session = Depends(get_db)):
-    """Lo que ve quien abre la liga: título, aviso de anonimato y preguntas. Sin sesión."""
-    m = _por_token(db, token)
-    return medicion_clima_publica_dict(m)
+    """Lo que ve quien abre la liga (personal o externa): título, aviso de anonimato y preguntas. Sin sesión."""
+    m, part = _resolver_token(db, token)
+    return {
+        **medicion_clima_publica_dict(m),
+        "tipoLiga": "personal" if part else "externa",
+        "yaRespondio": bool(part and part.respondio),
+        # la liga externa solo sirve si la medición acepta externos
+        "aceptaRespuestas": m.estado == "abierta" and (part is not None or bool(m.permite_externos)) and not (part and part.respondio),
+    }
 
 
 @router.post("/publica/{token}/responder", status_code=201)
 def responder_publica(token: str, datos: ResponderIn = Body(...), db: Session = Depends(get_db)):
-    """Respuesta por la liga pública. Si la medición NO es anónima y la persona es del roster, puede
-    identificarse con su código COL-####; un participante externo solo deja nombre/correo (nunca se crea
-    un colaborador ni un usuario)."""
-    m = _por_token(db, token)
-    col = None
-    if datos.colaborador_id:
-        col = db.query(Colaborador).filter(
-            Colaborador.codigo == datos.colaborador_id, Colaborador.cuenta_id == m.cuenta_id, Colaborador.eliminado_en.is_(None)
-        ).first()
-    origen = "colaborador" if col else "externo"
-    if origen == "externo" and not m.permite_externos:
-        raise HTTPException(403, "Esta medición es solo para colaboradores de la empresa.")
-    _guardar_respuesta(db, m, datos, origen, col)
+    """Liga PERSONAL: responde el invitado (una sola vez) y se marca su participación; la respuesta no
+    guarda su identidad si la medición es anónima. Liga EXTERNA: solo con «permite externos»; la respuesta
+    queda marcada como externa (no suma a la participación) y nunca se crea un colaborador."""
+    m, part = _resolver_token(db, token)
+    _exigir_abierta(m)
+    if part:
+        if part.respondio:
+            raise HTTPException(409, "Ya respondiste esta encuesta. ¡Gracias!")
+        _guardar_respuesta(db, m, datos, origen="colaborador", colaborador=part.colaborador)
+        part.respondio = True
+    else:
+        if not m.permite_externos:
+            raise HTTPException(403, "Esta medición es solo para colaboradores invitados: usa la liga que te llegó.")
+        _guardar_respuesta(db, m, datos, origen="externo", es_externa=True)
     db.commit()
     return {"guardada": True, "anonima": m.anonima}
 
@@ -250,21 +467,11 @@ class InvitarIn(BaseModel):
     mensaje: str = ""                # nota opcional de RH al inicio del aviso
 
 
-@router.post("/mediciones/{codigo}/invitar")
-async def invitar(codigo: str, datos: InvitarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
-    """Manda la liga de la medición a los colaboradores elegidos (correo y/o WhatsApp, con lo que tenga
-    cada quien en el roster). Que un proveedor falle NUNCA rompe la invitación: el resultado por persona
-    se le muestra a RH. No se guarda quién fue invitado como participante: la respuesta sigue su regla de
-    anonimato."""
-    m = _medicion(db, codigo, cuenta.id)
-    if m.estado != "abierta":
-        raise HTTPException(409, "Abre la medición antes de invitar (solo una medición abierta recibe respuestas).")
-    if not datos.colaborador_ids:
-        raise HTTPException(400, "Elige al menos un colaborador.")
-    liga = liga_publica(m)
-    nota = datos.mensaje.strip()
-    resultados, no_encontrados = [], []
-    for cod in datos.colaborador_ids:
+def _invitar_colaboradores(db: Session, m: MedicionClima, codigos: List[str], cuenta: Cuenta, por: str):
+    """Crea (o reutiliza) la participación de cada colaborador ACTIVO del roster, con su liga personal.
+    Regresa (participaciones, no_encontrados)."""
+    partes, no_encontrados = [], []
+    for cod in dict.fromkeys(codigos):
         col = db.query(Colaborador).filter(
             Colaborador.codigo == cod, Colaborador.cuenta_id == cuenta.id,
             Colaborador.eliminado_en.is_(None), Colaborador.activo.is_(True),
@@ -272,34 +479,73 @@ async def invitar(codigo: str, datos: InvitarIn, db: Session = Depends(get_db), 
         if not col:
             no_encontrados.append(cod)
             continue
-        primer = (col.nombre or "").split(" ")[0]
-        texto = (
-            f"Hola {primer}, en {cuenta.nombre_visible} queremos saber cómo te sientes: contesta «{m.titulo}» en unos minutos. "
-            + (f"{nota} " if nota else "")
-            + ("Tus respuestas son ANÓNIMAS. " if m.anonima else "")
-            + f"Aquí está la liga: {liga}"
-        )
-        fila = {"colaborador": col.codigo, "nombre": col.nombre, "correo": None, "whatsapp": None}
-        if col.correo:
-            try:
-                asunto, html = plantillas_correo.html_aviso(
-                    f"Encuesta de clima: {m.titulo}", texto, cuenta.nombre_visible, [], ("Contestar la encuesta", liga),
-                )
-                fila["correo"] = await enviar_correo(col.correo, asunto, html)
-            except Exception as ex:  # noqa: BLE001
-                fila["correo"] = {"enviado": False, "proveedor": "error", "detalle": str(ex)[:200]}
-        if col.telefono:
-            try:
-                fila["whatsapp"] = await enviar_texto_sin_plantilla(col.telefono, texto)
-            except Exception as ex:  # noqa: BLE001
-                fila["whatsapp"] = {"enviado": False, "proveedor": "error", "detalle": str(ex)[:200]}
-        resultados.append(fila)
-    if not resultados:
+        part = db.query(ParticipacionClima).filter(ParticipacionClima.medicion_id == m.id, ParticipacionClima.colaborador_id == col.id).first()
+        if not part:
+            part = ParticipacionClima(
+                cuenta_id=m.cuenta_id, medicion_id=m.id, colaborador_id=col.id,
+                token=secrets.token_urlsafe(24), invitado_por=por,
+            )
+            db.add(part)
+            db.flush()
+        partes.append(part)
+    return partes, no_encontrados
+
+
+async def _avisar(m: MedicionClima, part: ParticipacionClima, cuenta: Cuenta, nota: str) -> dict:
+    """Manda la liga PERSONAL por correo y/o WhatsApp; un proveedor caído nunca rompe la invitación."""
+    col = part.colaborador
+    liga = liga_personal(part)
+    primer = (col.nombre or "").split(" ")[0]
+    texto = (
+        f"Hola {primer}, en {cuenta.nombre_visible} queremos saber cómo te sientes: contesta «{m.titulo}» en unos minutos. "
+        + (f"{nota} " if nota else "")
+        + ("Tus respuestas son ANÓNIMAS. " if m.anonima else "")
+        + f"Esta es tu liga personal: {liga}"
+    )
+    fila = {"colaborador": col.codigo, "nombre": col.nombre, "correo": None, "whatsapp": None}
+    if col.correo:
+        try:
+            asunto, html = plantillas_correo.html_aviso(
+                f"Encuesta de clima: {m.titulo}", texto, cuenta.nombre_visible, [], ("Contestar la encuesta", liga),
+            )
+            fila["correo"] = await enviar_correo(col.correo, asunto, html)
+        except Exception as ex:  # noqa: BLE001
+            fila["correo"] = {"enviado": False, "proveedor": "error", "detalle": str(ex)[:200]}
+    if col.telefono:
+        try:
+            fila["whatsapp"] = await enviar_texto_sin_plantilla(col.telefono, texto)
+        except Exception as ex:  # noqa: BLE001
+            fila["whatsapp"] = {"enviado": False, "proveedor": "error", "detalle": str(ex)[:200]}
+    return fila
+
+
+@router.post("/mediciones/{codigo}/invitar")
+async def invitar(codigo: str, datos: InvitarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Invita colaboradores a una medición ABIERTA: cada quien queda en la tabla de participación con su
+    liga personal y se le avisa por correo y/o WhatsApp. A quien ya respondió no se le vuelve a escribir;
+    a quien ya estaba invitado y no ha respondido, el aviso cuenta como recordatorio."""
+    m = _medicion(db, codigo, cuenta.id)
+    if m.estado != "abierta":
+        raise HTTPException(409, "Abre la medición antes de invitar (solo una medición abierta recibe respuestas).")
+    if not datos.colaborador_ids:
+        raise HTTPException(400, "Elige al menos un colaborador.")
+    ya_invitados = {p.colaborador_id for p in m.participaciones}
+    partes, no_encontrados = _invitar_colaboradores(db, m, datos.colaborador_ids, cuenta, u.nombre)
+    if not partes:
         raise HTTPException(404, "Ninguno de los colaboradores indicados existe o está activo.")
+    resultados = []
+    for part in partes:
+        if part.respondio:
+            resultados.append({"colaborador": part.colaborador.codigo, "nombre": part.colaborador.nombre, "yaRespondio": True})
+            continue
+        if part.colaborador_id in ya_invitados:
+            part.recordatorios_enviados = (part.recordatorios_enviados or 0) + 1
+            part.ultimo_recordatorio_en = datetime.now(timezone.utc)
+        resultados.append(await _avisar(m, part, cuenta, datos.mensaje.strip()))
     registrar(db, u.nombre, "clima_invitaciones", "clima", m.codigo,
               {"invitados": [r["colaborador"] for r in resultados], "no_encontrados": no_encontrados, "correo_rh": u.correo})
     db.commit()
-    return {"liga": liga, "invitados": resultados, "noEncontrados": no_encontrados}
+    return {"liga": liga_publica(m), "invitados": resultados, "noEncontrados": no_encontrados}
 
 
 # ------------------------------------------------------------
@@ -308,33 +554,350 @@ async def invitar(codigo: str, datos: InvitarIn, db: Session = Depends(get_db), 
 
 
 @router.get("/mediciones/{codigo}/resultados")
-def resultados(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
-    """Agregados por pregunta. En una medición anónima NUNCA se regresa quién respondió; el detalle de
-    las abiertas viene sin autor."""
+def resultados(codigo: str, prueba: bool = False, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Indicadores en tiempo real (`services.clima_resultados`, única fuente): participación sobre
+    invitados, % favorable por pregunta, dimensiones e índice de clima. `prueba=true` = SOLO respuestas de
+    prueba (vista «Probar encuesta»); por defecto, SOLO reales internas. En una medición anónima NUNCA se
+    regresa quién respondió; las abiertas vienen sin autor."""
     m = _medicion(db, codigo, cuenta.id)
-    respuestas = list(m.respuestas)
+    fuente = "prueba" if prueba else "reales"
+    calculo = clima_resultados.calcular(m, fuente)
+    respuestas = clima_resultados.respuestas_de(m, fuente)
     total_roster = db.query(Colaborador).filter(
         Colaborador.cuenta_id == cuenta.id, Colaborador.eliminado_en.is_(None), Colaborador.activo.is_(True)
     ).count()
+    # vista plana por pregunta (compatibilidad del tablero anterior); lo nuevo vive en `calculo`
     por_pregunta = []
-    for p in m.preguntas or []:
-        valores = [r.respuestas.get(p["id"]) for r in respuestas if r.respuestas and r.respuestas.get(p["id"]) not in (None, "")]
-        fila = {"id": p["id"], "texto": p["texto"], "tipo": p["tipo"], "respuestas": len(valores)}
-        if p["tipo"] == "escala":
-            numeros = [float(v) for v in valores if str(v).replace(".", "", 1).isdigit()]
-            fila["promedio"] = round(sum(numeros) / len(numeros), 2) if numeros else None
-            fila["escalaMax"] = p.get("escala_max", 5)
-            fila["distribucion"] = {str(n): numeros.count(n) for n in sorted(set(numeros))}
-        elif p["tipo"] == "opcion":
-            fila["distribucion"] = {o: [str(v) for v in valores].count(o) for o in p.get("opciones", [])}
-        else:
-            fila["textos"] = [str(v)[:500] for v in valores]  # sin autor, siempre
-        por_pregunta.append(fila)
+    for d in calculo["dimensiones"]:
+        for f in d["preguntas"]:
+            fila = {k: v for k, v in f.items() if k != "comentarios"}
+            fila["dimension"] = d["nombre"]
+            if f["tipo"] == "escala":
+                fila["distribucion"] = {k: v for k, v in f["distribucion"].items() if v}
+            if f["tipo"] == "abierta":
+                fila["textos"] = f["comentarios"]
+            por_pregunta.append(fila)
+    part = calculo["participacion"]
     return {
         "medicion": medicion_clima_dict(m, liga=liga_publica(m)),
+        "fuente": fuente,
         "totalRespuestas": len(respuestas),
-        "colaboradoresActivos": total_roster,
-        "participacion": round(len(respuestas) / total_roster * 100) if total_roster else None,
-        "externos": sum(1 for r in respuestas if r.origen == "externo"),
+        "colaboradoresActivos": total_roster,  # compatibilidad del tablero actual (Fase 4 lo reemplaza)
+        "invitados": part["invitados"],
+        "respondieron": part["respondieron"],
+        "participacion": None if part["porcentaje"] is None else round(part["porcentaje"]),
+        "externos": calculo["externas"],
+        "pruebas": calculo["pruebas"],
         "porPregunta": por_pregunta,
+        "calculo": calculo,
+        "analisis": (m.analisis or [None])[-1] if fuente == "reales" else None,  # último análisis con IA (a demanda)
     }
+
+
+MAX_ANALISIS_GUARDADOS = 20
+
+
+@router.post("/mediciones/{codigo}/analizar")
+def analizar(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Analizar resultados con Red Human»: SOLO cuando RH pulsa el botón (nunca por cada respuesta). La IA
+    recibe las métricas actuales del motor (sin identidades) y regresa estado, fortalezas, focos de
+    atención, puntos por validar y acciones sugeridas. Queda en el historial de la medición con la fecha
+    y el número de respuestas consideradas; con la medición abierta es un análisis PRELIMINAR."""
+    m = _medicion(db, codigo, cuenta.id)
+    calculo = clima_resultados.calcular(m, "reales")
+    if not calculo["respuestasConsideradas"]:
+        raise HTTPException(409, "Aún no hay respuestas reales para analizar.")
+    metricas = {k: calculo[k] for k in ("respuestasConsideradas", "participacion", "indice", "dimensiones")}
+    resultado, con_ia = ia.analisis_clima(metricas, m.titulo, cuenta.nombre_visible)
+    analisis = {
+        "fecha": datetime.now(timezone.utc).isoformat(),
+        "respuestasConsideradas": calculo["respuestasConsideradas"],
+        "estadoMedicion": m.estado,
+        "alcance": "final" if m.estado == "cerrada" else "preliminar",
+        "indice": calculo["indice"]["valor"],
+        "estado": resultado.estado,
+        "resumen": resultado.resumen,
+        "fortalezas": resultado.fortalezas,
+        "focosAtencion": resultado.focos_atencion,
+        "puntosPorValidar": resultado.puntos_por_validar,
+        "accionesSugeridas": resultado.acciones_sugeridas,
+        "ia": con_ia,
+        "solicitadoPor": u.nombre,
+    }
+    m.analisis = (list(m.analisis or []) + [analisis])[-MAX_ANALISIS_GUARDADOS:]
+    registrar(db, u.nombre, "clima_analisis", "clima", m.codigo,
+              {"respuestas": analisis["respuestasConsideradas"], "ia": con_ia, "alcance": analisis["alcance"], "correo_rh": u.correo})
+    db.commit()
+    return analisis
+
+
+# ------------------------------------------------------------
+# Envío y apertura (modal «Enviar encuesta»)
+# ------------------------------------------------------------
+
+
+def _roster_activo(db: Session, cuenta_id: int):
+    return db.query(Colaborador).filter(
+        Colaborador.cuenta_id == cuenta_id, Colaborador.eliminado_en.is_(None), Colaborador.activo.is_(True)
+    )
+
+
+def _filtrar_roster(db: Session, cuenta_id: int, areas: List[str], sedes: List[str]) -> List[Colaborador]:
+    """Sede = `Colaborador.ubicacion` del roster maestro; área = `Colaborador.area`. Vacío = sin filtro."""
+    areas_n = {a.strip().lower() for a in areas if a and a.strip()}
+    sedes_n = {s.strip().lower() for s in sedes if s and s.strip()}
+    salida = []
+    for c in _roster_activo(db, cuenta_id).order_by(Colaborador.nombre).all():
+        if areas_n and (c.area or "").strip().lower() not in areas_n:
+            continue
+        if sedes_n and (c.ubicacion or "").strip().lower() not in sedes_n:
+            continue
+        salida.append(c)
+    return salida
+
+
+@router.get("/destinatarios")
+def destinatarios(areas: str = "", sedes: str = "", db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Opciones del modal de envío: áreas y sedes REALES del roster activo y los colaboradores que cumplen
+    los filtros (`areas`/`sedes` separados por coma)."""
+    todos = _roster_activo(db, cuenta.id).all()
+    elegidos = _filtrar_roster(db, cuenta.id, areas.split(","), sedes.split(","))
+    return {
+        "areas": sorted({(c.area or "").strip() for c in todos if (c.area or "").strip()}),
+        "sedes": sorted({(c.ubicacion or "").strip() for c in todos if (c.ubicacion or "").strip()}),
+        "colaboradores": [
+            {"id": c.codigo, "nombre": c.nombre, "area": c.area or "", "sede": c.ubicacion or "", "puesto": c.puesto or "",
+             "tieneCorreo": bool(c.correo), "tieneWhatsapp": bool(c.telefono)}
+            for c in elegidos
+        ],
+    }
+
+
+class AbrirIn(BaseModel):
+    colaborador_ids: List[str] = []   # selección explícita (COL-####); si viene vacía se usan los filtros
+    areas: List[str] = []
+    sedes: List[str] = []
+    cierra_en: str                    # obligatorio (editable después mientras esté abierta)
+    anonima: bool = True              # modalidad final: queda fija al abrir
+    permite_externos: Optional[bool] = None
+    mensaje: str = ""
+
+
+@router.post("/mediciones/{codigo}/abrir")
+async def abrir(codigo: str, datos: AbrirIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Modal «Enviar encuesta»: fija modalidad (anónima/identificada) y fecha de cierre, abre la medición,
+    registra a los destinatarios en la tabla de participación y les manda su liga personal. Las respuestas
+    de prueba se conservan aparte (nunca se mezclan)."""
+    m = _medicion(db, codigo, cuenta.id)
+    if m.estado != "borrador":
+        raise HTTPException(409, "Solo un borrador se puede enviar (flujo: borrador → abierta → cerrada).")
+    if not m.preguntas:
+        raise HTTPException(400, "La medición no tiene preguntas.")
+    cierre = _fecha_iso(datos.cierra_en)
+    if cierre is None or cierre <= datetime.now(timezone.utc):
+        raise HTTPException(400, "Elige una fecha y hora de cierre en el futuro.")
+    if datos.colaborador_ids:
+        codigos = datos.colaborador_ids
+    else:
+        codigos = [c.codigo for c in _filtrar_roster(db, cuenta.id, datos.areas, datos.sedes)]
+    if not codigos:
+        raise HTTPException(400, "No hay destinatarios: elige colaboradores o ajusta los filtros de área y sede.")
+    m.anonima = bool(datos.anonima)
+    if datos.permite_externos is not None:
+        m.permite_externos = bool(datos.permite_externos)
+    m.cierra_en = cierre
+    m.filtros_envio = {"areas": [a for a in datos.areas if a], "sedes": [s for s in datos.sedes if s], "seleccion": bool(datos.colaborador_ids)}
+    m.estado = "abierta"
+    m.abierta_en = datetime.now(timezone.utc)
+    partes, no_encontrados = _invitar_colaboradores(db, m, codigos, cuenta, u.nombre)
+    if not partes:
+        raise HTTPException(404, "Ninguno de los colaboradores indicados existe o está activo.")
+    envios = [await _avisar(m, p, cuenta, datos.mensaje.strip()) for p in partes]
+    registrar(db, u.nombre, "medicion_clima_abierta", "clima", m.codigo, {
+        "invitados": len(partes), "no_encontrados": no_encontrados, "anonima": m.anonima,
+        "cierra_en": cierre.isoformat(), "filtros": m.filtros_envio, "correo_rh": u.correo,
+    })
+    db.commit()
+    return {"medicion": medicion_clima_dict(m, liga=liga_publica(m), detalle=True), "invitados": envios, "noEncontrados": no_encontrados}
+
+
+@router.post("/mediciones/{codigo}/recordatorio")
+async def recordatorio(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Recuerda la encuesta SOLO a los invitados que aún no responden (la tabla de participación lo sabe
+    sin tocar las respuestas)."""
+    m = _medicion(db, codigo, cuenta.id)
+    if m.estado != "abierta":
+        raise HTTPException(409, "Solo una medición abierta admite recordatorios.")
+    pendientes = [p for p in m.participaciones if not p.respondio]
+    if not pendientes:
+        raise HTTPException(409, "Todos los invitados ya respondieron.")
+    envios = []
+    for p in pendientes:
+        envios.append(await _avisar(m, p, cuenta, "Te recordamos que tu opinión es importante."))
+        p.recordatorios_enviados = (p.recordatorios_enviados or 0) + 1
+        p.ultimo_recordatorio_en = datetime.now(timezone.utc)
+    registrar(db, u.nombre, "clima_recordatorio", "clima", m.codigo, {"pendientes": len(pendientes), "correo_rh": u.correo})
+    db.commit()
+    return {"recordados": len(pendientes), "envios": envios}
+
+
+# ------------------------------------------------------------
+# Plantillas de clima (Configuración)
+# ------------------------------------------------------------
+
+
+class PlantillaClimaIn(BaseModel):
+    nombre: str
+    descripcion: str = ""
+    dimensiones: List[str] = []
+    preguntas: List[dict] = []
+
+
+def _plantilla(db: Session, pid: int, cuenta_id: int) -> PlantillaClima:
+    p = db.query(PlantillaClima).filter(PlantillaClima.id == pid, PlantillaClima.cuenta_id == cuenta_id).first()
+    if not p:
+        raise HTTPException(404, "Plantilla de clima no encontrada.")
+    return p
+
+
+def _crear_plantilla_clima(db: Session, cuenta_id: int, datos: PlantillaClimaIn, por: str) -> PlantillaClima:
+    if not datos.nombre.strip():
+        raise HTTPException(400, "El nombre de la plantilla es obligatorio.")
+    preguntas, dimensiones = normalizar_cuestionario(datos.preguntas, datos.dimensiones)
+    if not preguntas:
+        raise HTTPException(400, "La plantilla necesita al menos una pregunta.")
+    p = PlantillaClima(cuenta_id=cuenta_id, nombre=datos.nombre.strip(), descripcion=datos.descripcion.strip(),
+                       dimensiones=dimensiones, preguntas=preguntas, creado_por=por)
+    db.add(p)
+    db.flush()
+    return p
+
+
+@router.get("/plantillas")
+def listar_plantillas(incluir_inactivas: bool = False, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    q = db.query(PlantillaClima).filter(PlantillaClima.cuenta_id == cuenta.id).order_by(PlantillaClima.nombre)
+    if not incluir_inactivas:
+        q = q.filter(PlantillaClima.activa.is_(True))
+    return [plantilla_clima_dict(p) for p in q.all()]
+
+
+@router.get("/plantillas/formato")
+def formato_plantilla(_: Usuario = Depends(usuario_actual)):
+    """CSV de ejemplo para «Subir plantilla»: una fila por pregunta."""
+    return masivo.csv_plantilla(
+        "plantilla_clima.csv", ["dimension", "pregunta", "tipo", "opciones", "orden"],
+        [["Liderazgo", "Mi jefe o jefa me da retroalimentación útil", "escala", "", "1"],
+         ["Bienestar", "¿Qué valoras más de trabajar aquí?", "opcion", "El equipo | El aprendizaje | Las prestaciones", "2"],
+         ["Comentarios", "¿Qué cambiarías para trabajar mejor?", "abierta", "", "3"]],
+    )
+
+
+@router.post("/plantillas", status_code=201)
+def crear_plantilla(datos: PlantillaClimaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    p = _crear_plantilla_clima(db, cuenta.id, datos, u.nombre)
+    registrar(db, u.nombre, "plantilla_clima_creada", "clima", str(p.id), {"nombre": p.nombre, "correo_rh": u.correo})
+    db.commit()
+    return plantilla_clima_dict(p)
+
+
+TIPOS_ARCHIVO = {"escala": "escala", "escala 1-5": "escala", "likert": "escala", "opcion": "opcion", "opción": "opcion",
+                 "opcion multiple": "opcion", "opción múltiple": "opcion", "multiple": "opcion", "abierta": "abierta", "texto": "abierta"}
+
+
+@router.post("/plantillas/importar", status_code=201)
+async def importar_plantilla(
+    archivo: UploadFile = File(...), nombre: str = Form(""), descripcion: str = Form(""),
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """«Subir plantilla»: CSV o Excel con columnas dimension, pregunta, tipo (escala | opcion | abierta),
+    opciones («a | b | c») y orden. Crea UNA plantilla con todas las filas; si alguna fila está mal no se
+    guarda nada y se dice cuál."""
+    filas = await masivo.leer_tabla(archivo)
+    preguntas, errores = [], []
+    for n, f in filas:
+        texto = f.get("pregunta") or f.get("texto") or ""
+        tipo = TIPOS_ARCHIVO.get((f.get("tipo") or "escala").strip().lower())
+        if not texto.strip():
+            errores.append({"fila": n, "error": "Falta la pregunta."})
+            continue
+        if not tipo:
+            errores.append({"fila": n, "error": f"Tipo «{f.get('tipo')}» no reconocido (usa escala, opcion o abierta)."})
+            continue
+        preguntas.append({"texto": texto, "tipo": tipo, "dimension": f.get("dimension") or "",
+                          "opciones": masivo.lista(f.get("opciones") or ""), "orden": f.get("orden") or n})
+    if errores:
+        detalle = "; ".join(f"fila {e['fila']}: {e['error']}" for e in errores[:10])
+        raise HTTPException(422, f"No se guardó nada. Corrige y vuelve a subir el archivo — {detalle}")
+    base = nombre.strip() or (archivo.filename or "Plantilla de clima").rsplit(".", 1)[0]
+    p = _crear_plantilla_clima(db, cuenta.id, PlantillaClimaIn(nombre=base, descripcion=descripcion, preguntas=preguntas), u.nombre)
+    registrar(db, u.nombre, "plantilla_clima_importada", "clima", str(p.id), {"nombre": p.nombre, "preguntas": len(p.preguntas), "correo_rh": u.correo})
+    db.commit()
+    return plantilla_clima_dict(p)
+
+
+@router.get("/plantillas/{pid}")
+def ver_plantilla(pid: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    return plantilla_clima_dict(_plantilla(db, pid, cuenta.id), detalle=True)
+
+
+class EditarPlantillaClimaIn(BaseModel):
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+    dimensiones: Optional[List[str]] = None
+    preguntas: Optional[List[dict]] = None
+    activa: Optional[bool] = None
+
+
+@router.patch("/plantillas/{pid}")
+def editar_plantilla(pid: int, datos: EditarPlantillaClimaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Editar la plantilla NO toca las mediciones que ya se crearon con ella (se copiaron al usarla)."""
+    p = _plantilla(db, pid, cuenta.id)
+    if datos.nombre is not None:
+        if not datos.nombre.strip():
+            raise HTTPException(400, "El nombre de la plantilla es obligatorio.")
+        p.nombre = datos.nombre.strip()
+    if datos.descripcion is not None:
+        p.descripcion = datos.descripcion.strip()
+    if datos.preguntas is not None or datos.dimensiones is not None:
+        preguntas, dimensiones = normalizar_cuestionario(
+            datos.preguntas if datos.preguntas is not None else list(p.preguntas or []),
+            datos.dimensiones if datos.dimensiones is not None else list(p.dimensiones or []),
+        )
+        if not preguntas:
+            raise HTTPException(400, "La plantilla necesita al menos una pregunta.")
+        p.preguntas, p.dimensiones = preguntas, dimensiones
+    if datos.activa is not None:
+        p.activa = bool(datos.activa)
+    registrar(db, u.nombre, "plantilla_clima_editada", "clima", str(p.id), {"nombre": p.nombre, "correo_rh": u.correo})
+    db.commit()
+    return plantilla_clima_dict(p, detalle=True)
+
+
+@router.delete("/plantillas/{pid}")
+def eliminar_plantilla(pid: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Baja lógica (se desactiva): las mediciones creadas con ella no se ven afectadas."""
+    p = _plantilla(db, pid, cuenta.id)
+    p.activa = False
+    registrar(db, u.nombre, "plantilla_clima_desactivada", "clima", str(p.id), {"nombre": p.nombre, "correo_rh": u.correo})
+    db.commit()
+    return plantilla_clima_dict(p)
+
+
+@router.post("/plantillas/{pid}/usar", status_code=201)
+def usar_plantilla(pid: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Usar plantilla»: crea un BORRADOR con una COPIA de sus dimensiones y preguntas (mismos tipos y
+    orden). Editar el borrador nunca altera la plantilla original."""
+    p = _plantilla(db, pid, cuenta.id)
+    if not p.activa:
+        raise HTTPException(409, "Esa plantilla está desactivada.")
+    m = MedicionClima(
+        codigo="TMP", cuenta_id=cuenta.id, titulo=p.nombre, descripcion=p.descripcion or "",
+        preguntas=copy.deepcopy(list(p.preguntas or [])), dimensiones=list(p.dimensiones or []),
+        estado="borrador", token=secrets.token_urlsafe(24), creado_por=u.nombre, plantilla_id=p.id,
+    )
+    db.add(m)
+    db.flush()
+    m.codigo = f"CLI-{900 + m.id}"
+    registrar(db, u.nombre, "medicion_clima_creada", "clima", m.codigo, {"titulo": m.titulo, "plantilla": p.id, "correo_rh": u.correo})
+    db.commit()
+    return medicion_clima_dict(m, liga=liga_publica(m), detalle=True)

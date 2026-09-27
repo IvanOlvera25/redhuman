@@ -1530,7 +1530,10 @@ class IntegracionTeams(Base):
 # NO fatal del arranque: si el motor de producción las rechaza, el resto de la plataforma arranca
 # igual y estos módulos responden 503 con el motivo.
 
-TABLAS_MODULOS_RH = ("ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima")
+TABLAS_MODULOS_RH = (
+    "ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima",
+    "participaciones_clima", "plantillas_clima",  # Clima v2 (2026-09-27)
+)
 
 # --- Desempeño ---
 ESTADOS_CICLO_DESEMPENO = ("borrador", "en_curso", "cerrado")
@@ -1589,8 +1592,13 @@ class EvaluacionDesempeno(Base):
 
 
 # --- Clima ---
+# Clima v2 (2026-09-27): flujo ESTRICTO de ida borrador → abierta → cerrada (nunca se reabre; mientras
+# está abierta solo se puede mover la fecha de cierre). En la interfaz: Borrador / Abierta / Cerrada.
 ESTADOS_MEDICION_CLIMA = ("borrador", "abierta", "cerrada")
-TIPOS_PREGUNTA_CLIMA = ("escala", "opcion", "abierta")
+TRANSICIONES_CLIMA = {"borrador": ("abierta",), "abierta": ("cerrada",), "cerrada": ()}
+TIPOS_PREGUNTA_CLIMA = ("escala", "opcion", "abierta")  # escala = 1 a 5 (favorable = 4 o 5)
+ESCALA_CLIMA = 5
+DIMENSION_CLIMA_DEFAULT = "General"
 
 
 class MedicionClima(Base):
@@ -1604,17 +1612,27 @@ class MedicionClima(Base):
     cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
     titulo: Mapped[str] = mapped_column(String(200))
     descripcion: Mapped[str] = mapped_column(Text, default="")
-    preguntas: Mapped[list] = mapped_column(JSON, default=list)  # [{id, texto, tipo, opciones, escala_max}]
+    # [{id, texto, tipo, dimension, orden, opciones, escala_max}] ordenadas por `orden` (Clima v2)
+    preguntas: Mapped[list] = mapped_column(JSON, default=list)
+    dimensiones: Mapped[list] = mapped_column(JSON, default=list)  # nombres en orden de presentación
     anonima: Mapped[bool] = mapped_column(Boolean, default=True)
     estado: Mapped[str] = mapped_column(String(20), default="borrador")  # ver ESTADOS_MEDICION_CLIMA
     token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # liga pública /clima/{token}
     permite_externos: Mapped[bool] = mapped_column(Boolean, default=False)
     abierta_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     cierra_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    cerrada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    cerrada_por: Mapped[str] = mapped_column(String(150), default="")  # nombre de RH o «sistema» (cron)
+    plantilla_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # trazabilidad, sin FK
+    # Destinatarios elegidos al abrir: {areas: [...], sedes: [...]} (solo para mostrar qué filtro se usó).
+    filtros_envio: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Análisis con IA a demanda (botón «Analizar resultados con Red Human»), el más reciente al final.
+    analisis: Mapped[list] = mapped_column(JSON, default=list)
     creado_por: Mapped[str] = mapped_column(String(150), default="")
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
     respuestas: Mapped[List["RespuestaClima"]] = relationship(back_populates="medicion", cascade="all, delete-orphan")
+    participaciones: Mapped[List["ParticipacionClima"]] = relationship(back_populates="medicion", cascade="all, delete-orphan")
 
 
 class RespuestaClima(Base):
@@ -1631,11 +1649,61 @@ class RespuestaClima(Base):
     externo_nombre: Mapped[str] = mapped_column(String(200), default="")
     externo_correo: Mapped[str] = mapped_column(String(200), default="")
     origen: Mapped[str] = mapped_column(String(20), default="colaborador")  # colaborador | externo
+    # Clima v2: una respuesta de PRUEBA («Probar encuesta») nunca se mezcla con las reales; una EXTERNA
+    # (liga compartida) se reporta aparte y no suma a la participación.
+    es_prueba: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    es_externa: Mapped[bool] = mapped_column(Boolean, default=False)
     respuestas: Mapped[dict] = mapped_column(JSON, default=dict)  # {pregunta_id: valor}
+    # En mediciones ANÓNIMAS solo se guarda el DÍA (00:00 UTC): con la hora exacta se podría cruzar
+    # contra la participación. Identificadas: hora exacta.
     enviado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
     medicion: Mapped["MedicionClima"] = relationship(back_populates="respuestas")
     colaborador: Mapped[Optional["Colaborador"]] = relationship()
+
+
+class ParticipacionClima(Base):
+    """Control de participación de una medición (Clima v2), SEPARADO de las respuestas: quién fue invitado,
+    su liga personal y si ya respondió (para recordatorios y para no aceptar duplicados).
+
+    Anonimato estricto: no hay ninguna llave hacia `respuestas_clima` y NO se guarda cuándo respondió
+    (solo `respondio`). La fila nace al invitar, así que su orden de inserción tampoco delata el orden de
+    las respuestas. Solo los invitados cuentan para la participación."""
+
+    __tablename__ = "participaciones_clima"
+    __table_args__ = (UniqueConstraint("medicion_id", "colaborador_id", name="uq_participacion_clima"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    medicion_id: Mapped[int] = mapped_column(ForeignKey("mediciones_clima.id"), index=True)
+    colaborador_id: Mapped[int] = mapped_column(ForeignKey("colaboradores.id"), index=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # liga personal /clima/{token}
+    respondio: Mapped[bool] = mapped_column(Boolean, default=False)
+    invitado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    invitado_por: Mapped[str] = mapped_column(String(150), default="")
+    recordatorios_enviados: Mapped[int] = mapped_column(Integer, default=0)
+    ultimo_recordatorio_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    medicion: Mapped["MedicionClima"] = relationship(back_populates="participaciones")
+    colaborador: Mapped["Colaborador"] = relationship()
+
+
+class PlantillaClima(Base):
+    """Plantilla reutilizable de encuesta de clima (Configuración → Plantillas de clima). Usarla COPIA sus
+    dimensiones y preguntas a la medición nueva: editar la medición nunca altera la plantilla."""
+
+    __tablename__ = "plantillas_clima"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    nombre: Mapped[str] = mapped_column(String(200))
+    descripcion: Mapped[str] = mapped_column(Text, default="")
+    dimensiones: Mapped[list] = mapped_column(JSON, default=list)
+    preguntas: Mapped[list] = mapped_column(JSON, default=list)  # mismo formato que MedicionClima.preguntas
+    activa: Mapped[bool] = mapped_column(Boolean, default=True)  # «eliminar» = desactivar
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
 
 
 def puede_ver_conocimiento(doc: "DocumentoConocimiento", colaborador: Optional["Colaborador"]) -> bool:
