@@ -930,6 +930,23 @@ def medicion_clima_dict(m, liga: str = "", detalle: bool = False) -> dict:
     return salida
 
 
+def plantilla_clima_dict(p, detalle: bool = False) -> dict:
+    salida = {
+        "id": p.id,
+        "nombre": p.nombre,
+        "descripcion": p.descripcion or "",
+        "dimensiones": list(p.dimensiones or []),
+        "preguntas": len(p.preguntas or []),
+        "tipos": sorted({q.get("tipo") for q in (p.preguntas or [])}),
+        "activa": bool(p.activa),
+        "creadoPor": p.creado_por or "",
+        "actualizada": iso(p.actualizada_en),
+    }
+    if detalle:
+        salida["cuestionario"] = list(p.preguntas or [])
+    return salida
+
+
 def medicion_clima_publica_dict(m) -> dict:
     """Lo que ve quien abre la liga pública: nada de resultados ni de quién respondió."""
     return {

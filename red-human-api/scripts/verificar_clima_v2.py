@@ -154,4 +154,74 @@ with TestClient(app) as client:
           "cada análisis queda en el historial; resultados muestra el más reciente")
     check("COL-" not in str(med.analisis) and "Persona" not in str(med.analisis), "el análisis no contiene identidades")
 
+    print("\n--- Fase 4 · Envío, recordatorios, plantillas y cierre automático ---")
+    d = client.get("/clima/destinatarios").json()
+    check(d["areas"] == ["Operaciones", "Ventas"] and d["sedes"] == ["CDMX", "Puebla"] and len(d["colaboradores"]) == 4,
+          "el modal recibe las áreas y sedes REALES del roster")
+    d = client.get("/clima/destinatarios?areas=Ventas&sedes=CDMX").json()
+    check([c["id"] for c in d["colaboradores"]] == ["COL-1"], "filtro por área y sede")
+    r = client.post("/clima/mediciones", json={"titulo": "Envío", "preguntas": [{"texto": "Me siento bien", "tipo": "escala"}]})
+    ENV = r.json()["id"]
+    check(client.post(f"/clima/mediciones/{ENV}/abrir", json={"areas": ["Ventas"], "cierra_en": "2000-01-01T00:00"}).status_code == 400,
+          "no se abre con fecha de cierre en el pasado")
+    r = client.post(f"/clima/mediciones/{ENV}/abrir", json={"areas": ["Ventas"], "cierra_en": "2099-06-30T17:00", "anonima": False})
+    check(r.status_code == 200 and r.json()["medicion"]["estado"] == "abierta" and not r.json()["medicion"]["anonima"]
+          and len(r.json()["invitados"]) == 2, "«Enviar»: abre con modalidad Identificada, cierre y los 2 de Ventas invitados")
+    check(client.post(f"/clima/mediciones/{ENV}/abrir", json={"cierra_en": "2099-06-30T17:00"}).status_code == 409, "solo un borrador se envía")
+    check(client.patch(f"/clima/mediciones/{ENV}", json={"cierra_en": "2099-07-15T17:00"}).json()["cierraEn"].startswith("2099-07-15"),
+          "abierta: la fecha de cierre se puede ampliar")
+    check(client.patch(f"/clima/mediciones/{ENV}", json={"cierra_en": "2000-01-01T00:00"}).status_code == 400, "…pero no hacia el pasado")
+    db.expire_all()
+    env = db.query(MedicionClima).filter_by(codigo=ENV).one()
+    client.post(f"/clima/publica/{env.participaciones[0].token}/responder", json={"respuestas": {"p1": 5}})
+    db.expire_all()
+    env = db.query(MedicionClima).filter_by(codigo=ENV).one()
+    guardada = env.respuestas[0]
+    check(guardada.colaborador_id is not None, "identificada: la respuesta sí queda ligada al colaborador (lo sabía al responder)")
+    r = client.post(f"/clima/mediciones/{ENV}/recordatorio").json()
+    check(r["recordados"] == 1, "el recordatorio va SOLO a quien no ha respondido")
+    client.post(f"/clima/publica/{env.participaciones[1].token}/responder", json={"respuestas": {"p1": 4}})
+    check(client.post(f"/clima/mediciones/{ENV}/recordatorio").status_code == 409, "si todos respondieron no hay a quién recordar")
+
+    base = {"nombre": "Clima base", "dimensiones": ["Liderazgo", "Bienestar"], "preguntas": [
+        {"texto": "Mi jefe me escucha", "tipo": "escala", "dimension": "Liderazgo", "orden": 2},
+        {"texto": "¿Qué valoras más?", "tipo": "opcion", "dimension": "Bienestar", "opciones": ["Equipo", "Horario"], "orden": 1},
+    ]}
+    r = client.post("/clima/plantillas", json=base)
+    PL = r.json()["id"]
+    check(r.status_code == 201 and r.json()["tipos"] == ["escala", "opcion"], "crear plantilla de clima")
+    orig = client.get(f"/clima/plantillas/{PL}").json()["cuestionario"]
+    check([q["texto"] for q in orig] == ["¿Qué valoras más?", "Mi jefe me escucha"], "la plantilla respeta el orden numérico")
+    r = client.post(f"/clima/plantillas/{PL}/usar")
+    USO = r.json()["id"]
+    check(r.status_code == 201 and r.json()["estado"] == "borrador" and r.json()["cuestionario"] == orig and r.json()["dimensiones"] == ["Liderazgo", "Bienestar"],
+          "«Usar plantilla»: borrador con copia exacta de dimensiones, tipos y orden")
+    client.patch(f"/clima/mediciones/{USO}", json={"preguntas": [{"texto": "Otra cosa", "tipo": "abierta"}]})
+    check(client.get(f"/clima/plantillas/{PL}").json()["cuestionario"] == orig, "editar el borrador NO altera la plantilla original")
+    client.patch(f"/clima/plantillas/{PL}", json={"nombre": "Clima base 2027"})
+    check(client.get(f"/clima/mediciones/{USO}").json()["cuestionario"][0]["texto"] == "Otra cosa", "editar la plantilla NO altera las mediciones ya creadas")
+    csv = "dimension,pregunta,tipo,opciones,orden\nLiderazgo,Mi jefe reconoce mi trabajo,escala,,1\nBienestar,¿Te gusta tu horario?,opción múltiple,Sí | No | A veces,2\nComentarios,¿Qué cambiarías?,abierta,,3\n"
+    r = client.post("/clima/plantillas/importar", files={"archivo": ("pulso.csv", csv.encode("utf-8"), "text/csv")})
+    check(r.status_code == 201 and r.json()["nombre"] == "pulso" and r.json()["preguntas"] == 3 and r.json()["dimensiones"] == ["Liderazgo", "Bienestar", "Comentarios"],
+          "«Subir plantilla» desde CSV: dimensiones, tipos y orden")
+    antes = len(client.get("/clima/plantillas").json())
+    r = client.post("/clima/plantillas/importar", files={"archivo": ("mala.csv", "pregunta,tipo\nHola,raro\n".encode(), "text/csv")})
+    check(r.status_code == 422 and len(client.get("/clima/plantillas").json()) == antes, "un archivo con filas malas no guarda nada y dice qué fila falla")
+    check(client.get("/clima/plantillas/formato").status_code == 200, "CSV de formato descargable")
+    client.delete(f"/clima/plantillas/{PL}")
+    check(all(p["id"] != PL for p in client.get("/clima/plantillas").json()) and client.post(f"/clima/plantillas/{PL}/usar").status_code == 409,
+          "eliminar = desactivar: ya no se lista ni se usa")
+
+    from app.services.clima_cierre import cerrar_vencidas  # noqa: E402
+    from datetime import datetime, timedelta, timezone  # noqa: E402
+
+    env = db.query(MedicionClima).filter_by(codigo=ENV).one()
+    env.cierra_en = datetime.now(timezone.utc) - timedelta(minutes=1)
+    db.commit()
+    check(cerrar_vencidas(db) == 1, "el job de cierre encuentra la medición vencida")
+    db.expire_all()
+    env = db.query(MedicionClima).filter_by(codigo=ENV).one()
+    check(env.estado == "cerrada" and env.cerrada_por == "sistema", "Abierta → Cerrada automáticamente al llegar la fecha de cierre")
+    check(cerrar_vencidas(db) == 0, "el job es idempotente")
+
 print(f"\n🎉 Clima v2 verificado: {OK} comprobaciones OK.")
