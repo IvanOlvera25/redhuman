@@ -926,7 +926,7 @@ TOOLS_ESCRITURA: Dict[str, dict] = {
             "description": "Publica una vacante en una o más plataformas (debe tener contenido generado).",
             "parameters": {"type": "object", "properties": {
                 "codigo": _p("string", "Código de la vacante"),
-                "plataformas": {"type": "array", "items": {"type": "string"}, "description": "WhatsApp | OCC | LinkedIn | Portal"},
+                "plataformas": {"type": "array", "items": {"type": "string"}, "description": "Portal | WhatsApp | Google Empleos | Jooble | Talent.com"},
             }, "required": ["codigo"], "additionalProperties": False},
         },
     },

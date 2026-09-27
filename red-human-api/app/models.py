@@ -22,7 +22,12 @@ def slugificar(texto: str) -> str:
 
 
 # Plataformas de publicación soportadas por el distribuidor (módulo 3.5).
-PLATAFORMAS = ["WhatsApp", "OCC", "LinkedIn", "Portal"]
+# Canales de publicación que RH elige al crear/publicar una vacante (2026-09-26). OCC y LinkedIn salieron
+# del catálogo: nunca tuvieron integración (sus textos generados se siguen copiando a mano desde
+# `Vacante.publicaciones`). Google Empleos, Jooble y Talent.com por ahora solo se REGISTRAN; su
+# integración (feeds XML / JobPosting) está en docs/arquitectura_bolsas_empleo.md. Valores viejos ya
+# guardados en `Vacante.plataformas` se conservan tal cual (ver routers.vacantes._unir_plataformas).
+PLATAFORMAS = ["Portal", "WhatsApp", "Google Empleos", "Jooble", "Talent.com"]
 
 # Kanban de Candidato.etapa — flujo confirmado con el cliente (documento + audio, 2026-08-29):
 # Prefiltro -> Entrevista IA -> Evaluación -> Entrevista Humana -> Contratación -> Onboarding.

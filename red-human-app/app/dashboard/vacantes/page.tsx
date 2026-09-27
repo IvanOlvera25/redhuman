@@ -87,12 +87,24 @@ const estadoTone: Record<Vacante["estado"], "good" | "neutral" | "warn" | "bad">
 
 const filtros = ["Todas", "Publicada", "Borrador", "En revisión"] as const;
 
-/** Plataformas del distribuidor: cada una tiene su propio copy y su propia page. */
+/** Canales de publicación que RH elige (rejilla «Publicación · Canales»). `api` debe coincidir EXACTO
+ * con `models.PLATAFORMAS` del backend (2026-09-26). Google Empleos, Jooble y Talent.com por ahora
+ * solo se registran; su integración está en docs/arquitectura_bolsas_empleo.md. */
 const PLATAFORMAS = [
-  { clave: "whatsapp", nombre: "WhatsApp", api: "WhatsApp", nota: "Mensaje y estados", tono: "human" },
-  { clave: "occ", nombre: "OCC", api: "OCC", nota: "Texto plano para el formulario de OCC", tono: "brand" },
-  { clave: "linkedin", nombre: "LinkedIn", api: "LinkedIn", nota: "Post del feed + LinkedIn Jobs", tono: "brand" },
-  { clave: "portal", nombre: "Portal", api: "Portal", nota: "Landing pública /aplicar", tono: "human" },
+  { clave: "portal", nombre: "Portal", api: "Portal", nota: "Landing pública /aplicar" },
+  { clave: "whatsapp", nombre: "WhatsApp", api: "WhatsApp", nota: "Menú del agente y estados" },
+  { clave: "google", nombre: "Google Empleos", api: "Google Empleos", nota: "Etiqueta estructurada JobPosting" },
+  { clave: "jooble", nombre: "Jooble", api: "Jooble", nota: "Feed XML automático" },
+  { clave: "talent", nombre: "Talent.com", api: "Talent.com", nota: "Feed XML automático" },
+] as const;
+
+/** Textos generados por plataforma (`Vacante.publicaciones`): lo que RH copia y pega. Independiente
+ * de los canales de arriba — OCC y LinkedIn ya no son canal, pero su texto se sigue generando. */
+const BLOQUES_TEXTO = [
+  { clave: "whatsapp", nombre: "WhatsApp" },
+  { clave: "occ", nombre: "OCC" },
+  { clave: "linkedin", nombre: "LinkedIn" },
+  { clave: "portal", nombre: "Portal" },
 ] as const;
 
 export default function Vacantes() {
@@ -830,7 +842,7 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
           }
         : {},
       publicar,
-      plataformas: publicar ? destinos : [],
+      plataformas: destinos, // se guarda también en borrador; el estado decide si se publica
       // sin contenido capturado ni IA ni plantilla, la API genera el contenido al guardar
       generar_si_falta: !gen && !plantillaBase && !manual,
       cliente_id: clienteId || null,
@@ -1163,7 +1175,7 @@ function ContenidoBase({ gen }: { gen: VacanteGenerada }) {
 
 /** Copy y page de cada plataforma, en pestañas — es lo que RH pega en OCC / LinkedIn. */
 function PestanasPlataforma({ bloques, liga }: { bloques: Record<string, BloquePlataforma>; liga?: string }) {
-  const disponibles = PLATAFORMAS.filter((p) => bloques[p.clave]?.page || bloques[p.clave]?.copy);
+  const disponibles = BLOQUES_TEXTO.filter((p) => bloques[p.clave]?.page || bloques[p.clave]?.copy);
   const [activa, setActiva] = useState(disponibles[0]?.clave ?? "occ");
   const bloque = bloques[activa];
 
@@ -1496,7 +1508,11 @@ function DetalleVacante({
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
     onEliminada?.();
   }
-  const [destinos, setDestinos] = useState<string[]>(v.plataformas.length ? v.plataformas : ["WhatsApp", "Portal"]);
+  // solo canales del catálogo actual: valores viejos (OCC, LinkedIn) no se preseleccionan
+  const [destinos, setDestinos] = useState<string[]>(() => {
+    const vigentes = v.plataformas.filter((p) => PLATAFORMAS.some((c) => c.api === p));
+    return vigentes.length ? vigentes : ["Portal", "WhatsApp"];
+  });
 
   const liga = v.slug && typeof window !== "undefined" ? `${window.location.origin}/aplicar/${v.slug}` : "";
   const bloques = (v.publicaciones ?? {}) as Record<string, BloquePlataforma>;
