@@ -2066,3 +2066,77 @@ def encuesta_clima(prompt: str, empresa: str = "") -> Tuple[EncuestaClimaIA, boo
     except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea: RH puede usar plantilla o crear a mano
         print(f"[ia] encuesta de clima demo ({ex})", flush=True)
         return _encuesta_clima_demo(prompt), False
+
+
+class AnalisisClimaIA(BaseModel):
+    estado: Literal["Favorable", "En observación", "Requiere atención"] = Field(
+        description="Diagnóstico general del clima según las métricas (no según suposiciones)."
+    )
+    resumen: str = Field(description="2-3 frases para RH con lo más importante, citando cifras que SÍ vienen en las métricas.")
+    fortalezas: List[str] = Field(description="2 a 4 fortalezas con evidencia (dimensión/pregunta y su % favorable).")
+    focos_atencion: List[str] = Field(description="2 a 4 focos de atención con evidencia (dimensión/pregunta y su %).")
+    puntos_por_validar: List[str] = Field(
+        description="Lo que los datos NO alcanzan a confirmar (poca participación, pocas respuestas, dimensiones sin resultado, comentarios aislados)."
+    )
+    acciones_sugeridas: List[str] = Field(description="3 a 5 acciones concretas y realistas para RH, ligadas a los focos.")
+
+
+def _analisis_clima_demo(m: dict) -> AnalisisClimaIA:
+    dims = [d for d in m.get("dimensiones", []) if d.get("favorable") is not None]
+    fuertes = [d for d in dims if d["favorable"] >= 80]
+    focos = [d for d in dims if d["favorable"] < 60]
+    indice = (m.get("indice") or {}).get("valor")
+    part = (m.get("participacion") or {}).get("porcentaje")
+    estado = "En observación" if indice is None else ("Favorable" if indice >= 75 else "En observación" if indice >= 60 else "Requiere atención")
+    validar = []
+    if part is not None and part < 60:
+        validar.append(f"Participación de {part}%: los resultados podrían no representar a todo el equipo.")
+    if m.get("respuestasConsideradas", 0) < 5:
+        validar.append(f"Solo {m.get('respuestasConsideradas', 0)} respuestas reales: tómalos como una primera lectura.")
+    sin = [d["nombre"] for d in m.get("dimensiones", []) if d.get("favorable") is None]
+    if sin:
+        validar.append("Dimensiones sin resultado en escala: " + ", ".join(sin) + ".")
+    return AnalisisClimaIA(
+        estado=estado,
+        resumen=(f"Índice de clima de {indice}% con {m.get('respuestasConsideradas', 0)} respuestas reales." if indice is not None
+                 else "Aún no hay dimensiones con resultado suficiente para un índice de clima."),
+        fortalezas=[f"{d['nombre']}: {d['favorable']}% favorable." for d in fuertes] or ["Sin dimensiones por arriba del 80% favorable todavía."],
+        focos_atencion=[f"{d['nombre']}: {d['favorable']}% favorable." for d in focos] or ["Sin dimensiones por debajo del 60% favorable."],
+        puntos_por_validar=validar or ["Sin puntos críticos por validar con los datos actuales."],
+        acciones_sugeridas=[f"Conversar con los equipos sobre «{d['nombre']}» y acordar 1-2 acciones con fecha." for d in focos][:4]
+        or ["Compartir los resultados con los equipos y reconocer lo que funciona."],
+    )
+
+
+def analisis_clima(metricas: dict, titulo: str = "", empresa: str = "") -> Tuple[AnalisisClimaIA, bool]:
+    """«Analizar resultados con Red Human» (a demanda, nunca automático). Recibe SOLO las métricas
+    agregadas del motor (`services.clima_resultados.calcular`) — sin identidades — y redacta el
+    diagnóstico. Nunca inventa cifras ni intenta identificar a nadie por sus comentarios. Regresa
+    (analisis, con_ia)."""
+    client = _client()
+    if client is None:
+        return _analisis_clima_demo(metricas), False
+    try:
+        import json as _json
+
+        resp = client.responses.parse(
+            model=MODEL,
+            instructions=(
+                "Eres analista de CLIMA LABORAL de Red Human AI (México). Recibes las métricas agregadas de una encuesta: "
+                "participación, índice de clima, % favorable (respuestas 4-5 de 5) por dimensión y por pregunta, "
+                "distribuciones de opción múltiple y comentarios abiertos anónimos. Reglas: (1) usa SOLO las cifras que "
+                "vienen en las métricas; nunca inventes datos ni porcentajes; (2) si la participación es baja o hay pocas "
+                "respuestas, dilo en `puntos_por_validar`; (3) NUNCA intentes identificar a una persona por sus comentarios "
+                "ni menciones datos sensibles; (4) acciones concretas, realistas y en español de México; (5) es una "
+                "recomendación: las decisiones las toma una persona de RH."
+            ),
+            input=f"Encuesta: {titulo}\nEmpresa: {empresa}\nMétricas (JSON):\n{_json.dumps(metricas, ensure_ascii=False)[:30000]}",
+            text_format=AnalisisClimaIA,
+        )
+        a = resp.output_parsed
+        if not a:
+            return _analisis_clima_demo(metricas), False
+        return a, True
+    except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea
+        print(f"[ia] análisis de clima demo ({ex})", flush=True)
+        return _analisis_clima_demo(metricas), False

@@ -588,4 +588,42 @@ def resultados(codigo: str, prueba: bool = False, db: Session = Depends(get_db),
         "pruebas": calculo["pruebas"],
         "porPregunta": por_pregunta,
         "calculo": calculo,
+        "analisis": (m.analisis or [None])[-1] if fuente == "reales" else None,  # último análisis con IA (a demanda)
     }
+
+
+MAX_ANALISIS_GUARDADOS = 20
+
+
+@router.post("/mediciones/{codigo}/analizar")
+def analizar(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Analizar resultados con Red Human»: SOLO cuando RH pulsa el botón (nunca por cada respuesta). La IA
+    recibe las métricas actuales del motor (sin identidades) y regresa estado, fortalezas, focos de
+    atención, puntos por validar y acciones sugeridas. Queda en el historial de la medición con la fecha
+    y el número de respuestas consideradas; con la medición abierta es un análisis PRELIMINAR."""
+    m = _medicion(db, codigo, cuenta.id)
+    calculo = clima_resultados.calcular(m, "reales")
+    if not calculo["respuestasConsideradas"]:
+        raise HTTPException(409, "Aún no hay respuestas reales para analizar.")
+    metricas = {k: calculo[k] for k in ("respuestasConsideradas", "participacion", "indice", "dimensiones")}
+    resultado, con_ia = ia.analisis_clima(metricas, m.titulo, cuenta.nombre_visible)
+    analisis = {
+        "fecha": datetime.now(timezone.utc).isoformat(),
+        "respuestasConsideradas": calculo["respuestasConsideradas"],
+        "estadoMedicion": m.estado,
+        "alcance": "final" if m.estado == "cerrada" else "preliminar",
+        "indice": calculo["indice"]["valor"],
+        "estado": resultado.estado,
+        "resumen": resultado.resumen,
+        "fortalezas": resultado.fortalezas,
+        "focosAtencion": resultado.focos_atencion,
+        "puntosPorValidar": resultado.puntos_por_validar,
+        "accionesSugeridas": resultado.acciones_sugeridas,
+        "ia": con_ia,
+        "solicitadoPor": u.nombre,
+    }
+    m.analisis = (list(m.analisis or []) + [analisis])[-MAX_ANALISIS_GUARDADOS:]
+    registrar(db, u.nombre, "clima_analisis", "clima", m.codigo,
+              {"respuestas": analisis["respuestasConsideradas"], "ia": con_ia, "alcance": analisis["alcance"], "correo_rh": u.correo})
+    db.commit()
+    return analisis

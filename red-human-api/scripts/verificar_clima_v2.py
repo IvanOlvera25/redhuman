@@ -133,4 +133,25 @@ with TestClient(app) as client:
     i2 = client.get(f"/clima/mediciones/{MED2}/resultados").json()["calculo"]["indice"]
     check(i2 == {"valor": None, "estado": "pendiente", "etiqueta": "Índice pendiente"}, f"con respuestas pero sin escalas calculables: «Índice pendiente» ({i2})")
 
+    print("\n--- Fase 2b · Analizar resultados con Red Human (a demanda) ---")
+    r = client.post("/clima/mediciones", json={"titulo": "Sin respuestas", "preguntas": [{"texto": "X", "tipo": "escala"}]})
+    check(client.post(f"/clima/mediciones/{r.json()['id']}/analizar").status_code == 409, "sin respuestas reales no se analiza (409)")
+    check(client.get(f"/clima/mediciones/{MED}/resultados").json()["analisis"] is None, "responder NO genera hallazgos: no hay análisis hasta que RH lo pide")
+    r = client.post(f"/clima/mediciones/{MED}/analizar")
+    a = r.json()
+    check(r.status_code == 200, f"«Analizar resultados» responde ({r.status_code})")
+    check(a["fecha"] and a["respuestasConsideradas"] == 3 and a["estado"] in ("Favorable", "En observación", "Requiere atención"),
+          f"trae fecha, respuestas consideradas (3) y estado ({a['estado']})")
+    check(all(a[k] for k in ("fortalezas", "focosAtencion", "puntosPorValidar", "accionesSugeridas")),
+          "trae fortalezas, focos de atención, puntos por validar y acciones sugeridas")
+    check(a["alcance"] == "preliminar" and a["estadoMedicion"] == "abierta" and a["ia"] is False, "con la medición abierta el análisis es PRELIMINAR (demo sin clave)")
+    check(a["indice"] == 58.3, "el análisis usa las mismas cifras del motor (índice 58.3)")
+    check(any("Liderazgo" in x or "58.3" in x for x in a["focosAtencion"] + [a["resumen"]]), "el diagnóstico cita las cifras reales del motor")
+    client.post(f"/clima/mediciones/{MED}/analizar")
+    db.expire_all()
+    med = db.query(MedicionClima).filter_by(codigo=MED).one()
+    check(len(med.analisis) == 2 and client.get(f"/clima/mediciones/{MED}/resultados").json()["analisis"]["fecha"] == med.analisis[-1]["fecha"],
+          "cada análisis queda en el historial; resultados muestra el más reciente")
+    check("COL-" not in str(med.analisis) and "Persona" not in str(med.analisis), "el análisis no contiene identidades")
+
 print(f"\n🎉 Clima v2 verificado: {OK} comprobaciones OK.")
