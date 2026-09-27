@@ -42,7 +42,7 @@ from ..models import (
     registrar,
 )
 from ..serial import medicion_clima_dict, medicion_clima_publica_dict
-from ..services import plantillas_correo
+from ..services import ia, plantillas_correo
 from ..services.correo import enviar_correo
 from ..services.whatsapp import enviar_texto_sin_plantilla
 from ..services.modulos_rh import requiere_modulos_rh
@@ -184,6 +184,27 @@ def crear_medicion(datos: MedicionIn, db: Session = Depends(get_db), u: Usuario 
     registrar(db, u.nombre, "medicion_clima_creada", "clima", m.codigo, {"titulo": m.titulo, "anonima": m.anonima, "preguntas": len(preguntas), "correo_rh": u.correo})
     db.commit()
     return medicion_clima_dict(m, liga=liga_publica(m))
+
+
+class GenerarClimaIn(BaseModel):
+    prompt: str  # «¿Qué quieres saber de tu equipo?»
+
+
+@router.post("/generar")
+def generar_encuesta(datos: GenerarClimaIn, u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Crear encuesta con Red Human»: propone nombre, dimensiones y preguntas a partir de lo que RH quiere
+    saber. NO guarda nada: RH revisa y edita, y luego crea la medición con POST /mediciones."""
+    if not datos.prompt.strip():
+        raise HTTPException(400, "Escribe qué quieres saber de tu equipo.")
+    enc, con_ia = ia.encuesta_clima(datos.prompt, cuenta.nombre_visible)
+    crudas = []
+    for p in enc.preguntas:
+        fila = p.model_dump()
+        if fila["tipo"] == "opcion" and len([o for o in fila.get("opciones") or [] if str(o).strip()]) < 2:
+            fila["tipo"], fila["opciones"] = "abierta", []  # opción mal formada: se conserva como abierta
+        crudas.append(fila)
+    preguntas, dimensiones = normalizar_cuestionario(crudas, enc.dimensiones)
+    return {"ia": con_ia, "titulo": enc.titulo, "descripcion": enc.descripcion, "dimensiones": dimensiones, "preguntas": preguntas}
 
 
 @router.get("/mediciones")

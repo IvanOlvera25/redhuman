@@ -1983,3 +1983,86 @@ def borrador_conocimiento(tema: str, tipo: str = "politica", notas: str = "", em
         return borrador_conocimiento(tema, tipo, notas, empresa) if False else (BorradorConocimiento(
             titulo=tema.strip() or "Documento interno", texto=notas.strip() or "[por definir]",
             avisos=[f"La IA no respondió ({str(ex)[:120]}). Captura el contenido a mano."]), False)
+
+
+# ============================================================
+# Clima laboral v2 (2026-09-27): encuesta con Red Human y análisis a demanda
+# ============================================================
+
+
+class PreguntaClimaIA(BaseModel):
+    texto: str = Field(description="Pregunta o afirmación breve, en español de México, de tú a tú.")
+    tipo: Literal["escala", "opcion", "abierta"] = Field(
+        description="escala = afirmación que se califica de 1 (totalmente en desacuerdo) a 5 (totalmente de acuerdo); "
+        "opcion = opción múltiple; abierta = comentario libre."
+    )
+    dimension: str = Field(description="Dimensión de clima a la que pertenece (debe ser una de `dimensiones`).")
+    opciones: List[str] = Field(default_factory=list, description="SOLO para tipo=opcion: 3 a 5 opciones cortas.")
+
+
+class EncuestaClimaIA(BaseModel):
+    titulo: str = Field(description="Nombre corto de la encuesta.")
+    descripcion: str = Field(description="1-2 frases para quien responde: para qué es y que toma pocos minutos.")
+    dimensiones: List[str] = Field(description="3 a 6 dimensiones de clima, en el orden en que se presentan.")
+    preguntas: List[PreguntaClimaIA] = Field(description="8 a 18 preguntas agrupadas por dimensión.")
+
+
+_BASE_CLIMA_DEMO = [
+    ("Liderazgo", "Mi jefe o jefa directa me da retroalimentación útil sobre mi trabajo."),
+    ("Liderazgo", "Confío en las decisiones de mi jefe o jefa directa."),
+    ("Comunicación", "Recibo a tiempo la información que necesito para hacer mi trabajo."),
+    ("Comunicación", "Me siento con libertad de expresar mis ideas y opiniones."),
+    ("Trabajo en equipo", "En mi equipo nos apoyamos cuando hay mucha carga de trabajo."),
+    ("Trabajo en equipo", "Hay colaboración entre mi área y las demás áreas."),
+    ("Reconocimiento y desarrollo", "Mi esfuerzo se reconoce cuando hago un buen trabajo."),
+    ("Reconocimiento y desarrollo", "Tengo oportunidades para aprender y crecer aquí."),
+    ("Bienestar", "Mi carga de trabajo me permite equilibrar mi vida personal."),
+    ("Bienestar", "Recomendaría esta empresa como un buen lugar para trabajar."),
+]
+
+
+def _encuesta_clima_demo(prompt: str) -> EncuestaClimaIA:
+    preguntas = [PreguntaClimaIA(texto=t, tipo="escala", dimension=d) for d, t in _BASE_CLIMA_DEMO]
+    preguntas.append(PreguntaClimaIA(
+        texto="¿Qué es lo que más valoras de trabajar aquí?", tipo="opcion", dimension="Bienestar",
+        opciones=["El equipo", "El liderazgo", "El aprendizaje", "Las prestaciones", "La estabilidad"],
+    ))
+    preguntas.append(PreguntaClimaIA(texto="¿Qué cambiarías para trabajar mejor?", tipo="abierta", dimension="Bienestar"))
+    dims = list(dict.fromkeys(p.dimension for p in preguntas))
+    return EncuestaClimaIA(
+        titulo="Encuesta de clima laboral",
+        descripcion="Queremos saber cómo te sientes en tu trabajo. Toma unos 5 minutos.",
+        dimensiones=dims, preguntas=preguntas,
+    )
+
+
+def encuesta_clima(prompt: str, empresa: str = "") -> Tuple[EncuestaClimaIA, bool]:
+    """«¿Qué quieres saber de tu equipo?» → encuesta propuesta (nombre, dimensiones y preguntas). Es solo
+    una PROPUESTA: RH la edita y la guarda. Nunca pide datos sensibles ni datos que identifiquen a quien
+    responde. Regresa (encuesta, con_ia)."""
+    client = _client()
+    if client is None:
+        return _encuesta_clima_demo(prompt), False
+    try:
+        resp = client.responses.parse(
+            model=MODEL,
+            instructions=(
+                "Diseñas encuestas de CLIMA LABORAL para empresas en México (Red Human AI). A partir de lo que RH quiere "
+                "saber de su equipo propones: un nombre corto, 3 a 6 dimensiones y 8 a 18 preguntas agrupadas por dimensión. "
+                "Reglas: (1) prefiere tipo `escala` redactada como AFIRMACIÓN en primera persona que se califica de 1 a 5 "
+                "(desacuerdo → acuerdo), en sentido positivo para que 4-5 sea favorable; (2) usa `opcion` solo cuando aporte "
+                "(3 a 5 opciones) y 1 o 2 `abierta` al final; (3) cada pregunta mide UNA sola cosa; (4) NUNCA preguntes ni "
+                f"insinúes datos sensibles ({DATOS_SENSIBLES_PROHIBIDOS}); (5) NUNCA pidas datos que identifiquen a la "
+                "persona (nombre, puesto exacto, antigüedad exacta, jefe específico): la encuesta puede ser anónima; "
+                "(6) español de México, claro y sin anglicismos; (7) cada `dimension` de una pregunta debe estar en `dimensiones`."
+            ),
+            input=f"Empresa: {empresa or 'no indicada'}\nLo que RH quiere saber de su equipo: {prompt.strip()[:2000]}",
+            text_format=EncuestaClimaIA,
+        )
+        enc = resp.output_parsed
+        if not enc or not enc.preguntas:
+            return _encuesta_clima_demo(prompt), False
+        return enc, True
+    except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea: RH puede usar plantilla o crear a mano
+        print(f"[ia] encuesta de clima demo ({ex})", flush=True)
+        return _encuesta_clima_demo(prompt), False
