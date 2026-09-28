@@ -228,6 +228,11 @@ def pdf_contrato(d: dict) -> bytes:
     pdf.set_font(_FUENTE, "", 10)
     pdf.set_text_color(85, 85, 85)
     pdf.cell(0, 6, _latin(f"{d['empresa']} - {d['hoy']}"), new_x="LMARGIN", new_y="NEXT")
+    if d.get("borrador"):
+        pdf.set_font(_FUENTE, "B", 10)
+        pdf.set_text_color(238, 68, 68)
+        pdf.cell(0, 6, _latin("BORRADOR - para revision y firma. La version firmada se carga en el Onboarding."), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(85, 85, 85)
     pdf.ln(4)
     pdf.set_font(_FUENTE, "", 11)
     pdf.set_text_color(26, 26, 26)

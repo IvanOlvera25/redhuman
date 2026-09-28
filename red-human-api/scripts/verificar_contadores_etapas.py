@@ -122,7 +122,12 @@ with TestClient(app) as client:
     check(conteos.por_etapa(db, cuenta.id) == pipe and conteos.por_etapa(db, cuenta.id, db.query(Vacante).filter_by(codigo=V1).one().id) == embudo, "services.conteos es la función única detrás de todo")
 
     print("\n--- 4. Mover etapa / cerrar → todos los contadores cambian juntos ---")
-    client.patch(f"/candidatos/{P['a']}/etapa", json={"etapa": "Onboarding", "manual": True})
+    # Onboarding v2 (2026-09-28): a Onboarding solo se entra con «Iniciar Onboarding» o con Modo Prueba activo
+    cfg.modo_prueba = True
+    db.commit()
+    check(client.patch(f"/candidatos/{P['a']}/etapa", json={"etapa": "Onboarding", "manual": True}).status_code == 200, "Modo Prueba: mover directo a Onboarding")
+    cfg.modo_prueba = False
+    db.commit()
     r = client.post(f"/candidatos/{P['b']}/decision", json={"accion": "descartar", "comentario": "Declinó"})
     v1 = client.get(f"/vacantes/{V1}").json()
     kan_v1 = client.get(f"/candidatos?vacante={V1}").json()

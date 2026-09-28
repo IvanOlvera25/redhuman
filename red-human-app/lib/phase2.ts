@@ -42,6 +42,9 @@ export interface DocExpediente {
   estadoOnboarding?: EstadoDocOnboarding;
   motivoNoAplica?: string;
   noAplicaPor?: string;
+  /** Fase 2: documento interno de RH (contrato firmado) — fuera del porcentaje y de lo que se pide al candidato. */
+  interno?: boolean;
+  aprobado?: boolean;
 }
 
 export interface NuevoIngreso {

@@ -676,6 +676,8 @@ DOCUMENTOS_BASE = [
 # guardados (pendiente | revision | recibido | rechazado) se LEEN así. «Aprobado» exige que una persona de
 # RH lo haya confirmado (`revisado_por`); lo que la IA validó sola sigue «Por revisar» (HITL).
 ESTADOS_DOCUMENTO_ONBOARDING = ("Pendiente", "Por revisar", "Aprobado", "Rechazado", "No aplica")
+# Documento interno que cierra la tarea fija «Contrato firmado» (Fase 2).
+TIPO_CONTRATO_FIRMADO = "Contrato firmado"
 
 
 def estado_documento_onboarding(d: "Documento") -> str:
@@ -775,20 +777,26 @@ class Expediente(Base):
 
     @property
     def obligatorios(self) -> List["Documento"]:
-        """Obligatorios que SÍ aplican a esta persona (RH puede marcar uno «No aplica» con motivo)."""
-        return [d for d in self.documentos if d.obligatorio and d.estado != "no_aplica"]
+        """Obligatorios que SÍ aplican a esta persona (RH puede marcar uno «No aplica» con motivo). Los
+        documentos INTERNOS (contrato firmado) nunca cuentan."""
+        return [d for d in self.documentos if d.obligatorio and d.estado != "no_aplica" and not d.interno]
 
     @property
     def progreso(self) -> int:
-        """% de documentos OBLIGATORIOS ya entregados — es lo que habilita el alta.
-        2026-09-15 (Fase 1): un documento digital SUBIDO cuenta desde que llega (estado `recibido`
-        o `revision` con archivo); antes solo contaba `recibido`, así que en modo demo / con la IA
-        en duda el porcentaje se quedaba en 0 hasta que RH lo marcaba «recibido físicamente»."""
+        """% de documentos OBLIGATORIOS **Aprobados** — es lo que habilita el contrato y el alta.
+        Onboarding v2 (2026-09-28, decisión del usuario): solo cuenta lo que una persona de RH confirmó
+        (`Documento.aprobado`); lo subido o validado solo por la IA queda «Por revisar» y no suma. En Modo
+        Prueba la subida se aprueba sola («Modo Prueba» en `revisado_por`)."""
         docs = self.obligatorios
         if not docs:
             return 0
-        entregados = sum(1 for d in docs if d.entregado)
-        return round(entregados / len(docs) * 100)
+        aprobados = sum(1 for d in docs if d.aprobado)
+        return round(aprobados / len(docs) * 100)
+
+    @property
+    def no_aprobados(self) -> List[str]:
+        """Obligatorios que todavía no están «Aprobados» (lo que falta para el 100 %)."""
+        return [d.tipo for d in self.obligatorios if not d.aprobado]
 
     @property
     def pendientes(self) -> List[str]:
@@ -845,10 +853,18 @@ class Documento(Base):
     motivo_no_aplica: Mapped[str] = mapped_column(Text, default="")
     no_aplica_por: Mapped[str] = mapped_column(String(150), default="")
     no_aplica_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Onboarding v2 (Fase 2): documento INTERNO de RH (el contrato firmado). Nunca se le pide al candidato,
+    # no entra al porcentaje ni a recordatorios y solo se carga por su acción propia.
+    interno: Mapped[bool] = mapped_column(Boolean, default=False)
 
     @property
     def aplica(self) -> bool:
         return self.estado != "no_aplica"
+
+    @property
+    def aprobado(self) -> bool:
+        """«Aprobado» = recibido y confirmado por una persona de RH (o Modo Prueba)."""
+        return self.estado == "recibido" and bool(self.revisado_por)
 
     @property
     def entregado(self) -> bool:

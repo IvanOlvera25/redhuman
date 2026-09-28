@@ -7,13 +7,14 @@
 * Tareas: pendiente → realizada | cancelada (con motivo). Las tres fijas (Contrato firmado, Alta IMSS /
   nómina, Confirmar ingreso) son obligatorias y no se cancelan una por una; «Contrato firmado» solo se
   cierra al cargar el contrato firmado.
-* Ninguna ruta de aquí escribe `Postulacion.etapa` (B5).
+* Fase 2: «Iniciar Onboarding» (`POST /expedientes/{id}/iniciar`) es la ÚNICA ruta que lleva de Contratación a
+  Onboarding (vía `candidatos.aplicar_movimiento`); el resto de las rutas de aquí nunca escribe la etapa (B5).
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -317,7 +318,257 @@ def editar_tarea(tid: int, datos: EditarTareaIn, db: Session = Depends(get_db), 
     if datos.fecha_limite is not None:
         t.fecha_limite = datos.fecha_limite
         t.dias_relativos = None  # fecha fija capturada por RH: ya no se recalcula con la de ingreso
+    if e:
+        onb.sincronizar_legado(db, e)  # las tareas son la fuente de verdad
     registrar(db, u.nombre, "tarea_onboarding_actualizada", "expediente", str(t.expediente_id),
               {"tarea": t.nombre, "de": anterior, "a": t.estado, "motivo": t.motivo_cancelacion[:300], "correo_rh": u.correo})
     db.commit()
     return tarea_onboarding_dict(t)
+
+
+# ---------- Fase 2: de Contratación a Onboarding ----------
+
+def _usuarios_cuenta(db: Session, cuenta_id: int) -> List[Usuario]:
+    from ..models import UsuarioCuenta
+
+    return (
+        db.query(Usuario)
+        .join(UsuarioCuenta, UsuarioCuenta.usuario_id == Usuario.id)
+        .filter(UsuarioCuenta.cuenta_id == cuenta_id, Usuario.activo.is_(True))
+        .order_by(Usuario.nombre)
+        .all()
+    )
+
+
+def _usuario_de(usuarios: List[Usuario], responsable: str) -> Optional[Usuario]:
+    r = onb.norm(responsable)
+    return next((x for x in usuarios if r and (onb.norm(x.nombre) == r or onb.norm(x.correo) == r)), None)
+
+
+@router.get("/expedientes/{exp_id}/resumen")
+def resumen_inicio(exp_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Pantalla de resumen de «Enviar a Onboarding»: requisitos (condiciones + consentimiento), la configuración
+    PRECARGADA de la plantilla que aplica (puesto > empresa > predeterminada) y los documentos que ya tiene el
+    expediente. No guarda nada."""
+    from ..services.configuracion import modo_prueba_activo
+
+    e = _expediente(db, exp_id, cuenta.id)
+    cfg = onb.configuracion_para(db, cuenta.id, e.puesto, e.empresa)
+    cfg["cursoInduccion"] = _curso_titulo(db, cfg.get("cursoInduccionId"), cuenta.id)
+    req = onb.requisitos_inicio(e)
+    prueba = modo_prueba_activo(db)
+    p = e.postulacion
+    cursos = db.query(Curso).filter(Curso.cuenta_id == cuenta.id, Curso.estado != "Archivado").order_by(Curso.titulo).all()
+    return {
+        "expedienteId": e.id,
+        "etapa": p.etapa if p else "",
+        "requisitos": req,
+        "modoPrueba": prueba,
+        "puedeIniciar": (req["completos"] or prueba) and e.estado != "alta",
+        "iniciado": onb.onboarding_iniciado(db, e),
+        "configuracion": cfg,
+        "documentosExpediente": [
+            {"tipo": d.tipo, "obligatorio": d.obligatorio, "estado": d.estado, "tieneArchivo": bool(d.archivo)}
+            for d in e.documentos if not d.interno
+        ],
+        "usuarios": [{"id": x.id, "nombre": x.nombre, "correo": x.correo} for x in _usuarios_cuenta(db, cuenta.id)],
+        "cursos": [{"id": c.id, "titulo": c.titulo} for c in cursos],
+    }
+
+
+class IniciarOnboardingIn(BaseModel):
+    """Selección para ESTA persona (precargada de la plantilla; «Cambiar selección» nunca altera la plantilla)."""
+    documentos: List[dict]
+    recursos: List[dict] = []
+    responsables: dict = {}
+    plazos: dict = {}
+    curso_induccion_id: Optional[int] = None
+    plantilla_id: Optional[int] = None
+    solicitar_documentos: bool = True
+    notificar_responsables: bool = True
+
+
+@router.post("/expedientes/{exp_id}/iniciar")
+async def iniciar_onboarding(exp_id: int, datos: IniciarOnboardingIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Iniciar Onboarding»: ÚNICO gatillo del paso Contratación → Onboarding (decisión del usuario). Aplica la
+    selección de documentos, genera las tareas (tres fijas + recursos), mueve la etapa con el movimiento de
+    siempre (`candidatos.aplicar_movimiento`), hace la primera solicitud de documentos al candidato y avisa a
+    los responsables internos. Un aviso caído nunca bloquea: el resultado de cada envío viaja a RH."""
+    from ..services.configuracion import modo_prueba_activo
+    from . import candidatos as rcand
+
+    e = _expediente(db, exp_id, cuenta.id)
+    p = e.postulacion
+    if not p:
+        raise HTTPException(409, "El expediente no está ligado a una postulación.")
+    if e.estado == "alta":
+        raise HTTPException(409, "El colaborador ya fue dado de alta.")
+    if p.etapa not in ("Contratación", "Onboarding"):
+        raise HTTPException(409, "«Iniciar Onboarding» es para postulaciones en Contratación.")
+    if onb.onboarding_iniciado(db, e) and p.etapa == "Onboarding":
+        raise HTTPException(409, "El Onboarding de esta persona ya se inició.")
+    prueba = modo_prueba_activo(db)
+    req = onb.requisitos_inicio(e)
+    if not req["completos"] and not prueba:
+        raise HTTPException(409, f"Antes de enviar a Onboarding completa: {', '.join(req['faltan'])}.")
+    if not onb.normalizar_documentos(datos.documentos):
+        raise HTTPException(400, "Selecciona al menos un documento.")
+    if datos.curso_induccion_id and not _curso_titulo(db, datos.curso_induccion_id, cuenta.id):
+        raise HTTPException(400, "El curso de inducción no existe en esta Cuenta.")
+
+    config = {
+        "documentos": datos.documentos,
+        "recursos": onb.normalizar_recursos(datos.recursos),
+        "responsables": onb.normalizar_responsables(datos.responsables),
+        "plazos": onb.normalizar_plazos(datos.plazos),
+    }
+    agregados, no_aplica, conservados = onb.aplicar_seleccion_documentos(db, e, datos.documentos, u.nombre)
+    tareas = onb.generar_tareas(db, e, cuenta.id, config, u.nombre)
+    onb.sincronizar_legado(db, e)
+    if datos.plantilla_id:
+        e.plantilla_onboarding_id = datos.plantilla_id
+    registrar(db, u.nombre, "onboarding_iniciado", "expediente", str(e.id), {
+        "postulacion": p.codigo, "plantilla": datos.plantilla_id, "documentos_agregados": agregados, "documentos_no_aplica": no_aplica,
+        "tareas": [t.nombre for t in tareas], "curso_induccion": datos.curso_induccion_id,
+        "modo_prueba": prueba and not req["completos"], "correo_rh": u.correo,
+    })
+    if p.etapa != "Onboarding":
+        await rcand.aplicar_movimiento(db, p, rcand.EtapaIn(etapa="Onboarding", comentario="Iniciar Onboarding"), u, desde_iniciar=True)
+    else:
+        db.commit()
+
+    solicitud: List[dict] = []
+    if datos.solicitar_documentos and any(not d.aprobado for d in e.obligatorios):
+        try:
+            r = await rcand._disparar_mensaje_onboarding(db, p, "solicitud_documentos", "documentos_solicitados", rcand._liga_documentos(p), u)
+            solicitud = r.get("resultados") or []
+        except Exception as ex:  # noqa: BLE001
+            solicitud = [{"destinatario": "Candidato", "canal": "whatsapp/correo", "destino": "", "enviado": False, "detalle": str(ex)[:200]}]
+
+    avisos: List[dict] = []
+    if datos.notificar_responsables:
+        avisos = await _avisar_responsables(db, e, cuenta, onb.tareas_de(db, e))
+
+    curso = None
+    if datos.curso_induccion_id:
+        curso = await _asignar_induccion(db, p, datos.curso_induccion_id, cuenta, u)
+    db.commit()
+    from ..serial import postulacion_dict
+
+    return {
+        "candidato": postulacion_dict(p, detalle=True),
+        "tareas": [tarea_onboarding_dict(t) for t in onb.tareas_de(db, e)],
+        "documentosAgregados": agregados,
+        "documentosNoAplica": no_aplica,
+        "documentosConservados": conservados,
+        "solicitudDocumentos": solicitud,
+        "avisosResponsables": avisos,
+        "cursoInduccion": curso,
+    }
+
+
+async def _avisar_responsables(db: Session, e: Expediente, cuenta: Cuenta, tareas: List[TareaOnboarding]) -> List[dict]:
+    """Un correo por responsable interno con SUS tareas y plazos. El responsable se reconoce si su nombre o
+    correo coincide con un Usuario de la Cuenta; si no, se reporta sin enviar (nunca silencioso)."""
+    from ..services import plantillas_correo
+    from ..services.correo import enviar_correo
+    from ..services.notificaciones import TZ_MEXICO
+
+    usuarios = _usuarios_cuenta(db, cuenta.id)
+    nombre = e.candidato.nombre if e.candidato else "la persona"
+    salida = []
+    for responsable, suyas in onb.tareas_por_responsable(tareas).items():
+        us = _usuario_de(usuarios, responsable)
+        if not us or not us.correo:
+            salida.append({"destinatario": responsable, "canal": "correo", "destino": "", "enviado": False,
+                           "detalle": "No coincide con un usuario de la Cuenta con correo; avísale por otro medio."})
+            continue
+        filas = []
+        for t in suyas:
+            limite = t.fecha_limite if (t.fecha_limite is None or t.fecha_limite.tzinfo) else t.fecha_limite.replace(tzinfo=timezone.utc)
+            filas.append((t.nombre, limite.astimezone(TZ_MEXICO).strftime("%d/%m/%Y") if limite else "Sin fecha"))
+        try:
+            asunto, html = plantillas_correo.html_aviso(
+                f"Onboarding de {nombre}: tienes tareas asignadas",
+                f"{nombre} ingresa como {e.puesto or 'nuevo colaborador'}. Estas tareas del Onboarding están a tu cargo:",
+                cuenta.nombre_visible, filas,
+            )
+            r = await enviar_correo(us.correo, asunto, html)
+        except Exception as ex:  # noqa: BLE001
+            r = {"enviado": False, "detalle": str(ex)[:200]}
+        salida.append({"destinatario": us.nombre, "canal": "correo", "destino": us.correo, "enviado": bool(r.get("enviado")), "detalle": str(r.get("detalle") or "")})
+    registrar(db, "sistema", "onboarding_responsables_avisados", "expediente", str(e.id), {"avisos": salida})
+    return salida
+
+
+async def _asignar_induccion(db: Session, p, curso_id: int, cuenta: Cuenta, u: Usuario) -> Optional[dict]:
+    """Asigna el curso de inducción a la persona (mismo mecanismo de Capacitación). Nunca bloquea el inicio."""
+    try:
+        from . import capacitacion as rcap
+
+        curso = db.query(Curso).filter(Curso.id == curso_id, Curso.cuenta_id == cuenta.id).first()
+        if not curso:
+            return None
+        a = await rcap.asignar_a_postulacion(db, p, curso, actor=u.nombre)
+        return {"curso": curso.titulo, "asignacion": a.codigo}
+    except Exception as ex:  # noqa: BLE001
+        return {"curso": "", "error": str(ex)[:200]}
+
+
+@router.post("/expedientes/{exp_id}/contrato-firmado")
+async def cargar_contrato_firmado(
+    exp_id: int, archivo: UploadFile = File(...), db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """«Cargar contrato firmado manualmente»: guarda el PDF FINAL firmado como documento INTERNO del expediente
+    (no suma al porcentaje) con quién y cuándo, y SOLO así la tarea fija «Contrato firmado» queda Realizada.
+    Reemplazarlo conserva la trazabilidad en bitácora."""
+    from ..models import TIPO_CONTRATO_FIRMADO, Documento
+    from ..services import archivos as fs
+
+    e = _expediente(db, exp_id, cuenta.id)
+    if e.estado == "alta":
+        raise HTTPException(409, "El colaborador ya fue dado de alta; el expediente no admite cambios.")
+    tarea = next((t for t in onb.tareas_de(db, e) if t.fija and t.clave == "contrato_firmado"), None)
+    if not tarea:
+        raise HTTPException(409, "Primero inicia el Onboarding («Enviar a Onboarding»).")
+    validado = await fs.validar(archivo, "contrato firmado")
+    if validado.extension != "pdf":
+        raise HTTPException(400, "El contrato firmado debe ser un PDF.")
+    doc = next((d for d in e.documentos if d.interno and d.tipo == TIPO_CONTRATO_FIRMADO), None)
+    reemplazo = doc is not None and bool(doc.archivo)
+    if doc is None:
+        doc = Documento(expediente_id=e.id, tipo=TIPO_CONTRATO_FIRMADO, obligatorio=False, interno=True)
+        e.documentos.append(doc)
+    ahora = datetime.now(timezone.utc)
+    doc.archivo = fs.guardar(validado, f"expedientes/{e.id}", "Contrato_firmado")
+    doc.nombre_archivo, doc.mime, doc.tamano = validado.nombre, validado.mime, validado.tamano
+    doc.subido_en = doc.recibido_en = ahora
+    doc.recibido_canal = "rh"
+    doc.estado, doc.revisado_por = "recibido", u.nombre
+    doc.notas_ia = f"Cargado manualmente por {u.nombre}."
+    tarea.estado, tarea.realizada_por, tarea.realizada_en = "realizada", u.nombre, ahora
+    tarea.cancelada_por, tarea.cancelada_en, tarea.motivo_cancelacion = "", None, ""
+    tarea.notas = f"Contrato firmado cargado por {u.nombre}."
+    onb.sincronizar_legado(db, e)
+    registrar(db, u.nombre, "contrato_firmado_cargado", "expediente", str(e.id),
+              {"archivo": validado.nombre, "reemplazo": reemplazo, "correo_rh": u.correo})
+    db.commit()
+    return {
+        "tarea": tarea_onboarding_dict(tarea),
+        "documento": {"tipo": doc.tipo, "archivo": doc.nombre_archivo, "cargadoPor": u.nombre, "cargadoEn": ahora.isoformat()},
+    }
+
+
+@router.get("/expedientes/{exp_id}/contrato-firmado")
+def descargar_contrato_firmado(exp_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    from fastapi.responses import FileResponse
+
+    from ..models import TIPO_CONTRATO_FIRMADO
+    from ..services import archivos as fs
+
+    e = _expediente(db, exp_id, cuenta.id)
+    doc = next((d for d in e.documentos if d.interno and d.tipo == TIPO_CONTRATO_FIRMADO), None)
+    if not doc or not fs.existe(doc.archivo):
+        raise HTTPException(404, "Todavía no se carga el contrato firmado.")
+    return FileResponse(doc.archivo, media_type="application/pdf", filename=doc.nombre_archivo or "contrato-firmado.pdf")

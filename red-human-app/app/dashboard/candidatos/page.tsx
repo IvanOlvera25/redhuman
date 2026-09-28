@@ -118,6 +118,8 @@ import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveed
 import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import { LineaNotificar, useNotificarAccion } from "@/components/dashboard/linea-notificar";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
+import { ModalIniciarOnboarding } from "@/components/dashboard/onboarding/iniciar-onboarding";
+import { PanelTareasOnboarding } from "@/components/dashboard/onboarding/tareas-onboarding";
 import { SwitchModoPrueba } from "@/components/dashboard/switch-modo-prueba";
 import { Toast, type ToastMsg } from "@/components/dashboard/toast";
 import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
@@ -4291,7 +4293,13 @@ function FilaDocumentoSimple({
     <div className="flex items-center justify-between gap-2 rounded-xl border border-border-soft bg-surface px-3.5 py-2.5">
       <span className="min-w-0 truncate text-sm">{d.nombre}</span>
       <div className="flex shrink-0 items-center gap-2">
-        <Badge tone={cargado ? "good" : "neutral"}>{cargado ? "Cargado" : "Pendiente"}</Badge>
+        {d.estadoOnboarding ? (
+          <Badge tone={d.estadoOnboarding === "Aprobado" ? "good" : d.estadoOnboarding === "Rechazado" ? "bad" : d.estadoOnboarding === "Por revisar" ? "warn" : "neutral"}>
+            {d.estadoOnboarding}
+          </Badge>
+        ) : (
+          <Badge tone={cargado ? "good" : "neutral"}>{cargado ? "Cargado" : "Pendiente"}</Badge>
+        )}
         {cargado && expedienteId ? (
           <a
             href={urlDocumento(expedienteId, d.nombre)}
@@ -4370,6 +4378,9 @@ function PanelContratacion({
   const [enviandoDoc, setEnviandoDoc] = useState<"" | "whatsapp" | "correo">("");
   const [resultadoDoc, setResultadoDoc] = useState<{ ok: boolean; texto: string } | null>(null);
   const condicionesListas = Boolean(cond?.completas);
+  // Onboarding v2 (Fase 2): «Enviar a Onboarding» exige condiciones + consentimiento de privacidad (salvo Modo Prueba)
+  const requisitosOnboarding = condicionesListas && Boolean(c.consentimiento);
+  const [iniciarAbierto, setIniciarAbierto] = useState(false);
   const documentosListos = (c.expedienteProgreso ?? 0) >= 100;
   const [expediente, setExpediente] = useState<NuevoIngreso | null>(null);
   const [cancelando, setCancelando] = useState(false);
@@ -4429,18 +4440,9 @@ function PanelContratacion({
     setResultadoDoc({ ok: r.data.enviado, texto: r.data.enviado ? `Carta enviada por ${canal === "whatsapp" ? "WhatsApp" : "correo"}.` : `No salió por ${canal}: ${r.data.detalle}` });
   }
 
-  async function enviarOnboarding(forzarPrueba = false) {
-    setOcupado("onboarding");
-    const r = await moverEtapaCandidato(c.id, "Onboarding", "", forzarPrueba);
-    setOcupado("");
-    if (!r.ok) {
-      return setAviso({
-        tono: "error", texto: r.error,
-        reintentar: modoPrueba && !forzarPrueba ? () => enviarOnboarding(true) : undefined,
-      });
-    }
-    setAviso({ tono: "ok", texto: "Candidato enviado a Onboarding." });
-    onCambio(r.data);
+  /** Onboarding v2 (Fase 2): abre el resumen; «Iniciar Onboarding» es el único gatillo del cambio de etapa. */
+  function enviarOnboarding() {
+    setIniciarAbierto(true);
   }
 
   async function confirmarCancelacion() {
@@ -4561,7 +4563,8 @@ function PanelContratacion({
           <Button size="sm" variant="outline" onClick={() => { setResultadoDoc(null); setDocPreview("carta"); }}>
             <FileText className="h-4 w-4" /> Generar carta de intención
           </Button>
-          {onDocumentos && (
+          {/* Onboarding v2: «Solicitar documentos» ya no vive en Contratación — la primera solicitud la hace «Iniciar Onboarding» */}
+          {onDocumentos && c.etapa === "Onboarding" && (
             <Button size="sm" variant="outline" onClick={() => onDocumentos("solicitar")} disabled={Boolean(ocupado)}>
               <Send className="h-4 w-4" /> Solicitar documentos
             </Button>
@@ -4571,17 +4574,21 @@ function PanelContratacion({
             variant="outline"
             onClick={() => { setResultadoDoc(null); setDocPreview("contrato"); }}
             disabled={!documentosListos && !modoPrueba}
-            title={documentosListos || modoPrueba ? "Contrato con las condiciones finales" : `Se habilita cuando el expediente esté al 100 % (hoy ${c.expedienteProgreso ?? 0} %)`}
+            title={documentosListos || modoPrueba ? "Borrador del contrato con las condiciones finales (el firmado se carga en el Onboarding)" : `Se habilita cuando el expediente tenga el 100 % de documentos Aprobados (hoy ${c.expedienteProgreso ?? 0} %)`}
           >
-            <FileCheck2 className="h-4 w-4" /> Generar contrato
+            <FileCheck2 className="h-4 w-4" /> Generar contrato (borrador)
           </Button>
           {c.etapa === "Contratación" && (
             <Button
               size="sm"
               className="ml-auto"
               onClick={() => enviarOnboarding()}
-              disabled={Boolean(ocupado)}
-              title="B5: recibir o subir documentos nunca cambia la etapa; este botón es la única forma de pasar a Onboarding"
+              disabled={Boolean(ocupado) || (!requisitosOnboarding && !modoPrueba)}
+              title={
+                requisitosOnboarding || modoPrueba
+                  ? "Revisa el resumen e inicia el Onboarding (única forma de pasar a Onboarding)"
+                  : `Falta: ${[!condicionesListas && "condiciones (puesto, sueldo, tipo y fecha de ingreso)", !c.consentimiento && "consentimiento de privacidad"].filter(Boolean).join(" y ")}`
+              }
             >
               Enviar a Onboarding
             </Button>
@@ -4589,15 +4596,31 @@ function PanelContratacion({
         </div>
       )}
 
+      {live && c.etapa === "Contratación" && !requisitosOnboarding && (
+        <p className="mt-3 text-[12px] text-ink-3">
+          Para enviar a Onboarding: {[!condicionesListas && "guarda puesto, sueldo, tipo y fecha de ingreso", !c.consentimiento && "registra el consentimiento de privacidad (LFPDPPP)"].filter(Boolean).join(" y ")}.
+          {modoPrueba ? " (Modo Prueba activo: puedes enviarlo de todos modos.)" : ""}
+        </p>
+      )}
+
+      {c.etapa === "Onboarding" && c.expedienteId != null && (
+        <div className="mt-5 border-t border-border-faint pt-4">
+          <Eyebrow>Tareas de Onboarding</Eyebrow>
+          <div className="mt-3">
+            <PanelTareasOnboarding expedienteId={c.expedienteId} live={live} onCambio={() => void cargarExpediente()} />
+          </div>
+        </div>
+      )}
+
       <div className="mt-5 border-t border-border-faint pt-4">
         <div className="flex items-center justify-between gap-3">
-          <Eyebrow>Expediente · {c.expedienteProgreso ?? 0}%</Eyebrow>
+          <Eyebrow>Expediente · {c.expedienteProgreso ?? 0}% aprobado</Eyebrow>
           <div className="w-32">
             <Progress value={c.expedienteProgreso ?? 0} tone="good" />
           </div>
         </div>
         <div className="mt-3 flex flex-col gap-2">
-          {(expediente?.documentos ?? []).map((d) => (
+          {(expediente?.documentos ?? []).filter((d) => !d.interno).map((d) => (
             <FilaDocumentoSimple
               key={d.nombre}
               d={d}
@@ -4625,15 +4648,22 @@ function PanelContratacion({
               <RotateCw className="h-4 w-4" /> {etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).texto}
             </Button>
           )}
-          {c.etapa === "Contratación" && !condicionesListas && (
-            <Button size="sm" onClick={() => enviarOnboarding()} disabled={Boolean(ocupado)}>
-              Enviar a Onboarding
-            </Button>
-          )}
           {onDescartar && (
             <MenuAcciones acciones={[{ etiqueta: "Descartar candidato…", icono: <ThumbsDown />, peligrosa: true, onClick: onDescartar, disabled: Boolean(ocupado) }]} />
           )}
         </div>
+      )}
+
+      {iniciarAbierto && c.expedienteId != null && (
+        <ModalIniciarOnboarding
+          expedienteId={c.expedienteId}
+          onClose={() => setIniciarAbierto(false)}
+          onIniciado={(r) => {
+            setIniciarAbierto(false);
+            onCambio(r.candidato);
+            setAviso({ tono: "ok", texto: `Onboarding iniciado: ${r.tareas.length} tareas generadas.` });
+          }}
+        />
       )}
 
       {docPreview && c.expedienteId != null && (

@@ -3055,6 +3055,61 @@ export function cambiarTareaOnboarding(id: number, datos: { estado?: TareaOnboar
   return patch<TareaOnboarding>(`/onboarding/tareas/${id}`, datos);
 }
 
+/* Fase 2 (2026-09-28): de Contratación a Onboarding. «Iniciar Onboarding» es el ÚNICO gatillo del cambio de etapa. */
+export interface ResumenOnboarding {
+  expedienteId: number;
+  etapa: string;
+  requisitos: { items: { clave: string; nombre: string; ok: boolean }[]; faltan: string[]; completos: boolean };
+  modoPrueba: boolean;
+  puedeIniciar: boolean;
+  iniciado: boolean;
+  configuracion: {
+    plantillaId: number | null;
+    plantilla: string;
+    origen: "puesto" | "empresa" | "predeterminada";
+    documentos: DocumentoPlantillaOnboarding[];
+    recursos: RecursoPlantillaOnboarding[];
+    responsables: Record<ClavePlazoOnboarding, string>;
+    plazos: Record<ClavePlazoOnboarding, number>;
+    cursoInduccionId: number | null;
+    cursoInduccion: string;
+  };
+  documentosExpediente: { tipo: string; obligatorio: boolean; estado: string; tieneArchivo: boolean }[];
+  usuarios: { id: number; nombre: string; correo: string }[];
+  cursos: { id: number; titulo: string }[];
+}
+export interface AvisoOnboarding { destinatario: string; canal: string; destino: string; enviado: boolean; detalle: string }
+export interface ResultadoIniciarOnboarding {
+  candidato: Candidato;
+  tareas: TareaOnboarding[];
+  documentosAgregados: string[];
+  documentosNoAplica: string[];
+  documentosConservados: string[];
+  solicitudDocumentos: ResultadoNotificacion[];
+  avisosResponsables: AvisoOnboarding[];
+  cursoInduccion: { curso: string; asignacion?: string; error?: string } | null;
+}
+export function fetchResumenOnboarding(expedienteId: number) {
+  return get<ResumenOnboarding>(`/onboarding/expedientes/${expedienteId}/resumen`);
+}
+export function iniciarOnboarding(expedienteId: number, datos: {
+  documentos: DocumentoPlantillaOnboarding[]; recursos: RecursoPlantillaOnboarding[];
+  responsables: Partial<Record<ClavePlazoOnboarding, string>>; plazos: Partial<Record<ClavePlazoOnboarding, number>>;
+  curso_induccion_id: number | null; plantilla_id: number | null;
+}) {
+  return post<ResultadoIniciarOnboarding>(`/onboarding/expedientes/${expedienteId}/iniciar`, datos);
+}
+export function subirContratoFirmado(expedienteId: number, archivo: File) {
+  const form = new FormData();
+  form.append("archivo", archivo);
+  return subir<{ tarea: TareaOnboarding; documento: { tipo: string; archivo: string; cargadoPor: string; cargadoEn: string } }>(
+    `/onboarding/expedientes/${expedienteId}/contrato-firmado`, form,
+  );
+}
+export function urlContratoFirmado(expedienteId: number) {
+  return urlArchivo(`/onboarding/expedientes/${expedienteId}/contrato-firmado`);
+}
+
 /* -------------------- Conocimiento: generación y permisos -------------------- */
 
 export function generarDocumentoConocimiento(datos: { tema: string; tipo?: string; notas?: string }) {

@@ -6,6 +6,9 @@ Fase 1: Plantillas de Onboarding (CRUD en Configuración, jerarquía puesto > em
 configuración aplicada es una COPIA), documentos con estados Pendiente / Por revisar / Aprobado / Rechazado /
 No aplica («No aplica» solo RH y con motivo, fuera del porcentaje, no se le pide al candidato) y tareas
 Pendiente / Realizada / Cancelada (motivo obligatorio; tres fijas obligatorias que no se cancelan).
+Fase 2: el porcentaje cuenta solo Aprobados; «Iniciar Onboarding» es el único paso a Onboarding (requisitos:
+condiciones + consentimiento), resumen precargado, «Cambiar selección», avisos a responsables, contrato firmado
+como documento interno, y Modo Prueba se salta las reglas nuevas.
 """
 
 import os
@@ -261,6 +264,113 @@ with TestClient(app) as client:
     etapa = client.get(f"/candidatos/{P}").json()
     check(etapa.get("etapa") == "Contratación", f"nada de lo anterior movió la etapa ({etapa.get('etapa')})")
 
+    # ======================= FASE 2: de Contratación a Onboarding =======================
+    print("\n--- 8. Fase 2 · el porcentaje solo cuenta documentos Aprobados ---")
+    r = client.post("/candidatos", json={"nombre": "Luisa Chofer", "telefono": "5533334444", "correo": "luisa@correo.mx", "vacante": vac["id"], "consentimiento": True, "fuente": "RH"})
+    P2 = r.json()["id"]
+    EXP2 = client.patch(f"/candidatos/{P2}/etapa", json={"etapa": "Contratación", "manual": True}).json()["expedienteId"]
+    client.post(f"/contratacion/expedientes/{EXP2}/documentos", data={"tipo": "CURP"}, files={"archivo": ("curp.pdf", PDF_MIN, "application/pdf")})
+    x = client.get(f"/contratacion/expedientes/{EXP2}").json()
+    check(x["progreso"] == 0 and "CURP" in x["noAprobados"], f"subido pero sin aprobar NO suma al porcentaje ({x['progreso']} %)")
+    x = client.post(f"/contratacion/expedientes/{EXP2}/documentos/estado", json={"tipo": "CURP", "estado": "aprobado"}).json()
+    check(x["progreso"] == 17 and "CURP" not in x["noAprobados"], f"aprobado por RH sí suma ({x['progreso']} %)")
+    r = client.get(f"/contratacion/expedientes/{EXP2}/contrato")
+    check(r.status_code == 409 and "Aprobados" in r.json()["detail"], "el contrato exige el 100 % de documentos Aprobados")
+
+    print("\n--- 9. «Iniciar Onboarding» es el ÚNICO gatillo hacia Onboarding ---")
+    r = client.patch(f"/candidatos/{P2}/etapa", json={"etapa": "Onboarding", "manual": True})
+    check(r.status_code == 409 and "Iniciar Onboarding" in r.json()["detail"], "mover a Onboarding por la etapa → 409 (Modo Prueba apagado)")
+    res = client.get(f"/onboarding/expedientes/{EXP2}/resumen").json()
+    check(res["puedeIniciar"] is False and "Sueldo" in res["requisitos"]["faltan"] and "Fecha de ingreso" in res["requisitos"]["faltan"],
+          f"sin condiciones no se puede enviar a Onboarding (faltan: {res['requisitos']['faltan']})")
+    r = client.post(f"/onboarding/expedientes/{EXP2}/iniciar", json={"documentos": [{"tipo": "CURP"}]})
+    check(r.status_code == 409 and "Sueldo" in r.json()["detail"], "el backend lo refuerza (409 con lo que falta)")
+    client.patch(f"/candidatos/{P2}/condiciones-contratacion", json={
+        "puesto": "Chofer repartidor", "sueldo": "$14,000 mensuales", "tipo_contratacion": "Tiempo indeterminado", "fecha_ingreso": "2026-11-02",
+    })
+    client.post(f"/candidatos/{P2}/consentimiento", json={"acepta": False, "medio": "verbal"})
+    res = client.get(f"/onboarding/expedientes/{EXP2}/resumen").json()
+    check(res["requisitos"]["faltan"] == ["Consentimiento de privacidad (LFPDPPP)"] and not res["puedeIniciar"],
+          "sin consentimiento de privacidad tampoco se habilita")
+    client.post(f"/candidatos/{P2}/consentimiento", json={"acepta": True, "medio": "escrito"})
+    res = client.get(f"/onboarding/expedientes/{EXP2}/resumen").json()
+    check(res["puedeIniciar"] and res["requisitos"]["completos"], "puesto + sueldo + tipo + fecha + consentimiento → habilitado")
+    cfg = res["configuracion"]
+    check(cfg["origen"] == "puesto" and cfg["plantilla"] == "Chofer" and [d["tipo"] for d in cfg["documentos"]] == ["Identificación oficial", "Licencia federal", "Carta de no antecedentes"],
+          "el resumen viene PRECARGADO con la plantilla del puesto")
+
+    print("\n--- 10. «Cambiar selección» (solo para esta persona) + Iniciar ---")
+    admin_nombre = admin.nombre
+    seleccion = {
+        "documentos": [{"tipo": "Identificación oficial"}, {"tipo": "CURP"}, {"tipo": "Licencia federal"}, {"tipo": "Número de Seguridad Social"}],
+        "recursos": [{"nombre": "Unidad asignada", "tipo": "equipo", "responsable": admin_nombre, "dias": -1}],
+        "responsables": {**cfg["responsables"], "alta_imss_nomina": admin_nombre},
+        "plazos": cfg["plazos"], "plantilla_id": cfg["plantillaId"], "curso_induccion_id": cfg["cursoInduccionId"],
+    }
+    r = client.post(f"/onboarding/expedientes/{EXP2}/iniciar", json=seleccion)
+    check(r.status_code == 200, f"«Iniciar Onboarding» ({r.status_code} {r.text[:200] if r.status_code != 200 else ''})")
+    out = r.json()
+    check(out["candidato"]["etapa"] == "Onboarding", "cambia la etapa a Onboarding (el mismo movimiento de siempre)")
+    check([t["clave"] for t in out["tareas"]][:3] == ["contrato_firmado", "alta_imss_nomina", "confirmar_ingreso"] and len(out["tareas"]) == 4,
+          "genera las tres tareas fijas + el recurso seleccionado")
+    check(out["documentosAgregados"] == ["Licencia federal"], "agrega los documentos seleccionados que faltaban")
+    check(set(out["documentosNoAplica"]) == {"Constancia de Situación Fiscal / RFC", "Comprobante de domicilio", "Cuenta bancaria / CLABE"},
+          "lo que RH quitó de la selección queda «No aplica» (nunca se borra)")
+    check(out["documentosConservados"] == [], "nada entregado se tocó")
+    docs2 = {d["nombre"]: d for d in client.get(f"/contratacion/expedientes/{EXP2}").json()["documentos"]}
+    check(docs2["Cuenta bancaria / CLABE"]["estadoOnboarding"] == "No aplica" and docs2["CURP"]["estadoOnboarding"] == "Aprobado", "estados correctos tras iniciar")
+    check(len(db.get(PlantillaOnboarding, CH["id"]).documentos) == 3, "la plantilla no cambió con la selección de la persona")
+    avisos = {a["destinatario"]: a for a in out["avisosResponsables"]}
+    check(admin_nombre in avisos and avisos[admin_nombre]["destino"] == admin.correo and "RESEND" in avisos[admin_nombre]["detalle"],
+          "avisa por correo al responsable interno que es usuario de la Cuenta (sin Resend: queda visible que no salió)")
+    check(avisos.get("Jurídico", {}).get("enviado") is False and "usuario de la Cuenta" in avisos["Jurídico"]["detalle"],
+          "un responsable que no es usuario se reporta, nunca en silencio")
+    check(isinstance(out["solicitudDocumentos"], list) and out["solicitudDocumentos"], "hace la primera solicitud de documentos al candidato")
+    check(out["cursoInduccion"] and out["cursoInduccion"]["curso"] == "Inducción general", "asigna el curso de inducción")
+    check(client.post(f"/onboarding/expedientes/{EXP2}/iniciar", json=seleccion).status_code == 409, "no se inicia dos veces")
+
+    print("\n--- 11. Contrato: borrador y contrato firmado ---")
+    tareas2 = {t["clave"]: t for t in client.get(f"/onboarding/expedientes/{EXP2}/tareas").json()}
+    check(client.patch(f"/onboarding/tareas/{tareas2['contrato_firmado']['id']}", json={"estado": "realizada"}).status_code == 409,
+          "«Contrato firmado» no se marca a mano")
+    check(client.patch(f"/contratacion/expedientes/{EXP2}/preparacion", json={"contrato": "Firmado"}).status_code == 409,
+          "…tampoco por el checklist viejo")
+    r = client.post(f"/onboarding/expedientes/{EXP2}/contrato-firmado", files={"archivo": ("firma.png", b"\x89PNG\r\n\x1a\n" + b"0" * 800, "image/png")})
+    check(r.status_code == 400 and "PDF" in r.json()["detail"], "el contrato firmado debe ser PDF")
+    r = client.post(f"/onboarding/expedientes/{EXP2}/contrato-firmado", files={"archivo": ("contrato-firmado.pdf", PDF_MIN, "application/pdf")})
+    check(r.status_code == 200 and r.json()["tarea"]["estado"] == "realizada" and r.json()["tarea"]["realizadaPor"] == admin_nombre,
+          "«Cargar contrato firmado» → tarea Realizada con quién y cuándo")
+    x = client.get(f"/contratacion/expedientes/{EXP2}").json()
+    firmado = next(d for d in x["documentos"] if d["nombre"] == "Contrato firmado")
+    check(firmado["interno"] and x["contrato"] == "Firmado", "se guarda como documento interno y el campo viejo se deriva de la tarea")
+    check("Contrato firmado" not in x["noAprobados"] and x["progreso"] == 25, f"el contrato firmado NO suma al porcentaje ({x['progreso']} %)")
+    check(client.get(f"/onboarding/expedientes/{EXP2}/contrato-firmado").status_code == 200, "se puede descargar")
+    e2 = db.get(Expediente, EXP2)
+    db.refresh(e2)
+    pub = client.get(f"/expedientes/publica/{e2.token}").json()
+    check(all(d["tipo"] != "Contrato firmado" for d in pub["documentos"]), "el candidato no ve el contrato firmado como documento por subir")
+    r = client.post(f"/contratacion/expedientes/{EXP2}/documentos", data={"tipo": "Contrato firmado"}, files={"archivo": ("c.pdf", PDF_MIN, "application/pdf")})
+    check(r.status_code == 409, "el contrato firmado no se sube por la vía de documentos del candidato")
+    r = client.patch(f"/contratacion/expedientes/{EXP2}/preparacion", json={"alta_administrativa": "Realizada"})
+    t_imss = {t["clave"]: t for t in client.get(f"/onboarding/expedientes/{EXP2}/tareas").json()}["alta_imss_nomina"]
+    check(r.status_code == 200 and t_imss["estado"] == "realizada" and r.json()["altaAdministrativa"] == "Realizada",
+          "el checklist viejo ahora actualiza la TAREA (fuente de verdad)")
+
+    print("\n--- 12. Modo Prueba se salta las reglas nuevas ---")
+    r = client.post("/candidatos", json={"nombre": "Prueba Directa", "telefono": "5599990000", "correo": "p@correo.mx", "vacante": vac["id"], "consentimiento": True, "fuente": "RH"})
+    P3 = r.json()["id"]
+    EXP3 = client.patch(f"/candidatos/{P3}/etapa", json={"etapa": "Contratación", "manual": True}).json()["expedienteId"]
+    cfg_sis = obtener(db)
+    cfg_sis.modo_prueba = True
+    db.commit()
+    check(client.get(f"/onboarding/expedientes/{EXP3}/resumen").json()["puedeIniciar"], "Modo Prueba: se puede iniciar sin condiciones")
+    check(client.get(f"/contratacion/expedientes/{EXP3}/contrato").status_code == 200, "Modo Prueba: el contrato (borrador) se genera sin el 100 %")
+    r = client.patch(f"/candidatos/{P3}/etapa", json={"etapa": "Onboarding", "manual": True})
+    check(r.status_code == 200 and r.json()["etapa"] == "Onboarding", "Modo Prueba: mover directo a Onboarding sí se permite")
+    check(len(client.get(f"/onboarding/expedientes/{EXP3}/tareas").json()) == 3, "…y las tareas fijas nacen igual")
+    cfg_sis.modo_prueba = False
+    db.commit()
+
     db.close()
 
-print(f"\n🎉 Onboarding v2 — Fase 1: {OK} verificaciones OK")
+print(f"\n🎉 Onboarding v2 — Fases 1 y 2: {OK} verificaciones OK")

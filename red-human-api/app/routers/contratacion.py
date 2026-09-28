@@ -153,19 +153,25 @@ def actualizar_preparacion(
     e = _expediente(db, exp_id, cuenta.id)
     if e.estado == "alta":
         raise HTTPException(409, "El expediente ya fue dado de alta; no admite cambios.")
+    from ..services import onboarding as onb
+
+    tareas = onb.tareas_de(db, e) if (datos.contrato or datos.alta_administrativa or datos.equipo_accesos) else []
+    if tareas:
+        # Onboarding v2 (2026-09-28): las TAREAS son la fuente de verdad; estos campos se derivan de ellas.
+        _preparacion_por_tareas(db, e, tareas, datos, u)
 
     cambios = []
-    if datos.contrato is not None:
+    if datos.contrato is not None and not tareas:
         if datos.contrato not in ESTADOS_CONTRATO:
             raise HTTPException(400, f"contrato inválido. Usa uno de: {', '.join(ESTADOS_CONTRATO)}")
         e.contrato = datos.contrato
         cambios.append("contrato")
-    if datos.alta_administrativa is not None:
+    if datos.alta_administrativa is not None and not tareas:
         if datos.alta_administrativa not in ESTADOS_ALTA_ADMIN:
             raise HTTPException(400, f"alta_administrativa inválida. Usa una de: {', '.join(ESTADOS_ALTA_ADMIN)}")
         e.alta_administrativa = datos.alta_administrativa
         cambios.append("alta_administrativa")
-    if datos.equipo_accesos is not None:
+    if datos.equipo_accesos is not None and not tareas:
         if datos.equipo_accesos not in ESTADOS_EQUIPO_ACCESOS:
             raise HTTPException(400, f"equipo_accesos inválido. Usa uno de: {', '.join(ESTADOS_EQUIPO_ACCESOS)}")
         e.equipo_accesos = datos.equipo_accesos
@@ -189,8 +195,40 @@ def actualizar_preparacion(
             db, u.nombre, "preparacion_ingreso_actualizada", "expediente", str(e.id),
             {"campos": cambios, "correo_rh": u.correo},
         )
-        db.commit()
+    db.commit()
     return expediente_dict(e)
+
+
+def _preparacion_por_tareas(db: Session, e: Expediente, tareas: list, datos: "PreparacionIn", u: Usuario) -> None:
+    """Traduce el checklist viejo a las tareas (fuente de verdad) y deriva de vuelta los campos."""
+    from ..services import onboarding as onb
+
+    por_clave = {t.clave: t for t in tareas if t.fija}
+    if datos.contrato is not None:
+        if datos.contrato not in ESTADOS_CONTRATO:
+            raise HTTPException(400, f"contrato inválido. Usa uno de: {', '.join(ESTADOS_CONTRATO)}")
+        t = por_clave.get("contrato_firmado")
+        if t and datos.contrato == "Firmado" and t.estado != "realizada":
+            raise HTTPException(409, "El contrato se marca firmado al cargar el PDF firmado («Cargar contrato firmado»).")
+        if t and datos.contrato == "Pendiente" and t.estado == "realizada":
+            raise HTTPException(409, "El contrato firmado ya está cargado; reemplázalo desde las tareas del Onboarding.")
+    if datos.alta_administrativa is not None:
+        if datos.alta_administrativa not in ESTADOS_ALTA_ADMIN:
+            raise HTTPException(400, f"alta_administrativa inválida. Usa una de: {', '.join(ESTADOS_ALTA_ADMIN)}")
+        t = por_clave.get("alta_imss_nomina")
+        if t:
+            onb.cambiar_estado_tarea(t, "realizada" if datos.alta_administrativa == "Realizada" else "pendiente", "", u.nombre)
+    if datos.equipo_accesos is not None:
+        if datos.equipo_accesos not in ESTADOS_EQUIPO_ACCESOS:
+            raise HTTPException(400, f"equipo_accesos inválido. Usa uno de: {', '.join(ESTADOS_EQUIPO_ACCESOS)}")
+        destino = {"Listo": "realizada", "Pendiente": "pendiente", "No aplica": "cancelada"}[datos.equipo_accesos]
+        for t in tareas:
+            if not t.fija and t.tipo in ("correo", "equipo", "accesos") and t.estado != destino:
+                onb.cambiar_estado_tarea(t, destino, "Marcado «No aplica» en la preparación de ingreso.", u.nombre)
+    onb.sincronizar_legado(db, e)
+    registrar(db, u.nombre, "preparacion_ingreso_actualizada", "expediente", str(e.id),
+              {"por_tareas": True, "contrato": datos.contrato, "alta_administrativa": datos.alta_administrativa,
+               "equipo_accesos": datos.equipo_accesos, "correo_rh": u.correo})
 
 
 # ------------------------------------------------------------
@@ -227,6 +265,8 @@ async def subir_documento_interno(db: Session, e: Expediente, tipo: str, archivo
     if e.estado == "alta":
         raise HTTPException(409, "El expediente ya fue dado de alta; no admite cambios.")
     doc = _documento(e, tipo)
+    if doc.interno:
+        raise HTTPException(409, f"«{doc.tipo}» es un documento interno de RH: cárgalo desde las tareas del Onboarding.")
     if doc.estado == "no_aplica" and subido_por == "candidato":
         raise HTTPException(409, f"«{doc.tipo}» no se requiere en tu expediente.")
     validado = await fs.validar(archivo, f"documento «{doc.tipo}»")
@@ -266,7 +306,7 @@ def documento_para_adjunto(db: Session, e: Expediente, pie: str, nombre_archivo:
     obligatorio pendiente/rechazado; (3) si no falta ninguno, el primer opcional pendiente; (4) si
     tampoco, se agrega como documento adicional (RH lo reclasifica desde el expediente)."""
     pista = _norm(f"{pie} {nombre_archivo}")
-    docs = sorted((d for d in e.documentos if d.estado != "no_aplica"), key=lambda d: d.id)
+    docs = sorted((d for d in e.documentos if d.estado != "no_aplica" and not d.interno), key=lambda d: d.id)
     if pista.strip():
         for d in docs:
             if _norm(d.tipo) in pista:
@@ -321,7 +361,8 @@ def _registrar_documento(db: Session, e: Expediente, doc: Documento, validado, s
     doc.subido_en = datetime.now(timezone.utc)
     doc.validacion = v.model_dump()
     doc.estado, doc.notas_ia = _resolver_estado(v, con_ia)
-    doc.revisado_por = ""  # vuelve a quedar pendiente de revisión humana
+    # vuelve a quedar pendiente de revisión humana («Por revisar»); en Modo Prueba queda «Aprobado» (Onboarding v2)
+    doc.revisado_por = "Modo Prueba" if (modo_prueba_activo(db) and doc.estado == "recibido") else ""
     if doc.entregado:  # B3: recibido (o digital en revisión) → fecha/hora y canal de recepción
         doc.recibido_en = doc.subido_en
         doc.recibido_canal = _canal_recepcion(subido_por)
@@ -388,6 +429,8 @@ def marcar_documento(
     """Revisión humana manual de un documento (el agente propone, RH dispone)."""
     e = _expediente(db, exp_id, cuenta.id)
     doc = _documento(e, datos.tipo)
+    if doc.interno:
+        raise HTTPException(409, f"«{doc.tipo}» es un documento interno de RH: se gestiona desde las tareas del Onboarding.")
     datos.estado = ALIAS_ESTADO_DOC.get((datos.estado or "").strip().lower(), (datos.estado or "").strip().lower())
     if datos.estado not in ESTADOS_DOC + ("no_aplica",):
         raise HTTPException(400, f"Estado inválido. Usa uno de: {', '.join(ESTADOS_DOC + ('no_aplica',))}")
@@ -602,7 +645,7 @@ async def alta(
     if faltan and not prueba:
         raise HTTPException(409, f"Captura y guarda las condiciones de contratación antes del alta. Faltan: {', '.join(faltan)}.")
     if e.progreso < 100 and not prueba and not puede_forzar_prueba(db, forzar_prueba):
-        raise HTTPException(409, f"El expediente está al {e.progreso}%. Faltan: {', '.join(e.pendientes)}.")
+        raise HTTPException(409, f"El expediente está al {e.progreso}% (solo cuentan documentos Aprobados). Faltan: {', '.join(e.no_aprobados)}.")
     # HITL: lo que cuenta para el % (recibido o digital en revisión) lo confirma una persona de RH
     # antes del alta — el porcentaje ya no espera esa confirmación, el alta sí.
     sin_revisar = e.sin_confirmar
@@ -812,10 +855,11 @@ def contrato(
     los documentos requeridos ya están (expediente al 100 %), salvo Modo Prueba."""
     e = _expediente(db, exp_id, cuenta.id)
     if not _documentos_listos(e) and not modo_prueba_activo(db):
-        raise HTTPException(409, f"El contrato se genera cuando el expediente está al 100 % (hoy {e.progreso} %). Faltan: {', '.join(e.pendientes)}.")
+        raise HTTPException(409, f"El contrato se genera cuando el expediente está al 100 % de documentos Aprobados (hoy {e.progreso} %). Faltan: {', '.join(e.no_aprobados)}.")
     d = _datos_carta_intencion(e)
     if not (e.puesto and e.sueldo and e.tipo_contratacion and e.fecha_ingreso) and not modo_prueba_activo(db):
         raise HTTPException(409, "Captura y guarda las condiciones de contratación (puesto, sueldo, tipo y fecha de ingreso) antes de generar el contrato.")
+    d["borrador"] = True  # Onboarding v2: lo generado es BORRADOR; el firmado se carga en la tarea «Contrato firmado»
     try:
         pdf = pdf_contrato(d)
     except Exception as ex:  # noqa: BLE001

@@ -680,6 +680,8 @@ def documento_dict(d: Documento) -> dict:
         # Onboarding v2 (2026-09-28): Pendiente | Por revisar | Aprobado | Rechazado | No aplica
         "estadoOnboarding": estado_documento_onboarding(d),
         "motivoNoAplica": d.motivo_no_aplica or "",
+        "interno": bool(d.interno),  # contrato firmado: documento de RH, fuera del porcentaje
+        "aprobado": d.aprobado,
         "noAplicaPor": d.no_aplica_por or "",
         "obligatorio": d.obligatorio,
         "notas": d.notas_ia or "",
@@ -746,6 +748,7 @@ def expediente_dict(e: Expediente) -> dict:
         "estado": estado,
         "documentos": [documento_dict(d) for d in e.documentos],
         "pendientes": e.pendientes,
+        "noAprobados": e.no_aprobados,  # Onboarding v2: lo que falta APROBAR para el 100 %
         "porRevisar": e.por_revisar,
         "sinConfirmar": sin_confirmar,
         # Fase 3: recordatorios automáticos de documentos

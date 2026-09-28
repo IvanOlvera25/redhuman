@@ -29,6 +29,7 @@ from ..models import (
 )
 
 CLAVES_FIJAS = {c for c, _ in TAREAS_FIJAS_ONBOARDING}
+EXTENSIONES_CONTRATO = (".pdf",)
 # Tareas que solo se cierran con su acción propia (no con «marcar realizada» genérico).
 CIERRE_CON_ACCION = {"contrato_firmado": "Se marca como realizada al cargar el contrato firmado (PDF final)."}
 
@@ -247,3 +248,78 @@ def cambiar_estado_tarea(t: TareaOnboarding, estado: str, motivo: str, por: str)
     else:
         return "Estado inválido. Usa pendiente, realizada o cancelada."
     return None
+
+
+# ---------- Fase 2: tareas = fuente de verdad, requisitos e inicio ----------
+
+def sincronizar_legado(db: Session, e: Expediente) -> None:
+    """Las TAREAS son la fuente de verdad (decisión del usuario, 2026-09-28). Los campos viejos del expediente
+    (`contrato`, `alta_administrativa`, `equipo_accesos`) se DERIVAN de ellas para no romper pantallas ni
+    reportes que todavía los leen. Sin tareas (Onboarding no iniciado) no se toca nada."""
+    tareas = tareas_de(db, e)
+    if not tareas:
+        return
+    por_clave = {t.clave: t for t in tareas if t.fija}
+    if "contrato_firmado" in por_clave:
+        e.contrato = "Firmado" if por_clave["contrato_firmado"].estado == "realizada" else "Pendiente"
+    if "alta_imss_nomina" in por_clave:
+        e.alta_administrativa = "Realizada" if por_clave["alta_imss_nomina"].estado == "realizada" else "Pendiente"
+    recursos = [t for t in tareas if not t.fija and t.tipo in ("correo", "equipo", "accesos")]
+    if recursos:
+        if all(t.estado == "cancelada" for t in recursos):
+            e.equipo_accesos = "No aplica"
+        elif all(t.estado in ("realizada", "cancelada") for t in recursos):
+            e.equipo_accesos = "Listo"
+        else:
+            e.equipo_accesos = "Pendiente"
+
+
+def requisitos_inicio(e: Expediente) -> dict:
+    """Lo que habilita «Enviar a Onboarding»: puesto, sueldo, tipo de contratación, fecha de ingreso y el
+    consentimiento de privacidad (LFPDPPP) de la postulación."""
+    p = e.postulacion
+    items = [
+        ("puesto", "Puesto", bool((e.puesto or "").strip())),
+        ("sueldo", "Sueldo", bool((e.sueldo or "").strip())),
+        ("tipo_contratacion", "Tipo de contratación", bool((e.tipo_contratacion or "").strip())),
+        ("fecha_ingreso", "Fecha de ingreso", bool(e.fecha_ingreso)),
+        ("consentimiento", "Consentimiento de privacidad (LFPDPPP)", bool(p and p.consentimiento)),
+    ]
+    faltan = [n for _, n, ok in items if not ok]
+    return {"items": [{"clave": c, "nombre": n, "ok": ok} for c, n, ok in items], "faltan": faltan, "completos": not faltan}
+
+
+def onboarding_iniciado(db: Session, e: Expediente) -> bool:
+    return bool(tareas_de(db, e))
+
+
+def aplicar_seleccion_documentos(db: Session, e: Expediente, documentos: List[dict], por: str) -> Tuple[List[str], List[str], List[str]]:
+    """Aplica la selección de documentos de ESTA persona: agrega los que falten y ajusta si son obligatorios;
+    un documento del expediente que RH quitó de la selección pasa a «No aplica» con motivo (nunca se borra).
+    Uno ya entregado se conserva tal cual. Regresa (agregados, no_aplica, conservados)."""
+    seleccion = {norm(d["tipo"]): d for d in normalizar_documentos(documentos)}
+    agregados = aplicar_documentos(db, e, list(seleccion.values()))
+    no_aplica, conservados = [], []
+    ahora = datetime.now(timezone.utc)
+    for d in e.documentos:
+        if d.interno:
+            continue
+        sel = seleccion.get(norm(d.tipo))
+        if sel:
+            d.obligatorio = bool(sel["obligatorio"])
+            continue
+        if d.estado in ("pendiente", "rechazado") and not d.archivo:
+            d.estado, d.motivo_no_aplica, d.no_aplica_por, d.no_aplica_en = "no_aplica", "No seleccionado al iniciar el Onboarding.", por, ahora
+            no_aplica.append(d.tipo)
+        elif d.estado != "no_aplica":
+            conservados.append(d.tipo)
+    db.flush()
+    return agregados, no_aplica, conservados
+
+
+def tareas_por_responsable(tareas: List[TareaOnboarding]) -> dict:
+    grupos: dict = {}
+    for t in tareas:
+        if t.estado == "pendiente" and (t.responsable or "").strip():
+            grupos.setdefault(t.responsable.strip(), []).append(t)
+    return grupos

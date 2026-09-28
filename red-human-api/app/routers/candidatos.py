@@ -1758,10 +1758,29 @@ async def mover_etapa(
     Mover una postulación cerrada (descartada) la reabre: es una decisión humana explícita.
 
     `forzar_prueba`: inerte salvo que Modo Prueba esté activo (ver
-    services.configuracion.puede_forzar_prueba) — deja saltar los bloqueos de secuencia."""
+    services.configuracion.puede_forzar_prueba) — deja saltar los bloqueos de secuencia.
+
+    Onboarding v2 (2026-09-28): a Onboarding SOLO se entra con «Iniciar Onboarding»
+    (`POST /onboarding/expedientes/{id}/iniciar`, que llama a `aplicar_movimiento`); aquí se rechaza salvo
+    con Modo Prueba activo."""
     p = _por_codigo(db, codigo, cuenta.id)
+    await aplicar_movimiento(db, p, datos, u, forzar_prueba)
+    return postulacion_dict(p, detalle=True)
+
+
+async def aplicar_movimiento(
+    db: Session, p: Postulacion, datos: EtapaIn, u: Usuario, forzar_prueba: bool = False, desde_iniciar: bool = False,
+) -> Postulacion:
+    """Núcleo del movimiento de etapa (hace commit). `desde_iniciar` = lo llama «Iniciar Onboarding»."""
     if datos.etapa not in ETAPAS_CANDIDATO:
         raise HTTPException(400, f"Etapa inválida. Usa una de: {', '.join(ETAPAS_CANDIDATO)}")
+    prueba_total = modo_prueba_activo(db)
+    if datos.etapa == "Onboarding" and not desde_iniciar and not prueba_total and datos.etapa != p.etapa:
+        raise HTTPException(
+            409,
+            "Para pasar a Onboarding usa «Enviar a Onboarding» e «Iniciar Onboarding» desde el expediente "
+            "(revisa condiciones, consentimiento, documentos y tareas).",
+        )
     # «Avanzar a Entrevista Humana» (2026-09-22) es una decisión humana explícita: se comporta como manual.
     omitiendo_ia = bool(datos.omitir_entrevista_ia) and datos.etapa == "Entrevista Humana"
     manual = datos.manual or omitiendo_ia
@@ -1845,10 +1864,24 @@ async def mover_etapa(
     registrar(
         db, u.nombre, "etapa_movida", "postulacion", p.codigo,
         {"candidato": p.candidato.codigo, "de": anterior, "a": datos.etapa, "comentario": datos.comentario, "reabierta": reabierta,
-         "manual": manual, "omitidas": omitidas, "omitio_entrevista_ia": omitiendo_ia, "correo_rh": u.correo},
+         "manual": manual, "omitidas": omitidas, "omitio_entrevista_ia": omitiendo_ia, "correo_rh": u.correo,
+         "iniciar_onboarding": desde_iniciar},
     )
+    if datos.etapa == "Onboarding" and not desde_iniciar and p.expediente:
+        # Modo Prueba (única vía sin «Iniciar Onboarding»): las tareas nacen igual desde la plantilla, sin avisos.
+        try:
+            from ..services import onboarding as onb
+
+            e = p.expediente
+            with db.begin_nested():  # savepoint: si falla, el movimiento no se pierde
+                cfg = onb.configuracion_para(db, p.cuenta_id, e.puesto, e.empresa)
+                onb.aplicar_documentos(db, e, cfg["documentos"])
+                onb.generar_tareas(db, e, p.cuenta_id, cfg, u.nombre)
+                onb.sincronizar_legado(db, e)
+        except Exception as ex:  # noqa: BLE001 — tablas de módulos no disponibles: el movimiento sigue
+            registrar(db, "sistema", "onboarding_tareas_no_generadas", "postulacion", p.codigo, {"error": str(ex)[:200]})
     db.commit()
-    return postulacion_dict(p, detalle=True)
+    return p
 
 
 # ------------------------------------------------------------
