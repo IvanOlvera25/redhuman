@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { Avatar, Badge, Button, Card, Eyebrow } from "@/components/ui";
 import { Aviso } from "@/components/dashboard/subida";
+import { ModalEditarColaborador } from "@/components/dashboard/colaboradores/alta-importar";
 import {
   darDeBajaColaborador,
   eliminarColaborador,
@@ -73,6 +74,7 @@ export function PerfilColaborador({
   const [ocupado, setOcupado] = useState(false);
   const [error, setError] = useState("");
   const [aviso, setAviso] = useState("");
+  const [editar, setEditar] = useState(false);
 
   useEffect(() => {
     let vivo = true;
@@ -160,6 +162,7 @@ export function PerfilColaborador({
           {/* Acciones administrativas */}
           {puedeDecidir && (
             <div className="flex flex-wrap items-center justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setEditar(true)} disabled={ocupado}>Editar datos</Button>
               {c.activo ? (
                 <Button variant="outline" size="sm" onClick={() => setConfirmar("baja")} disabled={ocupado}>
                   <UserMinus className="h-4 w-4" /> Dar de baja
@@ -184,7 +187,8 @@ export function PerfilColaborador({
               <Dato etiqueta="Tipo de contratación" valor={c.tipoContratacion} />
               <Dato etiqueta="Fecha de ingreso" valor={c.fechaIngreso ? new Date(c.fechaIngreso).toLocaleDateString("es-MX") : ""} />
               <Dato etiqueta="Ubicación" valor={c.ubicacion} />
-              <Dato etiqueta="Jefe(a) directo(a)" valor={c.jefeDirecto} />
+              <Dato etiqueta="Jefe(a) directo(a)" valor={c.jefeDirecto ? `${c.jefeDirecto}${c.jefeId ? ` (${c.jefeId})` : ""}` : ""} />
+              <Dato etiqueta="Área" valor={c.area} />
               <Dato etiqueta="Empresa" valor={c.empresa} />
               <Dato etiqueta="Cliente" valor={c.clienteNombre ?? "Directo (sin Cliente)"} />
             </div>
@@ -261,6 +265,14 @@ export function PerfilColaborador({
             </div>
           </Card>
         </div>
+
+        {editar && detalle && (
+          <ModalEditarColaborador
+            colaborador={detalle}
+            onClose={() => setEditar(false)}
+            onGuardado={(d) => { setEditar(false); setDetalle(d); setAviso("Datos actualizados."); onCambio(d); }}
+          />
+        )}
 
         {confirmar && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !ocupado && setConfirmar(null)}>

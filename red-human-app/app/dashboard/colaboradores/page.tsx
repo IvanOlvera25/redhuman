@@ -2,7 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Briefcase, Building2, CalendarClock, ExternalLink, Mail, MapPin, Phone, ShieldCheck, Users, UserSquare2 } from "lucide-react";
-import { Card, Badge, Avatar, Eyebrow } from "@/components/ui";
+import { Card, Badge, Avatar, Eyebrow, Button } from "@/components/ui";
+import { FileSpreadsheet, UserPlus } from "lucide-react";
+import { ModalAltaColaborador, ModalImportarColaboradores } from "@/components/dashboard/colaboradores/alta-importar";
+import { AvisoLinea, type AvisoRH } from "@/components/dashboard/modulos-rh";
 import { PageHeader } from "@/components/dashboard/parts";
 import { fetchClientesColaboradores, fetchColaboradores, type Colaborador } from "@/lib/api";
 import { usePolling } from "@/lib/use-polling";
@@ -19,6 +22,8 @@ export default function Colaboradores() {
   // 2026-09-15: tarjeta clickeable → perfil detallado con Baja / Eliminar
   const [sel, setSel] = useState<Colaborador | null>(null);
   const puedeDecidir = usePuedeDecidir();
+  const [modal, setModal] = useState<"" | "alta" | "importar">("");
+  const [aviso, setAviso] = useState<AvisoRH>(null);
 
   const recargar = useCallback(async () => {
     const d = await fetchColaboradores(undefined, clienteId === "" ? null : Number(clienteId));
@@ -44,8 +49,16 @@ export default function Colaboradores() {
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
       <PageHeader
         title="Colaboradores"
-        subtitle="Personas dadas de alta al cerrar el Onboarding — el destino final del pipeline de reclutamiento."
+        subtitle="Base maestra de personas: llegan al cerrar el Onboarding o por alta manual / importación de empleados existentes."
       >
+        {puedeDecidir && (
+          <>
+            <button onClick={() => setModal("importar")} title="Importar colaboradores (Excel o CSV)" aria-label="Importar colaboradores" className="grid h-9 w-9 place-items-center rounded-xl border border-border-soft text-ink-2 transition hover:border-brand/50 hover:text-brand">
+              <FileSpreadsheet className="h-4 w-4" />
+            </button>
+            <Button size="sm" onClick={() => setModal("alta")}><UserPlus className="h-4 w-4" /> Alta manual</Button>
+          </>
+        )}
         {live && (
           <Badge tone="good" dot>
             API en vivo
@@ -55,6 +68,14 @@ export default function Colaboradores() {
           {activos} activo{activos !== 1 ? "s" : ""}
         </Badge>
       </PageHeader>
+
+      {aviso && <AvisoLinea aviso={aviso} onCerrar={() => setAviso(null)} />}
+      {modal === "alta" && (
+        <ModalAltaColaborador onClose={() => setModal("")} onCreado={(c) => { setModal(""); setAviso({ tono: "ok", texto: `${c.nombre} quedó dado de alta (${c.id}).` }); void recargar(); }} />
+      )}
+      {modal === "importar" && (
+        <ModalImportarColaboradores onClose={() => setModal("")} onListo={(texto) => { setModal(""); setAviso({ tono: "ok", texto }); void recargar(); }} />
+      )}
 
       {/* Fase 5: filtro por Cliente — solo aparece cuando la Cuenta contrata para Clientes */}
       {clientes.length > 0 && (

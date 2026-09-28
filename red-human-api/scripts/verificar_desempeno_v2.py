@@ -239,4 +239,53 @@ with TestClient(app) as client:
     client.delete(f"/desempeno/plantillas/{PL}")
     check(all(p["id"] != PL for p in client.get("/desempeno/plantillas").json()), "eliminar plantilla = desactivar (ya no se ofrece)")
 
+    print("\n--- Fase 4 · Colaboradores (alta manual e importación) y evaluadores ---")
+    r = client.post("/colaboradores", json={"nombre": "Directora PMO", "correo": "jefa.pmo@empresa.mx", "puesto": "Directora de PMO", "area": "PMO"})
+    check(r.status_code == 201 and r.json()["origenAlta"] == "manual" and r.json()["empresa"], "alta manual sin pasar por Vacantes/Contratación (toma la empresa de la Cuenta)")
+    DIRECTORA = r.json()["id"]
+    r = client.post("/colaboradores", json={"nombre": "Otra persona", "correo": "JEFA.PMO@empresa.mx"})
+    check(r.status_code == 409 and "Posible duplicado" in r.json()["detail"], "el alta manual avisa de un posible duplicado (mismo correo)")
+    check(client.post("/colaboradores", json={"nombre": "Otra persona", "correo": "jefa.pmo@empresa.mx", "confirmar_duplicado": True}).status_code == 201,
+          "…y RH puede confirmar si de verdad es otra persona")
+    csv = ("Nombre,Correo,Telefono,Puesto,Departamento,Sede,Jefe directo,Fecha de ingreso\n"
+           "Sandra Importada,sandra.imp@empresa.mx,55 1234 5678,Gerente de proyectos,PMO,CDMX,jefa.pmo@empresa.mx,2024-03-01\n"
+           "Jefe Nuevo,jefe.nuevo@empresa.mx,,Líder de célula,TI,,,\n"
+           "Empleada Nueva,empleada@empresa.mx,,Desarrolladora,TI,,jefe.nuevo@empresa.mx,2025-01-15\n"
+           "Ana Datos,,,Analista de datos,BI,,,\n"
+           "Correo Malo,no-es-correo,,,,,,\n"
+           "Sandra Repetida,sandra.imp@empresa.mx,,,,,,\n")
+    total_antes = len(client.get("/colaboradores").json())
+    r = client.post("/colaboradores/importar/vista-previa", files={"archivo": ("empleados.csv", csv.encode("utf-8"), "text/csv")})
+    vp = r.json()
+    filas = {f["datos"]["nombre"]: f for f in vp["filas"]}
+    check(r.status_code == 200 and vp["conErrores"] == 1 and "Correo inválido" in filas["Correo Malo"]["errores"][0], "la vista previa marca errores por fila")
+    check(filas["Ana Datos"]["duplicados"] and filas["Sandra Repetida"]["duplicados"][0]["motivos"] == ["repetido en el archivo"],
+          "muestra posibles duplicados contra el roster y dentro del archivo")
+    check(filas["Sandra Importada"]["datos"]["area"] == "PMO" and filas["Sandra Importada"]["datos"]["jefe"] == "jefa.pmo@empresa.mx",
+          "encabezados homologados (Departamento → área, Jefe directo → jefe)")
+    check(len(client.get("/colaboradores").json()) == total_antes, "la vista previa NO guarda nada")
+    aceptadas = [f["datos"] for f in vp["filas"] if not f["errores"]]
+    r = client.post("/colaboradores/importar/confirmar", json={"filas": aceptadas})
+    creados = {c["nombre"]: c for c in r.json()["creados"]}
+    check(set(creados) == {"Sandra Importada", "Jefe Nuevo", "Empleada Nueva"} and len(r.json()["omitidos"]) == 2,
+          "al confirmar se dan de alta las filas válidas y se omiten los posibles duplicados")
+    check(creados["Empleada Nueva"]["jefeId"] == creados["Jefe Nuevo"]["id"], "el jefe puede venir en el mismo archivo (se enlaza al final)")
+    check(creados["Sandra Importada"]["jefeId"] == DIRECTORA and creados["Sandra Importada"]["jefeDirecto"] == "Directora PMO", "jefe resuelto por correo contra el roster")
+    SANDRA = creados["Sandra Importada"]["id"]
+    r = client.patch(f"/colaboradores/{creados['Jefe Nuevo']['id']}", json={"jefe": "Directora PMO"})
+    check(r.status_code == 200 and client.get(f"/colaboradores/{creados['Jefe Nuevo']['id']}").json()["jefeId"] == DIRECTORA, "el jefe se edita en la ficha del roster")
+
+    prop = client.get(f"/desempeno/evaluadores/propuesta?ids={SANDRA},COL-2,{creados['Empleada Nueva']['id']}").json()
+    check(prop[SANDRA]["usuario"]["id"] == evaluadora.id, "si el jefe tiene usuario (mismo correo), se propone como evaluador")
+    check(prop["COL-2"]["usuario"] is None and "Sin jefe" in prop["COL-2"]["motivo"], "sin jefe registrado: se pide elegir evaluador (no bloquea)")
+    check(prop[creados["Empleada Nueva"]["id"]]["usuario"] is None and "no tiene usuario" in prop[creados["Empleada Nueva"]["id"]]["motivo"],
+          "jefe sin usuario en el sistema: se explica y se elige a mano")
+    r = client.post("/desempeno/ciclos", json={"nombre": "Gerentes 2028", "equipo": "Gerentes de proyectos", "criterios": CRITERIOS})
+    CIC3 = r.json()["id"]
+    evs3 = {e["colaboradorId"]: e for e in client.post(f"/desempeno/ciclos/{CIC3}/participantes", json={"colaborador_ids": [SANDRA, "COL-2"]}).json()["evaluaciones"]}
+    check(evs3[SANDRA]["evaluadorUsuarioId"] == evaluadora.id and evs3[SANDRA]["evaluador"] == "Jefa PMO", "sin elegir evaluador, a Sandra la evalúa su jefa (propuesta)")
+    check(evs3["COL-2"]["evaluadorUsuarioId"] is None and evs3["COL-2"]["evaluador"] == admin.nombre, "sin jefe no se bloquea: evalúa quien la agregó hasta que RH elija")
+    check(evs3[SANDRA]["area"] == "PMO" and evs3[SANDRA]["jefe"] == "Directora PMO" and evs3[SANDRA]["empresa"],
+          "Desempeño toma empresa, área, puesto y jefe de la base de Colaboradores")
+
 print(f"\n🎉 Desempeño v2 verificado: {OK} comprobaciones OK.")

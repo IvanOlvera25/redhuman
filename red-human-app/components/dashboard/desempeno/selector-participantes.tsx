@@ -10,7 +10,7 @@ import { AlertTriangle, Loader2, Search } from "lucide-react";
 import { Button } from "@/components/ui";
 import { inputRH } from "@/components/dashboard/modulos-rh";
 import { cn } from "@/lib/utils";
-import { fetchColaboradores, fetchEvaluadoresDesempeno, type Colaborador, type EvaluadorDesempeno } from "@/lib/api";
+import { fetchColaboradores, fetchEvaluadoresDesempeno, fetchPropuestaEvaluadores, type Colaborador, type EvaluadorDesempeno, type PropuestaEvaluador } from "@/lib/api";
 
 /** Misma regla que el backend (`routers.desempeno.mismo_puesto`): «Gerentes de proyectos» ≈ «Gerente de proyecto». */
 function palabras(texto: string) {
@@ -48,6 +48,28 @@ export function SelectorParticipantes({ equipo, yaDentro = [], valor, onCambio }
   const [evaluadores, setEvaluadores] = useState<EvaluadorDesempeno[]>([]);
   const [busqueda, setBusqueda] = useState("");
   const [aceptados, setAceptados] = useState<string[]>([]); // otros puestos a los que RH aplica los mismos criterios
+  const [propuestas, setPropuestas] = useState<Record<string, PropuestaEvaluador>>({});
+
+  // Evaluador propuesto = su jefe en la base maestra (si tiene usuario). Si falta, RH elige: nunca bloquea.
+  useEffect(() => {
+    const faltan = valor.ids.filter((id) => !(id in propuestas));
+    if (!faltan.length) return;
+    fetchPropuestaEvaluadores(faltan).then((resp) => {
+      // cada id pedido queda marcado (aunque no venga) para no volver a pedirlo en bucle
+      const p: Record<string, PropuestaEvaluador> = Object.fromEntries(faltan.map((id) => [id, { jefe: null, usuario: null, motivo: "" }]));
+      Object.assign(p, resp ?? {});
+      setPropuestas((prev) => ({ ...prev, ...p }));
+      const evs = { ...valor.evaluadores };
+      let cambio = false;
+      for (const [id, prop] of Object.entries(p)) {
+        if (prop.usuario && evs[id] === undefined) {
+          evs[id] = prop.usuario.id;
+          cambio = true;
+        }
+      }
+      if (cambio) onCambio({ ...valor, evaluadores: evs });
+    });
+  }, [valor, propuestas, onCambio]);
 
   useEffect(() => {
     fetchColaboradores(true).then((c) => setRoster(c ?? []));
@@ -124,6 +146,11 @@ export function SelectorParticipantes({ equipo, yaDentro = [], valor, onCambio }
                     </span>
                   </label>
                   {dentro && <span className="shrink-0 text-[11px] font-semibold text-good">Ya está</span>}
+                  {marcado && propuestas[c.id]?.motivo && (
+                    <span className={cn("w-full text-[11px] sm:order-last", propuestas[c.id].usuario ? "text-good" : "text-warn")}>
+                      {propuestas[c.id].motivo}
+                    </span>
+                  )}
                   {marcado && (
                     <select
                       value={valor.evaluadores[c.id] ?? ""}

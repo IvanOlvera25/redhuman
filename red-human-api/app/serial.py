@@ -785,6 +785,16 @@ def expediente_dict(e: Expediente) -> dict:
 # ------------------------------------------------------------
 
 
+def _jefe_codigo(col) -> Optional[str]:
+    if not col.jefe_id:
+        return None
+    from sqlalchemy.orm import object_session
+
+    sesion = object_session(col)
+    jefe = sesion.get(Colaborador, col.jefe_id) if sesion else None
+    return jefe.codigo if jefe else None
+
+
 def colaborador_dict(col: Colaborador) -> dict:
     return {
         "id": col.codigo,
@@ -799,6 +809,8 @@ def colaborador_dict(col: Colaborador) -> dict:
         "condicionesIngreso": col.condiciones_ingreso or {},
         "ubicacion": col.ubicacion,
         "jefeDirecto": col.jefe_directo,
+        "jefeId": _jefe_codigo(col),  # 2026-09-27: jefe como otro colaborador del roster
+        "origenAlta": "contratacion" if (col.candidato_origen_id or col.expediente_id) else "manual",
         "estatus": "Activo" if col.activo else "Inactivo",
         "cvNombre": col.cv_nombre,
         "tieneCv": bool(col.cv_ruta),
@@ -899,6 +911,8 @@ def evaluacion_desempeno_dict(e, detalle: bool = False) -> dict:
         "colaborador": col.nombre if col else "",
         "puesto": col.puesto if col else "",
         "area": (col.area or "") if col else "",
+        "empresa": (col.empresa or "") if col else "",   # Desempeño toma empresa/área/puesto/jefe de la base maestra
+        "jefe": (col.jefe_directo or "") if col else "",
         "evaluador": e.evaluador or "",
         "evaluadorUsuarioId": e.evaluador_usuario_id,
         "estado": normalizar_estado_persona(e.estado),

@@ -2160,6 +2160,10 @@ export interface Colaborador {
   empresa: string;
   ubicacion: string;
   jefeDirecto: string;
+  /** 2026-09-27: jefe como otro colaborador del roster (código COL-####). */
+  jefeId?: string | null;
+  /** contratacion = llegó por el pipeline; manual = alta manual o importación. */
+  origenAlta?: "contratacion" | "manual";
   estatus: "Activo" | "Inactivo";
   cvNombre: string;
   tieneCv: boolean;
@@ -2480,6 +2484,8 @@ export interface EvaluacionDesempeno {
   colaborador: string;
   puesto: string;
   area: string;
+  empresa?: string;
+  jefe?: string;
   evaluador: string;
   evaluadorUsuarioId?: number | null;
   estado: EstadoPersonaDesempeno;
@@ -2582,6 +2588,45 @@ export function guardarEvaluacionDesempeno(codigo: string, datos: { resultados: 
     resultados: datos.resultados, brechas: datos.brechas ?? [], comentarios: datos.comentarios ?? "", completar: datos.completar ?? false,
   });
 }
+/* Colaboradores · alta manual e importación básica (Desempeño v2 · Fase 4) */
+export interface AltaColaboradorDatos {
+  nombre: string; correo?: string; telefono?: string; puesto?: string; area?: string; empresa?: string;
+  ubicacion?: string; jefe?: string; fecha_ingreso?: string; tipo_contratacion?: string;
+}
+export function altaColaborador(datos: AltaColaboradorDatos, confirmarDuplicado = false) {
+  return post<Colaborador>("/colaboradores", { ...datos, confirmar_duplicado: confirmarDuplicado });
+}
+export function editarColaborador(codigo: string, datos: { correo?: string; telefono?: string; puesto?: string; area?: string; empresa?: string; ubicacion?: string; jefe?: string }) {
+  return patch<ColaboradorDetalle>(`/colaboradores/${codigo}`, datos);
+}
+export interface FilaImportacionColaborador {
+  fila: number;
+  datos: Required<AltaColaboradorDatos>;
+  errores: string[];
+  duplicados: { id: string; nombre: string; motivos: string[] }[];
+}
+export function vistaPreviaImportacionColaboradores(archivo: File) {
+  const form = new FormData();
+  form.append("archivo", archivo);
+  return subir<{ filas: FilaImportacionColaborador[]; validas: number; conErrores: number; posiblesDuplicados: number }>("/colaboradores/importar/vista-previa", form);
+}
+export function confirmarImportacionColaboradores(filas: AltaColaboradorDatos[], incluirDuplicados: boolean) {
+  return post<{ creados: Colaborador[]; omitidos: { fila: number; nombre: string; motivo: string }[]; errores: { fila: number; nombre: string; error: string }[] }>(
+    "/colaboradores/importar/confirmar", { filas, incluir_duplicados: incluirDuplicados },
+  );
+}
+export function urlFormatoImportacionColaboradores() {
+  return `${API}/colaboradores/importar/formato`;
+}
+export interface PropuestaEvaluador {
+  jefe: { id: string; nombre: string } | null;
+  usuario: { id: number; nombre: string } | null;
+  motivo: string;
+}
+export function fetchPropuestaEvaluadores(ids: string[]) {
+  return get<Record<string, PropuestaEvaluador>>(`/desempeno/evaluadores/propuesta?ids=${encodeURIComponent(ids.join(","))}`);
+}
+
 /* Desempeño v2 · Reutilización (Fase 3) */
 export interface PlantillaDesempeno {
   id: number;

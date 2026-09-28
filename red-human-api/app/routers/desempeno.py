@@ -23,6 +23,7 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -321,6 +322,38 @@ def evaluadores(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actu
     return [{"id": u.id, "nombre": u.nombre, "correo": u.correo, "puesto": u.puesto or ""} for u in filas]
 
 
+def evaluador_propuesto(db: Session, col: Colaborador, cuenta_id: int) -> dict:
+    """Jefe del roster → su usuario del sistema (mismo correo, activo, con acceso a la Cuenta). Si falta el
+    jefe o no tiene usuario, NO bloquea: se dice por qué y RH elige al evaluador a mano."""
+    jefe = db.get(Colaborador, col.jefe_id) if col.jefe_id else None
+    if not jefe:
+        return {"jefe": None, "usuario": None, "motivo": "Sin jefe registrado en el roster: elige al evaluador."}
+    usuario = None
+    if jefe.correo:
+        usuario = (
+            db.query(Usuario).join(UsuarioCuenta, UsuarioCuenta.usuario_id == Usuario.id)
+            .filter(func.lower(Usuario.correo) == jefe.correo.strip().lower(), UsuarioCuenta.cuenta_id == cuenta_id, Usuario.activo.is_(True))
+            .first()
+        )
+    return {
+        "jefe": {"id": jefe.codigo, "nombre": jefe.nombre},
+        "usuario": {"id": usuario.id, "nombre": usuario.nombre} if usuario else None,
+        "motivo": "Jefe registrado (propuesto como evaluador)." if usuario
+        else f"{jefe.nombre} es su jefe, pero no tiene usuario en el sistema: elige al evaluador.",
+    }
+
+
+@router.get("/evaluadores/propuesta")
+def propuesta_evaluadores(ids: str = "", db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Para el paso 5: por cada colaborador, su jefe (de la base maestra) y el evaluador propuesto."""
+    salida = {}
+    for cod in [x.strip() for x in ids.split(",") if x.strip()]:
+        col = db.query(Colaborador).filter(Colaborador.codigo == cod, Colaborador.cuenta_id == cuenta.id, Colaborador.eliminado_en.is_(None)).first()
+        if col:
+            salida[cod] = evaluador_propuesto(db, col, cuenta.id)
+    return salida
+
+
 class RevisarIn(BaseModel):
     colaborador_ids: List[str] = []
 
@@ -368,7 +401,11 @@ def agregar_participantes(codigo: str, datos: ParticipantesIn, db: Session = Dep
         if prev:
             existentes.append(prev)
             continue
-        ev_u = _usuario_de_cuenta(db, datos.evaluadores.get(cod) or datos.evaluador_usuario_id, cuenta.id)
+        elegido = datos.evaluadores.get(cod) or datos.evaluador_usuario_id
+        if not elegido and not datos.evaluador.strip():
+            propuesto = evaluador_propuesto(db, col, cuenta.id)["usuario"]  # el jefe, si tiene usuario
+            elegido = propuesto["id"] if propuesto else None
+        ev_u = _usuario_de_cuenta(db, elegido, cuenta.id)
         e = EvaluacionDesempeno(
             codigo="TMP", cuenta_id=cuenta.id, ciclo_id=c.id, colaborador_id=col.id,
             evaluador=(ev_u.nombre if ev_u else (datos.evaluador.strip() or u.nombre)),
