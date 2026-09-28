@@ -123,6 +123,9 @@ def vacante_dict(
         "ubicacionMunicipio": v.ubicacion_municipio or "",
         # Capacitación universal (2026-09-16): curso que se asigna como filtro al quedar apto
         "cursoFiltroId": v.curso_filtro.codigo if v.curso_filtro else None,
+        # Evaluaciones (2026-09-28): solo SUGERENCIAS + aviso opcional al enviar a Onboarding
+        "evaluacionesSugeridas": list(v.evaluaciones_sugeridas or []),
+        "avisarEvaluacionesAntesOnboarding": bool(v.avisar_evaluaciones_antes_onboarding),
         "cursoFiltroTitulo": v.curso_filtro.titulo if v.curso_filtro else None,
         # embudo de esta vacante (conecta con el pipeline de candidatos)
         "embudo": embudo or {},
@@ -1075,3 +1078,77 @@ def tarea_onboarding_dict(t) -> dict:
         "canceladaEn": iso(t.cancelada_en),
         "cierreConAccion": onb.CIERRE_CON_ACCION.get(t.clave, ""),
     }
+
+
+# ------------------------------------------------------------
+# Evaluaciones y verificaciones (2026-09-28)
+# ------------------------------------------------------------
+
+
+def prueba_psicometrica_dict(pr) -> dict:
+    from .models import MODOS_PRUEBA
+
+    return {
+        "id": pr.id,
+        "clave": pr.clave,
+        "nombre": pr.nombre,
+        "descripcion": pr.descripcion or "",
+        "puestos": list(pr.puestos or []),
+        "modo": pr.modo,
+        "modoTexto": MODOS_PRUEBA.get(pr.modo, pr.modo),
+        "proveedor": pr.proveedor or "",
+        "idProveedor": pr.id_proveedor or "",
+        "url": pr.url or "",
+        "activa": bool(pr.activa),
+        "actualizada": iso(pr.actualizada_en),
+    }
+
+
+def evaluacion_candidato_dict(ev, usuario=None) -> dict:
+    """El informe médico COMPLETO (archivo, resumen, notas, comentario) solo viaja a quien tiene permiso; el resto
+    ve únicamente el estado y el dictamen."""
+    from .models import ESTADOS_EVALUACION, MODOS_PRUEBA, TIPOS_EVALUACION
+    from .services import evaluaciones as sev
+
+    restringido = ev.es_medico and not (usuario is not None and usuario.puede_ver_informe_medico())
+    dictamenes = sev.dictamenes_de(ev.tipo)
+    salida = {
+        "id": ev.codigo,
+        "tipo": ev.tipo,
+        "tipoTexto": TIPOS_EVALUACION.get(ev.tipo, ev.tipo),
+        "nombre": ev.nombre,
+        "pruebaId": ev.prueba_id,
+        "modo": ev.modo,
+        "modoTexto": MODOS_PRUEBA.get(ev.modo, ev.modo),
+        "proveedor": ev.proveedor or "",
+        "idProveedor": ev.id_proveedor or "",
+        "url": ev.url or "",
+        "estado": ev.estado,
+        "estadoTexto": ESTADOS_EVALUACION.get(ev.estado, ev.estado),
+        "pasoIntegrada": ev.paso_integrada or None,
+        "siguientePaso": sev.siguiente_paso(ev) if ev.estado in ("pendiente", "en_proceso") else None,
+        "motivoFallida": ev.motivo_fallida or "",
+        "dictamen": ev.dictamen or None,
+        "dictamenTexto": dictamenes.get(ev.dictamen, "") if ev.dictamen else "",
+        "dictamenesPosibles": [{"valor": k, "texto": t} for k, t in dictamenes.items()],
+        "revisadaPor": ev.revisada_por or "",
+        "revisadaEn": iso(ev.revisada_en),
+        "requiereConsentimientoExpreso": bool(ev.requiere_consentimiento_expreso),
+        "consentimientoAceptadoEn": iso(ev.consentimiento_aceptado_en),
+        "ligaConsentimiento": f"{settings.app_url}/consentimiento/{ev.consentimiento_token}" if ev.consentimiento_token and not ev.consentimiento_aceptado_en else None,
+        "tieneInforme": bool(ev.archivo),
+        "resultadoCargadoPor": ev.resultado_cargado_por or "",
+        "resultadoCargadoEn": iso(ev.resultado_cargado_en),
+        "informeRestringido": restringido,
+        "asignadaPor": ev.asignada_por or "",
+        "creada": iso(ev.creada_en),
+        "historial": list(ev.historial or []),
+    }
+    if not restringido:
+        salida.update({
+            "resultadoResumen": ev.resultado_resumen or "",
+            "nombreArchivo": ev.nombre_archivo or "",
+            "notas": ev.notas or "",
+            "comentarioRevision": ev.comentario_revision or "",
+        })
+    return salida

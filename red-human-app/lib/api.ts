@@ -133,6 +133,9 @@ export interface UsuarioRH {
   activo: boolean;
   debeCambiarPass: boolean;
   puedeDecidir: boolean;
+  /** Evaluaciones (2026-09-28): ver informes médicos completos (el Administrador siempre). */
+  accesoInformesMedicos?: boolean;
+  puedeVerInformeMedico?: boolean;
   ultimoAcceso: string | null;
   /** Lista de Cuentas activas a las que tiene acceso este usuario.
    * Cuando solo hay una, el frontend no muestra ningún selector (regla Fase A). */
@@ -174,7 +177,7 @@ export function crearUsuario(datos: {
 
 export function actualizarUsuario(
   id: number,
-  cambios: { nombre?: string; puesto?: string; telefono?: string; rol?: RolUsuario; activo?: boolean; password?: string },
+  cambios: { nombre?: string; puesto?: string; telefono?: string; rol?: RolUsuario; activo?: boolean; password?: string; acceso_informes_medicos?: boolean },
 ) {
   return patch<UsuarioRH>(`/auth/usuarios/${id}`, cambios);
 }
@@ -706,7 +709,7 @@ export function crearVacante(
 
 /** "Entrevista IA" es el valor interno/base de la etapa; en la interfaz se muestra como
  * «Entrevista Red Human» (Parte 3, decisión visual — sin migración de datos). */
-export const ETIQUETA_ETAPA: Record<string, string> = { "Entrevista IA": "Entrevista Red Human" };
+export const ETIQUETA_ETAPA: Record<string, string> = { "Entrevista IA": "Entrevista Red Human", Evaluación: "Evaluación integral" };
 export function nombreEtapa(etapa: string): string {
   return ETIQUETA_ETAPA[etapa] ?? etapa;
 }
@@ -3078,6 +3081,8 @@ export interface ResumenOnboarding {
   documentosExpediente: { tipo: string; obligatorio: boolean; estado: string; tieneArchivo: boolean }[];
   usuarios: { id: number; nombre: string; correo: string }[];
   cursos: { id: number; titulo: string }[];
+  /** Evaluaciones (2026-09-28): avisos si la vacante pidió «Avisar antes de Onboarding» (nunca bloquean). */
+  avisosEvaluaciones?: string[];
 }
 export interface AvisoOnboarding { destinatario: string; canal: string; destino: string; enviado: boolean; detalle: string }
 export interface ResultadoIniciarOnboarding {
@@ -3129,6 +3134,96 @@ export function cerrarOnboarding(expedienteId: number) {
 }
 export function registrarNoIngreso(expedienteId: number, motivo: string) {
   return post<EstadoOnboardingDetalle & { avisosResponsables: AvisoOnboarding[] }>(`/onboarding/expedientes/${expedienteId}/no-ingreso`, { motivo });
+}
+
+/* -------------------- Evaluaciones y verificaciones (2026-09-28) -------------------- */
+export type TipoEvaluacion = "psicometrica" | "tecnica" | "referencias" | "medico" | "socioeconomico" | "otra";
+export const TIPOS_EVALUACION: { valor: TipoEvaluacion; texto: string }[] = [
+  { valor: "psicometrica", texto: "Psicométrica" },
+  { valor: "tecnica", texto: "Técnica o caso práctico" },
+  { valor: "referencias", texto: "Referencias" },
+  { valor: "medico", texto: "Médico" },
+  { valor: "socioeconomico", texto: "Socioeconómico" },
+  { valor: "otra", texto: "Otra" },
+];
+export type ModoPrueba = "integrada" | "enlace" | "manual";
+export const MODOS_PRUEBA: { valor: ModoPrueba; texto: string }[] = [
+  { valor: "integrada", texto: "Integrada" },
+  { valor: "enlace", texto: "Enlace externo" },
+  { valor: "manual", texto: "Carga manual" },
+];
+export interface PruebaPsicometrica {
+  id: number; clave: string; nombre: string; descripcion: string; puestos: string[]; modo: ModoPrueba; modoTexto: string;
+  proveedor: string; idProveedor: string; url: string; activa: boolean; actualizada: string | null; sugerida?: boolean;
+}
+export interface PruebaPsicometricaIn {
+  clave: string; nombre: string; descripcion: string; puestos: string[]; modo: ModoPrueba; proveedor: string; id_proveedor: string; url: string; activa: boolean;
+}
+export interface EvaluacionCandidato {
+  id: string; tipo: TipoEvaluacion; tipoTexto: string; nombre: string; pruebaId: number | null; modo: ModoPrueba; modoTexto: string;
+  proveedor: string; idProveedor: string; url: string;
+  estado: "en_espera_consentimiento" | "pendiente" | "en_proceso" | "resultado_recibido" | "revisada" | "fallida"; estadoTexto: string;
+  pasoIntegrada: string | null; siguientePaso: string | null; motivoFallida: string;
+  dictamen: string | null; dictamenTexto: string; dictamenesPosibles: { valor: string; texto: string }[];
+  revisadaPor: string; revisadaEn: string | null;
+  requiereConsentimientoExpreso: boolean; consentimientoAceptadoEn: string | null; ligaConsentimiento: string | null;
+  tieneInforme: boolean; resultadoCargadoPor: string; resultadoCargadoEn: string | null; informeRestringido: boolean;
+  asignadaPor: string; creada: string | null; historial: { fecha: string; usuario: string; de: string; a: string; detalle: string }[];
+  resultadoResumen?: string; nombreArchivo?: string; notas?: string; comentarioRevision?: string;
+}
+export interface EvaluacionSugerida { tipo: TipoEvaluacion; prueba_id: number | null; nombre: string }
+export function fetchPruebasPsicometricas(incluirInactivas = false, puesto = "") {
+  const q = new URLSearchParams();
+  if (incluirInactivas) q.set("incluir_inactivas", "true");
+  if (puesto) q.set("puesto", puesto);
+  return get<PruebaPsicometrica[]>(`/evaluaciones/pruebas${q.toString() ? `?${q}` : ""}`);
+}
+export function crearPruebaPsicometrica(datos: PruebaPsicometricaIn) {
+  return post<PruebaPsicometrica>("/evaluaciones/pruebas", datos);
+}
+export function editarPruebaPsicometrica(id: number, datos: Partial<PruebaPsicometricaIn>) {
+  return patch<PruebaPsicometrica>(`/evaluaciones/pruebas/${id}`, datos);
+}
+export function inactivarPruebaPsicometrica(id: number) {
+  return eliminar<PruebaPsicometrica>(`/evaluaciones/pruebas/${id}`);
+}
+export function fetchEvaluacionesCandidato(codigo: string) {
+  return get<EvaluacionCandidato[]>(`/evaluaciones/postulaciones/${codigo}`);
+}
+export function agregarEvaluacionCandidato(codigo: string, datos: { tipo: TipoEvaluacion; nombre?: string; prueba_id?: number | null; modo?: string; proveedor?: string; url?: string; notas?: string }) {
+  return post<EvaluacionCandidato>(`/evaluaciones/postulaciones/${codigo}`, datos);
+}
+export function enviarEvaluacion(codigo: string) {
+  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/enviar`, {});
+}
+export function avanzarEvaluacionIntegrada(codigo: string) {
+  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/integracion/avanzar`, {});
+}
+export function cargarResultadoEvaluacion(codigo: string, resumen: string, archivo?: File | null) {
+  const form = new FormData();
+  form.append("resumen", resumen);
+  if (archivo) form.append("archivo", archivo);
+  return subir<EvaluacionCandidato>(`/evaluaciones/${codigo}/resultado`, form);
+}
+export function revisarEvaluacion(codigo: string, dictamen: string, comentario = "") {
+  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/revisar`, { dictamen, comentario });
+}
+export function cancelarEvaluacion(codigo: string, motivo: string) {
+  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/cancelar`, { motivo });
+}
+export function enviarLigaConsentimientoMedico(codigo: string) {
+  return post<{ liga: string; resultados: ResultadoNotificacion[] }>(`/evaluaciones/${codigo}/consentimiento/enviar`, {});
+}
+export function urlInformeEvaluacion(codigo: string) {
+  return urlArchivo(`/evaluaciones/${codigo}/informe`);
+}
+export function fetchConsentimientoPublico(token: string) {
+  return get<{ candidato: string; empresa: string; puesto: string; evaluacion: string; texto: string; aceptado: boolean; aceptadoEn: string | null; cancelada: boolean }>(
+    `/evaluaciones/publica/consentimiento/${token}`,
+  );
+}
+export function aceptarConsentimientoPublico(token: string, nombre: string) {
+  return post<{ ok: boolean; aceptadoEn: string; estado: string }>(`/evaluaciones/publica/consentimiento/${token}/aceptar`, { nombre, acepto: true });
 }
 
 /* -------------------- Conocimiento: generación y permisos -------------------- */

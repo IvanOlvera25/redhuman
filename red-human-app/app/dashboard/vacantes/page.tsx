@@ -52,6 +52,9 @@ import { useRouter } from "next/navigation";
 import {
   crearVacante,
   actualizarVacante,
+  fetchPruebasPsicometricas,
+  TIPOS_EVALUACION,
+  type PruebaPsicometrica,
   eliminarVacante,
   fetchVacantes,
   fetchVistaPreviaVacante,
@@ -1447,6 +1450,72 @@ function CursoFiltro({ v, onCambio }: { v: Vacante; onCambio: () => void }) {
   );
 }
 
+/* Evaluaciones (2026-09-28): la vacante solo SUGIERE evaluaciones y, si RH quiere, avisa al enviar a Onboarding
+   cuando falte alguna o no esté revisada. Nunca asigna ni bloquea por sí sola. */
+function EvaluacionesVacante({ v, editable, onCambio }: { v: Vacante; editable: boolean; onCambio: () => void }) {
+  const [sugeridas, setSugeridas] = useState<{ tipo: string; prueba_id: number | null; nombre: string }[]>(v.evaluacionesSugeridas ?? []);
+  const [avisar, setAvisar] = useState(Boolean(v.avisarEvaluacionesAntesOnboarding));
+  const [pruebas, setPruebas] = useState<PruebaPsicometrica[]>([]);
+  const [guardando, setGuardando] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (editable) fetchPruebasPsicometricas(false, v.titulo).then((p) => setPruebas(p ?? []));
+  }, [editable, v.titulo]);
+  async function guardar() {
+    setGuardando(true);
+    setError("");
+    const r = await actualizarVacante(v.id, { evaluaciones_sugeridas: sugeridas, avisar_evaluaciones_antes_onboarding: avisar });
+    setGuardando(false);
+    if (!r.ok) return setError(r.error);
+    onCambio();
+  }
+  if (!editable) {
+    return (
+      <p className="text-sm text-ink-2">
+        {(v.evaluacionesSugeridas ?? []).map((x) => x.nombre).join(" · ") || "Sin evaluaciones sugeridas."}
+        {v.avisarEvaluacionesAntesOnboarding ? " · Avisa antes de Onboarding" : ""}
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      {sugeridas.map((x, i) => (
+        <div key={i} className="flex flex-wrap gap-2">
+          <select
+            value={x.tipo}
+            onChange={(e) => setSugeridas(sugeridas.map((y, j) => (j === i ? { tipo: e.target.value, prueba_id: null, nombre: "" } : y)))}
+            className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand"
+          >
+            {TIPOS_EVALUACION.map((t) => <option key={t.valor} value={t.valor}>{t.texto}</option>)}
+          </select>
+          {x.tipo === "psicometrica" && (
+            <select
+              value={x.prueba_id ?? ""}
+              onChange={(e) => setSugeridas(sugeridas.map((y, j) => (j === i ? { ...y, prueba_id: e.target.value ? Number(e.target.value) : null, nombre: "" } : y)))}
+              className="h-10 min-w-0 flex-1 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand"
+            >
+              <option value="">Cualquier psicométrica</option>
+              {pruebas.map((p) => <option key={p.id} value={p.id}>{p.nombre}{p.sugerida ? " · sugerida para el puesto" : ""}</option>)}
+            </select>
+          )}
+          <Button size="sm" variant="ghost" onClick={() => setSugeridas(sugeridas.filter((_, j) => j !== i))} aria-label="Quitar"><X className="h-4 w-4" /></Button>
+        </div>
+      ))}
+      <div className="flex flex-wrap items-center gap-3">
+        <Button size="sm" variant="outline" onClick={() => setSugeridas([...sugeridas, { tipo: "psicometrica", prueba_id: null, nombre: "" }])}>
+          <Plus className="h-4 w-4" /> Sugerir evaluación
+        </Button>
+        <label className="flex items-center gap-2 text-sm text-ink-2">
+          <input type="checkbox" checked={avisar} onChange={(e) => setAvisar(e.target.checked)} /> Avisar antes de Onboarding
+        </label>
+        <Button size="sm" onClick={guardar} disabled={guardando}>{guardando ? "Guardando…" : "Guardar"}</Button>
+      </div>
+      <p className="text-[11px] text-ink-3">Solo sugiere: RH las asigna desde la ficha del candidato. El aviso aparece al «Enviar a Onboarding» y nunca bloquea.</p>
+      {error && <p className="text-sm font-semibold text-bad">{error}</p>}
+    </div>
+  );
+}
+
 /* Sección plegable CERRADA por defecto (regla de UI 2026-09-16: nada de "efecto libro"). */
 function Plegable({ titulo, resumen, children }: { titulo: string; resumen?: string; children: React.ReactNode }) {
   const [abierto, setAbierto] = useState(false);
@@ -1755,6 +1824,13 @@ function DetalleVacante({
               <p className="mt-1 text-sm leading-relaxed text-ink-2">{v.perfilIdeal}</p>
             </div>
           )}
+        </Plegable>
+
+        <Plegable
+          titulo="Evaluaciones y verificaciones"
+          resumen={`${(v.evaluacionesSugeridas ?? []).length ? `${(v.evaluacionesSugeridas ?? []).length} sugerida(s)` : "Sin sugerencias"}${v.avisarEvaluacionesAntesOnboarding ? " · avisa antes de Onboarding" : ""}`}
+        >
+          <EvaluacionesVacante v={v} editable={live && puedeDecidir} onCambio={() => onCambio(v.id)} />
         </Plegable>
 
         <Plegable titulo="Publicaciones" resumen={tieneContenido ? `${Object.keys(bloques).length} plataforma(s)${v.plataformas.length ? ` · distribuida en ${v.plataformas.join(", ")}` : ""}` : "Sin contenido generado"}>

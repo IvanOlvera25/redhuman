@@ -52,6 +52,10 @@ class Vacante(Base):
     codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     slug: Mapped[str] = mapped_column(String(160), default="", index=True)
     titulo: Mapped[str] = mapped_column(String(200))
+    # Evaluaciones (2026-09-28): sugeridas para quien se postule [{tipo, prueba_id?, nombre?}] y si RH quiere un
+    # aviso al enviar a Onboarding cuando falte alguna o no esté revisada. Solo SUGIERE: nunca bloquea ni asigna sola.
+    evaluaciones_sugeridas: Mapped[list] = mapped_column(JSON, default=list)
+    avisar_evaluaciones_antes_onboarding: Mapped[bool] = mapped_column(Boolean, default=False)
     area: Mapped[str] = mapped_column(String(100), default="")
     empresa: Mapped[str] = mapped_column(String(150), default="Grupo Carbe")
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
@@ -1159,6 +1163,9 @@ class Usuario(Base):
     # entrevistador interno sin volver a capturar el dato en ningún lado.
     telefono: Mapped[str] = mapped_column(String(30), default="")
     rol: Mapped[str] = mapped_column(String(20), default="Usuario")  # Administrador | Usuario
+    # Evaluaciones (2026-09-28): ver el informe médico COMPLETO (dato sensible). Sin él, solo estado y dictamen.
+    # El Administrador lo tiene siempre (`puede_ver_informe_medico`).
+    acceso_informes_medicos: Mapped[bool] = mapped_column(Boolean, default=False)
     hash_pass: Mapped[str] = mapped_column(String(255))
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
     debe_cambiar_pass: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -1185,6 +1192,9 @@ class Usuario(Base):
         if limite.tzinfo is None:
             limite = limite.replace(tzinfo=timezone.utc)
         return limite > ahora()
+
+    def puede_ver_informe_medico(self) -> bool:
+        return self.rol == "Administrador" or bool(self.acceso_informes_medicos)
 
     def puede_decidir(self) -> bool:
         """Ya no hay perfil de solo lectura (Fase A): Administrador y Usuario deciden por
@@ -1596,6 +1606,7 @@ TABLAS_MODULOS_RH = (
     "participaciones_clima", "plantillas_clima",  # Clima v2 (2026-09-27)
     "plantillas_desempeno", "acciones_desempeno",  # Desempeño v2 (2026-09-27)
     "plantillas_onboarding", "tareas_onboarding",  # Onboarding v2 (2026-09-28)
+    "pruebas_psicometricas", "evaluaciones_candidato",  # Evaluaciones y verificaciones (2026-09-28)
 )
 
 # --- Desempeño ---
@@ -1952,3 +1963,110 @@ class TareaOnboarding(Base):
     cancelada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     creada_por: Mapped[str] = mapped_column(String(150), default="")
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
+# --- Evaluaciones y verificaciones del candidato (2026-09-28) ---
+# Psicométrica, técnica/caso práctico, referencias, médico, socioeconómico u otra. Se agregan desde la ficha y
+# NUNCA mueven la columna del pipeline. Sin conexiones a proveedores todavía: el modo «Integrada» se simula a mano
+# (Asignada → Enviada → Iniciada → Completada → Resultado recibido). HITL: la IA no revisa ni dictamina nada.
+TIPOS_EVALUACION = {
+    "psicometrica": "Psicométrica",
+    "tecnica": "Técnica o caso práctico",
+    "referencias": "Referencias",
+    "medico": "Médico",
+    "socioeconomico": "Socioeconómico",
+    "otra": "Otra",
+}
+MODOS_PRUEBA = {"integrada": "Integrada", "enlace": "Enlace externo", "manual": "Carga manual"}
+# Seguimiento (lo que ve RH). «fallida» = Fallida/Cancelada, siempre con motivo.
+ESTADOS_EVALUACION = {
+    "en_espera_consentimiento": "En espera de consentimiento",
+    "pendiente": "Pendiente",
+    "en_proceso": "En proceso",
+    "resultado_recibido": "Resultado recibido",
+    "revisada": "Revisada",
+    "fallida": "Fallida/Cancelada",
+}
+# Modo Integrada (simulado hasta conectar proveedores): cada paso y su estado de seguimiento.
+PASOS_INTEGRADA = ("asignada", "enviada", "iniciada", "completada", "resultado_recibido")
+ESTADO_POR_PASO = {"asignada": "pendiente", "enviada": "en_proceso", "iniciada": "en_proceso", "completada": "en_proceso", "resultado_recibido": "resultado_recibido"}
+DICTAMENES_GENERALES = {"favorable": "Favorable", "con_observaciones": "Con observaciones", "desfavorable": "Desfavorable"}
+DICTAMENES_MEDICOS = {"apto": "Apto", "apto_con_restricciones": "Apto con restricciones", "no_apto": "No apto"}
+# Texto del consentimiento EXPRESO y POR ESCRITO (medio electrónico) para el estudio médico — LFPDPPP: los datos de
+# salud son sensibles. Se guarda la copia EXACTA que la persona aceptó.
+TEXTO_CONSENTIMIENTO_MEDICO = (
+    "Yo, {nombre}, otorgo mi consentimiento expreso y por escrito, por medio electrónico, para que {empresa} "
+    "realice o solicite un estudio médico relacionado con el puesto de {puesto}. Entiendo que mis datos de salud "
+    "son datos personales sensibles conforme a la Ley Federal de Protección de Datos Personales en Posesión de los "
+    "Particulares; que solo se usarán para evaluar mi aptitud para el puesto; que el informe completo solo lo podrán "
+    "consultar las personas autorizadas y que el resto del equipo verá únicamente el dictamen (Apto, Apto con "
+    "restricciones o No apto). Sé que puedo revocar este consentimiento y ejercer mis derechos ARCO en cualquier momento."
+)
+
+
+class PruebaPsicometrica(Base):
+    """Catálogo de Configuración → Pruebas psicométricas (por Cuenta). «Eliminar» = inactivar."""
+
+    __tablename__ = "pruebas_psicometricas"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    clave: Mapped[str] = mapped_column(String(60))  # identificador interno (único por Cuenta)
+    nombre: Mapped[str] = mapped_column(String(200))  # nombre visible
+    descripcion: Mapped[str] = mapped_column(Text, default="")
+    puestos: Mapped[list] = mapped_column(JSON, default=list)  # puestos sugeridos
+    modo: Mapped[str] = mapped_column(String(20), default="manual")  # MODOS_PRUEBA
+    proveedor: Mapped[str] = mapped_column(String(150), default="")
+    id_proveedor: Mapped[str] = mapped_column(String(150), default="")  # identificador en el proveedor
+    url: Mapped[str] = mapped_column(String(500), default="")  # modo «Enlace externo»
+    activa: Mapped[bool] = mapped_column(Boolean, default=True)
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+
+class EvaluacionCandidato(Base):
+    """Una evaluación o verificación asignada a una POSTULACIÓN. Nunca escribe `Postulacion.etapa`."""
+
+    __tablename__ = "evaluaciones_candidato"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(20), index=True)  # EVA-####
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    postulacion_id: Mapped[int] = mapped_column(Integer, index=True)
+    tipo: Mapped[str] = mapped_column(String(20))  # TIPOS_EVALUACION
+    nombre: Mapped[str] = mapped_column(String(200))
+    prueba_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # catálogo psicométrico
+    modo: Mapped[str] = mapped_column(String(20), default="manual")  # MODOS_PRUEBA
+    proveedor: Mapped[str] = mapped_column(String(150), default="")
+    id_proveedor: Mapped[str] = mapped_column(String(150), default="")
+    url: Mapped[str] = mapped_column(String(500), default="")
+    estado: Mapped[str] = mapped_column(String(30), default="pendiente")  # ESTADOS_EVALUACION
+    paso_integrada: Mapped[str] = mapped_column(String(20), default="")  # PASOS_INTEGRADA (solo modo integrada)
+    motivo_fallida: Mapped[str] = mapped_column(Text, default="")
+    notas: Mapped[str] = mapped_column(Text, default="")
+    # --- consentimiento ---
+    requiere_consentimiento_expreso: Mapped[bool] = mapped_column(Boolean, default=False)  # estudio médico
+    consentimiento_token: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)
+    consentimiento_texto: Mapped[str] = mapped_column(Text, default="")  # copia exacta aceptada
+    consentimiento_aceptado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    consentimiento_evidencia: Mapped[dict] = mapped_column(JSON, default=dict)  # nombre tecleado, IP, navegador, huella
+    # --- resultado / informe ---
+    archivo: Mapped[str] = mapped_column(String(300), default="")
+    nombre_archivo: Mapped[str] = mapped_column(String(255), default="")
+    mime: Mapped[str] = mapped_column(String(80), default="")
+    resultado_resumen: Mapped[str] = mapped_column(Text, default="")
+    resultado_cargado_por: Mapped[str] = mapped_column(String(150), default="")
+    resultado_cargado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    dictamen: Mapped[str] = mapped_column(String(30), default="")  # DICTAMENES_GENERALES | DICTAMENES_MEDICOS
+    comentario_revision: Mapped[str] = mapped_column(Text, default="")
+    revisada_por: Mapped[str] = mapped_column(String(150), default="")
+    revisada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    historial: Mapped[list] = mapped_column(JSON, default=list)  # [{fecha, usuario, de, a, detalle}]
+    asignada_por: Mapped[str] = mapped_column(String(150), default="")
+    creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+    @property
+    def es_medico(self) -> bool:
+        return self.tipo == "medico"

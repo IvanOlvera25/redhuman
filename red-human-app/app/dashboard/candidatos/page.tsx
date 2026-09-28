@@ -120,6 +120,8 @@ import { LineaNotificar, useNotificarAccion } from "@/components/dashboard/linea
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import { ModalIniciarOnboarding } from "@/components/dashboard/onboarding/iniciar-onboarding";
 import { PanelTareasOnboarding } from "@/components/dashboard/onboarding/tareas-onboarding";
+import { ModalAgregarEvaluacion, PanelEvaluaciones } from "@/components/dashboard/evaluaciones/panel-evaluaciones";
+import { ClipboardCheck as IconoEvaluacion } from "lucide-react";
 import { SwitchModoPrueba } from "@/components/dashboard/switch-modo-prueba";
 import { Toast, type ToastMsg } from "@/components/dashboard/toast";
 import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
@@ -1405,6 +1407,9 @@ function ModalCandidato({
   const [confirmacion, setConfirmacion] = useState<null | "solicitar" | "recordatorio" | "alta">(null);
   // 2026-09-16 (control manual de RH): «Mover a otra etapa» — selector simple + motivo opcional
   const [moverA, setMoverA] = useState<null | { etapa: EtapaCandidato | ""; motivo: string }>(null);
+  // Evaluaciones (2026-09-28): «Agregar evaluación o verificación» — nunca mueve la columna del pipeline
+  const [agregarEval, setAgregarEval] = useState(false);
+  const [versionEval, setVersionEval] = useState(0);
   // 2026-09-22: confirmación de «Avanzar a Entrevista Humana» (omite la Entrevista Red Human)
   const [avanceDirecto, setAvanceDirecto] = useState(false);
   async function confirmarAvanceDirecto() {
@@ -1605,7 +1610,7 @@ function ModalCandidato({
             {(
               [
                 { id: "resumen", label: "Resumen", icon: User, tone: "brand" },
-                { id: "evaluaciones", label: "Evaluaciones", icon: Sparkles, tone: "human" },
+                { id: "evaluaciones", label: "Evaluación integral", icon: Sparkles, tone: "human" },
                 { id: "documentos", label: "CV y documentos", icon: FileText, tone: "brand" },
                 { id: "whatsapp", label: "WhatsApp", icon: MessageCircle, tone: "good", badge: c.mensajes },
                 // 2026-09-17: la pestaña del expediente (checklist de documentos) vive en Contratación Y
@@ -1670,7 +1675,7 @@ function ModalCandidato({
           {c.etapa === "Entrevista Humana" && <PanelEntrevistaHumana c={c} live={live} onCambio={onCambio} />}
 
           {tab === "resumen" && <PestanaResumen c={c} live={live} onCambio={onCambio} setTab={setTab} />}
-          {tab === "evaluaciones" && <PestanaEvaluaciones c={c} live={live} onCambio={onCambio} />}
+          {tab === "evaluaciones" && <PestanaEvaluaciones c={c} live={live} onCambio={onCambio} versionEval={versionEval} />}
           {tab === "documentos" && <PestanaDocumentos c={c} live={live} onCambio={onCambio} setAviso={setAviso} />}
           {tab === "whatsapp" && <PestanaWhatsApp c={c} live={live} onCambio={onCambio} />}
           {tab === "contratacion" && (c.etapa === "Contratación" || c.etapa === "Onboarding") && (
@@ -1769,6 +1774,7 @@ function ModalCandidato({
                           disabled: Boolean(ocupado),
                         }]
                       : []),
+                    { etiqueta: "Agregar evaluación o verificación", icono: <IconoEvaluacion />, onClick: () => setAgregarEval(true), disabled: Boolean(ocupado) || c.activa === false },
                     { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
                     ...(c.etapa === "Entrevista Humana"
                       ? [{ etiqueta: "Agendar otra Entrevista Humana", icono: <CalendarClock />, onClick: () => setModalEntrevista(true), disabled: Boolean(ocupado) }]
@@ -1879,6 +1885,19 @@ function ModalCandidato({
             </div>
           </div>
         </div>
+      )}
+      {agregarEval && (
+        <ModalAgregarEvaluacion
+          codigo={c.id}
+          puesto={c.puesto}
+          onClose={() => setAgregarEval(false)}
+          onAgregada={(ev) => {
+            setAgregarEval(false);
+            setVersionEval((x) => x + 1);
+            setTab("evaluaciones");
+            setAviso({ tono: "ok", texto: `«${ev.nombre}» agregada: ${ev.estadoTexto}. El candidato sigue en ${nombreEtapa(c.etapa)}.` });
+          }}
+        />
       )}
       {moverA && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !ocupado && setMoverA(null)}>
@@ -2389,7 +2408,7 @@ function PestanaResumen({
 /* ============================================================
    PESTAÑA 2: Evaluaciones (Luna, avatar, requisitos/brechas, prefiltro, entrevista humana)
    ============================================================ */
-function PestanaEvaluaciones({ c, live, onCambio }: { c: Candidato; live?: boolean; onCambio?: (c: Candidato) => void }) {
+function PestanaEvaluaciones({ c, live, onCambio, versionEval = 0 }: { c: Candidato; live?: boolean; onCambio?: (c: Candidato) => void; versionEval?: number }) {
   const puedeDecidir = usePuedeDecidir();
   const [evaluando, setEvaluando] = useState(false);
   const [errorEval, setErrorEval] = useState("");
@@ -2686,6 +2705,9 @@ function PestanaEvaluaciones({ c, live, onCambio }: { c: Candidato; live?: boole
           </div>
         </div>
       )}
+
+      {/* ===== Evaluaciones y verificaciones (2026-09-28): no mueven la columna del pipeline ===== */}
+      <PanelEvaluaciones codigo={c.id} puesto={c.puesto} live={Boolean(live) && puedeDecidir} version={versionEval} />
     </div>
   );
 }

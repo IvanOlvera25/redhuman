@@ -310,6 +310,9 @@ export interface Vacante {
   ubicacionMunicipio?: string;
   /** Capacitación universal: curso que se asigna como filtro al quedar apto */
   cursoFiltroId?: string | null;
+  /** Evaluaciones (2026-09-28): sugerencias de la vacante + aviso al enviar a Onboarding (nunca bloquea). */
+  evaluacionesSugeridas?: { tipo: string; prueba_id: number | null; nombre: string }[];
+  avisarEvaluacionesAntesOnboarding?: boolean;
   cursoFiltroTitulo?: string | null;
   /** 2026-09-17: Cuenta dueña (portal por Cuenta) y homónimas publicadas en otras Cuentas (detalle). */
   cuentaId?: number | null;

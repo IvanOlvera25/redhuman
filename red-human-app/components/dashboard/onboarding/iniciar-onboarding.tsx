@@ -132,6 +132,15 @@ export function ModalIniciarOnboarding({ expedienteId, onClose, onIniciado }: {
             )}
           </div>
 
+          {(resumen.avisosEvaluaciones?.length ?? 0) > 0 && (
+            <div className="mt-4 rounded-xl border border-warn/30 bg-warn-soft px-3 py-2.5 text-xs text-warn">
+              <p className="font-semibold">Evaluaciones y verificaciones (aviso de la vacante; no bloquea):</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                {resumen.avisosEvaluaciones!.map((a) => <li key={a}>{a}</li>)}
+              </ul>
+            </div>
+          )}
+
           <ul className="mt-4 grid gap-1.5 sm:grid-cols-2">
             {resumen.requisitos.items.map((it) => (
               <li key={it.clave} className={it.ok ? "flex items-center gap-2 text-sm text-ink-2" : "flex items-center gap-2 text-sm font-semibold text-bad"}>

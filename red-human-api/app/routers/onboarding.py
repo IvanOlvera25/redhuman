@@ -373,7 +373,23 @@ def resumen_inicio(exp_id: int, db: Session = Depends(get_db), _: Usuario = Depe
         ],
         "usuarios": [{"id": x.id, "nombre": x.nombre, "correo": x.correo} for x in _usuarios_cuenta(db, cuenta.id)],
         "cursos": [{"id": c.id, "titulo": c.titulo} for c in cursos],
+        # Evaluaciones (2026-09-28): la vacante pidió «Avisar antes de Onboarding» → aviso (nunca bloquea)
+        "avisosEvaluaciones": _avisos_evaluaciones(db, p),
     }
+
+
+def _avisos_evaluaciones(db: Session, p) -> List[str]:
+    if not p:
+        return []
+    try:
+        from ..models import EvaluacionCandidato
+        from ..services import evaluaciones as sev
+
+        evs = db.query(EvaluacionCandidato).filter(EvaluacionCandidato.postulacion_id == p.id).all()
+        return sev.avisos_antes_onboarding(p, evs)
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        return []
 
 
 class IniciarOnboardingIn(BaseModel):
