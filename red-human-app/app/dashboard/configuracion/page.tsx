@@ -38,6 +38,8 @@ import { invalidarReglasNotificacion } from "@/components/dashboard/linea-notifi
 import { BotonCargaMasiva } from "@/components/dashboard/carga-masiva";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import { SeccionPlantillasClima } from "@/components/dashboard/clima/seccion-plantillas-clima";
+import { SeccionPlantillasOnboarding } from "@/components/dashboard/onboarding/seccion-plantillas-onboarding";
+import { SeccionPruebasPsicometricas } from "@/components/dashboard/evaluaciones/seccion-pruebas-psicometricas";
 import {
   actualizarCliente,
   actualizarConfiguracion,
@@ -123,6 +125,8 @@ export default function Configuracion() {
       <SeccionClientes />
       <SeccionPlantillas />
       <SeccionPlantillasClima />
+      <SeccionPlantillasOnboarding />
+      <SeccionPruebasPsicometricas />
       <SeccionNotificaciones />
       <SeccionIntegraciones />
       <SeccionModoPrueba />
@@ -913,6 +917,8 @@ function FormUsuario({
   const [telefono, setTelefono] = useState(usuario?.telefono ?? "");
   const [rol, setRol] = useState<RolUsuario>(usuario?.rol ?? "Usuario");
   const [activo, setActivo] = useState(usuario?.activo ?? true);
+  // Evaluaciones (2026-09-28): permiso para ver informes médicos completos (el Administrador siempre lo tiene)
+  const [accesoMedico, setAccesoMedico] = useState(Boolean(usuario?.accesoInformesMedicos));
   const [password, setPassword] = useState("");
   const [guardando, setGuardando] = useState(false);
 
@@ -921,7 +927,7 @@ function FormUsuario({
     onError("");
     let r;
     if (usuario) {
-      const cambios: Parameters<typeof actualizarUsuario>[1] = { nombre, puesto, telefono, rol, activo };
+      const cambios: Parameters<typeof actualizarUsuario>[1] = { nombre, puesto, telefono, rol, activo, acceso_informes_medicos: accesoMedico };
       if (password) cambios.password = password;
       r = await actualizarUsuario(usuario.id, cambios);
     } else {
@@ -948,6 +954,16 @@ function FormUsuario({
           <div className="flex items-center gap-2 pt-5">
             <input type="checkbox" id={`activo-${usuario.id}`} checked={activo} onChange={(e) => setActivo(e.target.checked)} className="h-4 w-4 rounded accent-brand" />
             <label htmlFor={`activo-${usuario.id}`} className="text-sm">Usuario activo</label>
+          </div>
+        )}
+        {usuario && (
+          <div className="flex items-start gap-2 sm:col-span-2">
+            <input type="checkbox" id={`medico-${usuario.id}`} checked={rol === "Administrador" || accesoMedico} disabled={rol === "Administrador"}
+              onChange={(e) => setAccesoMedico(e.target.checked)} className="mt-0.5 h-4 w-4 rounded accent-brand" />
+            <label htmlFor={`medico-${usuario.id}`} className="text-sm">
+              Puede ver informes médicos completos
+              <span className="block text-[11px] text-ink-3">Dato sensible (LFPDPPP). Sin este permiso solo ve el estado y el dictamen. El Administrador siempre lo tiene.</span>
+            </label>
           </div>
         )}
       </div>

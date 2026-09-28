@@ -15,7 +15,7 @@ import type {
   TipoEntrevistador,
   Vacante,
 } from "@/lib/data";
-import type { NuevoIngreso } from "@/lib/phase2";
+import type { NuevoIngreso, ResumenTableroOnboarding } from "@/lib/phase2";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -133,6 +133,9 @@ export interface UsuarioRH {
   activo: boolean;
   debeCambiarPass: boolean;
   puedeDecidir: boolean;
+  /** Evaluaciones (2026-09-28): ver informes médicos completos (el Administrador siempre). */
+  accesoInformesMedicos?: boolean;
+  puedeVerInformeMedico?: boolean;
   ultimoAcceso: string | null;
   /** Lista de Cuentas activas a las que tiene acceso este usuario.
    * Cuando solo hay una, el frontend no muestra ningún selector (regla Fase A). */
@@ -174,7 +177,7 @@ export function crearUsuario(datos: {
 
 export function actualizarUsuario(
   id: number,
-  cambios: { nombre?: string; puesto?: string; telefono?: string; rol?: RolUsuario; activo?: boolean; password?: string },
+  cambios: { nombre?: string; puesto?: string; telefono?: string; rol?: RolUsuario; activo?: boolean; password?: string; acceso_informes_medicos?: boolean },
 ) {
   return patch<UsuarioRH>(`/auth/usuarios/${id}`, cambios);
 }
@@ -706,7 +709,7 @@ export function crearVacante(
 
 /** "Entrevista IA" es el valor interno/base de la etapa; en la interfaz se muestra como
  * «Entrevista Red Human» (Parte 3, decisión visual — sin migración de datos). */
-export const ETIQUETA_ETAPA: Record<string, string> = { "Entrevista IA": "Entrevista Red Human" };
+export const ETIQUETA_ETAPA: Record<string, string> = { "Entrevista IA": "Entrevista Red Human", Evaluación: "Evaluación integral" };
 export function nombreEtapa(etapa: string): string {
   return ETIQUETA_ETAPA[etapa] ?? etapa;
 }
@@ -1817,8 +1820,8 @@ export function responderEvaluacion(token: string, indice: number, respuesta: nu
    Módulo 2 · Contratación e integración
    ============================================================ */
 
-export function fetchExpedientes() {
-  return get<NuevoIngreso[]>("/contratacion/expedientes");
+export function fetchExpedientes(cerrados = false) {
+  return get<NuevoIngreso[]>(`/contratacion/expedientes${cerrados ? "?cerrados=true" : ""}`);
 }
 
 export function fetchExpediente(id: number) {
@@ -1857,13 +1860,14 @@ export function urlDocumento(expedienteId: number, tipo: string) {
 
 export function marcarDocumento(
   expedienteId: number,
-  datos: { tipo: string; estado: string; notas?: string; recibidoFisico?: boolean },
+  datos: { tipo: string; estado: string; notas?: string; recibidoFisico?: boolean; motivo?: string },
 ) {
   return post<NuevoIngreso>(`/contratacion/expedientes/${expedienteId}/documentos/estado`, {
     tipo: datos.tipo,
     estado: datos.estado,
     notas: datos.notas ?? "",
     recibido_fisico: datos.recibidoFisico ?? false,
+    motivo: datos.motivo ?? "", // «No aplica» (solo RH) exige motivo
   });
 }
 
@@ -2966,6 +2970,283 @@ export function usarPlantillaClima(id: number) {
 }
 export function urlFormatoPlantillaClima() {
   return `${API}/clima/plantillas/formato`;
+}
+
+/* -------------------- Onboarding v2 (2026-09-28): plantillas y tareas -------------------- */
+
+export type AlcancePlantillaOnboarding = "empresa" | "puesto";
+export type TipoRecursoOnboarding = "correo" | "equipo" | "accesos" | "otro";
+export interface DocumentoPlantillaOnboarding { tipo: string; obligatorio: boolean }
+export interface RecursoPlantillaOnboarding { nombre: string; tipo: TipoRecursoOnboarding; responsable: string; dias: number }
+export type ClavePlazoOnboarding = "documentos" | "contrato_firmado" | "alta_imss_nomina" | "confirmar_ingreso";
+export interface PlantillaOnboarding {
+  id: number;
+  nombre: string;
+  alcance: AlcancePlantillaOnboarding;
+  empresa: string;
+  puesto: string;
+  documentos: DocumentoPlantillaOnboarding[];
+  recursos: RecursoPlantillaOnboarding[];
+  responsables: Record<ClavePlazoOnboarding, string>;
+  plazos: Record<ClavePlazoOnboarding, number>;
+  cursoInduccionId: number | null;
+  cursoInduccion: string;
+  activa: boolean;
+  creadoPor: string;
+  actualizada: string | null;
+}
+export interface OpcionesPlantillaOnboarding {
+  razonesSociales: string[];
+  puestos: string[];
+  cursos: { id: number; codigo: string; titulo: string; estado: string }[];
+  documentosBase: string[];
+  tareasFijas: { clave: ClavePlazoOnboarding; nombre: string }[];
+  tiposRecurso: TipoRecursoOnboarding[];
+  plazosDefault: Record<ClavePlazoOnboarding, number>;
+  estadosDocumento: string[];
+}
+export interface PlantillaOnboardingIn {
+  nombre: string;
+  alcance: AlcancePlantillaOnboarding;
+  empresa: string;
+  puesto: string;
+  documentos: DocumentoPlantillaOnboarding[];
+  recursos: RecursoPlantillaOnboarding[];
+  responsables: Partial<Record<ClavePlazoOnboarding, string>>;
+  plazos: Partial<Record<ClavePlazoOnboarding, number>>;
+  curso_induccion_id: number | null;
+}
+export interface TareaOnboarding {
+  id: number;
+  expedienteId: number;
+  clave: string;
+  nombre: string;
+  tipo: string;
+  fija: boolean;
+  obligatoria: boolean;
+  responsable: string;
+  diasRelativos: number | null;
+  fechaLimite: string | null;
+  estado: "pendiente" | "realizada" | "cancelada";
+  atrasada: boolean;
+  motivoCancelacion: string;
+  notas: string;
+  realizadaPor: string;
+  realizadaEn: string | null;
+  canceladaPor: string;
+  canceladaEn: string | null;
+  cierreConAccion: string;
+}
+export function fetchPlantillasOnboarding(incluirInactivas = false) {
+  return get<PlantillaOnboarding[]>(`/onboarding/plantillas${incluirInactivas ? "?incluir_inactivas=true" : ""}`);
+}
+export function fetchOpcionesPlantillaOnboarding() {
+  return get<OpcionesPlantillaOnboarding>("/onboarding/plantillas/opciones");
+}
+export function crearPlantillaOnboarding(datos: PlantillaOnboardingIn) {
+  return post<PlantillaOnboarding>("/onboarding/plantillas", datos);
+}
+export function editarPlantillaOnboarding(id: number, datos: Partial<PlantillaOnboardingIn> & { activa?: boolean; quitar_curso?: boolean }) {
+  return patch<PlantillaOnboarding>(`/onboarding/plantillas/${id}`, datos);
+}
+export function desactivarPlantillaOnboarding(id: number) {
+  return eliminar<PlantillaOnboarding>(`/onboarding/plantillas/${id}`);
+}
+export function fetchTareasOnboarding(expedienteId: number) {
+  return get<TareaOnboarding[]>(`/onboarding/expedientes/${expedienteId}/tareas`);
+}
+export function cambiarTareaOnboarding(id: number, datos: { estado?: TareaOnboarding["estado"]; motivo?: string; responsable?: string; notas?: string }) {
+  return patch<TareaOnboarding>(`/onboarding/tareas/${id}`, datos);
+}
+
+/* Fase 2 (2026-09-28): de Contratación a Onboarding. «Iniciar Onboarding» es el ÚNICO gatillo del cambio de etapa. */
+export interface ResumenOnboarding {
+  expedienteId: number;
+  etapa: string;
+  requisitos: { items: { clave: string; nombre: string; ok: boolean }[]; faltan: string[]; completos: boolean };
+  modoPrueba: boolean;
+  puedeIniciar: boolean;
+  iniciado: boolean;
+  configuracion: {
+    plantillaId: number | null;
+    plantilla: string;
+    origen: "puesto" | "empresa" | "predeterminada";
+    documentos: DocumentoPlantillaOnboarding[];
+    recursos: RecursoPlantillaOnboarding[];
+    responsables: Record<ClavePlazoOnboarding, string>;
+    plazos: Record<ClavePlazoOnboarding, number>;
+    cursoInduccionId: number | null;
+    cursoInduccion: string;
+  };
+  documentosExpediente: { tipo: string; obligatorio: boolean; estado: string; tieneArchivo: boolean }[];
+  usuarios: { id: number; nombre: string; correo: string }[];
+  cursos: { id: number; titulo: string }[];
+  /** Evaluaciones (2026-09-28): avisos si la vacante pidió «Avisar antes de Onboarding» (nunca bloquean). */
+  avisosEvaluaciones?: string[];
+}
+export interface AvisoOnboarding { destinatario: string; canal: string; destino: string; enviado: boolean; detalle: string }
+export interface ResultadoIniciarOnboarding {
+  candidato: Candidato;
+  tareas: TareaOnboarding[];
+  documentosAgregados: string[];
+  documentosNoAplica: string[];
+  documentosConservados: string[];
+  solicitudDocumentos: ResultadoNotificacion[];
+  avisosResponsables: AvisoOnboarding[];
+  cursoInduccion: { curso: string; asignacion?: string; error?: string } | null;
+}
+export function fetchResumenOnboarding(expedienteId: number) {
+  return get<ResumenOnboarding>(`/onboarding/expedientes/${expedienteId}/resumen`);
+}
+export function iniciarOnboarding(expedienteId: number, datos: {
+  documentos: DocumentoPlantillaOnboarding[]; recursos: RecursoPlantillaOnboarding[];
+  responsables: Partial<Record<ClavePlazoOnboarding, string>>; plazos: Partial<Record<ClavePlazoOnboarding, number>>;
+  curso_induccion_id: number | null; plantilla_id: number | null;
+}) {
+  return post<ResultadoIniciarOnboarding>(`/onboarding/expedientes/${expedienteId}/iniciar`, datos);
+}
+export function subirContratoFirmado(expedienteId: number, archivo: File) {
+  const form = new FormData();
+  form.append("archivo", archivo);
+  return subir<{ tarea: TareaOnboarding; documento: { tipo: string; archivo: string; cargadoPor: string; cargadoEn: string } }>(
+    `/onboarding/expedientes/${expedienteId}/contrato-firmado`, form,
+  );
+}
+export function urlContratoFirmado(expedienteId: number) {
+  return urlArchivo(`/onboarding/expedientes/${expedienteId}/contrato-firmado`);
+}
+
+/* Fase 3 (2026-09-28): gestión activa, alta y cierre del Onboarding. */
+export type EstadoOnboardingDetalle = ResumenTableroOnboarding & { listaTareas: TareaOnboarding[] };
+export function fetchEstadoOnboarding(expedienteId: number) {
+  return get<EstadoOnboardingDetalle>(`/onboarding/expedientes/${expedienteId}/estado`);
+}
+export function generarTareasOnboarding(expedienteId: number) {
+  return post<{ tareas: TareaOnboarding[]; documentosAgregados: string[]; avisosResponsables: AvisoOnboarding[]; plantilla: string; origen: string }>(
+    `/onboarding/expedientes/${expedienteId}/generar-tareas`, {},
+  );
+}
+export function confirmarIngresoOnboarding(expedienteId: number, fechaReal: string) {
+  return post<EstadoOnboardingDetalle & { plazosRecalculados: number }>(`/onboarding/expedientes/${expedienteId}/confirmar-ingreso`, { fecha_real: fechaReal });
+}
+export function cerrarOnboarding(expedienteId: number) {
+  return post<ResumenTableroOnboarding>(`/onboarding/expedientes/${expedienteId}/cerrar`, {});
+}
+export function registrarNoIngreso(expedienteId: number, motivo: string) {
+  return post<EstadoOnboardingDetalle & { avisosResponsables: AvisoOnboarding[] }>(`/onboarding/expedientes/${expedienteId}/no-ingreso`, { motivo });
+}
+
+/* -------------------- Tablero de control (2026-09-28): SOLO datos reales, por Cuenta -------------------- */
+export interface TableroControl {
+  cuentaId: number;
+  generado: string;
+  kpis: { candidatosActivos: number; candidatosNuevos7d: number; colaboradoresActivos: number; altas30d: number; vacantesPublicadas: number };
+  actividad: { dia: string; fecha: string; candidatos: number; entrevistas: number }[];
+  fuentes: { name: string; value: number }[];
+  tiempoContratacion: { serie: { mes: string; dias: number }[]; promedio: number | null };
+  recientes: { id: string; nombre: string; puesto: string; ubicacion: string; fuente: string; estado: string; score: number; etapa: string; aplicado: string }[];
+  pendientesRH: { modulo: number; tipo: string; cantidad: number; texto: string; ruta: string }[];
+  /** null = el módulo no está disponible en este servidor (sus tablas no se pudieron crear). */
+  onboarding: { activos: number; tareasAtrasadas: number; avancePromedio: number | null; sinTareas: number; listosParaCerrar: number } | null;
+  evaluaciones: { pendientes: number; enEsperaConsentimiento: number; enProceso: number; resultadoRecibido: number; revisadas: number; porEstado: Record<string, number> } | null;
+  desempeno: {
+    activos: number; borradores: number; personasIncluidas: number; personasCompletadas: number; avance: number | null;
+    ciclos: { id: string; nombre: string; periodo: string; incluidas: number; completadas: number; porcentaje: number }[];
+  } | null;
+  clima: { abiertas: number; borradores: number; cerradas: number } | null;
+}
+export function fetchTablero() {
+  return get<TableroControl>("/metricas/tablero");
+}
+
+/* -------------------- Evaluaciones y verificaciones (2026-09-28) -------------------- */
+export type TipoEvaluacion = "psicometrica" | "tecnica" | "referencias" | "medico" | "socioeconomico" | "otra";
+export const TIPOS_EVALUACION: { valor: TipoEvaluacion; texto: string }[] = [
+  { valor: "psicometrica", texto: "Psicométrica" },
+  { valor: "tecnica", texto: "Técnica o caso práctico" },
+  { valor: "referencias", texto: "Referencias" },
+  { valor: "medico", texto: "Médico" },
+  { valor: "socioeconomico", texto: "Socioeconómico" },
+  { valor: "otra", texto: "Otra" },
+];
+export type ModoPrueba = "integrada" | "enlace" | "manual";
+export const MODOS_PRUEBA: { valor: ModoPrueba; texto: string }[] = [
+  { valor: "integrada", texto: "Integrada" },
+  { valor: "enlace", texto: "Enlace externo" },
+  { valor: "manual", texto: "Carga manual" },
+];
+export interface PruebaPsicometrica {
+  id: number; clave: string; nombre: string; descripcion: string; puestos: string[]; modo: ModoPrueba; modoTexto: string;
+  proveedor: string; idProveedor: string; url: string; activa: boolean; actualizada: string | null; sugerida?: boolean;
+}
+export interface PruebaPsicometricaIn {
+  clave: string; nombre: string; descripcion: string; puestos: string[]; modo: ModoPrueba; proveedor: string; id_proveedor: string; url: string; activa: boolean;
+}
+export interface EvaluacionCandidato {
+  id: string; tipo: TipoEvaluacion; tipoTexto: string; nombre: string; pruebaId: number | null; modo: ModoPrueba; modoTexto: string;
+  proveedor: string; idProveedor: string; url: string;
+  estado: "en_espera_consentimiento" | "pendiente" | "en_proceso" | "resultado_recibido" | "revisada" | "fallida"; estadoTexto: string;
+  pasoIntegrada: string | null; siguientePaso: string | null; motivoFallida: string;
+  dictamen: string | null; dictamenTexto: string; dictamenesPosibles: { valor: string; texto: string }[];
+  revisadaPor: string; revisadaEn: string | null;
+  requiereConsentimientoExpreso: boolean; consentimientoAceptadoEn: string | null; ligaConsentimiento: string | null;
+  tieneInforme: boolean; resultadoCargadoPor: string; resultadoCargadoEn: string | null; informeRestringido: boolean;
+  asignadaPor: string; creada: string | null; historial: { fecha: string; usuario: string; de: string; a: string; detalle: string }[];
+  resultadoResumen?: string; nombreArchivo?: string; notas?: string; comentarioRevision?: string;
+}
+export interface EvaluacionSugerida { tipo: TipoEvaluacion; prueba_id: number | null; nombre: string }
+export function fetchPruebasPsicometricas(incluirInactivas = false, puesto = "") {
+  const q = new URLSearchParams();
+  if (incluirInactivas) q.set("incluir_inactivas", "true");
+  if (puesto) q.set("puesto", puesto);
+  return get<PruebaPsicometrica[]>(`/evaluaciones/pruebas${q.toString() ? `?${q}` : ""}`);
+}
+export function crearPruebaPsicometrica(datos: PruebaPsicometricaIn) {
+  return post<PruebaPsicometrica>("/evaluaciones/pruebas", datos);
+}
+export function editarPruebaPsicometrica(id: number, datos: Partial<PruebaPsicometricaIn>) {
+  return patch<PruebaPsicometrica>(`/evaluaciones/pruebas/${id}`, datos);
+}
+export function inactivarPruebaPsicometrica(id: number) {
+  return eliminar<PruebaPsicometrica>(`/evaluaciones/pruebas/${id}`);
+}
+export function fetchEvaluacionesCandidato(codigo: string) {
+  return get<EvaluacionCandidato[]>(`/evaluaciones/postulaciones/${codigo}`);
+}
+export function agregarEvaluacionCandidato(codigo: string, datos: { tipo: TipoEvaluacion; nombre?: string; prueba_id?: number | null; modo?: string; proveedor?: string; url?: string; notas?: string }) {
+  return post<EvaluacionCandidato>(`/evaluaciones/postulaciones/${codigo}`, datos);
+}
+export function enviarEvaluacion(codigo: string) {
+  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/enviar`, {});
+}
+export function avanzarEvaluacionIntegrada(codigo: string) {
+  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/integracion/avanzar`, {});
+}
+export function cargarResultadoEvaluacion(codigo: string, resumen: string, archivo?: File | null) {
+  const form = new FormData();
+  form.append("resumen", resumen);
+  if (archivo) form.append("archivo", archivo);
+  return subir<EvaluacionCandidato>(`/evaluaciones/${codigo}/resultado`, form);
+}
+export function revisarEvaluacion(codigo: string, dictamen: string, comentario = "") {
+  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/revisar`, { dictamen, comentario });
+}
+export function cancelarEvaluacion(codigo: string, motivo: string) {
+  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/cancelar`, { motivo });
+}
+export function enviarLigaConsentimientoMedico(codigo: string) {
+  return post<{ liga: string; resultados: ResultadoNotificacion[] }>(`/evaluaciones/${codigo}/consentimiento/enviar`, {});
+}
+export function urlInformeEvaluacion(codigo: string) {
+  return urlArchivo(`/evaluaciones/${codigo}/informe`);
+}
+export function fetchConsentimientoPublico(token: string) {
+  return get<{ candidato: string; empresa: string; puesto: string; evaluacion: string; texto: string; aceptado: boolean; aceptadoEn: string | null; cancelada: boolean }>(
+    `/evaluaciones/publica/consentimiento/${token}`,
+  );
+}
+export function aceptarConsentimientoPublico(token: string, nombre: string) {
+  return post<{ ok: boolean; aceptadoEn: string; estado: string }>(`/evaluaciones/publica/consentimiento/${token}/aceptar`, { nombre, acepto: true });
 }
 
 /* -------------------- Conocimiento: generación y permisos -------------------- */

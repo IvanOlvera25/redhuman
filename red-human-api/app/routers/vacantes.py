@@ -584,6 +584,9 @@ class ActualizarIn(BaseModel):
     colaboradores_ids: Optional[List[int]] = None
     mostrar_cliente_candidato: Optional[bool] = None
     enfoque_entrevista: Optional[str] = None  # Fase 4 (Punto 6)
+    # Evaluaciones (2026-09-28): sugerencias [{tipo, prueba_id?, nombre?}] + aviso antes de Onboarding
+    evaluaciones_sugeridas: Optional[List[dict]] = None
+    avisar_evaluaciones_antes_onboarding: Optional[bool] = None
 
 
 @router.patch("/{codigo}")
@@ -613,6 +616,16 @@ def actualizar(
             if not curso:
                 raise HTTPException(400, "El curso de filtro no existe o no está publicado.")
             v.curso_filtro_id = curso.id
+    if "evaluaciones_sugeridas" in cambios:
+        from ..models import PruebaPsicometrica
+        from ..services import evaluaciones as sev
+
+        try:
+            pruebas = {pr.id: pr.nombre for pr in db.query(PruebaPsicometrica).filter(PruebaPsicometrica.cuenta_id == cuenta.id).all()}
+        except Exception:  # noqa: BLE001 — tablas de módulos no disponibles
+            db.rollback()
+            pruebas = {}
+        cambios["evaluaciones_sugeridas"] = sev.normalizar_sugeridas(cambios["evaluaciones_sugeridas"], pruebas)
     if datos.sueldo_periodicidad is not None and datos.sueldo_periodicidad not in PERIODICIDADES_SUELDO:
         raise HTTPException(400, f"Periodicidad de sueldo inválida. Usa una de: {', '.join(PERIODICIDADES_SUELDO)}")
     if datos.seniority is not None and datos.seniority and datos.seniority not in ia.SENIORITY.__args__:

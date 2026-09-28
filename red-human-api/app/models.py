@@ -52,6 +52,10 @@ class Vacante(Base):
     codigo: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     slug: Mapped[str] = mapped_column(String(160), default="", index=True)
     titulo: Mapped[str] = mapped_column(String(200))
+    # Evaluaciones (2026-09-28): sugeridas para quien se postule [{tipo, prueba_id?, nombre?}] y si RH quiere un
+    # aviso al enviar a Onboarding cuando falte alguna o no esté revisada. Solo SUGIERE: nunca bloquea ni asigna sola.
+    evaluaciones_sugeridas: Mapped[list] = mapped_column(JSON, default=list)
+    avisar_evaluaciones_antes_onboarding: Mapped[bool] = mapped_column(Boolean, default=False)
     area: Mapped[str] = mapped_column(String(100), default="")
     empresa: Mapped[str] = mapped_column(String(150), default="Grupo Carbe")
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
@@ -672,6 +676,26 @@ DOCUMENTOS_BASE = [
 ]
 
 
+# Onboarding v2 (2026-09-28): vocabulario visible de los documentos. NO se migran datos: los valores
+# guardados (pendiente | revision | recibido | rechazado) se LEEN así. «Aprobado» exige que una persona de
+# RH lo haya confirmado (`revisado_por`); lo que la IA validó sola sigue «Por revisar» (HITL).
+ESTADOS_DOCUMENTO_ONBOARDING = ("Pendiente", "Por revisar", "Aprobado", "Rechazado", "No aplica")
+# Documento interno que cierra la tarea fija «Contrato firmado» (Fase 2).
+TIPO_CONTRATO_FIRMADO = "Contrato firmado"
+
+
+def estado_documento_onboarding(d: "Documento") -> str:
+    if d.estado == "no_aplica":
+        return "No aplica"
+    if d.estado == "rechazado":
+        return "Rechazado"
+    if d.estado == "recibido":
+        return "Aprobado" if d.revisado_por else "Por revisar"
+    if d.estado == "revision" and d.archivo:
+        return "Por revisar"
+    return "Pendiente"
+
+
 # 2026-09-20 (B2): tipo de contratación con vigencia y unidades de duración permitidas.
 TIPO_CONTRATACION_DETERMINADO = "Tiempo determinado"
 UNIDADES_DURACION = ("días", "meses", "años")
@@ -745,6 +769,20 @@ class Expediente(Base):
     # enviados (automáticos y manuales); el nivel del SIGUIENTE es min(enviados+1, 3). Tras el
     # definitivo no salen más automáticos: RH da seguimiento (bitácora `recordatorios_agotados`).
     recordatorios_enviados: Mapped[int] = mapped_column(Integer, default=0)
+    # Onboarding v2 (2026-09-28): plantilla que se aplicó (Configuración → Plantillas de Onboarding).
+    # Null = aún no se generó el Onboarding o se usó la configuración predeterminada.
+    plantilla_onboarding_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Onboarding v2 (Fase 3): fecha REAL de llegada («Confirmar ingreso»). Con ella el alta se habilita y los
+    # plazos pendientes se recalculan contra la fecha real (si no, contra la prevista `fecha_ingreso`).
+    fecha_ingreso_real: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ingreso_confirmado_por: Mapped[str] = mapped_column(String(150), default="")
+    ingreso_confirmado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # «Cerrar Onboarding» (manual, nunca automático) y «No ingresó» (solo antes del alta).
+    onboarding_cerrado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    onboarding_cerrado_por: Mapped[str] = mapped_column(String(150), default="")
+    no_ingreso_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    no_ingreso_por: Mapped[str] = mapped_column(String(150), default="")
+    no_ingreso_motivo: Mapped[str] = mapped_column(Text, default="")
 
     candidato: Mapped[Optional[Candidato]] = relationship(foreign_keys=[candidato_id])
     postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="expediente")
@@ -754,19 +792,26 @@ class Expediente(Base):
 
     @property
     def obligatorios(self) -> List["Documento"]:
-        return [d for d in self.documentos if d.obligatorio]
+        """Obligatorios que SÍ aplican a esta persona (RH puede marcar uno «No aplica» con motivo). Los
+        documentos INTERNOS (contrato firmado) nunca cuentan."""
+        return [d for d in self.documentos if d.obligatorio and d.estado != "no_aplica" and not d.interno]
 
     @property
     def progreso(self) -> int:
-        """% de documentos OBLIGATORIOS ya entregados — es lo que habilita el alta.
-        2026-09-15 (Fase 1): un documento digital SUBIDO cuenta desde que llega (estado `recibido`
-        o `revision` con archivo); antes solo contaba `recibido`, así que en modo demo / con la IA
-        en duda el porcentaje se quedaba en 0 hasta que RH lo marcaba «recibido físicamente»."""
+        """% de documentos OBLIGATORIOS **Aprobados** — es lo que habilita el contrato y el alta.
+        Onboarding v2 (2026-09-28, decisión del usuario): solo cuenta lo que una persona de RH confirmó
+        (`Documento.aprobado`); lo subido o validado solo por la IA queda «Por revisar» y no suma. En Modo
+        Prueba la subida se aprueba sola («Modo Prueba» en `revisado_por`)."""
         docs = self.obligatorios
         if not docs:
             return 0
-        entregados = sum(1 for d in docs if d.entregado)
-        return round(entregados / len(docs) * 100)
+        aprobados = sum(1 for d in docs if d.aprobado)
+        return round(aprobados / len(docs) * 100)
+
+    @property
+    def no_aprobados(self) -> List[str]:
+        """Obligatorios que todavía no están «Aprobados» (lo que falta para el 100 %)."""
+        return [d.tipo for d in self.obligatorios if not d.aprobado]
 
     @property
     def pendientes(self) -> List[str]:
@@ -797,7 +842,9 @@ class Documento(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     expediente_id: Mapped[int] = mapped_column(ForeignKey("expedientes.id"), index=True)
     tipo: Mapped[str] = mapped_column(String(80))
-    estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # pendiente | revision | recibido | rechazado
+    # pendiente | revision | recibido | rechazado | no_aplica (Onboarding v2, 2026-09-28: SOLO RH, con motivo).
+    # Vocabulario de Onboarding (Pendiente / Por revisar / Aprobado / Rechazado / No aplica) = `estado_documento_onboarding`.
+    estado: Mapped[str] = mapped_column(String(20), default="pendiente")
     obligatorio: Mapped[bool] = mapped_column(Boolean, default=True)
     archivo: Mapped[str] = mapped_column(String(300), default="")  # ruta en disco
     nombre_archivo: Mapped[str] = mapped_column(String(255), default="")  # nombre original
@@ -817,6 +864,22 @@ class Documento(Base):
     solicitudes: Mapped[list] = mapped_column(JSON, default=list)  # [{en, canal, tipo: solicitud|recordatorio, por}]
     recibido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     recibido_canal: Mapped[str] = mapped_column(String(40), default="")  # whatsapp | liga | rh | fisico
+    # Onboarding v2 (2026-09-28): «No aplica» lo marca SOLO una persona de RH y siempre con motivo.
+    motivo_no_aplica: Mapped[str] = mapped_column(Text, default="")
+    no_aplica_por: Mapped[str] = mapped_column(String(150), default="")
+    no_aplica_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Onboarding v2 (Fase 2): documento INTERNO de RH (el contrato firmado). Nunca se le pide al candidato,
+    # no entra al porcentaje ni a recordatorios y solo se carga por su acción propia.
+    interno: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    @property
+    def aplica(self) -> bool:
+        return self.estado != "no_aplica"
+
+    @property
+    def aprobado(self) -> bool:
+        """«Aprobado» = recibido y confirmado por una persona de RH (o Modo Prueba)."""
+        return self.estado == "recibido" and bool(self.revisado_por)
 
     @property
     def entregado(self) -> bool:
@@ -1100,6 +1163,9 @@ class Usuario(Base):
     # entrevistador interno sin volver a capturar el dato en ningún lado.
     telefono: Mapped[str] = mapped_column(String(30), default="")
     rol: Mapped[str] = mapped_column(String(20), default="Usuario")  # Administrador | Usuario
+    # Evaluaciones (2026-09-28): ver el informe médico COMPLETO (dato sensible). Sin él, solo estado y dictamen.
+    # El Administrador lo tiene siempre (`puede_ver_informe_medico`).
+    acceso_informes_medicos: Mapped[bool] = mapped_column(Boolean, default=False)
     hash_pass: Mapped[str] = mapped_column(String(255))
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
     debe_cambiar_pass: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -1126,6 +1192,9 @@ class Usuario(Base):
         if limite.tzinfo is None:
             limite = limite.replace(tzinfo=timezone.utc)
         return limite > ahora()
+
+    def puede_ver_informe_medico(self) -> bool:
+        return self.rol == "Administrador" or bool(self.acceso_informes_medicos)
 
     def puede_decidir(self) -> bool:
         """Ya no hay perfil de solo lectura (Fase A): Administrador y Usuario deciden por
@@ -1536,6 +1605,8 @@ TABLAS_MODULOS_RH = (
     "ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima",
     "participaciones_clima", "plantillas_clima",  # Clima v2 (2026-09-27)
     "plantillas_desempeno", "acciones_desempeno",  # Desempeño v2 (2026-09-27)
+    "plantillas_onboarding", "tareas_onboarding",  # Onboarding v2 (2026-09-28)
+    "pruebas_psicometricas", "evaluaciones_candidato",  # Evaluaciones y verificaciones (2026-09-28)
 )
 
 # --- Desempeño ---
@@ -1824,3 +1895,178 @@ def puede_ver_conocimiento(doc: "DocumentoConocimiento", colaborador: Optional["
     area_col = (colaborador.area or "").strip().lower()
     puesto_col = (colaborador.puesto or "").strip().lower()
     return bool((area_col and area_col in areas) or (puesto_col and puesto_col in puestos))
+
+
+# --- Onboarding v2 (2026-09-28) ---
+# Plantillas de Onboarding (Configuración): qué documentos se piden, qué recursos internos se preparan
+# (correo, equipo, accesos), quién es responsable por defecto, el curso de inducción y los plazos RELATIVOS a
+# la fecha de ingreso. Jerarquía: la plantilla de PUESTO prevalece sobre la de EMPRESA; sin ninguna aplica la
+# configuración predeterminada (DOCUMENTOS_BASE + las tres tareas fijas). Aplicarla a una persona COPIA la
+# configuración: cambiar la selección de un candidato nunca altera la plantilla, ni al revés.
+ALCANCES_PLANTILLA_ONBOARDING = ("empresa", "puesto")
+TIPOS_RECURSO_ONBOARDING = ("correo", "equipo", "accesos", "otro")
+ESTADOS_TAREA_ONBOARDING = ("pendiente", "realizada", "cancelada")
+# Tareas FIJAS y obligatorias de todo Onboarding (clave, nombre). No se eliminan ni se cancelan una por una.
+TAREAS_FIJAS_ONBOARDING = (
+    ("contrato_firmado", "Contrato firmado"),
+    ("alta_imss_nomina", "Alta IMSS / nómina"),
+    ("confirmar_ingreso", "Confirmar ingreso"),
+)
+# Plazos predeterminados en días respecto a la fecha de ingreso (negativo = antes del ingreso).
+PLAZOS_ONBOARDING_DEFAULT = {"documentos": -3, "contrato_firmado": -1, "alta_imss_nomina": 0, "confirmar_ingreso": 0}
+
+
+class PlantillaOnboarding(Base):
+    __tablename__ = "plantillas_onboarding"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    nombre: Mapped[str] = mapped_column(String(200))
+    alcance: Mapped[str] = mapped_column(String(20), default="empresa")  # ALCANCES_PLANTILLA_ONBOARDING
+    # Razón social contratante (una de `cuentas.razones_sociales_de`); vacío = cualquiera de la Cuenta.
+    empresa: Mapped[str] = mapped_column(String(200), default="")
+    puesto: Mapped[str] = mapped_column(String(200), default="")  # solo alcance «puesto»
+    documentos: Mapped[list] = mapped_column(JSON, default=list)  # [{tipo, obligatorio}]
+    recursos: Mapped[list] = mapped_column(JSON, default=list)  # [{nombre, tipo, responsable, dias}]
+    responsables: Mapped[dict] = mapped_column(JSON, default=dict)  # {documentos, contrato_firmado, alta_imss_nomina, confirmar_ingreso}
+    plazos: Mapped[dict] = mapped_column(JSON, default=dict)  # días relativos a la fecha de ingreso
+    curso_induccion_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    activa: Mapped[bool] = mapped_column(Boolean, default=True)  # «eliminar» = desactivar
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+
+class TareaOnboarding(Base):
+    """Tarea del Onboarding de UNA persona (expediente). Estados: pendiente → realizada | cancelada (con
+    motivo). Las tres fijas (`TAREAS_FIJAS_ONBOARDING`) nacen siempre y no se cancelan una por una."""
+
+    __tablename__ = "tareas_onboarding"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    expediente_id: Mapped[int] = mapped_column(Integer, index=True)
+    clave: Mapped[str] = mapped_column(String(40), default="")  # contrato_firmado | alta_imss_nomina | confirmar_ingreso | recurso | otra
+    nombre: Mapped[str] = mapped_column(String(200))
+    tipo: Mapped[str] = mapped_column(String(20), default="otro")  # fija | correo | equipo | accesos | otro
+    fija: Mapped[bool] = mapped_column(Boolean, default=False)
+    obligatoria: Mapped[bool] = mapped_column(Boolean, default=True)
+    responsable: Mapped[str] = mapped_column(String(150), default="")
+    dias_relativos: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # respecto a la fecha de ingreso
+    fecha_limite: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # ESTADOS_TAREA_ONBOARDING
+    motivo_cancelacion: Mapped[str] = mapped_column(Text, default="")
+    notas: Mapped[str] = mapped_column(Text, default="")
+    realizada_por: Mapped[str] = mapped_column(String(150), default="")
+    realizada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelada_por: Mapped[str] = mapped_column(String(150), default="")
+    cancelada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    creada_por: Mapped[str] = mapped_column(String(150), default="")
+    creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
+# --- Evaluaciones y verificaciones del candidato (2026-09-28) ---
+# Psicométrica, técnica/caso práctico, referencias, médico, socioeconómico u otra. Se agregan desde la ficha y
+# NUNCA mueven la columna del pipeline. Sin conexiones a proveedores todavía: el modo «Integrada» se simula a mano
+# (Asignada → Enviada → Iniciada → Completada → Resultado recibido). HITL: la IA no revisa ni dictamina nada.
+TIPOS_EVALUACION = {
+    "psicometrica": "Psicométrica",
+    "tecnica": "Técnica o caso práctico",
+    "referencias": "Referencias",
+    "medico": "Médico",
+    "socioeconomico": "Socioeconómico",
+    "otra": "Otra",
+}
+MODOS_PRUEBA = {"integrada": "Integrada", "enlace": "Enlace externo", "manual": "Carga manual"}
+# Seguimiento (lo que ve RH). «fallida» = Fallida/Cancelada, siempre con motivo.
+ESTADOS_EVALUACION = {
+    "en_espera_consentimiento": "En espera de consentimiento",
+    "pendiente": "Pendiente",
+    "en_proceso": "En proceso",
+    "resultado_recibido": "Resultado recibido",
+    "revisada": "Revisada",
+    "fallida": "Fallida/Cancelada",
+}
+# Modo Integrada (simulado hasta conectar proveedores): cada paso y su estado de seguimiento.
+PASOS_INTEGRADA = ("asignada", "enviada", "iniciada", "completada", "resultado_recibido")
+ESTADO_POR_PASO = {"asignada": "pendiente", "enviada": "en_proceso", "iniciada": "en_proceso", "completada": "en_proceso", "resultado_recibido": "resultado_recibido"}
+DICTAMENES_GENERALES = {"favorable": "Favorable", "con_observaciones": "Con observaciones", "desfavorable": "Desfavorable"}
+DICTAMENES_MEDICOS = {"apto": "Apto", "apto_con_restricciones": "Apto con restricciones", "no_apto": "No apto"}
+# Texto del consentimiento EXPRESO y POR ESCRITO (medio electrónico) para el estudio médico — LFPDPPP: los datos de
+# salud son sensibles. Se guarda la copia EXACTA que la persona aceptó.
+TEXTO_CONSENTIMIENTO_MEDICO = (
+    "Yo, {nombre}, otorgo mi consentimiento expreso y por escrito, por medio electrónico, para que {empresa} "
+    "realice o solicite un estudio médico relacionado con el puesto de {puesto}. Entiendo que mis datos de salud "
+    "son datos personales sensibles conforme a la Ley Federal de Protección de Datos Personales en Posesión de los "
+    "Particulares; que solo se usarán para evaluar mi aptitud para el puesto; que el informe completo solo lo podrán "
+    "consultar las personas autorizadas y que el resto del equipo verá únicamente el dictamen (Apto, Apto con "
+    "restricciones o No apto). Sé que puedo revocar este consentimiento y ejercer mis derechos ARCO en cualquier momento."
+)
+
+
+class PruebaPsicometrica(Base):
+    """Catálogo de Configuración → Pruebas psicométricas (por Cuenta). «Eliminar» = inactivar."""
+
+    __tablename__ = "pruebas_psicometricas"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    clave: Mapped[str] = mapped_column(String(60))  # identificador interno (único por Cuenta)
+    nombre: Mapped[str] = mapped_column(String(200))  # nombre visible
+    descripcion: Mapped[str] = mapped_column(Text, default="")
+    puestos: Mapped[list] = mapped_column(JSON, default=list)  # puestos sugeridos
+    modo: Mapped[str] = mapped_column(String(20), default="manual")  # MODOS_PRUEBA
+    proveedor: Mapped[str] = mapped_column(String(150), default="")
+    id_proveedor: Mapped[str] = mapped_column(String(150), default="")  # identificador en el proveedor
+    url: Mapped[str] = mapped_column(String(500), default="")  # modo «Enlace externo»
+    activa: Mapped[bool] = mapped_column(Boolean, default=True)
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+
+class EvaluacionCandidato(Base):
+    """Una evaluación o verificación asignada a una POSTULACIÓN. Nunca escribe `Postulacion.etapa`."""
+
+    __tablename__ = "evaluaciones_candidato"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(20), index=True)  # EVA-####
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    postulacion_id: Mapped[int] = mapped_column(Integer, index=True)
+    tipo: Mapped[str] = mapped_column(String(20))  # TIPOS_EVALUACION
+    nombre: Mapped[str] = mapped_column(String(200))
+    prueba_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # catálogo psicométrico
+    modo: Mapped[str] = mapped_column(String(20), default="manual")  # MODOS_PRUEBA
+    proveedor: Mapped[str] = mapped_column(String(150), default="")
+    id_proveedor: Mapped[str] = mapped_column(String(150), default="")
+    url: Mapped[str] = mapped_column(String(500), default="")
+    estado: Mapped[str] = mapped_column(String(30), default="pendiente")  # ESTADOS_EVALUACION
+    paso_integrada: Mapped[str] = mapped_column(String(20), default="")  # PASOS_INTEGRADA (solo modo integrada)
+    motivo_fallida: Mapped[str] = mapped_column(Text, default="")
+    notas: Mapped[str] = mapped_column(Text, default="")
+    # --- consentimiento ---
+    requiere_consentimiento_expreso: Mapped[bool] = mapped_column(Boolean, default=False)  # estudio médico
+    consentimiento_token: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)
+    consentimiento_texto: Mapped[str] = mapped_column(Text, default="")  # copia exacta aceptada
+    consentimiento_aceptado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    consentimiento_evidencia: Mapped[dict] = mapped_column(JSON, default=dict)  # nombre tecleado, IP, navegador, huella
+    # --- resultado / informe ---
+    archivo: Mapped[str] = mapped_column(String(300), default="")
+    nombre_archivo: Mapped[str] = mapped_column(String(255), default="")
+    mime: Mapped[str] = mapped_column(String(80), default="")
+    resultado_resumen: Mapped[str] = mapped_column(Text, default="")
+    resultado_cargado_por: Mapped[str] = mapped_column(String(150), default="")
+    resultado_cargado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    dictamen: Mapped[str] = mapped_column(String(30), default="")  # DICTAMENES_GENERALES | DICTAMENES_MEDICOS
+    comentario_revision: Mapped[str] = mapped_column(Text, default="")
+    revisada_por: Mapped[str] = mapped_column(String(150), default="")
+    revisada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    historial: Mapped[list] = mapped_column(JSON, default=list)  # [{fecha, usuario, de, a, detalle}]
+    asignada_por: Mapped[str] = mapped_column(String(150), default="")
+    creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+    @property
+    def es_medico(self) -> bool:
+        return self.tipo == "medico"

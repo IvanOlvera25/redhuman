@@ -4,7 +4,9 @@
    ============================================================ */
 
 /* -------------------- Onboarding (3.11) -------------------- */
-export type EstadoDoc = "recibido" | "revision" | "pendiente" | "rechazado";
+/** Onboarding v2 (2026-09-28): «no_aplica» lo marca SOLO RH con motivo (ver `estadoOnboarding`). */
+export type EstadoDoc = "recibido" | "revision" | "pendiente" | "rechazado" | "no_aplica";
+export type EstadoDocOnboarding = "Pendiente" | "Por revisar" | "Aprobado" | "Rechazado" | "No aplica";
 
 export interface ValidacionDoc {
   tipoDetectado?: string | null;
@@ -35,10 +37,44 @@ export interface DocExpediente {
   solicitudes?: { en: string; canal: string; tipo: "solicitud" | "recordatorio"; por: string }[];
   recibidoEn?: string | null;
   recibidoCanal?: string;
-  estadoSimple?: "Pendiente" | "Recibido" | "Rechazado";
+  estadoSimple?: "Pendiente" | "Recibido" | "Rechazado" | "No aplica";
+  /** Onboarding v2: Pendiente | Por revisar | Aprobado (confirmado por RH) | Rechazado | No aplica */
+  estadoOnboarding?: EstadoDocOnboarding;
+  motivoNoAplica?: string;
+  noAplicaPor?: string;
+  /** Fase 2: documento interno de RH (contrato firmado) — fuera del porcentaje y de lo que se pide al candidato. */
+  interno?: boolean;
+  aprobado?: boolean;
+}
+
+/** Onboarding v2 (Fase 3): resumen del tablero. «No aplica» y «Cancelada» NO cuentan en el total (se muestran aparte). */
+export interface ResumenTableroOnboarding {
+  iniciado: boolean;
+  documentos: {
+    aprobados: string[];
+    faltantes: { tipo: string; estado: EstadoDocOnboarding; obligatorio: boolean }[];
+    noAplica: { tipo: string; motivo: string; por: string }[];
+    total: number;
+    pct: number;
+  };
+  tareas: { realizadas: number; pendientes: number; atrasadas: number; total: number; pct: number; canceladas: { nombre: string; motivo: string; por: string }[] };
+  ingreso: { prevista: string | null; real: string | null; confirmado: boolean; confirmadoPor: string; confirmadoEn: string | null };
+  alta: boolean;
+  puedeAlta: boolean;
+  cerrado: boolean;
+  cerradoPor: string;
+  cerradoEn: string | null;
+  puedeCerrar: boolean;
+  faltanCierre: string[];
+  noIngreso: { en: string | null; por: string; motivo: string } | null;
+  puedeNoIngreso: boolean;
 }
 
 export interface NuevoIngreso {
+  /** Onboarding v2 (Fase 3): null si las tablas de módulos no están disponibles. */
+  onboarding?: ResumenTableroOnboarding | null;
+  /** Onboarding v2: obligatorios que aún no están Aprobados (lo que falta para el 100 %). */
+  noAprobados?: string[];
   id: string;
   nombre: string;
   puesto: string;

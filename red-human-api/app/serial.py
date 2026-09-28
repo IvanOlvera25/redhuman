@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from .config import settings
-from .models import NIVELES_RECORDATORIO, AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
+from .models import NIVELES_RECORDATORIO, estado_documento_onboarding, AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
 from .services.avatar import avatar_activo
 from .services.ia import texto_preguntas, texto_util_candidato
 
@@ -123,6 +123,9 @@ def vacante_dict(
         "ubicacionMunicipio": v.ubicacion_municipio or "",
         # Capacitación universal (2026-09-16): curso que se asigna como filtro al quedar apto
         "cursoFiltroId": v.curso_filtro.codigo if v.curso_filtro else None,
+        # Evaluaciones (2026-09-28): solo SUGERENCIAS + aviso opcional al enviar a Onboarding
+        "evaluacionesSugeridas": list(v.evaluaciones_sugeridas or []),
+        "avisarEvaluacionesAntesOnboarding": bool(v.avisar_evaluaciones_antes_onboarding),
         "cursoFiltroTitulo": v.curso_filtro.titulo if v.curso_filtro else None,
         # embudo de esta vacante (conecta con el pipeline de candidatos)
         "embudo": embudo or {},
@@ -676,7 +679,13 @@ def documento_dict(d: Documento) -> dict:
     v = d.validacion or {}
     return {
         "nombre": d.tipo,
-        "estado": d.estado,  # pendiente | revision | recibido | rechazado
+        "estado": d.estado,  # pendiente | revision | recibido | rechazado | no_aplica
+        # Onboarding v2 (2026-09-28): Pendiente | Por revisar | Aprobado | Rechazado | No aplica
+        "estadoOnboarding": estado_documento_onboarding(d),
+        "motivoNoAplica": d.motivo_no_aplica or "",
+        "interno": bool(d.interno),  # contrato firmado: documento de RH, fuera del porcentaje
+        "aprobado": d.aprobado,
+        "noAplicaPor": d.no_aplica_por or "",
         "obligatorio": d.obligatorio,
         "notas": d.notas_ia or "",
         "archivo": d.nombre_archivo or "",
@@ -692,7 +701,7 @@ def documento_dict(d: Documento) -> dict:
         "recibidoEn": iso(d.recibido_en),
         "recibidoCanal": d.recibido_canal or "",
         # Estado simple para la pestaña «CV y documentos»: Pendiente | Recibido (recibido o digital en revisión)
-        "estadoSimple": "Recibido" if d.entregado else ("Rechazado" if d.estado == "rechazado" else "Pendiente"),
+        "estadoSimple": "Recibido" if d.entregado else ("Rechazado" if d.estado == "rechazado" else ("No aplica" if d.estado == "no_aplica" else "Pendiente")),
         "validacion": {
             "tipoDetectado": v.get("tipo_detectado"),
             "coincideTipo": v.get("coincide_tipo"),
@@ -742,6 +751,7 @@ def expediente_dict(e: Expediente) -> dict:
         "estado": estado,
         "documentos": [documento_dict(d) for d in e.documentos],
         "pendientes": e.pendientes,
+        "noAprobados": e.no_aprobados,  # Onboarding v2: lo que falta APROBAR para el 100 %
         "porRevisar": e.por_revisar,
         "sinConfirmar": sin_confirmar,
         # Fase 3: recordatorios automáticos de documentos
@@ -1015,3 +1025,130 @@ def medicion_clima_publica_dict(m) -> dict:
             else "Esta medición es identificada: tus respuestas quedan ligadas a tu nombre."
         ),
     }
+
+
+# ------------------------------------------------------------
+# Onboarding v2 (2026-09-28)
+# ------------------------------------------------------------
+
+
+def plantilla_onboarding_dict(p, curso_titulo: str = "") -> dict:
+    from .services import onboarding as onb
+
+    cfg = onb.config_de_plantilla(p)
+    return {
+        "id": p.id,
+        "nombre": p.nombre,
+        "alcance": p.alcance,
+        "empresa": p.empresa or "",
+        "puesto": p.puesto or "",
+        "documentos": cfg["documentos"],
+        "recursos": cfg["recursos"],
+        "responsables": cfg["responsables"],
+        "plazos": cfg["plazos"],
+        "cursoInduccionId": p.curso_induccion_id,
+        "cursoInduccion": curso_titulo,
+        "activa": bool(p.activa),
+        "creadoPor": p.creado_por or "",
+        "actualizada": iso(p.actualizada_en),
+    }
+
+
+def tarea_onboarding_dict(t) -> dict:
+    from .services import onboarding as onb
+
+    return {
+        "id": t.id,
+        "expedienteId": t.expediente_id,
+        "clave": t.clave,
+        "nombre": t.nombre,
+        "tipo": t.tipo,
+        "fija": bool(t.fija),
+        "obligatoria": bool(t.obligatoria),
+        "responsable": t.responsable or "",
+        "diasRelativos": t.dias_relativos,
+        "fechaLimite": iso(t.fecha_limite),
+        "estado": t.estado,  # pendiente | realizada | cancelada
+        "atrasada": onb.atrasada(t),
+        "motivoCancelacion": t.motivo_cancelacion or "",
+        "notas": t.notas or "",
+        "realizadaPor": t.realizada_por or "",
+        "realizadaEn": iso(t.realizada_en),
+        "canceladaPor": t.cancelada_por or "",
+        "canceladaEn": iso(t.cancelada_en),
+        "cierreConAccion": onb.CIERRE_CON_ACCION.get(t.clave, ""),
+    }
+
+
+# ------------------------------------------------------------
+# Evaluaciones y verificaciones (2026-09-28)
+# ------------------------------------------------------------
+
+
+def prueba_psicometrica_dict(pr) -> dict:
+    from .models import MODOS_PRUEBA
+
+    return {
+        "id": pr.id,
+        "clave": pr.clave,
+        "nombre": pr.nombre,
+        "descripcion": pr.descripcion or "",
+        "puestos": list(pr.puestos or []),
+        "modo": pr.modo,
+        "modoTexto": MODOS_PRUEBA.get(pr.modo, pr.modo),
+        "proveedor": pr.proveedor or "",
+        "idProveedor": pr.id_proveedor or "",
+        "url": pr.url or "",
+        "activa": bool(pr.activa),
+        "actualizada": iso(pr.actualizada_en),
+    }
+
+
+def evaluacion_candidato_dict(ev, usuario=None) -> dict:
+    """El informe médico COMPLETO (archivo, resumen, notas, comentario) solo viaja a quien tiene permiso; el resto
+    ve únicamente el estado y el dictamen."""
+    from .models import ESTADOS_EVALUACION, MODOS_PRUEBA, TIPOS_EVALUACION
+    from .services import evaluaciones as sev
+
+    restringido = ev.es_medico and not (usuario is not None and usuario.puede_ver_informe_medico())
+    dictamenes = sev.dictamenes_de(ev.tipo)
+    salida = {
+        "id": ev.codigo,
+        "tipo": ev.tipo,
+        "tipoTexto": TIPOS_EVALUACION.get(ev.tipo, ev.tipo),
+        "nombre": ev.nombre,
+        "pruebaId": ev.prueba_id,
+        "modo": ev.modo,
+        "modoTexto": MODOS_PRUEBA.get(ev.modo, ev.modo),
+        "proveedor": ev.proveedor or "",
+        "idProveedor": ev.id_proveedor or "",
+        "url": ev.url or "",
+        "estado": ev.estado,
+        "estadoTexto": ESTADOS_EVALUACION.get(ev.estado, ev.estado),
+        "pasoIntegrada": ev.paso_integrada or None,
+        "siguientePaso": sev.siguiente_paso(ev) if ev.estado in ("pendiente", "en_proceso") else None,
+        "motivoFallida": ev.motivo_fallida or "",
+        "dictamen": ev.dictamen or None,
+        "dictamenTexto": dictamenes.get(ev.dictamen, "") if ev.dictamen else "",
+        "dictamenesPosibles": [{"valor": k, "texto": t} for k, t in dictamenes.items()],
+        "revisadaPor": ev.revisada_por or "",
+        "revisadaEn": iso(ev.revisada_en),
+        "requiereConsentimientoExpreso": bool(ev.requiere_consentimiento_expreso),
+        "consentimientoAceptadoEn": iso(ev.consentimiento_aceptado_en),
+        "ligaConsentimiento": f"{settings.app_url}/consentimiento/{ev.consentimiento_token}" if ev.consentimiento_token and not ev.consentimiento_aceptado_en else None,
+        "tieneInforme": bool(ev.archivo),
+        "resultadoCargadoPor": ev.resultado_cargado_por or "",
+        "resultadoCargadoEn": iso(ev.resultado_cargado_en),
+        "informeRestringido": restringido,
+        "asignadaPor": ev.asignada_por or "",
+        "creada": iso(ev.creada_en),
+        "historial": list(ev.historial or []),
+    }
+    if not restringido:
+        salida.update({
+            "resultadoResumen": ev.resultado_resumen or "",
+            "nombreArchivo": ev.nombre_archivo or "",
+            "notas": ev.notas or "",
+            "comentarioRevision": ev.comentario_revision or "",
+        })
+    return salida

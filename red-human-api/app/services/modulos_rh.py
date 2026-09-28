@@ -29,6 +29,6 @@ def requiere_modulos_rh() -> None:
     if not _DISPONIBLE["ok"]:
         raise HTTPException(
             503,
-            "Los módulos de Desempeño y Clima no están disponibles en este servidor: "
+            "Los módulos de Desempeño, Clima y Onboarding no están disponibles en este servidor: "
             f"no se pudieron crear sus tablas ({_DISPONIBLE['error'] or 'sin detalle'}).",
         )

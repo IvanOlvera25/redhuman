@@ -68,6 +68,7 @@ def _sincronizar_estado(e: Expediente) -> None:
 @router.get("/expedientes")
 def listar(
     estado: Optional[str] = None,
+    cerrados: bool = False,
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
     cuenta: Cuenta = Depends(cuenta_actual),
@@ -88,7 +89,29 @@ def listar(
     )
     if estado:
         q = q.filter(Expediente.estado == estado)
-    return [expediente_dict(e) for e in q.all()]
+    # Onboarding v2 (Fase 3): los Onboardings CERRADOS salen del tablero (salvo `cerrados=true`)
+    if not cerrados:
+        q = q.filter(Expediente.onboarding_cerrado_en.is_(None))
+    expedientes = q.all()
+    return [{**expediente_dict(e), "onboarding": r} for e, r in zip(expedientes, _resumenes_onboarding(db, expedientes))]
+
+
+def _resumenes_onboarding(db: Session, expedientes: List[Expediente]) -> List[Optional[dict]]:
+    """Resumen de tareas/documentos por expediente con UNA consulta de tareas (sin N+1). Si las tablas de los
+    módulos no están disponibles, el tablero sigue funcionando sin él."""
+    from ..models import TareaOnboarding
+    from ..services import onboarding as onb
+
+    try:
+        ids = [e.id for e in expedientes]
+        por_exp: dict = {}
+        if ids:
+            for t in db.query(TareaOnboarding).filter(TareaOnboarding.expediente_id.in_(ids)).all():
+                por_exp.setdefault(t.expediente_id, []).append(t)
+        return [onb.resumen_tablero(e, sorted(por_exp.get(e.id, []), key=lambda t: t.id)) for e in expedientes]
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        return [None for _ in expedientes]
 
 
 @router.get("/metricas")
@@ -153,19 +176,25 @@ def actualizar_preparacion(
     e = _expediente(db, exp_id, cuenta.id)
     if e.estado == "alta":
         raise HTTPException(409, "El expediente ya fue dado de alta; no admite cambios.")
+    from ..services import onboarding as onb
+
+    tareas = onb.tareas_de(db, e) if (datos.contrato or datos.alta_administrativa or datos.equipo_accesos) else []
+    if tareas:
+        # Onboarding v2 (2026-09-28): las TAREAS son la fuente de verdad; estos campos se derivan de ellas.
+        _preparacion_por_tareas(db, e, tareas, datos, u)
 
     cambios = []
-    if datos.contrato is not None:
+    if datos.contrato is not None and not tareas:
         if datos.contrato not in ESTADOS_CONTRATO:
             raise HTTPException(400, f"contrato inválido. Usa uno de: {', '.join(ESTADOS_CONTRATO)}")
         e.contrato = datos.contrato
         cambios.append("contrato")
-    if datos.alta_administrativa is not None:
+    if datos.alta_administrativa is not None and not tareas:
         if datos.alta_administrativa not in ESTADOS_ALTA_ADMIN:
             raise HTTPException(400, f"alta_administrativa inválida. Usa una de: {', '.join(ESTADOS_ALTA_ADMIN)}")
         e.alta_administrativa = datos.alta_administrativa
         cambios.append("alta_administrativa")
-    if datos.equipo_accesos is not None:
+    if datos.equipo_accesos is not None and not tareas:
         if datos.equipo_accesos not in ESTADOS_EQUIPO_ACCESOS:
             raise HTTPException(400, f"equipo_accesos inválido. Usa uno de: {', '.join(ESTADOS_EQUIPO_ACCESOS)}")
         e.equipo_accesos = datos.equipo_accesos
@@ -189,8 +218,40 @@ def actualizar_preparacion(
             db, u.nombre, "preparacion_ingreso_actualizada", "expediente", str(e.id),
             {"campos": cambios, "correo_rh": u.correo},
         )
-        db.commit()
+    db.commit()
     return expediente_dict(e)
+
+
+def _preparacion_por_tareas(db: Session, e: Expediente, tareas: list, datos: "PreparacionIn", u: Usuario) -> None:
+    """Traduce el checklist viejo a las tareas (fuente de verdad) y deriva de vuelta los campos."""
+    from ..services import onboarding as onb
+
+    por_clave = {t.clave: t for t in tareas if t.fija}
+    if datos.contrato is not None:
+        if datos.contrato not in ESTADOS_CONTRATO:
+            raise HTTPException(400, f"contrato inválido. Usa uno de: {', '.join(ESTADOS_CONTRATO)}")
+        t = por_clave.get("contrato_firmado")
+        if t and datos.contrato == "Firmado" and t.estado != "realizada":
+            raise HTTPException(409, "El contrato se marca firmado al cargar el PDF firmado («Cargar contrato firmado»).")
+        if t and datos.contrato == "Pendiente" and t.estado == "realizada":
+            raise HTTPException(409, "El contrato firmado ya está cargado; reemplázalo desde las tareas del Onboarding.")
+    if datos.alta_administrativa is not None:
+        if datos.alta_administrativa not in ESTADOS_ALTA_ADMIN:
+            raise HTTPException(400, f"alta_administrativa inválida. Usa una de: {', '.join(ESTADOS_ALTA_ADMIN)}")
+        t = por_clave.get("alta_imss_nomina")
+        if t:
+            onb.cambiar_estado_tarea(t, "realizada" if datos.alta_administrativa == "Realizada" else "pendiente", "", u.nombre)
+    if datos.equipo_accesos is not None:
+        if datos.equipo_accesos not in ESTADOS_EQUIPO_ACCESOS:
+            raise HTTPException(400, f"equipo_accesos inválido. Usa uno de: {', '.join(ESTADOS_EQUIPO_ACCESOS)}")
+        destino = {"Listo": "realizada", "Pendiente": "pendiente", "No aplica": "cancelada"}[datos.equipo_accesos]
+        for t in tareas:
+            if not t.fija and t.tipo in ("correo", "equipo", "accesos") and t.estado != destino:
+                onb.cambiar_estado_tarea(t, destino, "Marcado «No aplica» en la preparación de ingreso.", u.nombre)
+    onb.sincronizar_legado(db, e)
+    registrar(db, u.nombre, "preparacion_ingreso_actualizada", "expediente", str(e.id),
+              {"por_tareas": True, "contrato": datos.contrato, "alta_administrativa": datos.alta_administrativa,
+               "equipo_accesos": datos.equipo_accesos, "correo_rh": u.correo})
 
 
 # ------------------------------------------------------------
@@ -227,6 +288,10 @@ async def subir_documento_interno(db: Session, e: Expediente, tipo: str, archivo
     if e.estado == "alta":
         raise HTTPException(409, "El expediente ya fue dado de alta; no admite cambios.")
     doc = _documento(e, tipo)
+    if doc.interno:
+        raise HTTPException(409, f"«{doc.tipo}» es un documento interno de RH: cárgalo desde las tareas del Onboarding.")
+    if doc.estado == "no_aplica" and subido_por == "candidato":
+        raise HTTPException(409, f"«{doc.tipo}» no se requiere en tu expediente.")
     validado = await fs.validar(archivo, f"documento «{doc.tipo}»")
     return _registrar_documento(db, e, doc, validado, subido_por)
 
@@ -264,7 +329,7 @@ def documento_para_adjunto(db: Session, e: Expediente, pie: str, nombre_archivo:
     obligatorio pendiente/rechazado; (3) si no falta ninguno, el primer opcional pendiente; (4) si
     tampoco, se agrega como documento adicional (RH lo reclasifica desde el expediente)."""
     pista = _norm(f"{pie} {nombre_archivo}")
-    docs = sorted(e.documentos, key=lambda d: d.id)
+    docs = sorted((d for d in e.documentos if d.estado != "no_aplica" and not d.interno), key=lambda d: d.id)
     if pista.strip():
         for d in docs:
             if _norm(d.tipo) in pista:
@@ -319,7 +384,8 @@ def _registrar_documento(db: Session, e: Expediente, doc: Documento, validado, s
     doc.subido_en = datetime.now(timezone.utc)
     doc.validacion = v.model_dump()
     doc.estado, doc.notas_ia = _resolver_estado(v, con_ia)
-    doc.revisado_por = ""  # vuelve a quedar pendiente de revisión humana
+    # vuelve a quedar pendiente de revisión humana («Por revisar»); en Modo Prueba queda «Aprobado» (Onboarding v2)
+    doc.revisado_por = "Modo Prueba" if (modo_prueba_activo(db) and doc.estado == "recibido") else ""
     if doc.entregado:  # B3: recibido (o digital en revisión) → fecha/hora y canal de recepción
         doc.recibido_en = doc.subido_en
         doc.recibido_canal = _canal_recepcion(subido_por)
@@ -365,10 +431,15 @@ def descargar_documento(
     return FileResponse(doc.archivo, media_type=doc.mime or "application/octet-stream", filename=doc.nombre_archivo or doc.tipo)
 
 
+# Onboarding v2 (2026-09-28): también se acepta el vocabulario nuevo; se guarda con los valores de siempre.
+ALIAS_ESTADO_DOC = {"aprobado": "recibido", "por_revisar": "revision", "por revisar": "revision", "no aplica": "no_aplica"}
+
+
 class EstadoDocIn(BaseModel):
     tipo: str
-    estado: str  # recibido | rechazado | revision | pendiente
+    estado: str  # recibido (Aprobado) | rechazado | revision (Por revisar) | pendiente | no_aplica (solo RH, con motivo)
     notas: str = ""
+    motivo: str = ""  # obligatorio para «No aplica»
     # el documento se entregó en físico o fuera del sistema: RH lo da por recibido bajo su responsabilidad
     recibido_fisico: bool = False
 
@@ -381,8 +452,27 @@ def marcar_documento(
     """Revisión humana manual de un documento (el agente propone, RH dispone)."""
     e = _expediente(db, exp_id, cuenta.id)
     doc = _documento(e, datos.tipo)
-    if datos.estado not in ESTADOS_DOC:
-        raise HTTPException(400, f"Estado inválido. Usa uno de: {', '.join(ESTADOS_DOC)}")
+    if doc.interno:
+        raise HTTPException(409, f"«{doc.tipo}» es un documento interno de RH: se gestiona desde las tareas del Onboarding.")
+    datos.estado = ALIAS_ESTADO_DOC.get((datos.estado or "").strip().lower(), (datos.estado or "").strip().lower())
+    if datos.estado not in ESTADOS_DOC + ("no_aplica",):
+        raise HTTPException(400, f"Estado inválido. Usa uno de: {', '.join(ESTADOS_DOC + ('no_aplica',))}")
+    if datos.estado == "no_aplica":
+        # «No aplica» lo decide SOLO una persona de RH (esta ruta exige sesión con permiso de decisión) y con motivo
+        motivo = (datos.motivo or datos.notas or "").strip()
+        if not motivo:
+            raise HTTPException(400, "Indica el motivo por el que este documento no aplica.")
+        anterior = doc.estado
+        doc.estado, doc.motivo_no_aplica, doc.no_aplica_por = "no_aplica", motivo[:1000], u.nombre
+        doc.no_aplica_en = datetime.now(timezone.utc)
+        doc.revisado_por = u.nombre
+        _sincronizar_estado(e)
+        registrar(db, u.nombre, "documento_no_aplica", "documento", f"{e.id}:{doc.tipo}", {"de": anterior, "motivo": motivo[:300], "correo_rh": u.correo})
+        db.commit()
+        return expediente_dict(e)
+    if doc.estado == "no_aplica":
+        # vuelve a aplicar: se limpia el motivo (queda en bitácora)
+        doc.motivo_no_aplica, doc.no_aplica_por, doc.no_aplica_en = "", "", None
     # confirmar uno ya recibido es válido; darlo por recibido de la nada exige archivo o entrega física declarada
     if datos.estado == "recibido" and not doc.archivo and doc.estado != "recibido" and not datos.recibido_fisico:
         raise HTTPException(
@@ -466,6 +556,8 @@ async def recordatorio(
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
 ):
     e = _expediente(db, exp_id, cuenta.id)
+    if e.no_ingreso_en:
+        raise HTTPException(409, "Esta persona quedó como «No ingresó»: ya no se le envían recordatorios.")
     pendientes = e.pendientes
     if not pendientes:
         return {"enviado": False, "detalle": "Sin documentos pendientes 🎉", "expediente": expediente_dict(e)}
@@ -523,7 +615,7 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
         tipo_contratacion=e.tipo_contratacion or "",
         cv_ruta=cv.ruta if cv else "",
         cv_nombre=cv.nombre if cv else "",
-        fecha_ingreso=e.fecha_ingreso,
+        fecha_ingreso=e.fecha_ingreso_real or e.fecha_ingreso,  # Onboarding v2: la fecha REAL confirmada manda
         dado_de_alta_por=u.nombre,
         candidato_origen_id=c.id,
         expediente_id=e.id,
@@ -570,6 +662,8 @@ async def alta(
     # validación de integridad del expediente (documentos adjuntos, 100 %, confirmación de RH) — el flag
     # forzar_prueba ya no es necesario. Con Modo Prueba apagado todo sigue exigiéndose.
     prueba = modo_prueba_activo(db)
+    if e.no_ingreso_en:
+        raise HTTPException(409, "Esta persona quedó como «No ingresó»; no se puede dar de alta.")
     if not prueba and not any(d.archivo for d in e.documentos):
         raise HTTPException(400, "No se puede dar de alta al colaborador: El expediente no tiene documentos adjuntos.")
     # 2026-09-19 (Bloque 3, alta perfecta): el alta toma ESTRICTAMENTE las condiciones finales guardadas —
@@ -578,7 +672,7 @@ async def alta(
     if faltan and not prueba:
         raise HTTPException(409, f"Captura y guarda las condiciones de contratación antes del alta. Faltan: {', '.join(faltan)}.")
     if e.progreso < 100 and not prueba and not puede_forzar_prueba(db, forzar_prueba):
-        raise HTTPException(409, f"El expediente está al {e.progreso}%. Faltan: {', '.join(e.pendientes)}.")
+        raise HTTPException(409, f"El expediente está al {e.progreso}% (solo cuentan documentos Aprobados). Faltan: {', '.join(e.no_aprobados)}.")
     # HITL: lo que cuenta para el % (recibido o digital en revisión) lo confirma una persona de RH
     # antes del alta — el porcentaje ya no espera esa confirmación, el alta sí.
     sin_revisar = e.sin_confirmar
@@ -588,6 +682,10 @@ async def alta(
             "Antes del alta, una persona de RH debe confirmar los documentos subidos (validados por la IA o en revisión): "
             + ", ".join(sin_revisar),
         )
+    # Onboarding v2 (Fase 3), después de las validaciones de integridad: «Dar de alta» se habilita SOLO
+    # después de «Confirmar ingreso» (fecha real), sin importar la fecha prevista. Modo Prueba se la salta.
+    if not e.ingreso_confirmado_en and not prueba:
+        raise HTTPException(409, "Primero confirma el ingreso (fecha real de llegada) con «Confirmar ingreso».")
 
     if datos.fecha_ingreso:
         try:
@@ -788,10 +886,11 @@ def contrato(
     los documentos requeridos ya están (expediente al 100 %), salvo Modo Prueba."""
     e = _expediente(db, exp_id, cuenta.id)
     if not _documentos_listos(e) and not modo_prueba_activo(db):
-        raise HTTPException(409, f"El contrato se genera cuando el expediente está al 100 % (hoy {e.progreso} %). Faltan: {', '.join(e.pendientes)}.")
+        raise HTTPException(409, f"El contrato se genera cuando el expediente está al 100 % de documentos Aprobados (hoy {e.progreso} %). Faltan: {', '.join(e.no_aprobados)}.")
     d = _datos_carta_intencion(e)
     if not (e.puesto and e.sueldo and e.tipo_contratacion and e.fecha_ingreso) and not modo_prueba_activo(db):
         raise HTTPException(409, "Captura y guarda las condiciones de contratación (puesto, sueldo, tipo y fecha de ingreso) antes de generar el contrato.")
+    d["borrador"] = True  # Onboarding v2: lo generado es BORRADOR; el firmado se carga en la tarea «Contrato firmado»
     try:
         pdf = pdf_contrato(d)
     except Exception as ex:  # noqa: BLE001

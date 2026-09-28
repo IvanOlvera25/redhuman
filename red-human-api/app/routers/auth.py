@@ -26,6 +26,9 @@ def usuario_dict(u: Usuario) -> dict:
        "activo": u.activo,
        "debeCambiarPass": u.debe_cambiar_pass,
        "puedeDecidir": u.puede_decidir(),
+       # Evaluaciones (2026-09-28): ver informes médicos completos (el Administrador siempre)
+       "accesoInformesMedicos": bool(u.acceso_informes_medicos),
+       "puedeVerInformeMedico": u.puede_ver_informe_medico(),
        "ultimoAcceso": u.ultimo_acceso.isoformat() if u.ultimo_acceso else None,
        # Punto 27: lista de Cuentas activas del usuario para el selector multi-cuenta del
        # frontend. Cuando solo hay una, el selector no aparece (regla de negocio Fase A).
@@ -255,6 +258,7 @@ class ActualizarUsuarioIn(BaseModel):
    rol: Optional[str] = None
    activo: Optional[bool] = None
    password: Optional[str] = None
+   acceso_informes_medicos: Optional[bool] = None  # solo lo cambia un Administrador (este endpoint ya lo exige)
 
 @router.patch("/usuarios/{usuario_id}")
 def actualizar(
@@ -294,6 +298,9 @@ def actualizar(
    if datos.telefono is not None:
        u.telefono = clave_telefono(datos.telefono)
        cambios.append("telefono")
+   if datos.acceso_informes_medicos is not None:
+       u.acceso_informes_medicos = bool(datos.acceso_informes_medicos)
+       cambios.append("acceso_informes_medicos")
    if datos.password:
        motivo = auth.validar_fortaleza(datos.password)
        if motivo:
