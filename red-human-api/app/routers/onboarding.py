@@ -467,7 +467,9 @@ async def iniciar_onboarding(exp_id: int, datos: IniciarOnboardingIn, db: Sessio
     }
 
 
-async def _avisar_responsables(db: Session, e: Expediente, cuenta: Cuenta, tareas: List[TareaOnboarding]) -> List[dict]:
+async def _avisar_responsables(
+    db: Session, e: Expediente, cuenta: Cuenta, tareas: List[TareaOnboarding], titulo: str = "", parrafo: str = "", solo_pendientes: bool = True,
+) -> List[dict]:
     """Un correo por responsable interno con SUS tareas y plazos. El responsable se reconoce si su nombre o
     correo coincide con un Usuario de la Cuenta; si no, se reporta sin enviar (nunca silencioso)."""
     from ..services import plantillas_correo
@@ -477,7 +479,12 @@ async def _avisar_responsables(db: Session, e: Expediente, cuenta: Cuenta, tarea
     usuarios = _usuarios_cuenta(db, cuenta.id)
     nombre = e.candidato.nombre if e.candidato else "la persona"
     salida = []
-    for responsable, suyas in onb.tareas_por_responsable(tareas).items():
+    grupos = onb.tareas_por_responsable(tareas) if solo_pendientes else {}
+    if not solo_pendientes:
+        for t in tareas:
+            if (t.responsable or "").strip():
+                grupos.setdefault(t.responsable.strip(), []).append(t)
+    for responsable, suyas in grupos.items():
         us = _usuario_de(usuarios, responsable)
         if not us or not us.correo:
             salida.append({"destinatario": responsable, "canal": "correo", "destino": "", "enviado": False,
@@ -489,8 +496,8 @@ async def _avisar_responsables(db: Session, e: Expediente, cuenta: Cuenta, tarea
             filas.append((t.nombre, limite.astimezone(TZ_MEXICO).strftime("%d/%m/%Y") if limite else "Sin fecha"))
         try:
             asunto, html = plantillas_correo.html_aviso(
-                f"Onboarding de {nombre}: tienes tareas asignadas",
-                f"{nombre} ingresa como {e.puesto or 'nuevo colaborador'}. Estas tareas del Onboarding están a tu cargo:",
+                titulo or f"Onboarding de {nombre}: tienes tareas asignadas",
+                parrafo or f"{nombre} ingresa como {e.puesto or 'nuevo colaborador'}. Estas tareas del Onboarding están a tu cargo:",
                 cuenta.nombre_visible, filas,
             )
             r = await enviar_correo(us.correo, asunto, html)
@@ -572,3 +579,159 @@ def descargar_contrato_firmado(exp_id: int, db: Session = Depends(get_db), _: Us
     if not doc or not fs.existe(doc.archivo):
         raise HTTPException(404, "Todavía no se carga el contrato firmado.")
     return FileResponse(doc.archivo, media_type="application/pdf", filename=doc.nombre_archivo or "contrato-firmado.pdf")
+
+
+# ---------- Fase 3: gestión activa, alta y cierre ----------
+
+def _dia_mx(texto: str, campo: str) -> datetime:
+    """«AAAA-MM-DD» capturado en México → mismo criterio que `fecha_ingreso` (medianoche UTC de ese día)."""
+    try:
+        return datetime.fromisoformat((texto or "")[:10]).replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(400, f"{campo} inválida (usa AAAA-MM-DD).")
+
+
+def _historial(p, evento: str, texto: str, u: Usuario, **extra) -> None:
+    """Deja el hecho en el historial del candidato (solo se AGREGA)."""
+    if p is None:
+        return
+    p.historial = list(p.historial or []) + [
+        {"evento": evento, "texto": texto, "usuario": u.nombre, "fecha": datetime.now(timezone.utc).isoformat(), **extra}
+    ]
+
+
+@router.get("/expedientes/{exp_id}/estado")
+def estado_onboarding(exp_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Estado completo para el tablero: documentos aprobados vs faltantes, «No aplica» aparte con motivo,
+    tareas realizadas/pendientes/atrasadas, canceladas aparte con motivo, ingreso, alta y cierre."""
+    e = _expediente(db, exp_id, cuenta.id)
+    tareas = onb.tareas_de(db, e)
+    return {**onb.resumen_tablero(e, tareas), "listaTareas": [tarea_onboarding_dict(t) for t in tareas]}
+
+
+@router.post("/expedientes/{exp_id}/generar-tareas")
+async def generar_tareas_legado(exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Botón «Generar tareas de Onboarding» para quien YA estaba en Onboarding antes de Onboarding v2: crea las
+    tareas desde la plantilla que aplica (puesto > empresa > predeterminada) y agrega los documentos que falten,
+    SIN mover la etapa, sin pedir requisitos y sin volver a solicitar documentos. Avisa a los responsables."""
+    e = _expediente(db, exp_id, cuenta.id)
+    p = e.postulacion
+    if e.estado == "alta" or e.no_ingreso_en or e.onboarding_cerrado_en:
+        raise HTTPException(409, "Este Onboarding ya terminó; no se generan tareas.")
+    if onb.onboarding_iniciado(db, e):
+        raise HTTPException(409, "Este Onboarding ya tiene tareas.")
+    if not p or p.etapa != "Onboarding":
+        raise HTTPException(409, "Para quien está en Contratación usa «Enviar a Onboarding».")
+    cfg = onb.configuracion_para(db, cuenta.id, e.puesto, e.empresa)
+    agregados = onb.aplicar_documentos(db, e, cfg["documentos"])
+    tareas = onb.generar_tareas(db, e, cuenta.id, cfg, u.nombre)
+    onb.sincronizar_legado(db, e)
+    e.plantilla_onboarding_id = cfg.get("plantillaId")
+    registrar(db, u.nombre, "onboarding_tareas_generadas", "expediente", str(e.id),
+              {"legado": True, "plantilla": cfg.get("plantilla") or cfg["origen"], "tareas": [t.nombre for t in tareas], "documentos_agregados": agregados, "correo_rh": u.correo})
+    db.commit()
+    avisos = await _avisar_responsables(db, e, cuenta, tareas)
+    db.commit()
+    return {"tareas": [tarea_onboarding_dict(t) for t in tareas], "documentosAgregados": agregados, "avisosResponsables": avisos,
+            "plantilla": cfg.get("plantilla") or "", "origen": cfg["origen"]}
+
+
+class ConfirmarIngresoIn(BaseModel):
+    fecha_real: str  # AAAA-MM-DD
+
+
+@router.post("/expedientes/{exp_id}/confirmar-ingreso")
+def confirmar_ingreso(exp_id: int, datos: ConfirmarIngresoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Confirmar ingreso»: registra la fecha REAL de llegada (quién y cuándo), cierra la tarea fija y recalcula los
+    plazos pendientes contra esa fecha. Es lo que habilita «Dar de alta», sin importar la fecha prevista."""
+    from ..services.notificaciones import TZ_MEXICO
+
+    e = _expediente(db, exp_id, cuenta.id)
+    if e.estado == "alta":
+        raise HTTPException(409, "El colaborador ya fue dado de alta.")
+    if e.no_ingreso_en:
+        raise HTTPException(409, "Esta persona quedó como «No ingresó».")
+    tarea = next((t for t in onb.tareas_de(db, e) if t.clave == "confirmar_ingreso"), None)
+    if not tarea:
+        raise HTTPException(409, "Primero genera las tareas del Onboarding.")
+    real = _dia_mx(datos.fecha_real, "fecha_real")
+    if real.date() > datetime.now(TZ_MEXICO).date():
+        raise HTTPException(400, "La fecha real de ingreso no puede ser futura: confírmala el día que la persona llegue.")
+    ahora = datetime.now(timezone.utc)
+    e.fecha_ingreso_real, e.ingreso_confirmado_por, e.ingreso_confirmado_en = real, u.nombre, ahora
+    tarea.estado, tarea.realizada_por, tarea.realizada_en = "realizada", u.nombre, ahora
+    tarea.cancelada_por, tarea.cancelada_en, tarea.motivo_cancelacion = "", None, ""
+    tarea.notas = f"Ingreso real: {real.date().isoformat()}."
+    recalculadas = onb.recalcular_fechas(db, e)
+    prevista = e.fecha_ingreso.date().isoformat() if e.fecha_ingreso else None
+    _historial(e.postulacion, "ingreso_confirmado", f"Ingreso confirmado por {u.nombre}: llegó el {real.date().isoformat()}"
+               + (f" (prevista {prevista})" if prevista and prevista != real.date().isoformat() else ""), u)
+    registrar(db, u.nombre, "ingreso_confirmado", "expediente", str(e.id),
+              {"fecha_real": real.date().isoformat(), "fecha_prevista": prevista, "plazos_recalculados": recalculadas, "correo_rh": u.correo})
+    db.commit()
+    return {**onb.resumen_tablero(e, onb.tareas_de(db, e)), "listaTareas": [tarea_onboarding_dict(t) for t in onb.tareas_de(db, e)], "plazosRecalculados": recalculadas}
+
+
+@router.post("/expedientes/{exp_id}/cerrar")
+def cerrar_onboarding(exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Cerrar Onboarding»: acción MANUAL (nunca automática). Solo con el alta hecha, todas las tareas Realizadas o
+    Canceladas (con motivo) y todos los documentos Aprobados o «No aplica» (con motivo). Modo Prueba se la salta."""
+    from ..services.configuracion import modo_prueba_activo
+
+    e = _expediente(db, exp_id, cuenta.id)
+    if e.onboarding_cerrado_en:
+        raise HTTPException(409, f"El Onboarding ya se cerró ({e.onboarding_cerrado_por}).")
+    if e.estado != "alta":
+        raise HTTPException(409, "Primero da de alta a la persona; el Onboarding se cierra después del alta.")
+    tareas = onb.tareas_de(db, e)
+    faltan = onb.pendientes_cierre(e, tareas)
+    prueba = modo_prueba_activo(db)
+    if faltan and not prueba:
+        raise HTTPException(409, "Aún no se puede cerrar el Onboarding: " + "; ".join(faltan[:8]) + ("…" if len(faltan) > 8 else "") + ".")
+    e.onboarding_cerrado_en, e.onboarding_cerrado_por = datetime.now(timezone.utc), u.nombre
+    _historial(e.postulacion, "onboarding_cerrado", f"Onboarding cerrado por {u.nombre}", u)
+    registrar(db, u.nombre, "onboarding_cerrado", "expediente", str(e.id), {"modo_prueba": bool(faltan and prueba), "pendientes": faltan, "correo_rh": u.correo})
+    db.commit()
+    return onb.resumen_tablero(e, tareas)
+
+
+class NoIngresoIn(BaseModel):
+    motivo: str = ""
+
+
+@router.post("/expedientes/{exp_id}/no-ingreso")
+async def no_ingreso(exp_id: int, datos: NoIngresoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«No ingresó» (solo antes del alta): cancela las tareas abiertas (también las fijas), detiene los
+    recordatorios, avisa a los responsables, cierra la postulación y deja el hecho en el historial del candidato."""
+    e = _expediente(db, exp_id, cuenta.id)
+    if e.estado == "alta":
+        raise HTTPException(409, "La persona ya fue dada de alta; usa la baja del colaborador.")
+    if e.no_ingreso_en:
+        raise HTTPException(409, "Ya se registró que esta persona no ingresó.")
+    motivo = (datos.motivo or "").strip()
+    if not motivo:
+        raise HTTPException(400, "Indica el motivo por el que la persona no ingresó.")
+    ahora = datetime.now(timezone.utc)
+    tareas = onb.tareas_de(db, e)
+    abiertas = [t for t in tareas if t.estado == "pendiente"]
+    for t in abiertas:
+        t.estado, t.cancelada_por, t.cancelada_en = "cancelada", u.nombre, ahora
+        t.motivo_cancelacion = f"No ingresó: {motivo}"[:1000]
+    e.no_ingreso_en, e.no_ingreso_por, e.no_ingreso_motivo = ahora, u.nombre, motivo[:2000]
+    e.documentos_hasta = None  # sin recordatorios automáticos
+    onb.sincronizar_legado(db, e)
+    p = e.postulacion
+    _historial(p, "no_ingreso", f"No ingresó — registrado por {u.nombre}: {motivo}", u, motivo=motivo[:500])
+    if p is not None and p.activa:
+        p.cerrar("no_ingreso")
+    registrar(db, u.nombre, "onboarding_no_ingreso", "expediente", str(e.id),
+              {"motivo": motivo[:500], "tareas_canceladas": [t.nombre for t in abiertas], "postulacion": p.codigo if p else None, "correo_rh": u.correo})
+    db.commit()
+    nombre = e.candidato.nombre if e.candidato else "La persona"
+    avisos = await _avisar_responsables(
+        db, e, cuenta, abiertas, titulo=f"Onboarding cancelado: {nombre} no ingresó",
+        parrafo=f"{nombre} no ingresó como {e.puesto or 'colaborador'}. Motivo: {motivo}. Estas tareas a tu cargo quedaron canceladas:",
+        solo_pendientes=False,
+    )
+    db.commit()
+    return {**onb.resumen_tablero(e, tareas), "listaTareas": [tarea_onboarding_dict(t) for t in tareas], "avisosResponsables": avisos}

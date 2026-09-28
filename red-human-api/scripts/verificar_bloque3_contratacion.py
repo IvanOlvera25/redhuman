@@ -123,6 +123,13 @@ with TestClient(app) as client:
     check(r.status_code == 200 and r.content[:4] == b"%PDF" and len(r.content) > 2500, "contrato PDF generado con las condiciones finales")
 
     print("\n--- 5. Alta perfecta: Colaborador con las condiciones finales + snapshot inmutable ---")
+    # Onboarding v2 (2026-09-28): a Onboarding se entra con «Iniciar Onboarding» y el alta exige «Confirmar ingreso»
+    res = client.get(f"/onboarding/expedientes/{EXP}/resumen").json()
+    r = client.post(f"/onboarding/expedientes/{EXP}/iniciar", json={"documentos": res["configuracion"]["documentos"], "notificar_responsables": False})
+    check(r.status_code == 200 and r.json()["candidato"]["etapa"] == "Onboarding", f"«Iniciar Onboarding» ({r.status_code})")
+    r = client.post(f"/contratacion/expedientes/{EXP}/alta", json={})
+    check(r.status_code == 409 and "Confirmar ingreso" in r.json()["detail"], "sin «Confirmar ingreso» no hay alta (Onboarding v2)")
+    client.post(f"/onboarding/expedientes/{EXP}/confirmar-ingreso", json={"fecha_real": __import__("datetime").date.today().isoformat()})
     r = client.post(f"/contratacion/expedientes/{EXP}/alta", json={"notificar": {"candidato_whatsapp": False, "candidato_correo": False}})
     check(r.status_code == 200, f"alta autorizada ({r.status_code})")
     db.expire_all()

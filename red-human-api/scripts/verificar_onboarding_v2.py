@@ -9,6 +9,8 @@ Pendiente / Realizada / Cancelada (motivo obligatorio; tres fijas obligatorias q
 Fase 2: el porcentaje cuenta solo Aprobados; «Iniciar Onboarding» es el único paso a Onboarding (requisitos:
 condiciones + consentimiento), resumen precargado, «Cambiar selección», avisos a responsables, contrato firmado
 como documento interno, y Modo Prueba se salta las reglas nuevas.
+Fase 3: tablero (aprobados vs pendientes; «No aplica»/«Cancelada» aparte), botón legado, recálculo de plazos y
+atrasos, «Confirmar ingreso» → «Dar de alta» → «Cerrar Onboarding» (manual) y «No ingresó».
 """
 
 import os
@@ -371,6 +373,119 @@ with TestClient(app) as client:
     cfg_sis.modo_prueba = False
     db.commit()
 
+    # ======================= FASE 3: gestión activa, tablero y cierre =======================
+    from datetime import date  # noqa: E402
+
+    from app.models import Postulacion  # noqa: E402
+
+    HOY = date.today().isoformat()
+    print("\n--- 13. Tablero: aprobados vs pendientes, «No aplica» y «Cancelada» aparte ---")
+    fila = next(x for x in client.get("/contratacion/expedientes").json() if x["expedienteId"] == EXP2)
+    ob = fila["onboarding"]
+    check(ob["iniciado"] and ob["documentos"]["total"] == 4 and ob["documentos"]["aprobados"] == ["CURP"] and ob["documentos"]["pct"] == 25,
+          f"documentos: 1 aprobado de 4 aplicables = 25 % ({ob['documentos']})")
+    check(len(ob["documentos"]["noAplica"]) == 3 and all(x["motivo"] for x in ob["documentos"]["noAplica"]), "«No aplica» fuera del total y aparte con su motivo")
+    check(ob["tareas"]["realizadas"] == 2 and ob["tareas"]["total"] == 4 and ob["tareas"]["pct"] == 50, f"tareas: 2 de 4 realizadas = 50 % ({ob['tareas']})")
+    t_unidad = next(t for t in client.get(f"/onboarding/expedientes/{EXP2}/tareas").json() if t["nombre"] == "Unidad asignada")
+    client.patch(f"/onboarding/tareas/{t_unidad['id']}", json={"estado": "cancelada", "motivo": "Usará su vehículo propio"})
+    est = client.get(f"/onboarding/expedientes/{EXP2}/estado").json()
+    check(est["tareas"]["total"] == 3 and est["tareas"]["pct"] == 67 and est["tareas"]["canceladas"][0]["motivo"] == "Usará su vehículo propio",
+          "una tarea cancelada sale del total (67 %) y se muestra aparte con su motivo")
+
+    print("\n--- 14. Botón legado: «Generar tareas» sin mover la etapa ---")
+    r = client.post("/candidatos", json={"nombre": "Pedro Legado", "telefono": "5544445555", "correo": "pedro@correo.mx", "vacante": vac["id"], "consentimiento": True, "fuente": "RH"})
+    P4 = r.json()["id"]
+    EXP4 = client.patch(f"/candidatos/{P4}/etapa", json={"etapa": "Contratación", "manual": True}).json()["expedienteId"]
+    check(client.post(f"/onboarding/expedientes/{EXP4}/generar-tareas").status_code == 409, "en Contratación no: ahí se usa «Enviar a Onboarding»")
+    db.expire_all()
+    post4 = db.query(Postulacion).filter(Postulacion.id == db.get(Expediente, EXP4).postulacion_id).one()
+    post4.etapa = "Onboarding"  # simula a quien ya estaba en Onboarding antes de Onboarding v2
+    db.commit()
+    check(client.get(f"/onboarding/expedientes/{EXP4}/estado").json()["iniciado"] is False, "legado: en Onboarding y sin tareas")
+    r = client.post(f"/onboarding/expedientes/{EXP4}/generar-tareas")
+    check(r.status_code == 200 and [t["clave"] for t in r.json()["tareas"]] == ["contrato_firmado", "alta_imss_nomina", "confirmar_ingreso"],
+          f"«Generar tareas» crea las tres fijas desde la plantilla que aplica ({r.json().get('origen')})")
+    check(client.get(f"/candidatos/{P4}").json()["etapa"] == "Onboarding", "…sin mover la etapa")
+    check(client.post(f"/onboarding/expedientes/{EXP4}/generar-tareas").status_code == 409, "no se generan dos veces")
+
+    print("\n--- 15. Fechas: recálculo y atrasos ---")
+    t2 = {t["clave"]: t for t in client.get(f"/onboarding/expedientes/{EXP2}/tareas").json()}
+    check(t2["confirmar_ingreso"]["fechaLimite"].startswith("2026-11-02"), "plazo de «Confirmar ingreso» = fecha prevista")
+    check(client.patch(f"/onboarding/tareas/{t2['confirmar_ingreso']['id']}", json={"estado": "realizada"}).status_code == 409,
+          "«Confirmar ingreso» no se marca a mano (tiene su acción)")
+    client.patch(f"/candidatos/{P2}/condiciones-contratacion", json={
+        "puesto": "Chofer repartidor", "sueldo": "$14,000 mensuales", "tipo_contratacion": "Tiempo indeterminado", "fecha_ingreso": "2026-11-09",
+    })
+    t2 = {t["clave"]: t for t in client.get(f"/onboarding/expedientes/{EXP2}/tareas").json()}
+    check(t2["confirmar_ingreso"]["fechaLimite"].startswith("2026-11-09"), "cambiar la fecha prevista recalcula los plazos pendientes")
+    check(t2["contrato_firmado"]["estado"] == "realizada", "…las realizadas no se tocan")
+    r = client.post(f"/onboarding/expedientes/{EXP2}/tareas", json={"nombre": "Examen de manejo", "dias": -500})
+    check(r.json()["atrasada"] is True, "una tarea pendiente con fecha límite vencida es «Atrasada»")
+    check(client.get(f"/onboarding/expedientes/{EXP2}/estado").json()["tareas"]["atrasadas"] == 1, "el tablero cuenta las atrasadas")
+    T_EXAMEN = r.json()["id"]
+
+    print("\n--- 16. Confirmar ingreso → Dar de alta → Cerrar Onboarding ---")
+    for tipo in ("Identificación oficial", "Licencia federal", "Número de Seguridad Social"):
+        client.post(f"/contratacion/expedientes/{EXP2}/documentos/estado", json={"tipo": tipo, "estado": "recibido", "recibido_fisico": True})
+    check(client.get(f"/contratacion/expedientes/{EXP2}").json()["progreso"] == 100, "expediente al 100 % aprobado")
+    check(client.get(f"/onboarding/expedientes/{EXP2}/estado").json()["puedeAlta"] is False, "sin confirmar ingreso, «Dar de alta» deshabilitado")
+    r = client.post(f"/contratacion/expedientes/{EXP2}/alta", json={})
+    check(r.status_code == 409 and "Confirmar ingreso" in r.json()["detail"], "el backend lo refuerza aunque todo lo demás esté completo")
+    check(client.post(f"/onboarding/expedientes/{EXP2}/cerrar").status_code == 409, "no se cierra el Onboarding antes del alta")
+    check(client.post(f"/onboarding/expedientes/{EXP2}/confirmar-ingreso", json={"fecha_real": "2099-01-01"}).status_code == 400, "la fecha real no puede ser futura")
+    r = client.post(f"/onboarding/expedientes/{EXP2}/confirmar-ingreso", json={"fecha_real": HOY})
+    check(r.status_code == 200 and r.json()["ingreso"]["confirmado"] and r.json()["ingreso"]["real"].startswith(HOY) and r.json()["puedeAlta"],
+          "«Confirmar ingreso» registra la fecha real (quién y cuándo) y habilita el alta")
+    tt = {t["nombre"]: t for t in r.json()["listaTareas"]}
+    check(tt["Confirmar ingreso"]["estado"] == "realizada", "…y cierra la tarea fija")
+    check(client.patch(f"/onboarding/tareas/{tt['Confirmar ingreso']['id']}", json={"estado": "pendiente"}).status_code == 409,
+          "«Confirmar ingreso» no se reabre desde la lista de tareas")
+    esperado = (date.fromisoformat(HOY) - timedelta(days=500)).isoformat()
+    check(tt["Examen de manejo"]["fechaLimite"].startswith(esperado), "si la fecha real difiere, los plazos pendientes se recalculan contra ella")
+    db.expire_all()
+    historial = [h["evento"] for h in (db.query(Postulacion).filter(Postulacion.id == db.get(Expediente, EXP2).postulacion_id).one().historial or [])]
+    check("ingreso_confirmado" in historial, "queda en el historial del candidato")
+    r = client.post(f"/contratacion/expedientes/{EXP2}/alta", json={"notificar": {"candidato_whatsapp": False, "candidato_correo": False}})
+    check(r.status_code == 200, f"«Dar de alta» después de confirmar ingreso ({r.status_code})")
+    est = client.get(f"/onboarding/expedientes/{EXP2}/estado").json()
+    check(est["alta"] and not est["cerrado"] and est["puedeCerrar"] is False and any("Examen de manejo" in f for f in est["faltanCierre"]),
+          "tras el alta NO se cierra solo; falta la tarea pendiente")
+    r = client.post(f"/onboarding/expedientes/{EXP2}/cerrar")
+    check(r.status_code == 409 and "Examen de manejo" in r.json()["detail"], "«Cerrar Onboarding» bloqueado con tareas abiertas")
+    client.patch(f"/onboarding/tareas/{T_EXAMEN}", json={"estado": "realizada"})
+    est = client.get(f"/onboarding/expedientes/{EXP2}/estado").json()
+    check(est["puedeCerrar"] and not est["cerrado"], "todo Realizado/Cancelado y documentos Aprobados/No aplica → se habilita, pero sigue abierto (nunca automático)")
+    r = client.post(f"/onboarding/expedientes/{EXP2}/cerrar")
+    check(r.status_code == 200 and r.json()["cerrado"] and r.json()["cerradoPor"] == admin_nombre, "«Cerrar Onboarding» manual con quién")
+    check(all(x["expedienteId"] != EXP2 for x in client.get("/contratacion/expedientes").json()), "el cerrado sale del tablero")
+    check(any(x["expedienteId"] == EXP2 for x in client.get("/contratacion/expedientes", params={"cerrados": True}).json()), "…y se consulta con «cerrados»")
+    check(client.post(f"/onboarding/expedientes/{EXP2}/no-ingreso", json={"motivo": "x"}).status_code == 409, "«No ingresó» no aplica después del alta")
+
+    print("\n--- 17. «No ingresó» ---")
+    r = client.post("/candidatos", json={"nombre": "Nora Ausente", "telefono": "5566667777", "correo": "nora@correo.mx", "vacante": vac["id"], "consentimiento": True, "fuente": "RH"})
+    P5 = r.json()["id"]
+    EXP5 = client.patch(f"/candidatos/{P5}/etapa", json={"etapa": "Contratación", "manual": True}).json()["expedienteId"]
+    client.patch(f"/candidatos/{P5}/condiciones-contratacion", json={"puesto": "Almacenista", "sueldo": "$11,000", "tipo_contratacion": "Tiempo indeterminado", "fecha_ingreso": "2026-11-16"})
+    res5 = client.get(f"/onboarding/expedientes/{EXP5}/resumen").json()
+    client.post(f"/onboarding/expedientes/{EXP5}/iniciar", json={
+        "documentos": res5["configuracion"]["documentos"], "responsables": {"alta_imss_nomina": admin_nombre}, "notificar_responsables": False,
+    })
+    client.patch(f"/contratacion/expedientes/{EXP5}/preparacion", json={"documentos_hasta": "2099-12-31"})
+    check(client.post(f"/onboarding/expedientes/{EXP5}/no-ingreso", json={}).status_code == 400, "«No ingresó» exige motivo")
+    r = client.post(f"/onboarding/expedientes/{EXP5}/no-ingreso", json={"motivo": "Aceptó otra oferta"})
+    check(r.status_code == 200 and r.json()["noIngreso"]["motivo"] == "Aceptó otra oferta", "«No ingresó» registrado con motivo")
+    check(all(t["estado"] == "cancelada" and t["motivoCancelacion"].startswith("No ingresó") for t in r.json()["listaTareas"]),
+          "cancela TODAS las tareas abiertas (también las fijas) con el motivo")
+    check(any(a["destino"] == admin.correo for a in r.json()["avisosResponsables"]), "avisa a los responsables")
+    db.expire_all()
+    e5 = db.get(Expediente, EXP5)
+    p5 = db.query(Postulacion).filter(Postulacion.id == e5.postulacion_id).one()
+    check(e5.documentos_hasta is None and not p5.activa and p5.motivo_cierre == "no_ingreso", "detiene los recordatorios automáticos y cierra la postulación")
+    check(any(h["evento"] == "no_ingreso" and "Aceptó otra oferta" in h["texto"] for h in p5.historial or []), "queda en el historial del candidato")
+    check(client.post(f"/contratacion/expedientes/{EXP5}/recordatorio", json={}).status_code == 409, "ya no se le mandan recordatorios manuales")
+    check(client.post(f"/contratacion/expedientes/{EXP5}/alta", json={}).status_code == 409, "…ni se le puede dar de alta")
+    check(all(x["expedienteId"] != EXP5 for x in client.get("/contratacion/expedientes").json()), "sale del tablero de Onboarding")
+
     db.close()
 
-print(f"\n🎉 Onboarding v2 — Fases 1 y 2: {OK} verificaciones OK")
+print(f"\n🎉 Onboarding v2 — Fases 1, 2 y 3: {OK} verificaciones OK")

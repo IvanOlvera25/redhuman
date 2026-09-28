@@ -87,7 +87,10 @@ export function PanelTareasOnboarding({ expedienteId, live, onCambio }: { expedi
                   )}
                 </>
               )}
-              {live && !esContrato && t.estado === "pendiente" && (
+              {live && !esContrato && t.estado === "pendiente" && t.cierreConAccion && (
+                <span className="text-[11px] text-ink-3" title={t.cierreConAccion}>Se confirma en el tablero de Onboarding</span>
+              )}
+              {live && !esContrato && t.estado === "pendiente" && !t.cierreConAccion && (
                 <Button size="sm" variant="outline" onClick={() => void cambiar(t, "realizada")} disabled={ocupado === t.id}>
                   {ocupado === t.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Realizada
                 </Button>
@@ -98,7 +101,7 @@ export function PanelTareasOnboarding({ expedienteId, live, onCambio }: { expedi
                     ...(esContrato && t.estado === "realizada"
                       ? [{ etiqueta: "Reemplazar contrato firmado", icono: <FileSignature className="h-4 w-4" />, onClick: () => archivo.current?.click() }]
                       : []),
-                    ...(t.estado !== "pendiente" && !esContrato
+                    ...(t.estado !== "pendiente" && !t.cierreConAccion
                       ? [{ etiqueta: "Reabrir", icono: <RotateCcw className="h-4 w-4" />, onClick: () => void cambiar(t, "pendiente") }]
                       : []),
                     ...(!t.fija && t.estado === "pendiente"

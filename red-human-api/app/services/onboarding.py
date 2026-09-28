@@ -31,7 +31,15 @@ from ..models import (
 CLAVES_FIJAS = {c for c, _ in TAREAS_FIJAS_ONBOARDING}
 EXTENSIONES_CONTRATO = (".pdf",)
 # Tareas que solo se cierran con su acción propia (no con «marcar realizada» genérico).
-CIERRE_CON_ACCION = {"contrato_firmado": "Se marca como realizada al cargar el contrato firmado (PDF final)."}
+CIERRE_CON_ACCION = {
+    "contrato_firmado": "Se marca como realizada al cargar el contrato firmado (PDF final).",
+    "confirmar_ingreso": "Se marca con «Confirmar ingreso» (registra la fecha real de llegada).",
+}
+
+
+def fecha_base(e: Expediente) -> Optional[datetime]:
+    """Fecha contra la que corren los plazos: la REAL si ya se confirmó el ingreso; si no, la prevista."""
+    return e.fecha_ingreso_real or e.fecha_ingreso
 
 
 def norm(s: str) -> str:
@@ -174,14 +182,14 @@ def generar_tareas(db: Session, e: Expediente, cuenta_id: int, config: dict, por
         dias = _entero(plazos.get(clave), PLAZOS_ONBOARDING_DEFAULT.get(clave))
         db.add(TareaOnboarding(
             cuenta_id=cuenta_id, expediente_id=e.id, clave=clave, nombre=nombre, tipo="fija", fija=True, obligatoria=True,
-            responsable=responsables.get(clave, ""), dias_relativos=dias, fecha_limite=fecha_limite(e.fecha_ingreso, dias), creada_por=por,
+            responsable=responsables.get(clave, ""), dias_relativos=dias, fecha_limite=fecha_limite(fecha_base(e), dias), creada_por=por,
         ))
     for r in normalizar_recursos(config.get("recursos") or []):
         if norm(r["nombre"]) in recursos:
             continue
         db.add(TareaOnboarding(
             cuenta_id=cuenta_id, expediente_id=e.id, clave="recurso", nombre=r["nombre"], tipo=r["tipo"], fija=False, obligatoria=True,
-            responsable=r["responsable"], dias_relativos=r["dias"], fecha_limite=fecha_limite(e.fecha_ingreso, r["dias"]), creada_por=por,
+            responsable=r["responsable"], dias_relativos=r["dias"], fecha_limite=fecha_limite(fecha_base(e), r["dias"]), creada_por=por,
         ))
     db.flush()
     return tareas_de(db, e)
@@ -209,7 +217,7 @@ def recalcular_fechas(db: Session, e: Expediente) -> int:
     for t in tareas_de(db, e):
         if t.estado != "pendiente" or t.dias_relativos is None:
             continue
-        nueva = fecha_limite(e.fecha_ingreso, t.dias_relativos)
+        nueva = fecha_limite(fecha_base(e), t.dias_relativos)
         if nueva != t.fecha_limite:
             t.fecha_limite = nueva
             n += 1
@@ -243,6 +251,8 @@ def cambiar_estado_tarea(t: TareaOnboarding, estado: str, motivo: str, por: str)
         t.estado, t.cancelada_por, t.cancelada_en, t.motivo_cancelacion = "cancelada", por, ahora, motivo[:1000]
         t.realizada_por, t.realizada_en = "", None
     elif estado == "pendiente":  # reabrir
+        if t.clave in CIERRE_CON_ACCION and t.estado == "realizada":
+            return f"«{t.nombre}» se cerró con su acción propia y no se reabre desde la lista de tareas."
         t.estado = "pendiente"
         t.realizada_por, t.realizada_en, t.cancelada_por, t.cancelada_en, t.motivo_cancelacion = "", None, "", None, ""
     else:
@@ -323,3 +333,73 @@ def tareas_por_responsable(tareas: List[TareaOnboarding]) -> dict:
         if t.estado == "pendiente" and (t.responsable or "").strip():
             grupos.setdefault(t.responsable.strip(), []).append(t)
     return grupos
+
+
+# ---------- Fase 3: tablero, alta, cierre ----------
+
+def _iso(dt: Optional[datetime]) -> Optional[str]:
+    return dt.isoformat() if dt else None
+
+
+def documentos_aplicables(e: Expediente) -> List[Documento]:
+    """Los documentos que cuentan para el avance y el cierre: todos menos los internos y los «No aplica»."""
+    return [d for d in e.documentos if not d.interno and d.estado != "no_aplica"]
+
+
+def pendientes_cierre(e: Expediente, tareas: List[TareaOnboarding]) -> List[str]:
+    """Qué impide «Cerrar Onboarding»: tareas abiertas y documentos que no están Aprobados ni «No aplica»."""
+    from ..models import estado_documento_onboarding
+
+    faltan = [f"Tarea «{t.nombre}» pendiente" for t in tareas if t.estado == "pendiente"]
+    faltan += [f"Documento «{d.tipo}» {estado_documento_onboarding(d).lower()}" for d in documentos_aplicables(e) if not d.aprobado]
+    if not tareas:
+        faltan.insert(0, "El Onboarding no tiene tareas generadas")
+    return faltan
+
+
+def resumen_tablero(e: Expediente, tareas: List[TareaOnboarding]) -> dict:
+    """Lo que pinta el tablero de Onboarding. «No aplica» y «Cancelada» se excluyen del total y se muestran
+    aparte con su motivo, así el 100 % nunca es falso."""
+    from ..models import estado_documento_onboarding
+
+    aplicables = documentos_aplicables(e)
+    aprobados = [d for d in aplicables if d.aprobado]
+    vivas = [t for t in tareas if t.estado != "cancelada"]
+    realizadas = [t for t in vivas if t.estado == "realizada"]
+    cerrado = bool(e.onboarding_cerrado_en)
+    faltan = pendientes_cierre(e, tareas)
+    confirmado = bool(e.ingreso_confirmado_en)
+    return {
+        "iniciado": bool(tareas),
+        "documentos": {
+            "aprobados": [d.tipo for d in aprobados],
+            "faltantes": [{"tipo": d.tipo, "estado": estado_documento_onboarding(d), "obligatorio": d.obligatorio} for d in aplicables if not d.aprobado],
+            "noAplica": [{"tipo": d.tipo, "motivo": d.motivo_no_aplica or "", "por": d.no_aplica_por or ""} for d in e.documentos if d.estado == "no_aplica" and not d.interno],
+            "total": len(aplicables),
+            "pct": round(len(aprobados) / len(aplicables) * 100) if aplicables else 0,
+        },
+        "tareas": {
+            "realizadas": len(realizadas),
+            "pendientes": len(vivas) - len(realizadas),
+            "atrasadas": sum(1 for t in vivas if atrasada(t)),
+            "total": len(vivas),
+            "pct": round(len(realizadas) / len(vivas) * 100) if vivas else 0,
+            "canceladas": [{"nombre": t.nombre, "motivo": t.motivo_cancelacion or "", "por": t.cancelada_por or ""} for t in tareas if t.estado == "cancelada"],
+        },
+        "ingreso": {
+            "prevista": _iso(e.fecha_ingreso),
+            "real": _iso(e.fecha_ingreso_real),
+            "confirmado": confirmado,
+            "confirmadoPor": e.ingreso_confirmado_por or "",
+            "confirmadoEn": _iso(e.ingreso_confirmado_en),
+        },
+        "alta": e.estado == "alta",
+        "puedeAlta": e.estado != "alta" and confirmado and not e.no_ingreso_en,
+        "cerrado": cerrado,
+        "cerradoPor": e.onboarding_cerrado_por or "",
+        "cerradoEn": _iso(e.onboarding_cerrado_en),
+        "puedeCerrar": not cerrado and e.estado == "alta" and not faltan,
+        "faltanCierre": faltan,
+        "noIngreso": {"en": _iso(e.no_ingreso_en), "por": e.no_ingreso_por or "", "motivo": e.no_ingreso_motivo or ""} if e.no_ingreso_en else None,
+        "puedeNoIngreso": e.estado != "alta" and not e.no_ingreso_en,
+    }

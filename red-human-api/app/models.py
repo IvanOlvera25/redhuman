@@ -768,6 +768,17 @@ class Expediente(Base):
     # Onboarding v2 (2026-09-28): plantilla que se aplicó (Configuración → Plantillas de Onboarding).
     # Null = aún no se generó el Onboarding o se usó la configuración predeterminada.
     plantilla_onboarding_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Onboarding v2 (Fase 3): fecha REAL de llegada («Confirmar ingreso»). Con ella el alta se habilita y los
+    # plazos pendientes se recalculan contra la fecha real (si no, contra la prevista `fecha_ingreso`).
+    fecha_ingreso_real: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ingreso_confirmado_por: Mapped[str] = mapped_column(String(150), default="")
+    ingreso_confirmado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # «Cerrar Onboarding» (manual, nunca automático) y «No ingresó» (solo antes del alta).
+    onboarding_cerrado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    onboarding_cerrado_por: Mapped[str] = mapped_column(String(150), default="")
+    no_ingreso_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    no_ingreso_por: Mapped[str] = mapped_column(String(150), default="")
+    no_ingreso_motivo: Mapped[str] = mapped_column(Text, default="")
 
     candidato: Mapped[Optional[Candidato]] = relationship(foreign_keys=[candidato_id])
     postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="expediente")

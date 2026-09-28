@@ -15,7 +15,7 @@ import type {
   TipoEntrevistador,
   Vacante,
 } from "@/lib/data";
-import type { NuevoIngreso } from "@/lib/phase2";
+import type { NuevoIngreso, ResumenTableroOnboarding } from "@/lib/phase2";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -1817,8 +1817,8 @@ export function responderEvaluacion(token: string, indice: number, respuesta: nu
    Módulo 2 · Contratación e integración
    ============================================================ */
 
-export function fetchExpedientes() {
-  return get<NuevoIngreso[]>("/contratacion/expedientes");
+export function fetchExpedientes(cerrados = false) {
+  return get<NuevoIngreso[]>(`/contratacion/expedientes${cerrados ? "?cerrados=true" : ""}`);
 }
 
 export function fetchExpediente(id: number) {
@@ -1857,13 +1857,14 @@ export function urlDocumento(expedienteId: number, tipo: string) {
 
 export function marcarDocumento(
   expedienteId: number,
-  datos: { tipo: string; estado: string; notas?: string; recibidoFisico?: boolean },
+  datos: { tipo: string; estado: string; notas?: string; recibidoFisico?: boolean; motivo?: string },
 ) {
   return post<NuevoIngreso>(`/contratacion/expedientes/${expedienteId}/documentos/estado`, {
     tipo: datos.tipo,
     estado: datos.estado,
     notas: datos.notas ?? "",
     recibido_fisico: datos.recibidoFisico ?? false,
+    motivo: datos.motivo ?? "", // «No aplica» (solo RH) exige motivo
   });
 }
 
@@ -3108,6 +3109,26 @@ export function subirContratoFirmado(expedienteId: number, archivo: File) {
 }
 export function urlContratoFirmado(expedienteId: number) {
   return urlArchivo(`/onboarding/expedientes/${expedienteId}/contrato-firmado`);
+}
+
+/* Fase 3 (2026-09-28): gestión activa, alta y cierre del Onboarding. */
+export type EstadoOnboardingDetalle = ResumenTableroOnboarding & { listaTareas: TareaOnboarding[] };
+export function fetchEstadoOnboarding(expedienteId: number) {
+  return get<EstadoOnboardingDetalle>(`/onboarding/expedientes/${expedienteId}/estado`);
+}
+export function generarTareasOnboarding(expedienteId: number) {
+  return post<{ tareas: TareaOnboarding[]; documentosAgregados: string[]; avisosResponsables: AvisoOnboarding[]; plantilla: string; origen: string }>(
+    `/onboarding/expedientes/${expedienteId}/generar-tareas`, {},
+  );
+}
+export function confirmarIngresoOnboarding(expedienteId: number, fechaReal: string) {
+  return post<EstadoOnboardingDetalle & { plazosRecalculados: number }>(`/onboarding/expedientes/${expedienteId}/confirmar-ingreso`, { fecha_real: fechaReal });
+}
+export function cerrarOnboarding(expedienteId: number) {
+  return post<ResumenTableroOnboarding>(`/onboarding/expedientes/${expedienteId}/cerrar`, {});
+}
+export function registrarNoIngreso(expedienteId: number, motivo: string) {
+  return post<EstadoOnboardingDetalle & { avisosResponsables: AvisoOnboarding[] }>(`/onboarding/expedientes/${expedienteId}/no-ingreso`, { motivo });
 }
 
 /* -------------------- Conocimiento: generación y permisos -------------------- */

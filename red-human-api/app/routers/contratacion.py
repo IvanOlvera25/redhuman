@@ -68,6 +68,7 @@ def _sincronizar_estado(e: Expediente) -> None:
 @router.get("/expedientes")
 def listar(
     estado: Optional[str] = None,
+    cerrados: bool = False,
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
     cuenta: Cuenta = Depends(cuenta_actual),
@@ -88,7 +89,29 @@ def listar(
     )
     if estado:
         q = q.filter(Expediente.estado == estado)
-    return [expediente_dict(e) for e in q.all()]
+    # Onboarding v2 (Fase 3): los Onboardings CERRADOS salen del tablero (salvo `cerrados=true`)
+    if not cerrados:
+        q = q.filter(Expediente.onboarding_cerrado_en.is_(None))
+    expedientes = q.all()
+    return [{**expediente_dict(e), "onboarding": r} for e, r in zip(expedientes, _resumenes_onboarding(db, expedientes))]
+
+
+def _resumenes_onboarding(db: Session, expedientes: List[Expediente]) -> List[Optional[dict]]:
+    """Resumen de tareas/documentos por expediente con UNA consulta de tareas (sin N+1). Si las tablas de los
+    módulos no están disponibles, el tablero sigue funcionando sin él."""
+    from ..models import TareaOnboarding
+    from ..services import onboarding as onb
+
+    try:
+        ids = [e.id for e in expedientes]
+        por_exp: dict = {}
+        if ids:
+            for t in db.query(TareaOnboarding).filter(TareaOnboarding.expediente_id.in_(ids)).all():
+                por_exp.setdefault(t.expediente_id, []).append(t)
+        return [onb.resumen_tablero(e, sorted(por_exp.get(e.id, []), key=lambda t: t.id)) for e in expedientes]
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        return [None for _ in expedientes]
 
 
 @router.get("/metricas")
@@ -533,6 +556,8 @@ async def recordatorio(
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
 ):
     e = _expediente(db, exp_id, cuenta.id)
+    if e.no_ingreso_en:
+        raise HTTPException(409, "Esta persona quedó como «No ingresó»: ya no se le envían recordatorios.")
     pendientes = e.pendientes
     if not pendientes:
         return {"enviado": False, "detalle": "Sin documentos pendientes 🎉", "expediente": expediente_dict(e)}
@@ -590,7 +615,7 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
         tipo_contratacion=e.tipo_contratacion or "",
         cv_ruta=cv.ruta if cv else "",
         cv_nombre=cv.nombre if cv else "",
-        fecha_ingreso=e.fecha_ingreso,
+        fecha_ingreso=e.fecha_ingreso_real or e.fecha_ingreso,  # Onboarding v2: la fecha REAL confirmada manda
         dado_de_alta_por=u.nombre,
         candidato_origen_id=c.id,
         expediente_id=e.id,
@@ -637,6 +662,8 @@ async def alta(
     # validación de integridad del expediente (documentos adjuntos, 100 %, confirmación de RH) — el flag
     # forzar_prueba ya no es necesario. Con Modo Prueba apagado todo sigue exigiéndose.
     prueba = modo_prueba_activo(db)
+    if e.no_ingreso_en:
+        raise HTTPException(409, "Esta persona quedó como «No ingresó»; no se puede dar de alta.")
     if not prueba and not any(d.archivo for d in e.documentos):
         raise HTTPException(400, "No se puede dar de alta al colaborador: El expediente no tiene documentos adjuntos.")
     # 2026-09-19 (Bloque 3, alta perfecta): el alta toma ESTRICTAMENTE las condiciones finales guardadas —
@@ -655,6 +682,10 @@ async def alta(
             "Antes del alta, una persona de RH debe confirmar los documentos subidos (validados por la IA o en revisión): "
             + ", ".join(sin_revisar),
         )
+    # Onboarding v2 (Fase 3), después de las validaciones de integridad: «Dar de alta» se habilita SOLO
+    # después de «Confirmar ingreso» (fecha real), sin importar la fecha prevista. Modo Prueba se la salta.
+    if not e.ingreso_confirmado_en and not prueba:
+        raise HTTPException(409, "Primero confirma el ingreso (fecha real de llegada) con «Confirmar ingreso».")
 
     if datos.fecha_ingreso:
         try:

@@ -103,7 +103,9 @@ with TestClient(app) as client:
     db.commit()
     r = client.post("/candidatos", json={"nombre": "Estricto Persona", "telefono": "5513131313", "vacante": vac["id"], "consentimiento": True, "fuente": "RH"})
     P2 = r.json()["id"]
-    r = client.patch(f"/candidatos/{P2}/etapa", json={"etapa": "Onboarding", "manual": True})
+    # Onboarding v2 (2026-09-28): sin Modo Prueba a Onboarding solo se entra con «Iniciar Onboarding»; el
+    # expediente nace en Contratación y ahí se prueba que el alta lo sigue exigiendo.
+    r = client.patch(f"/candidatos/{P2}/etapa", json={"etapa": "Contratación", "manual": True})
     EXP2 = r.json()["expedienteId"]
     r = client.post(f"/contratacion/expedientes/{EXP2}/alta", json={"puesto": "Cajero"})
     check(r.status_code in (400, 409), "sin Modo Prueba: el alta sigue exigiendo el expediente")

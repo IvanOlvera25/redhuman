@@ -47,7 +47,34 @@ export interface DocExpediente {
   aprobado?: boolean;
 }
 
+/** Onboarding v2 (Fase 3): resumen del tablero. «No aplica» y «Cancelada» NO cuentan en el total (se muestran aparte). */
+export interface ResumenTableroOnboarding {
+  iniciado: boolean;
+  documentos: {
+    aprobados: string[];
+    faltantes: { tipo: string; estado: EstadoDocOnboarding; obligatorio: boolean }[];
+    noAplica: { tipo: string; motivo: string; por: string }[];
+    total: number;
+    pct: number;
+  };
+  tareas: { realizadas: number; pendientes: number; atrasadas: number; total: number; pct: number; canceladas: { nombre: string; motivo: string; por: string }[] };
+  ingreso: { prevista: string | null; real: string | null; confirmado: boolean; confirmadoPor: string; confirmadoEn: string | null };
+  alta: boolean;
+  puedeAlta: boolean;
+  cerrado: boolean;
+  cerradoPor: string;
+  cerradoEn: string | null;
+  puedeCerrar: boolean;
+  faltanCierre: string[];
+  noIngreso: { en: string | null; por: string; motivo: string } | null;
+  puedeNoIngreso: boolean;
+}
+
 export interface NuevoIngreso {
+  /** Onboarding v2 (Fase 3): null si las tablas de módulos no están disponibles. */
+  onboarding?: ResumenTableroOnboarding | null;
+  /** Onboarding v2: obligatorios que aún no están Aprobados (lo que falta para el 100 %). */
+  noAprobados?: string[];
   id: string;
   nombre: string;
   puesto: string;

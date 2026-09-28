@@ -46,6 +46,9 @@ import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import type { NotificarAccion } from "@/lib/api";
 import { cn, etiquetaRecordatorio } from "@/lib/utils";
 import { usePolling } from "@/lib/use-polling";
+import { MenuAcciones } from "@/components/dashboard/menu-acciones";
+import { BotonCerrarOnboarding, GestionOnboarding, MiniAvanceOnboarding, ModalNoIngreso } from "@/components/dashboard/onboarding/gestion-onboarding";
+import { UserX } from "lucide-react";
 
 const docConfig: Record<
   EstadoDoc,
@@ -75,18 +78,19 @@ export default function Onboarding() {
   const [cargando, setCargando] = useState(true);
   const [live, setLive] = useState(false);
   const [aviso, setAviso] = useState<AvisoEstado>(null);
+  const [verCerrados, setVerCerrados] = useState(false);
 
   const sel: NuevoIngreso | undefined = datos.find((d) => d.id === selId) ?? datos[0];
 
   const recargar = useCallback(async () => {
-    const e = await fetchExpedientes();
+    const e = await fetchExpedientes(verCerrados);
     if (e) {
       setDatos(e);
       setLive(true);
       setSelId((actual) => (e.some((x) => x.id === actual) ? actual : e[0]?.id ?? ""));
     }
     setCargando(false);
-  }, []);
+  }, [verCerrados]);
 
   useEffect(() => {
     recargar();
@@ -99,7 +103,9 @@ export default function Onboarding() {
     setDatos((prev) => prev.map((d) => (d.id === actualizado.id ? actualizado : d)));
   }, []);
 
-  const pendientes = datos.reduce((acc, n) => acc + n.documentos.filter((d) => d.estado !== "recibido").length, 0);
+  // Onboarding v2 (Fase 3): pendientes = documentos aplicables que aún no están Aprobados («No aplica» no cuenta)
+  const pendientes = datos.reduce((acc, n) => acc + (n.onboarding ? n.onboarding.documentos.faltantes.length : n.documentos.filter((d) => d.estado !== "recibido" && d.estado !== "no_aplica").length), 0);
+  const atrasadas = datos.reduce((acc, n) => acc + (n.onboarding?.tareas.atrasadas ?? 0), 0);
   const listos = datos.filter((n) => n.listoParaAlta).length;
 
   return (
@@ -121,6 +127,14 @@ export default function Onboarding() {
         <Badge tone="warn" dot>
           {pendientes} documentos pendientes
         </Badge>
+        {atrasadas > 0 && (
+          <Badge tone="bad" dot>
+            {atrasadas} tarea{atrasadas === 1 ? "" : "s"} atrasada{atrasadas === 1 ? "" : "s"}
+          </Badge>
+        )}
+        <label className="flex items-center gap-1.5 text-xs text-ink-2">
+          <input type="checkbox" checked={verCerrados} onChange={(e) => setVerCerrados(e.target.checked)} /> Mostrar cerrados
+        </label>
       </PageHeader>
 
       {cargando && (
@@ -161,15 +175,19 @@ export default function Onboarding() {
                   </div>
                   <ChevronRight className={cn("h-4 w-4", active ? "text-brand" : "text-ink-3")} />
                 </div>
-                <div className="mt-3 flex items-center gap-2">
-                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-2">
-                    <div
-                      className={cn("h-full rounded-full transition-all", n.progreso === 100 ? "bg-good" : "bg-brand")}
-                      style={{ width: `${n.progreso}%` }}
-                    />
+                {n.onboarding ? (
+                  <MiniAvanceOnboarding o={n.onboarding} />
+                ) : (
+                  <div className="mt-3 flex items-center gap-2">
+                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-2">
+                      <div
+                        className={cn("h-full rounded-full transition-all", n.progreso === 100 ? "bg-good" : "bg-brand")}
+                        style={{ width: `${n.progreso}%` }}
+                      />
+                    </div>
+                    <span className="font-mono text-[11px] font-semibold tabular">{n.progreso}%</span>
                   </div>
-                  <span className="font-mono text-[11px] font-semibold tabular">{n.progreso}%</span>
-                </div>
+                )}
                 {n.estado === "alta" && (
                   <p className="mt-2 font-mono text-[10px] text-good">✓ alta autorizada</p>
                 )}
@@ -225,6 +243,8 @@ function Expediente({
   };
 
   const soloLectura = !live || !puedeDecidir || n.estado === "alta";
+  const ob = n.onboarding;
+  const [noIngreso, setNoIngreso] = useState(false);
 
   // Punto 12: confirmación ligera con la línea "Notificar: … · Editar" antes de cada acción.
   const [confirmacion, setConfirmacion] = useState<null | "solicitar" | "recordatorio" | "alta">(null);
@@ -308,13 +328,18 @@ function Expediente({
     n.estado === "alta"
       ? "Este expediente ya fue dado de alta."
       : n.progreso < 100
-        ? `Faltan documentos: ${(n.pendientes ?? []).join(", ") || "por definir"}.`
+        ? `Faltan documentos por aprobar: ${(n.noAprobados ?? n.pendientes ?? []).join(", ") || "por definir"}.`
         : (n.sinConfirmar?.length ?? 0) > 0
           ? `Confirma como RH los documentos validados por la IA: ${n.sinConfirmar!.join(", ")}.`
-          : "";
+          : ob && !ob.ingreso.confirmado
+            ? "«Dar de alta» se habilita después de «Confirmar ingreso» (fecha real de llegada)."
+            : "";
+  // Onboarding v2 (Fase 3): el alta exige además el ingreso confirmado (Modo Prueba se lo salta)
+  const altaHabilitada = n.estado !== "alta" && (modoPrueba || (n.listoParaAlta && (!ob || ob.puedeAlta)));
 
-  // 2026-09-15 (Fase 1): un digital subido (en revisión) ya cuenta como entregado, igual que el %.
-  const recibidos = n.documentos.filter((d) => d.estado === "recibido" || (d.estado === "revision" && d.tieneArchivo)).length;
+  // Onboarding v2: solo cuentan los Aprobados sobre los aplicables (sin internos ni «No aplica»)
+  const aplicables = n.documentos.filter((d) => !d.interno && d.estado !== "no_aplica");
+  const recibidos = aplicables.filter((d) => d.aprobado ?? d.estado === "recibido").length;
   const evaluacion = n.evaluacion;
   const brechas = evaluacion?.brechas ?? [];
   const resultado = brechas.length > 0 ? "Apto con observaciones" : "Apto";
@@ -351,9 +376,21 @@ function Expediente({
             </div>
           </div>
         </div>
-        {n.estado === "alta" ? (
+        {ob?.cerrado ? (
+          <Badge tone="neutral" dot>
+            Onboarding cerrado
+          </Badge>
+        ) : n.estado === "alta" ? (
           <Badge tone="good" dot>
             Alta autorizada
+          </Badge>
+        ) : ob && !ob.iniciado ? (
+          <Badge tone="warn" dot>
+            Sin tareas
+          </Badge>
+        ) : n.listoParaAlta && ob && !ob.ingreso.confirmado ? (
+          <Badge tone="warn" dot>
+            Falta confirmar ingreso
           </Badge>
         ) : n.listoParaAlta ? (
           <Badge tone="good" dot>
@@ -390,6 +427,9 @@ function Expediente({
           )}
         </div>
       )}
+
+      {/* ============ Onboarding v2 (Fase 3) — avance separado, tareas, ingreso ============ */}
+      <GestionOnboarding n={n} live={live && puedeDecidir} setAviso={setAviso} onRecargar={onRecargar} />
 
       {/* ============ BLOQUE 2 — Resumen de evaluación ============ */}
       <div className="border-b border-border-faint p-5">
@@ -473,11 +513,11 @@ function Expediente({
           )}
         </div>
         <p className="mt-1.5 text-sm font-semibold text-ink">
-          Expediente {n.progreso}% — {recibidos} de {n.documentos.length} documentos recibidos
+          Expediente {n.progreso}% — {recibidos} de {aplicables.length} documentos aprobados
         </p>
 
         <div className="mt-3 space-y-2">
-          {n.documentos.map((d) => (
+          {n.documentos.filter((d) => !d.interno).map((d) => (
             <Documento
               key={d.nombre}
               d={d}
@@ -542,7 +582,8 @@ function Expediente({
         )}
       </div>
 
-      {/* ============ BLOQUE 4 — Preparación de ingreso ============ */}
+      {/* ============ BLOQUE 4 — Preparación de ingreso (solo sin tareas: con tareas, ellas mandan) ============ */}
+      {!ob?.iniciado && (
       <div className="border-b border-border-faint p-5">
         <Eyebrow>Preparación de ingreso</Eyebrow>
         <div className="mt-3 grid gap-3 sm:grid-cols-3">
@@ -572,6 +613,7 @@ function Expediente({
           <CalendarClock className="h-3.5 w-3.5" /> Fecha prevista de ingreso: {n.ingreso}
         </p>
       </div>
+      )}
 
       {/* ============ BLOQUE 5 — Acción final ============ */}
       <div className="border-b border-border-faint p-5">
@@ -599,13 +641,23 @@ function Expediente({
         <Button
           size="lg"
           className="w-full"
-          disabled={Boolean(ocupado) || n.estado === "alta" || (!n.listoParaAlta && !modoPrueba)}
+          disabled={Boolean(ocupado) || !altaHabilitada}
           onClick={() => setConfirmacion("alta")}
-          title={!n.listoParaAlta && !modoPrueba ? "Completa y valida el expediente al 100% (o activa Modo Prueba) para dar de alta." : undefined}
+          title={!altaHabilitada && n.estado !== "alta" ? bloqueoAlta || "Completa el expediente al 100 % y confirma el ingreso (o activa Modo Prueba)." : undefined}
         >
           <FileCheck2 className="h-5 w-5" />
           {n.estado === "alta" ? "Alta completada ✓" : ocupado === "alta" ? "Dando de alta…" : !n.listoParaAlta && modoPrueba ? `DAR DE ALTA (Modo Prueba · ${n.progreso}%)` : "DAR DE ALTA COMO COLABORADOR"}
         </Button>
+
+        <BotonCerrarOnboarding n={n} modoPrueba={modoPrueba} setAviso={setAviso} onRecargar={onRecargar} />
+        {live && puedeDecidir && ob?.puedeNoIngreso && (
+          <div className="mt-2 flex justify-end">
+            <MenuAcciones
+              acciones={[{ etiqueta: "No ingresó…", icono: <UserX className="h-4 w-4" />, peligrosa: true, onClick: () => setNoIngreso(true), disabled: Boolean(ocupado) }]}
+            />
+          </div>
+        )}
+        {noIngreso && <ModalNoIngreso n={n} onClose={() => setNoIngreso(false)} setAviso={setAviso} onRecargar={onRecargar} />}
 
         {confirmacion === "solicitar" && (
           <ConfirmacionAccion
@@ -832,10 +884,14 @@ function Documento({
   const [cargando, setCargando] = useState(false);
   const c = docConfig[d.estado];
 
-  // Vista simplificada que pide el bloque 3: Recibido / Pendiente / No aplica.
-  const noAplica = d.obligatorio === false || d.estado === "no_aplica";
-  const badgeLabel = noAplica ? "No aplica" : d.estado === "recibido" ? "Recibido" : "Pendiente";
-  const badgeTone: "good" | "warn" | "neutral" = noAplica ? "neutral" : d.estado === "recibido" ? "good" : "warn";
+  // Onboarding v2 (Fase 3): Pendiente / Por revisar / Aprobado / Rechazado / No aplica. Un documento OPCIONAL ya
+  // no se muestra como «No aplica» (ese era el 100 % falso): «No aplica» solo lo marca RH con motivo.
+  const noAplica = d.estado === "no_aplica";
+  const badgeLabel = d.estadoOnboarding ?? (noAplica ? "No aplica" : d.estado === "recibido" ? "Recibido" : "Pendiente");
+  const badgeTone: "good" | "warn" | "neutral" | "bad" =
+    badgeLabel === "Aprobado" ? "good" : badgeLabel === "Rechazado" ? "bad" : badgeLabel === "No aplica" ? "neutral" : "warn";
+  const [pidiendoMotivo, setPidiendoMotivo] = useState(false);
+  const [motivoNoAplica, setMotivoNoAplica] = useState("");
 
   async function subir(archivos: File[]) {
     if (!expedienteId) return;
@@ -852,13 +908,14 @@ function Documento({
     onActualizado(r.data.expediente);
   }
 
-  async function marcar(estado: string, recibidoFisico = false) {
+  async function marcar(estado: string, recibidoFisico = false, motivo = "") {
     if (!expedienteId) return;
     setCargando(true);
     const r = await marcarDocumento(expedienteId, {
       tipo: d.nombre,
       estado,
       recibidoFisico,
+      motivo,
     });
     setCargando(false);
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
@@ -879,8 +936,12 @@ function Documento({
           <c.icon className="h-4 w-4" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium">{d.nombre}</span>
-          {d.subido && <span className="font-mono text-[10px] text-ink-3">{d.subido}</span>}
+          <span className="block truncate text-sm font-medium">{d.nombre}{d.obligatorio === false && <span className="font-normal text-ink-3"> · opcional</span>}</span>
+          {noAplica && d.motivoNoAplica ? (
+            <span className="block truncate text-[11px] text-ink-3">No aplica: {d.motivoNoAplica}{d.noAplicaPor ? ` (${d.noAplicaPor})` : ""}</span>
+          ) : (
+            d.subido && <span className="font-mono text-[10px] text-ink-3">{d.subido}</span>
+          )}
         </span>
         {necesitaConfirmar && <span className="shrink-0 font-mono text-[10px] text-warn">confirmar</span>}
         <Badge tone={badgeTone}>{badgeLabel}</Badge>
@@ -918,7 +979,7 @@ function Documento({
                 <Download className="h-3.5 w-3.5" /> Ver {d.tamano ? `(${pesoLegible(d.tamano)})` : ""}
               </a>
             )}
-            {d.estado !== "recibido" || necesitaConfirmar ? (
+            {!noAplica && (d.estado !== "recibido" || necesitaConfirmar) ? (
               <button
                 onClick={() => marcar("recibido", !d.tieneArchivo)}
                 disabled={cargando}
@@ -928,7 +989,24 @@ function Documento({
                 {d.tieneArchivo ? "Confirmar recibido" : "Recibido en físico"}
               </button>
             ) : null}
-            {d.estado !== "rechazado" && (
+            {noAplica ? (
+              <button
+                onClick={() => marcar("pendiente")}
+                disabled={cargando}
+                className="inline-flex items-center gap-1 rounded-lg border border-border-soft px-2.5 py-1.5 text-[12px] font-medium text-ink-2 transition hover:border-brand hover:text-brand disabled:opacity-50"
+              >
+                Volver a pedirlo
+              </button>
+            ) : (
+              <button
+                onClick={() => setPidiendoMotivo((x) => !x)}
+                disabled={cargando}
+                className="inline-flex items-center gap-1 rounded-lg border border-border-soft px-2.5 py-1.5 text-[12px] font-medium text-ink-2 transition hover:border-brand hover:text-brand disabled:opacity-50"
+              >
+                No aplica…
+              </button>
+            )}
+            {d.estado !== "rechazado" && !noAplica && (
               <button
                 onClick={() => marcar("rechazado")}
                 disabled={cargando}
@@ -939,6 +1017,23 @@ function Documento({
             )}
           </div>
 
+          {pidiendoMotivo && !noAplica && (
+            <div className="flex gap-2">
+              <input
+                value={motivoNoAplica}
+                onChange={(e) => setMotivoNoAplica(e.target.value)}
+                placeholder="Motivo por el que no aplica (obligatorio)"
+                className="h-9 flex-1 rounded-lg border border-border-soft bg-surface px-3 text-[13px] outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+              <Button
+                size="sm"
+                disabled={!motivoNoAplica.trim() || cargando}
+                onClick={async () => { await marcar("no_aplica", false, motivoNoAplica.trim()); setPidiendoMotivo(false); setMotivoNoAplica(""); }}
+              >
+                Guardar
+              </Button>
+            </div>
+          )}
           {d.revisadoPor && <p className="font-mono text-[10px] text-ink-3">revisado por {d.revisadoPor}</p>}
         </div>
       )}

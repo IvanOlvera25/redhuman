@@ -146,8 +146,20 @@ with TestClient(app) as client:
     om = r.json()["actividadesOmitidas"]
     check([o["actividad"] for o in om] == ["Prefiltro", "Entrevista IA", "Evaluación"] and all(o["usuario"] == admin.nombre and o["fecha"] and o["motivo"] == "el cliente ya la entrevistó" for o in om),
           f"lo saltado quedó como «Omitida manualmente» con usuario, fecha y motivo: {[o['actividad'] for o in om]}")
+    # Onboarding v2 (2026-09-28): a Onboarding solo se entra con «Iniciar Onboarding»; el salto manual directo
+    # queda bloqueado salvo con Modo Prueba activo (ahí sigue abriendo el expediente sin bloquear).
     r = client.patch(f"/candidatos/{P3}/etapa", json={"etapa": "Onboarding", "manual": True})
-    check(r.status_code == 200 and r.json()["etapa"] == "Onboarding" and r.json()["expedienteId"], "manual: salto directo a Onboarding abre el expediente y no bloquea")
+    check(r.status_code == 409 and "Iniciar Onboarding" in r.json()["detail"], "manual sin Modo Prueba: el salto directo a Onboarding pide «Iniciar Onboarding» (Onboarding v2)")
+    from app.services.configuracion import obtener as _obtener_cfg  # noqa: E402
+
+    _cfg = _obtener_cfg(db)
+    _antes = _cfg.modo_prueba
+    _cfg.modo_prueba = True
+    db.commit()
+    r = client.patch(f"/candidatos/{P3}/etapa", json={"etapa": "Onboarding", "manual": True})
+    _cfg.modo_prueba = _antes
+    db.commit()
+    check(r.status_code == 200 and r.json()["etapa"] == "Onboarding" and r.json()["expedienteId"], "manual con Modo Prueba: salto directo a Onboarding abre el expediente y no bloquea")
     check([o["actividad"] for o in r.json()["actividadesOmitidas"]][-2:] == ["Entrevista Humana", "Contratación"], "segundo salto agrega sus propias omisiones")
     r = client.patch(f"/candidatos/{P3}/etapa", json={"etapa": "Prefiltro", "manual": True})
     check(r.status_code == 200 and r.json()["etapa"] == "Prefiltro", "manual: también permite regresar de etapa")

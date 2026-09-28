@@ -2375,6 +2375,15 @@ def guardar_condiciones_contratacion(
         exp.duracion_unidad = ""
         exp.fecha_termino = None
     exp.condiciones_guardadas_en = datetime.now(timezone.utc)
+    # Onboarding v2 (Fase 3): si cambió la fecha prevista, los plazos PENDIENTES se recalculan solos
+    # (mientras no haya fecha real confirmada, que es la que manda después).
+    try:
+        from ..services import onboarding as onb
+
+        with db.begin_nested():
+            onb.recalcular_fechas(db, exp)
+    except Exception:  # noqa: BLE001 — tablas de módulos no disponibles: las condiciones se guardan igual
+        pass
 
     registrar(
         db, u.nombre, "condiciones_contratacion_guardadas", "postulacion", p.codigo,
@@ -2403,6 +2412,8 @@ async def _disparar_mensaje_onboarding(
     # papeles (INE, comprobante) desde ahí por WhatsApp.
     if p.etapa not in ("Contratación", "Onboarding"):
         raise HTTPException(409, "Esta acción es solo para postulaciones en Contratación u Onboarding.")
+    if p.expediente and p.expediente.no_ingreso_en:
+        raise HTTPException(409, "Esta persona quedó como «No ingresó»: ya no se le piden documentos.")
     override = override_de(notificar)
     extra: dict = {}
     e = p.expediente
