@@ -896,6 +896,12 @@ def ciclo_desempeno_dict(c, detalle: bool = False) -> dict:
     return salida
 
 
+def _brechas(e) -> list:
+    from .routers.desempeno import normalizar_brechas  # import tardío
+
+    return normalizar_brechas(list(e.brechas or []))
+
+
 def evaluacion_desempeno_dict(e, detalle: bool = False) -> dict:
     from .models import normalizar_estado_persona
     from .services import desempeno_calculo as calc
@@ -918,7 +924,7 @@ def evaluacion_desempeno_dict(e, detalle: bool = False) -> dict:
         "estado": normalizar_estado_persona(e.estado),
         "calificacion": e.calificacion,
         "escalaMaxima": 100,
-        "brechas": list(e.brechas or []),
+        "brechas": _brechas(e),
         "creadoEn": iso(e.creado_en),
         "completadaEn": iso(e.completada_en),
         "completadaPor": e.completada_por or "",
@@ -931,6 +937,16 @@ def evaluacion_desempeno_dict(e, detalle: bool = False) -> dict:
         salida["faltantes"] = calculo["faltantes"]
         salida["comentarios"] = e.comentarios or ""
         salida["conclusion"] = e.conclusion or ""
+        salida["resumen"] = e.resumen or ""
+        salida["fortalezas"] = list(e.fortalezas or [])
+        salida["propuestaIa"] = dict(e.propuesta_ia or {}) or None
+        salida["notas"] = list(e.notas or [])
+        ids = {c["id"] for c in salida["criterios"]}
+        # historial: cambios de la evaluación general a sus criterios + ajustes individuales de la persona
+        salida["historialCambios"] = sorted(
+            [h for h in (e.ciclo.historial_cambios or []) if h.get("criterio_id") in ids] + list(e.historial_cambios or []),
+            key=lambda h: h.get("fecha") or "",
+        ) if e.ciclo else list(e.historial_cambios or [])
         salida["objetivos"] = list(e.ciclo.objetivos or []) if e.ciclo else []  # legado
         salida["kpis"] = list(e.ciclo.kpis or []) if e.ciclo else []            # legado
     return salida

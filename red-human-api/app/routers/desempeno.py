@@ -34,6 +34,10 @@ from ..models import (
     CicloDesempeno,
     Colaborador,
     Cuenta,
+    AccionDesempeno,
+    AsignacionCurso,
+    Curso,
+    ESTADOS_ACCION_DESEMPENO,
     EvaluacionDesempeno,
     PlantillaDesempeno,
     Usuario,
@@ -453,8 +457,40 @@ class EvaluarIn(BaseModel):
     # v2: [{criterio_id, real, valoracion, no_aplica, motivo_no_aplica, comentario}]
     resultados: Optional[List[dict]] = None
     comentarios: Optional[str] = None
-    brechas: Optional[List[dict]] = None  # [{tema, brecha, accion_sugerida}]
-    completar: bool = False   # True = queda «completada» (solo si todos los criterios aplicables tienen resultado)
+    conclusion: Optional[str] = None      # obligatoria para completar
+    resumen: Optional[str] = None
+    fortalezas: Optional[List[str]] = None  # las CONFIRMA el evaluador (nunca automáticas por umbral)
+    brechas: Optional[List[dict]] = None  # [{id, tema, descripcion, criterio_id, confirmada, origen}]
+    completar: bool = False   # True = «completada» (todos los criterios aplicables + conclusión)
+
+
+def verificar_evaluador(e: EvaluacionDesempeno, u: Usuario) -> None:
+    """Captura su evaluador asignado o un Administrador (RH). Sin evaluador asignado, cualquier decisor."""
+    if u.rol != "Administrador" and e.evaluador_usuario_id and e.evaluador_usuario_id != u.id:
+        raise HTTPException(403, f"Esta evaluación la captura su evaluador ({e.evaluador}) o un administrador.")
+
+
+def normalizar_brechas(brechas: List[dict]) -> List[dict]:
+    salida = []
+    usados = {str(b.get("id")) for b in brechas if b.get("id")}
+    n = 0
+    for b in brechas:
+        tema = str(b.get("tema") or "").strip()
+        if not tema:
+            continue
+        bid = str(b.get("id") or "")
+        while not bid or (bid in usados and bid != str(b.get("id") or "")):
+            n += 1
+            bid = f"b{n}"
+        usados.add(bid)
+        salida.append({
+            "id": bid, "tema": tema,
+            "descripcion": str(b.get("descripcion") or b.get("brecha") or "").strip(),
+            "criterio_id": b.get("criterio_id") or None,
+            "confirmada": bool(b.get("confirmada", True)),
+            "origen": b.get("origen") or "manual",
+        })
+    return salida
 
 
 def _limpiar_resultados(e: EvaluacionDesempeno, filas: List[dict]) -> List[dict]:
@@ -482,6 +518,7 @@ def _limpiar_resultados(e: EvaluacionDesempeno, filas: List[dict]) -> List[dict]
 @router.patch("/evaluaciones/{codigo}")
 def evaluar(codigo: str, datos: EvaluarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
     e = _evaluacion(db, codigo, cuenta.id)
+    verificar_evaluador(e, u)
     estado_ciclo = normalizar_estado_ciclo(e.ciclo.estado if e.ciclo else "")
     if estado_ciclo != "en_curso":
         raise HTTPException(409, "Solo se evalúa con la evaluación EN CURSO (inicia la evaluación primero)." if estado_ciclo == "borrador"
@@ -491,15 +528,24 @@ def evaluar(codigo: str, datos: EvaluarIn, db: Session = Depends(get_db), u: Usu
     if datos.resultados is not None:
         e.resultados = _limpiar_resultados(e, datos.resultados)
     if datos.brechas is not None:
-        e.brechas = [b for b in datos.brechas if str(b.get("tema") or "").strip()]
+        e.brechas = normalizar_brechas(datos.brechas)
     if datos.comentarios is not None:
         e.comentarios = datos.comentarios.strip()
+    if datos.conclusion is not None:
+        e.conclusion = datos.conclusion.strip()
+    if datos.resumen is not None:
+        e.resumen = datos.resumen.strip()
+    if datos.fortalezas is not None:
+        e.fortalezas = [f.strip() for f in datos.fortalezas if f and f.strip()]
     calculo = calc.calcular(e)
     e.calificacion = calculo["calificacion"]
     e.evaluador = e.evaluador or u.nombre
     if datos.completar:
-        if calculo["faltantes"]:
-            raise HTTPException(400, "Para completar falta: " + " ".join(calculo["faltantes"]))
+        faltan = list(calculo["faltantes"])
+        if not (e.conclusion or "").strip():
+            faltan.append("Registra la conclusión del evaluador.")
+        if faltan:
+            raise HTTPException(400, "Para completar falta: " + " ".join(faltan))
         e.estado = "completada"
         e.completada_en = datetime.now(timezone.utc)
         e.completada_por = u.nombre
@@ -593,32 +639,24 @@ def resultados(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(
     av = calc.avance(c)
     completadas = [e for e in evs if normalizar_estado_persona(e.estado) == "completada"]
     calificadas = [e for e in completadas if e.calificacion is not None]
-    # Fortalezas: resultados con logro alto, agrupados por criterio (se reemplaza en la Fase 5 por las
-    # fortalezas CONFIRMADAS por el evaluador).
+    # Fortalezas y brechas = las CONFIRMADAS por el evaluador (se eliminó la regla que volvía fortaleza
+    # cualquier criterio con 85 % o más). Una buena evaluación puede no tener ninguna brecha.
     fortalezas: dict = {}
     for e in completadas:
-        nombres = {cr["id"]: cr["nombre"] for cr in calc.criterios_efectivos(e)}
-        for d in calc.calcular(e)["detalle"]:
-            if d["cumplimiento"] is None or d["cumplimiento"] < 85:
-                continue
-            nombre = nombres.get(d["criterio_id"], "Sin nombre")
-            fila = fortalezas.setdefault(nombre, {"tema": nombre, "personas": 0, "promedio": 0.0, "_suma": 0.0})
-            fila["personas"] += 1
-            fila["_suma"] += d["cumplimiento"]
-            fila["promedio"] = round(fila["_suma"] / fila["personas"], 1)
-    for fila in fortalezas.values():
-        fila.pop("_suma", None)
-
-    brechas: dict = {}
-    for e in evs:
-        for b in e.brechas or []:
-            tema = str(b.get("tema") or "").strip() or "Sin tema"
-            fila = brechas.setdefault(tema, {"tema": tema, "personas": 0, "acciones": [], "colaboradores": []})
+        for f in e.fortalezas or []:
+            fila = fortalezas.setdefault(f, {"tema": f, "personas": 0, "colaboradores": []})
             fila["personas"] += 1
             fila["colaboradores"].append(e.colaborador.nombre if e.colaborador else "")
-            accion = str(b.get("accion_sugerida") or "").strip()
-            if accion and accion not in fila["acciones"]:
-                fila["acciones"].append(accion)
+    brechas: dict = {}
+    for e in evs:
+        for b in normalizar_brechas(e.brechas or []):
+            if not b["confirmada"]:
+                continue
+            fila = brechas.setdefault(b["tema"], {"tema": b["tema"], "personas": 0, "acciones": [], "colaboradores": []})
+            fila["personas"] += 1
+            fila["colaboradores"].append(e.colaborador.nombre if e.colaborador else "")
+            if b["descripcion"] and b["descripcion"] not in fila["acciones"]:
+                fila["acciones"].append(b["descripcion"])
     promedio = round(sum(e.calificacion for e in calificadas) / len(calificadas), 1) if calificadas else None
     return {
         "ciclo": ciclo_desempeno_dict(c),
@@ -633,7 +671,8 @@ def resultados(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(
         ],
         "pendientes": [evaluacion_desempeno_dict(e) for e in evs if normalizar_estado_persona(e.estado) != "completada"],
         "brechas": sorted(brechas.values(), key=lambda b: b["personas"], reverse=True),
-        "fortalezas": sorted(fortalezas.values(), key=lambda f: (f["personas"], f["promedio"]), reverse=True),
+        "fortalezas": sorted(fortalezas.values(), key=lambda f: f["personas"], reverse=True),
+        "accionesAbiertas": sum(1 for a in _acciones_de(db, [e.id for e in evs]) if estado_accion(db, a) in ("abierta", "en_proceso")),
     }
 
 
@@ -844,4 +883,294 @@ async def vista_previa_importacion(archivo: UploadFile = File(...), _: Usuario =
         "filas": salida,
         "validos": validos,
         "conErrores": sum(1 for x in salida if x["errores"]),
+    }
+
+
+# ------------------------------------------------------------
+# 6. Ejecución: notas de avance, cambios después de iniciar, IA, acciones, historial y tablero
+# ------------------------------------------------------------
+
+
+class NotaIn(BaseModel):
+    texto: str
+    criterio_id: str = ""
+
+
+@router.post("/evaluaciones/{codigo}/notas", status_code=201)
+def agregar_nota(codigo: str, datos: NotaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Nota de avance OPCIONAL y con fecha, para la persona o para un criterio (durante el periodo)."""
+    e = _evaluacion(db, codigo, cuenta.id)
+    verificar_evaluador(e, u)
+    if normalizar_estado_ciclo(e.ciclo.estado) == "cerrada":
+        raise HTTPException(409, "La evaluación está cerrada.")
+    if not datos.texto.strip():
+        raise HTTPException(400, "Escribe la nota.")
+    criterio = None
+    if datos.criterio_id:
+        criterio = next((c for c in calc.criterios_efectivos(e) if c["id"] == datos.criterio_id), None)
+        if not criterio:
+            raise HTTPException(404, "Ese criterio no existe en la evaluación.")
+    notas = list(e.notas or [])
+    notas.append({"id": f"n{len(notas) + 1}", "fecha": datetime.now(timezone.utc).isoformat(), "texto": datos.texto.strip()[:2000],
+                  "criterio_id": datos.criterio_id or None, "criterio": criterio["nombre"] if criterio else None, "autor": u.nombre})
+    e.notas = notas
+    db.commit()
+    return evaluacion_desempeno_dict(e, detalle=True)
+
+
+class CambioCriterioIn(BaseModel):
+    motivo: str = ""
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+    esperado: Optional[str] = None
+    unidad: Optional[str] = None
+    meta: Optional[float] = None
+    sentido: Optional[str] = None
+    peso: Optional[float] = None
+
+
+@router.patch("/ciclos/{codigo}/criterios/{criterio_id}")
+def cambiar_criterio(codigo: str, criterio_id: str, datos: CambioCriterioIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Cambiar un criterio o meta de la evaluación YA INICIADA: queda el valor anterior, el nuevo, el motivo,
+    la fecha y el usuario. Recalcula a quienes aún no están completados (los completados conservan su cálculo)."""
+    c = _ciclo(db, codigo, cuenta.id)
+    if normalizar_estado_ciclo(c.estado) != "en_curso":
+        raise HTTPException(409, "Solo aplica con la evaluación en curso (en borrador se edita directo).")
+    if not datos.motivo.strip():
+        raise HTTPException(400, "Indica el motivo del cambio.")
+    criterios = [dict(x) for x in calc.criterios_de(c)]
+    actual = next((x for x in criterios if x["id"] == criterio_id), None)
+    if not actual:
+        raise HTTPException(404, "Ese criterio no existe en la evaluación.")
+    campos = ("nombre", "descripcion", "esperado", "unidad", "meta", "sentido", "peso")
+    cambios = {k: getattr(datos, k) for k in campos if getattr(datos, k) is not None}
+    if not cambios:
+        raise HTTPException(400, "No indicaste qué cambiar.")
+    anterior = {k: actual.get(k) for k in cambios}
+    actual.update(cambios)
+    c.criterios = _criterios(criterios)
+    if c.pesos_personalizados and "peso" in cambios:
+        error = calc.validar_pesos(c.criterios, True)
+        if error:
+            raise HTTPException(400, error)
+    registrar_cambio(c, u, criterio_id, actual["nombre"], anterior, cambios, datos.motivo.strip(), "evaluacion")
+    for e in calc.incluidas(c):
+        if normalizar_estado_persona(e.estado) != "completada":
+            e.calificacion = calc.calcular(e)["calificacion"]
+    registrar(db, u.nombre, "desempeno_criterio_cambiado", "desempeno", c.codigo,
+              {"criterio": criterio_id, "cambios": cambios, "motivo": datos.motivo.strip(), "correo_rh": u.correo})
+    db.commit()
+    return ciclo_desempeno_dict(c, detalle=True)
+
+
+def datos_para_ia(e: EvaluacionDesempeno) -> dict:
+    calculo = calc.calcular(e)
+    cumpl = {d["criterio_id"]: d for d in calculo["detalle"]}
+    res = {r.get("criterio_id"): r for r in (e.resultados or [])}
+    return {
+        "puesto": e.colaborador.puesto if e.colaborador else "",
+        "calificacion": calculo["calificacion"],
+        "criterios": [
+            {"nombre": c["nombre"], "tipo": c["tipo"], "meta": c.get("meta"), "unidad": c.get("unidad"), "esperado": c.get("esperado"),
+             "resultado": (res.get(c["id"]) or {}).get("real") if c["tipo"] == "medible" else (res.get(c["id"]) or {}).get("valoracion"),
+             "no_aplica": cumpl.get(c["id"], {}).get("no_aplica"), "cumplimiento": cumpl.get(c["id"], {}).get("cumplimiento"),
+             "comentario": (res.get(c["id"]) or {}).get("comentario")}
+            for c in calc.criterios_efectivos(e)
+        ],
+        "comentarios": e.comentarios or "",
+        "notas": [n["texto"] for n in (e.notas or [])],
+    }
+
+
+@router.post("/evaluaciones/{codigo}/propuesta-ia")
+def propuesta_ia(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Red Human propone resumen, fortalezas y brechas SOLO con los resultados capturados. No se confirma
+    nada: el evaluador edita o acepta (PATCH /evaluaciones/{codigo})."""
+    e = _evaluacion(db, codigo, cuenta.id)
+    verificar_evaluador(e, u)
+    datos = datos_para_ia(e)
+    if datos["calificacion"] is None:
+        raise HTTPException(409, "Captura al menos un resultado antes de pedir la propuesta.")
+    prop, con_ia = ia.resumen_desempeno(datos)
+    ids = {c["nombre"]: c["id"] for c in calc.criterios_efectivos(e)}
+    e.propuesta_ia = {
+        "fecha": datetime.now(timezone.utc).isoformat(), "ia": con_ia, "resumen": prop.resumen, "fortalezas": prop.fortalezas,
+        "brechas": [{"tema": b.tema, "descripcion": b.descripcion, "criterio_id": ids.get(b.criterio), "origen": "ia", "confirmada": False} for b in prop.brechas],
+    }
+    db.commit()
+    return e.propuesta_ia
+
+
+def _acciones_de(db: Session, evaluacion_ids: List[int]) -> List[AccionDesempeno]:
+    if not evaluacion_ids:
+        return []
+    return db.query(AccionDesempeno).filter(AccionDesempeno.evaluacion_id.in_(evaluacion_ids)).order_by(AccionDesempeno.id).all()
+
+
+def estado_accion(db: Session, a: AccionDesempeno) -> str:
+    """Un curso sigue a su asignación en Capacitación: completada allá = completada aquí."""
+    if a.tipo == "curso" and a.asignacion_curso_id and a.estado not in ("cancelada",):
+        asig = db.get(AsignacionCurso, a.asignacion_curso_id)
+        if asig and asig.estado == "completado":
+            return "completada"
+        if asig and asig.estado == "en_curso" and a.estado == "abierta":
+            return "en_proceso"
+    return a.estado
+
+
+def accion_dict(db: Session, a: AccionDesempeno) -> dict:
+    curso = db.get(Curso, a.curso_id) if a.curso_id else None
+    asig = db.get(AsignacionCurso, a.asignacion_curso_id) if a.asignacion_curso_id else None
+    return {
+        "id": a.id, "brechaId": a.brecha_id, "brecha": a.brecha, "tipo": a.tipo, "descripcion": a.descripcion,
+        "responsable": a.responsable, "fechaCompromiso": a.fecha_compromiso.isoformat() if a.fecha_compromiso else None,
+        "estado": estado_accion(db, a), "curso": {"id": curso.codigo, "titulo": curso.titulo} if curso else None,
+        "asignacion": asig.codigo if asig else None, "creadoPor": a.creado_por,
+        "evaluacionId": a.evaluacion.codigo if a.evaluacion else "",
+    }
+
+
+class AccionIn(BaseModel):
+    brecha_id: str
+    tipo: str = "accion"            # accion | curso
+    descripcion: str = ""
+    responsable: str = ""
+    fecha_compromiso: str = ""      # AAAA-MM-DD
+    curso_codigo: str = ""          # obligatorio si tipo = curso
+
+
+def _fecha(texto: str) -> Optional[datetime]:
+    if not texto.strip():
+        return None
+    try:
+        return datetime.fromisoformat(texto.strip()[:10]).replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(400, f"Fecha inválida «{texto}» (usa AAAA-MM-DD).")
+
+
+@router.post("/evaluaciones/{codigo}/acciones", status_code=201)
+async def crear_accion(codigo: str, datos: AccionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Una BRECHA CONFIRMADA genera una acción con responsable, fecha y estado. Si es un curso, se asigna en
+    Capacitación (misma asignación que usa ese módulo, con su aviso) y la acción sigue su estado."""
+    from .capacitacion import _nueva_asignacion, notificar_seguro  # import tardío (evita ciclos)
+
+    e = _evaluacion(db, codigo, cuenta.id)
+    brecha = next((b for b in normalizar_brechas(e.brechas or []) if b["id"] == datos.brecha_id), None)
+    if not brecha:
+        raise HTTPException(404, "Esa brecha no existe en la evaluación.")
+    if not brecha["confirmada"]:
+        raise HTTPException(409, "Confirma la brecha antes de asignarle acciones.")
+    if datos.tipo not in ("accion", "curso"):
+        raise HTTPException(400, "Tipo inválido (accion o curso).")
+    a = AccionDesempeno(
+        cuenta_id=cuenta.id, evaluacion_id=e.id, colaborador_id=e.colaborador_id, brecha_id=brecha["id"], brecha=brecha["tema"],
+        tipo=datos.tipo, descripcion=datos.descripcion.strip(), responsable=datos.responsable.strip() or u.nombre,
+        fecha_compromiso=_fecha(datos.fecha_compromiso), estado="abierta", creado_por=u.nombre,
+    )
+    envio = None
+    if datos.tipo == "curso":
+        curso = db.query(Curso).filter(Curso.codigo == datos.curso_codigo, Curso.cuenta_id == cuenta.id).first()
+        if not curso:
+            raise HTTPException(404, "Ese curso no existe en esta Cuenta.")
+        if curso.estado != "Publicado":
+            raise HTTPException(409, "Solo se pueden asignar cursos finalizados (publicados).")
+        asig = db.query(AsignacionCurso).filter(AsignacionCurso.curso_id == curso.id, AsignacionCurso.colaborador_id == e.colaborador_id,
+                                                AsignacionCurso.estado != "completado").first()
+        if not asig:
+            asig = _nueva_asignacion(db, curso, "colaborador", u.nombre, colaborador_id=e.colaborador_id)
+            envio = await notificar_seguro(asig) if (asig.telefono_persona or asig.correo_persona) else None
+        a.curso_id, a.asignacion_curso_id = curso.id, asig.id
+        a.descripcion = a.descripcion or f"Curso «{curso.titulo}»"
+    db.add(a)
+    db.flush()
+    registrar(db, u.nombre, "desempeno_accion_creada", "desempeno", e.codigo,
+              {"brecha": brecha["tema"], "tipo": a.tipo, "curso": datos.curso_codigo or None, "correo_rh": u.correo})
+    db.commit()
+    return {**accion_dict(db, a), "envio": envio}
+
+
+class EditarAccionIn(BaseModel):
+    estado: Optional[str] = None
+    responsable: Optional[str] = None
+    fecha_compromiso: Optional[str] = None
+    descripcion: Optional[str] = None
+
+
+@router.patch("/acciones/{accion_id}")
+def editar_accion(accion_id: int, datos: EditarAccionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    a = db.query(AccionDesempeno).filter(AccionDesempeno.id == accion_id, AccionDesempeno.cuenta_id == cuenta.id).first()
+    if not a:
+        raise HTTPException(404, "Acción no encontrada.")
+    if datos.estado is not None:
+        if datos.estado not in ESTADOS_ACCION_DESEMPENO:
+            raise HTTPException(400, f"Estado inválido. Usa: {', '.join(ESTADOS_ACCION_DESEMPENO)}")
+        a.estado = datos.estado
+    if datos.responsable is not None:
+        a.responsable = datos.responsable.strip()
+    if datos.fecha_compromiso is not None:
+        a.fecha_compromiso = _fecha(datos.fecha_compromiso)
+    if datos.descripcion is not None:
+        a.descripcion = datos.descripcion.strip()
+    registrar(db, u.nombre, "desempeno_accion_editada", "desempeno", str(a.id), {"estado": a.estado, "correo_rh": u.correo})
+    db.commit()
+    return accion_dict(db, a)
+
+
+@router.get("/evaluaciones/{codigo}/acciones")
+def acciones_evaluacion(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    e = _evaluacion(db, codigo, cuenta.id)
+    return [accion_dict(db, a) for a in _acciones_de(db, [e.id])]
+
+
+def _historial_persona(db: Session, evs: List[EvaluacionDesempeno], completo: bool = True) -> List[dict]:
+    salida = []
+    for e in sorted(evs, key=lambda x: x.id, reverse=True):
+        fila = evaluacion_desempeno_dict(e, detalle=True)
+        fila["estadoEvaluacion"] = normalizar_estado_ciclo(e.ciclo.estado)
+        fila["acciones"] = [accion_dict(db, a) for a in _acciones_de(db, [e.id])]
+        if not completo:  # vista del propio colaborador: sin propuestas internas de la IA
+            fila.pop("propuestaIa", None)
+        salida.append(fila)
+    return salida
+
+
+@router.get("/colaboradores/{colaborador}/historial")
+def historial_colaborador(colaborador: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Pestaña «Desempeño» de la ficha del colaborador: periodos anteriores, resultados y acciones."""
+    col = db.query(Colaborador).filter(Colaborador.codigo == colaborador, Colaborador.cuenta_id == cuenta.id, Colaborador.eliminado_en.is_(None)).first()
+    if not col:
+        raise HTTPException(404, "Colaborador no encontrado.")
+    evs = db.query(EvaluacionDesempeno).filter(EvaluacionDesempeno.colaborador_id == col.id, EvaluacionDesempeno.cuenta_id == cuenta.id).all()
+    return _historial_persona(db, evs)
+
+
+@router.get("/mis-evaluaciones")
+def mis_evaluaciones(db: Session = Depends(get_db), u: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """El colaborador con acceso al sistema (mismo correo que en el roster — decisión del usuario) consulta
+    SUS criterios, resultados y conclusión. Solo lectura; los borradores de la evaluación no se muestran."""
+    cols = db.query(Colaborador).filter(func.lower(Colaborador.correo) == (u.correo or "").strip().lower(),
+                                        Colaborador.cuenta_id == cuenta.id, Colaborador.eliminado_en.is_(None)).all() if u.correo else []
+    if not cols:
+        return []
+    evs = db.query(EvaluacionDesempeno).filter(EvaluacionDesempeno.colaborador_id.in_([c.id for c in cols])).all()
+    evs = [e for e in evs if normalizar_estado_ciclo(e.ciclo.estado) != "borrador"]
+    return _historial_persona(db, evs, completo=False)
+
+
+@router.get("/tablero")
+def tablero(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Tablero principal: pendientes, completadas, promedio de resultados válidos, brechas confirmadas y
+    acciones abiertas (sobre evaluaciones iniciadas o cerradas)."""
+    ciclos = [c for c in db.query(CicloDesempeno).filter(CicloDesempeno.cuenta_id == cuenta.id).all() if normalizar_estado_ciclo(c.estado) != "borrador"]
+    evs = [e for c in ciclos for e in calc.incluidas(c)]
+    completadas = [e for e in evs if normalizar_estado_persona(e.estado) == "completada"]
+    validas = [e.calificacion for e in completadas if e.calificacion is not None]
+    acciones = _acciones_de(db, [e.id for e in evs])
+    return {
+        "pendientes": sum(1 for e in evs if normalizar_estado_persona(e.estado) != "completada" and normalizar_estado_ciclo(e.ciclo.estado) == "en_curso"),
+        "completadas": len(completadas),
+        "promedio": round(sum(validas) / len(validas), 1) if validas else None,
+        "brechasConfirmadas": sum(1 for e in evs for b in normalizar_brechas(e.brechas or []) if b["confirmada"]),
+        "accionesAbiertas": sum(1 for a in acciones if estado_accion(db, a) in ("abierta", "en_proceso")),
+        "evaluacionesEnCurso": sum(1 for c in ciclos if normalizar_estado_ciclo(c.estado) == "en_curso"),
     }

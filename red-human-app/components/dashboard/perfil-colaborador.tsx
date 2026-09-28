@@ -26,14 +26,17 @@ import {
 import { Avatar, Badge, Button, Card, Eyebrow } from "@/components/ui";
 import { Aviso } from "@/components/dashboard/subida";
 import { ModalEditarColaborador } from "@/components/dashboard/colaboradores/alta-importar";
+import { HistorialDesempeno } from "@/components/dashboard/desempeno/cierre-evaluacion";
 import {
   darDeBajaColaborador,
+  fetchHistorialDesempenoColaborador,
   eliminarColaborador,
   fetchColaborador,
   reactivarColaborador,
   urlDocumento,
   type Colaborador,
   type ColaboradorDetalle,
+  type EvaluacionDesempeno,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -75,6 +78,11 @@ export function PerfilColaborador({
   const [error, setError] = useState("");
   const [aviso, setAviso] = useState("");
   const [editar, setEditar] = useState(false);
+  const [pestana, setPestana] = useState<"datos" | "desempeno">("datos");
+  const [desempeno, setDesempeno] = useState<EvaluacionDesempeno[] | null>(null);
+  useEffect(() => {
+    if (pestana === "desempeno" && desempeno === null) fetchHistorialDesempenoColaborador(colaborador.id).then((d) => setDesempeno(d ?? []));
+  }, [pestana, desempeno, colaborador.id]);
 
   useEffect(() => {
     let vivo = true;
@@ -148,7 +156,24 @@ export function PerfilColaborador({
           </div>
         </div>
 
-        <div className="flex flex-col gap-5 p-6">
+        <div className="scroll-x flex gap-1 border-b border-border-soft px-6" role="tablist">
+          {([["datos", "Datos"], ["desempeno", "Desempeño"]] as const).map(([k, t]) => (
+            <button key={k} role="tab" aria-selected={pestana === k} onClick={() => setPestana(k)}
+              className={cn("border-b-2 px-3 py-2.5 text-sm font-semibold", pestana === k ? "border-brand text-ink" : "border-transparent text-ink-3 hover:text-ink")}>
+              {t}
+            </button>
+          ))}
+        </div>
+
+        {pestana === "desempeno" && (
+          <div className="p-6">
+            {desempeno === null ? <div className="h-16 animate-pulse rounded-xl bg-surface-2/60" /> : (
+              <HistorialDesempeno evaluaciones={desempeno} vacio="Todavía no tiene evaluaciones de desempeño." />
+            )}
+          </div>
+        )}
+
+        <div className={cn("flex flex-col gap-5 p-6", pestana !== "datos" && "hidden")}>
           {aviso && <Aviso tono="ok" onCerrar={() => setAviso("")}>{aviso}</Aviso>}
           {error && !confirmar && <Aviso tono="error" onCerrar={() => setError("")}>{error}</Aviso>}
           {!c.activo && (

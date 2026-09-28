@@ -2209,3 +2209,60 @@ def criterios_desempeno(puesto: str, periodo: str = "", contexto: str = "") -> T
     except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea: RH captura a mano
         print(f"[ia] criterios de desempeño demo ({ex})", flush=True)
         return _criterios_demo(puesto), False
+
+
+class BrechaIA(BaseModel):
+    tema: str = Field(description="Tema corto de la brecha.")
+    descripcion: str = Field(description="Qué falta, con la evidencia de los resultados capturados.")
+    criterio: str = Field(default="", description="Nombre EXACTO del criterio del que sale la evidencia, si aplica.")
+
+
+class ResumenDesempenoIA(BaseModel):
+    resumen: str = Field(description="2-3 frases sobre el periodo, usando SOLO los resultados capturados.")
+    fortalezas: List[str] = Field(default_factory=list, description="0 a 4 fortalezas con evidencia de los resultados.")
+    brechas: List[BrechaIA] = Field(default_factory=list, description="0 a 4 brechas con evidencia; VACÍO si el desempeño es bueno.")
+
+
+def _resumen_desempeno_demo(datos: dict) -> ResumenDesempenoIA:
+    con_valor = [c for c in datos.get("criterios", []) if c.get("cumplimiento") is not None]
+    altos = sorted(con_valor, key=lambda c: c["cumplimiento"], reverse=True)[:2]
+    bajos = [c for c in con_valor if c["cumplimiento"] < 60]
+    calif = datos.get("calificacion")
+    return ResumenDesempenoIA(
+        resumen=(f"Calificación de {calif}% con {len(con_valor)} criterio(s) evaluado(s)." if calif is not None
+                 else "Aún no hay resultados válidos para resumir."),
+        fortalezas=[f"{c['nombre']}: {c['cumplimiento']}% de cumplimiento." for c in altos if c["cumplimiento"] >= 75],
+        brechas=[BrechaIA(tema=c["nombre"], descripcion=f"Cumplimiento de {c['cumplimiento']}% en «{c['nombre']}».", criterio=c["nombre"]) for c in bajos],
+    )
+
+
+def resumen_desempeno(datos: dict) -> Tuple[ResumenDesempenoIA, bool]:
+    """Propuesta de resumen, fortalezas y brechas basada ESTRICTAMENTE en los resultados capturados (el
+    evaluador la edita o confirma). Nunca inventa datos ni fuerza brechas: un buen periodo puede no tener
+    ninguna. Regresa (propuesta, con_ia)."""
+    client = _client()
+    if client is None:
+        return _resumen_desempeno_demo(datos), False
+    try:
+        import json as _json
+
+        resp = client.responses.parse(
+            model=MODEL,
+            instructions=(
+                "Eres analista de desempeño de Red Human AI (México). Recibes los criterios de UNA persona con su resultado "
+                "capturado, el % de cumplimiento calculado, comentarios y notas de avance. Redacta: resumen, fortalezas y "
+                "brechas. Reglas: (1) usa SOLO lo capturado; nunca inventes cifras, hechos ni criterios; (2) un criterio sin "
+                "resultado o «No aplica» NO es fortaleza ni brecha; (3) si el desempeño es bueno, deja `brechas` vacío — no "
+                "fuerces brechas; (4) nada de datos sensibles ni rasgos de personalidad; (5) es una propuesta: la confirma "
+                "o edita el evaluador."
+            ),
+            input=_json.dumps(datos, ensure_ascii=False)[:20000],
+            text_format=ResumenDesempenoIA,
+        )
+        prop = resp.output_parsed
+        if not prop:
+            return _resumen_desempeno_demo(datos), False
+        return prop, True
+    except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea
+        print(f"[ia] resumen de desempeño demo ({ex})", flush=True)
+        return _resumen_desempeno_demo(datos), False

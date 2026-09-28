@@ -70,8 +70,8 @@ def check(cond, msg):
 
 print("\n--- 0. Regla de oro: ninguna tabla nueva de personas ---")
 nuevas = set(TABLAS_MODULOS_RH)
-check(nuevas == {"ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima", "participaciones_clima", "plantillas_clima", "plantillas_desempeno"},
-      "solo 7 tablas nuevas (Clima v2 y Desempeño v2 agregan participación y plantillas), ninguna de personas")
+check(nuevas == {"ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima", "participaciones_clima", "plantillas_clima", "plantillas_desempeno", "acciones_desempeno"},
+      "solo 8 tablas nuevas (Clima v2 y Desempeño v2 agregan participación, plantillas y acciones), ninguna de personas")
 for nombre in sorted(nuevas):
     columnas = set(Base.metadata.tables[nombre].columns.keys())
     # una tabla de personas tendría datos de contacto propios; `nombre`/`titulo` describen al ciclo o a
@@ -125,13 +125,14 @@ with TestClient(app) as client:
         "resultados": [{"tipo": "objetivo", "nombre": "Cumplir responsabilidades", "meta": "100%", "real": "90%", "logro": 90, "peso": 60},
                        {"tipo": "kpi", "nombre": "Calidad", "meta": "95%", "real": "70%", "logro": 70, "peso": 40}],
         "brechas": [{"tema": "Atención a cliente", "brecha": "Quejas por trato", "accion_sugerida": "Curso de servicio"}],
-        "comentarios": "Buen periodo, con foco en calidad.", "completar": True,
+        "comentarios": "Buen periodo, con foco en calidad.", "conclusion": "Buen periodo.", "fortalezas": ["Cumplir responsabilidades"], "completar": True,
     })
     check(r.status_code == 200 and r.json()["estado"] == "completada", "evaluación capturada y completada")
     check(r.json()["calificacion"] == 82.0, f"calificación ponderada (90×60 + 70×40)/100 = 82 → {r.json()['calificacion']}")
     client.patch(f"/desempeno/evaluaciones/{EV2}", json={"resultados": [{"tipo": "objetivo", "nombre": "Cumplir responsabilidades", "logro": 60},
                                                                      {"tipo": "kpi", "nombre": "Calidad", "logro": 60}],
-                                                         "brechas": [{"tema": "Atención a cliente", "brecha": "Tiempos de respuesta", "accion_sugerida": "Curso de servicio"}], "completar": True})
+                                                         "brechas": [{"tema": "Atención a cliente", "brecha": "Tiempos de respuesta", "accion_sugerida": "Curso de servicio"}],
+                                                         "conclusion": "Periodo regular.", "completar": True})
     r = client.get(f"/desempeno/ciclos/{CICLO}/resultados").json()
     check(r["total"] == 2 and r["completadas"] == 2 and r["avance"] == 100, "avance del ciclo")
     check(r["promedio"] == 71.0 and r["ranking"][0]["id"] == EV1, f"promedio y ranking ({r['promedio']})")
@@ -232,8 +233,9 @@ with TestClient(app) as client:
     check(client.post("/conocimiento/preguntar", json={"pregunta": "x", "colaborador_id": "COL-999"}).status_code == 404, "un colaborador inexistente no se inventa: 404")
     print("\n--- 4. Lo que consumen las pantallas: fortalezas, invitaciones y borrador con IA ---")
     res = client.get(f"/desempeno/ciclos/{CICLO}/resultados").json()
-    check(any(f["tema"] == "Cumplir responsabilidades" for f in res["fortalezas"]), f"el dashboard recibe FORTALEZAS (logro >= 85 %) además de brechas: {[f['tema'] for f in res['fortalezas']]}")
-    check(res["fortalezas"][0]["personas"] >= 1 and res["fortalezas"][0]["promedio"] >= 85, "cada fortaleza trae cuántas personas y su promedio")
+    check([f["tema"] for f in res["fortalezas"]] == ["Cumplir responsabilidades"],
+          f"el dashboard recibe las FORTALEZAS CONFIRMADAS por el evaluador (ya no por umbral de 85 %): {[f['tema'] for f in res['fortalezas']]}")
+    check(res["fortalezas"][0]["personas"] == 1, "cada fortaleza trae cuántas personas la tienen")
 
     ENVIOS.clear()
     r = client.post(f"/clima/mediciones/{MED}/invitar", json={"colaborador_ids": ["COL-1", "COL-2", "COL-3"], "mensaje": "Nos ayuda mucho."})

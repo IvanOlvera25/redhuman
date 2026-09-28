@@ -1535,7 +1535,7 @@ class IntegracionTeams(Base):
 TABLAS_MODULOS_RH = (
     "ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima",
     "participaciones_clima", "plantillas_clima",  # Clima v2 (2026-09-27)
-    "plantillas_desempeno",  # Desempeño v2 (2026-09-27)
+    "plantillas_desempeno", "acciones_desempeno",  # Desempeño v2 (2026-09-27)
 )
 
 # --- Desempeño ---
@@ -1639,6 +1639,36 @@ class EvaluacionDesempeno(Base):
     colaborador: Mapped["Colaborador"] = relationship()
 
     __table_args__ = (UniqueConstraint("ciclo_id", "colaborador_id", name="uq_evaluacion_ciclo_colaborador"),)
+
+
+ESTADOS_ACCION_DESEMPENO = ("abierta", "en_proceso", "completada", "cancelada")
+
+
+class AccionDesempeno(Base):
+    """Acción que nace de una BRECHA CONFIRMADA por el evaluador (Desempeño v2, 2026-09-27): responsable,
+    fecha compromiso y estado. Si es un curso, se crea la asignación en Capacitación (misma tabla que usa
+    ese módulo) y el estado de la acción sigue al de la asignación."""
+
+    __tablename__ = "acciones_desempeno"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    evaluacion_id: Mapped[int] = mapped_column(ForeignKey("evaluaciones_desempeno.id"), index=True)
+    colaborador_id: Mapped[int] = mapped_column(ForeignKey("colaboradores.id"), index=True)
+    brecha_id: Mapped[str] = mapped_column(String(20), default="")
+    brecha: Mapped[str] = mapped_column(String(200), default="")  # tema de la brecha (copia legible)
+    tipo: Mapped[str] = mapped_column(String(20), default="accion")  # accion | curso
+    descripcion: Mapped[str] = mapped_column(Text, default="")
+    responsable: Mapped[str] = mapped_column(String(150), default="")
+    fecha_compromiso: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    estado: Mapped[str] = mapped_column(String(20), default="abierta")  # ver ESTADOS_ACCION_DESEMPENO
+    curso_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    asignacion_curso_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+    evaluacion: Mapped["EvaluacionDesempeno"] = relationship()
 
 
 class PlantillaDesempeno(Base):

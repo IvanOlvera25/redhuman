@@ -2474,7 +2474,15 @@ export interface ResultadoDesempeno {
   motivo_no_aplica?: string;
   comentario?: string;
 }
-export interface BrechaDesempeno { tema: string; brecha?: string; accion_sugerida?: string }
+/** Brecha: la propone la IA o el evaluador; SOLO las confirmadas cuentan y generan acciones. */
+export interface BrechaDesempeno { id?: string; tema: string; descripcion?: string; criterio_id?: string | null; confirmada?: boolean; origen?: "ia" | "manual" }
+export interface NotaDesempeno { id: string; fecha: string; texto: string; criterio_id: string | null; criterio: string | null; autor: string }
+export interface PropuestaIaDesempeno { fecha: string; ia: boolean; resumen: string; fortalezas: string[]; brechas: BrechaDesempeno[] }
+export interface AccionDesempeno {
+  id: number; brechaId: string; brecha: string; tipo: "accion" | "curso"; descripcion: string; responsable: string;
+  fechaCompromiso: string | null; estado: "abierta" | "en_proceso" | "completada" | "cancelada";
+  curso: { id: string; titulo: string } | null; asignacion: string | null; creadoPor: string; evaluacionId: string;
+}
 export interface EvaluacionDesempeno {
   id: string;
   cicloId: string;
@@ -2501,6 +2509,14 @@ export interface EvaluacionDesempeno {
   faltantes?: string[];
   comentarios?: string;
   conclusion?: string;
+  resumen?: string;
+  fortalezas?: string[];
+  propuestaIa?: PropuestaIaDesempeno | null;
+  notas?: NotaDesempeno[];
+  historialCambios?: CambioDesempeno[];
+  /* historial de la ficha / mis evaluaciones */
+  acciones?: AccionDesempeno[];
+  estadoEvaluacion?: EstadoCicloDesempeno;
 }
 export interface ResultadosCiclo {
   ciclo: CicloDesempeno;
@@ -2512,7 +2528,8 @@ export interface ResultadosCiclo {
   ranking: EvaluacionDesempeno[];
   pendientes: EvaluacionDesempeno[];
   brechas: { tema: string; personas: number; acciones: string[]; colaboradores: string[] }[];
-  fortalezas: { tema: string; personas: number; promedio: number }[];
+  fortalezas: { tema: string; personas: number; colaboradores?: string[] }[];
+  accionesAbiertas?: number;
 }
 
 export function generarPlanDesempeno(datos: { puesto?: string; periodo?: string; contexto?: string }) {
@@ -2583,10 +2600,51 @@ export function agregarParticipantesDesempeno(codigo: string, colaboradorIds: st
 export function fetchEvaluacionDesempeno(codigo: string) {
   return get<EvaluacionDesempeno>(`/desempeno/evaluaciones/${codigo}`);
 }
-export function guardarEvaluacionDesempeno(codigo: string, datos: { resultados: ResultadoDesempeno[]; brechas?: BrechaDesempeno[]; comentarios?: string; completar?: boolean }) {
-  return patch<EvaluacionDesempeno>(`/desempeno/evaluaciones/${codigo}`, {
-    resultados: datos.resultados, brechas: datos.brechas ?? [], comentarios: datos.comentarios ?? "", completar: datos.completar ?? false,
+export function guardarEvaluacionDesempeno(codigo: string, datos: {
+  resultados?: ResultadoDesempeno[]; brechas?: BrechaDesempeno[]; comentarios?: string; conclusion?: string;
+  resumen?: string; fortalezas?: string[]; completar?: boolean;
+}) {
+  return patch<EvaluacionDesempeno>(`/desempeno/evaluaciones/${codigo}`, { ...datos, completar: datos.completar ?? false });
+}
+export function agregarNotaDesempeno(codigo: string, texto: string, criterioId = "") {
+  return post<EvaluacionDesempeno>(`/desempeno/evaluaciones/${codigo}/notas`, { texto, criterio_id: criterioId });
+}
+export function propuestaIaDesempeno(codigo: string) {
+  return post<PropuestaIaDesempeno>(`/desempeno/evaluaciones/${codigo}/propuesta-ia`, {});
+}
+export function cambiarCriterioCicloDesempeno(codigo: string, criterioId: string, datos: { motivo: string; meta?: number | null; nombre?: string; esperado?: string }) {
+  return patch<CicloDesempeno>(`/desempeno/ciclos/${codigo}/criterios/${criterioId}`, {
+    motivo: datos.motivo,
+    ...(datos.meta !== undefined && datos.meta !== null ? { meta: datos.meta } : {}),
+    ...(datos.nombre ? { nombre: datos.nombre } : {}),
+    ...(datos.esperado ? { esperado: datos.esperado } : {}),
   });
+}
+export function crearAccionDesempeno(evaluacion: string, datos: { brechaId: string; tipo: "accion" | "curso"; descripcion?: string; responsable?: string; fechaCompromiso?: string; cursoCodigo?: string }) {
+  return post<AccionDesempeno & { envio: unknown }>(`/desempeno/evaluaciones/${evaluacion}/acciones`, {
+    brecha_id: datos.brechaId, tipo: datos.tipo, descripcion: datos.descripcion ?? "", responsable: datos.responsable ?? "",
+    fecha_compromiso: datos.fechaCompromiso ?? "", curso_codigo: datos.cursoCodigo ?? "",
+  });
+}
+export function editarAccionDesempeno(id: number, datos: { estado?: AccionDesempeno["estado"]; responsable?: string; fechaCompromiso?: string }) {
+  return patch<AccionDesempeno>(`/desempeno/acciones/${id}`, {
+    ...(datos.estado ? { estado: datos.estado } : {}),
+    ...(datos.responsable !== undefined ? { responsable: datos.responsable } : {}),
+    ...(datos.fechaCompromiso !== undefined ? { fecha_compromiso: datos.fechaCompromiso } : {}),
+  });
+}
+export function fetchAccionesEvaluacion(codigo: string) {
+  return get<AccionDesempeno[]>(`/desempeno/evaluaciones/${codigo}/acciones`);
+}
+export interface TableroDesempeno { pendientes: number; completadas: number; promedio: number | null; brechasConfirmadas: number; accionesAbiertas: number; evaluacionesEnCurso: number }
+export function fetchTableroDesempeno() {
+  return get<TableroDesempeno>("/desempeno/tablero");
+}
+export function fetchHistorialDesempenoColaborador(codigo: string) {
+  return get<EvaluacionDesempeno[]>(`/desempeno/colaboradores/${codigo}/historial`);
+}
+export function fetchMisEvaluacionesDesempeno() {
+  return get<EvaluacionDesempeno[]>("/desempeno/mis-evaluaciones");
 }
 /* Colaboradores · alta manual e importación básica (Desempeño v2 · Fase 4) */
 export interface AltaColaboradorDatos {

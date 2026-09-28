@@ -112,6 +112,8 @@ with TestClient(app) as client:
     check(r.status_code == 400 and "No aplica" in r.json()["detail"], "«No aplica» sin motivo no deja completar")
     todo[3]["motivo_no_aplica"] = "El proyecto aún no tiene encuesta de satisfacción."
     r = client.patch(f"/desempeno/evaluaciones/{EV1}", json={"resultados": todo, "completar": True})
+    check(r.status_code == 400 and "conclusión" in r.json()["detail"], "sin la conclusión del evaluador no se completa (Fase 5)")
+    r = client.patch(f"/desempeno/evaluaciones/{EV1}", json={"resultados": todo, "conclusion": "Cumple lo esperado del periodo.", "completar": True})
     cumpl = {d["criterio_id"]: d for d in r.json()["cumplimiento"]}
     check(r.status_code == 200 and r.json()["estado"] == "completada", "con todo lo aplicable capturado se completa")
     check(cumpl[ids["Proyectos entregados a tiempo"]]["cumplimiento"] == 100.0, "medible «mayor es mejor» con tope 100 % (130/100 → 100 %)")
@@ -287,5 +289,142 @@ with TestClient(app) as client:
     check(evs3["COL-2"]["evaluadorUsuarioId"] is None and evs3["COL-2"]["evaluador"] == admin.nombre, "sin jefe no se bloquea: evalúa quien la agregó hasta que RH elija")
     check(evs3[SANDRA]["area"] == "PMO" and evs3[SANDRA]["jefe"] == "Directora PMO" and evs3[SANDRA]["empresa"],
           "Desempeño toma empresa, área, puesto y jefe de la base de Colaboradores")
+
+    # ================================================================
+    print("\n--- Fase 5 + PRUEBA FUNCIONAL DE PUNTA A PUNTA (Sandra) ---")
+    from app.models import AsignacionCurso, Curso  # noqa: E402
+
+    curso = Curso(codigo="CUR-900", titulo="Planeación de proyectos", estado="Publicado", cuenta_id=cuenta.id)
+    db.add(curso)
+    db.commit()
+    # 1. importar a Sandra como colaboradora (su jefa tiene usuario en el sistema)
+    csv = "nombre,correo,telefono,puesto,area,jefe\nSandra Gómez,sandra.gomez@empresa.mx,,Gerente de proyectos,PMO,jefa.pmo@empresa.mx\n"
+    vp = client.post("/colaboradores/importar/vista-previa", files={"archivo": ("sandra.csv", csv.encode(), "text/csv")}).json()
+    r = client.post("/colaboradores/importar/confirmar", json={"filas": [f["datos"] for f in vp["filas"]]})
+    SG = r.json()["creados"][0]["id"]
+    check(r.json()["creados"][0]["jefeDirecto"] == "Directora PMO", "1. Sandra importada como colaboradora, con su jefa")
+    # 2-3. evaluación para gerentes de proyectos con propuesta de IA; RH captura las metas al revisar
+    prop = client.post("/desempeno/criterios/generar", json={"puesto": "Gerentes de proyectos", "periodo": "2029-S1"}).json()["criterios"]
+    for c in prop:
+        if c["tipo"] == "medible":
+            c["meta"] = 10 if c["sentido"] == "menor_es_mejor" else 95
+    r = client.post("/desempeno/ciclos", json={"nombre": "Gerentes de proyectos 2029-S1", "periodo": "2029-S1", "equipo": "Gerentes de proyectos",
+                                               "criterios": prop, "origen_criterios": "ia"})
+    E2E = r.json()["id"]
+    check(r.status_code == 201 and r.json()["origenCriterios"] == "ia", "2-3. evaluación creada con la propuesta de IA (metas capturadas por RH)")
+    # 4. guardar plantilla
+    PL2 = client.post(f"/desempeno/ciclos/{E2E}/plantilla", json={"nombre": "Gerentes de proyectos"}).json()["id"]
+    check(bool(PL2), "4. plantilla guardada")
+    # 5. agregar a Sandra con su evaluador (propuesto: su jefa)
+    ev = client.post(f"/desempeno/ciclos/{E2E}/participantes", json={"colaborador_ids": [SG]}).json()["evaluaciones"][0]
+    EVSG = ev["id"]
+    check(ev["evaluadorUsuarioId"] == evaluadora.id, "5. Sandra agregada con su evaluadora (su jefa)")
+    client.post(f"/desempeno/ciclos/{E2E}/iniciar")
+    crits = {c["id"]: c for c in client.get(f"/desempeno/evaluaciones/{EVSG}").json()["criterios"]}
+    # permisos del evaluador: otra persona (no admin) no captura esta evaluación
+    intruso = Usuario(correo="intruso@empresa.mx", nombre="Otro usuario", rol="Usuario", hash_pass="x", activo=True)
+    db.add(intruso)
+    db.flush()
+    db.add(UsuarioCuenta(usuario_id=intruso.id, cuenta_id=cuenta.id))
+    db.commit()
+    app.dependency_overrides[usuario_decisor] = lambda: intruso
+    check(client.patch(f"/desempeno/evaluaciones/{EVSG}", json={"resultados": []}).status_code == 403, "solo su evaluador (o un administrador) captura la evaluación")
+    ev_user = db.get(Usuario, evaluadora.id)
+    app.dependency_overrides[usuario_decisor] = lambda: ev_user
+    # 6. guardar resultados vacíos → sigue Pendiente
+    r = client.patch(f"/desempeno/evaluaciones/{EVSG}", json={"resultados": [{"criterio_id": i} for i in crits]})
+    check(r.status_code == 200 and r.json()["estado"] == "pendiente", "6. la evaluadora guarda un borrador vacío: Sandra sigue «Pendiente»")
+    # 7. registrar avance (nota opcional con fecha, para un criterio)
+    primero = next(iter(crits))
+    r = client.post(f"/desempeno/evaluaciones/{EVSG}/notas", json={"texto": "Buen arranque del proyecto Alfa.", "criterio_id": primero})
+    nota = r.json()["notas"][0]
+    check(nota["fecha"] and nota["criterio"] == crits[primero]["nombre"] and nota["autor"] == "Jefa PMO", "7. nota de avance con fecha, criterio y autor")
+    # cambio a una meta DESPUÉS de iniciar: queda anterior, nuevo, motivo, fecha y usuario
+    app.dependency_overrides[usuario_decisor] = lambda: admin
+    med_id = next(i for i, c in crits.items() if c["tipo"] == "medible" and c["sentido"] == "mayor_es_mejor")
+    check(client.patch(f"/desempeno/ciclos/{E2E}/criterios/{med_id}", json={"meta": 90}).status_code == 400, "un cambio después de iniciar exige motivo")
+    r = client.patch(f"/desempeno/ciclos/{E2E}/criterios/{med_id}", json={"meta": 90, "motivo": "Ajuste de alcance del proyecto"})
+    h = r.json()["historialCambios"][-1]
+    check(h["campo"] == "meta" and h["anterior"] == 95 and h["nuevo"] == 90 and h["motivo"] and h["usuario"] == admin.nombre and h["fecha"],
+          "cambio de meta con valor anterior, nuevo, motivo, fecha y usuario")
+    check(client.get(f"/desempeno/evaluaciones/{EVSG}").json()["historialCambios"][-1]["nuevo"] == 90, "la persona ve el historial de sus criterios")
+    # la propia colaboradora consulta sus criterios (acceso por el mismo correo)
+    sandra_user = Usuario(correo="sandra.gomez@empresa.mx", nombre="Sandra Gómez", rol="Usuario", hash_pass="x", activo=True)
+    db.add(sandra_user)
+    db.flush()
+    db.add(UsuarioCuenta(usuario_id=sandra_user.id, cuenta_id=cuenta.id))
+    db.commit()
+    app.dependency_overrides[usuario_actual] = lambda: sandra_user
+    mias = client.get("/desempeno/mis-evaluaciones").json()
+    check(len(mias) == 1 and mias[0]["id"] == EVSG and mias[0]["criterios"] and "propuestaIa" not in mias[0], "la colaboradora consulta SUS criterios (solo lectura)")
+    app.dependency_overrides[usuario_actual] = lambda: admin
+    # 8. capturar y calcular resultados
+    app.dependency_overrides[usuario_decisor] = lambda: ev_user
+    resultados = []
+    for i, c in crits.items():
+        if c["tipo"] == "medible":
+            resultados.append({"criterio_id": i, "real": 40 if c["sentido"] == "mayor_es_mejor" else 5})  # 40/90 → brecha clara
+        else:
+            resultados.append({"criterio_id": i, "valoracion": 5})
+    r = client.patch(f"/desempeno/evaluaciones/{EVSG}", json={"resultados": resultados})
+    check(r.json()["estado"] == "en_proceso" and r.json()["calificacion"] is not None and not r.json()["faltantes"], "8. resultados capturados y calculados")
+    prop_ia = client.post(f"/desempeno/evaluaciones/{EVSG}/propuesta-ia").json()
+    check(prop_ia["resumen"] and prop_ia["brechas"] and all(not b["confirmada"] for b in prop_ia["brechas"]),
+          "la IA propone resumen, fortalezas y brechas SOLO con lo capturado; nada queda confirmado solo")
+    check(client.get(f"/desempeno/ciclos/{E2E}/resultados").json()["brechas"] == [], "una propuesta no confirmada no cuenta como brecha")
+    # 9. confirmar una brecha y asignar capacitación
+    sin_confirmar = client.patch(f"/desempeno/evaluaciones/{EVSG}", json={"brechas": [prop_ia["brechas"][0]]}).json()["brechas"][0]
+    app.dependency_overrides[usuario_decisor] = lambda: admin
+    check(client.post(f"/desempeno/evaluaciones/{EVSG}/acciones", json={"brecha_id": sin_confirmar["id"], "tipo": "accion"}).status_code == 409,
+          "una brecha NO confirmada no genera acciones")
+    app.dependency_overrides[usuario_decisor] = lambda: ev_user
+    b = {**prop_ia["brechas"][0], "id": sin_confirmar["id"], "confirmada": True}
+    r = client.patch(f"/desempeno/evaluaciones/{EVSG}", json={"brechas": [b], "fortalezas": prop_ia["fortalezas"][:1], "resumen": prop_ia["resumen"]})
+    BID = r.json()["brechas"][0]["id"]
+    check(r.json()["brechas"][0]["confirmada"], "9a. la evaluadora confirma una brecha")
+    app.dependency_overrides[usuario_decisor] = lambda: admin
+    r = client.post(f"/desempeno/evaluaciones/{EVSG}/acciones", json={"brecha_id": BID, "tipo": "curso", "curso_codigo": "CUR-900", "responsable": "Jefa PMO", "fecha_compromiso": "2029-05-30"})
+    acc = r.json()
+    check(r.status_code == 201 and acc["curso"]["id"] == "CUR-900" and acc["estado"] == "abierta" and acc["fechaCompromiso"].startswith("2029-05-30"),
+          "9b. la brecha genera una acción de capacitación con responsable, fecha y estado")
+    db.expire_all()
+    asig = db.query(AsignacionCurso).filter(AsignacionCurso.colaborador_id == db.query(Colaborador).filter_by(codigo=SG).one().id).first()
+    check(asig is not None and asig.curso_id == curso.id, "9c. la asignación aparece automáticamente en Capacitación")
+    asig.estado = "completado"
+    db.commit()
+    check(client.get(f"/desempeno/evaluaciones/{EVSG}/acciones").json()[0]["estado"] == "completada", "la acción sigue el estado del curso en Capacitación")
+    # completar y cerrar
+    app.dependency_overrides[usuario_decisor] = lambda: ev_user
+    r = client.patch(f"/desempeno/evaluaciones/{EVSG}", json={"conclusion": "Buen liderazgo; reforzar planeación.", "completar": True})
+    check(r.json()["estado"] == "completada", "Sandra completada (todos los criterios + conclusión)")
+    app.dependency_overrides[usuario_decisor] = lambda: admin
+    tab = client.get("/desempeno/tablero").json()
+    check({"pendientes", "completadas", "promedio", "brechasConfirmadas", "accionesAbiertas"} <= set(tab) and tab["brechasConfirmadas"] >= 1,
+          f"tablero: pendientes {tab['pendientes']}, completadas {tab['completadas']}, promedio {tab['promedio']}, brechas {tab['brechasConfirmadas']}, acciones abiertas {tab['accionesAbiertas']}")
+    r = client.post(f"/desempeno/ciclos/{E2E}/cerrar", json={})
+    check(r.json()["estado"] == "cerrada", "10. evaluación cerrada")
+    # 11. historial en la ficha de Sandra
+    hist = client.get(f"/desempeno/colaboradores/{SG}/historial").json()
+    check(len(hist) == 1 and hist[0]["periodo"] == "2029-S1" and hist[0]["calificacion"] is not None and hist[0]["acciones"] and hist[0]["estadoEvaluacion"] == "cerrada",
+          "11. la ficha de Sandra muestra el periodo, su resultado y sus acciones")
+    # 12. reutilizar la plantilla en otro periodo
+    pl = client.get(f"/desempeno/plantillas/{PL2}").json()
+    r = client.post("/desempeno/ciclos", json={"nombre": "Gerentes de proyectos 2029-S2", "periodo": "2029-S2", "equipo": "Gerentes de proyectos",
+                                               "criterios": pl["listaCriterios"], "origen_criterios": "plantilla", "plantilla_id": PL2})
+    check(r.status_code == 201 and len(r.json()["criterios"]) == len(pl["listaCriterios"]) and r.json()["participantes"] == 0,
+          "12. la plantilla se reutiliza en otro periodo (sin personas ni resultados)")
+    fort = client.get(f"/desempeno/ciclos/{E2E}/resultados").json()["fortalezas"]
+    check(all(f["tema"] in prop_ia["fortalezas"][:1] for f in fort), "las fortalezas son SOLO las confirmadas (sin regla automática de 85 %)")
+
+    print("\n--- Flujo rápido: sin plantillas, Excel, pesos ni notas ---")
+    r = client.post("/desempeno/ciclos", json={"nombre": "Rápida", "equipo": "Gerentes de proyectos",
+                                               "criterios": [{"tipo": "descriptivo", "nombre": "Liderazgo", "esperado": "Guía a su equipo"}]})
+    RAP = r.json()["id"]
+    evr = client.post(f"/desempeno/ciclos/{RAP}/participantes", json={"colaborador_ids": ["COL-2"]}).json()["evaluaciones"][0]["id"]
+    client.post(f"/desempeno/ciclos/{RAP}/iniciar")
+    cid = client.get(f"/desempeno/ciclos/{RAP}").json()["criterios"][0]["id"]
+    r = client.patch(f"/desempeno/evaluaciones/{evr}", json={"resultados": [{"criterio_id": cid, "valoracion": 5}], "conclusion": "Excelente periodo.", "completar": True})
+    check(r.json()["estado"] == "completada" and r.json()["calificacion"] == 100.0 and r.json()["brechas"] == [], "una buena evaluación se completa SIN inventar brechas")
+    check(client.post(f"/desempeno/ciclos/{RAP}/cerrar", json={}).json()["estado"] == "cerrada", "flujo rápido completo: crear → agregar → iniciar → evaluar → cerrar")
 
 print(f"\n🎉 Desempeño v2 verificado: {OK} comprobaciones OK.")

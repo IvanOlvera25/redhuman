@@ -18,6 +18,7 @@ import { usePuedeDecidir } from "@/components/sesion";
 import { AsistenteCrearEvaluacion } from "@/components/dashboard/desempeno/asistente-crear";
 import { VistaPlantillasDesempeno } from "@/components/dashboard/desempeno/plantillas-desempeno";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
+import { AccionesBrechas, CierreEvaluacion, HistorialCambios, HistorialDesempeno, NotasAvance, type ValorCierre } from "@/components/dashboard/desempeno/cierre-evaluacion";
 import { EditorCriterios, criteriosParaGuardar } from "@/components/dashboard/desempeno/editor-criterios";
 import { SelectorParticipantes, type SeleccionParticipantes } from "@/components/dashboard/desempeno/selector-participantes";
 import { usePolling } from "@/lib/use-polling";
@@ -25,6 +26,10 @@ import { cn } from "@/lib/utils";
 import {
   agregarParticipantesDesempeno,
   ajustarCriterioDesempeno,
+  cambiarCriterioCicloDesempeno,
+  fetchCicloDesempeno,
+  fetchMisEvaluacionesDesempeno,
+  fetchTableroDesempeno,
   cerrarCicloDesempeno,
   duplicarCicloDesempeno,
   editarCicloDesempeno,
@@ -39,6 +44,7 @@ import {
   type CriterioDesempeno,
   type EvaluacionDesempeno,
   type ResultadoDesempeno,
+  type TableroDesempeno,
   type ResultadosCiclo,
 } from "@/lib/api";
 
@@ -58,9 +64,13 @@ export default function Desempeno() {
   const [otra, setOtra] = useState<SeleccionParticipantes["paraOtraEvaluacion"]>([]);
   const [verPlantillas, setVerPlantillas] = useState(false);
 
+  const [tablero, setTablero] = useState<TableroDesempeno | null>(null);
+  const [mias, setMias] = useState<EvaluacionDesempeno[]>([]);
   const recargar = useCallback(async () => {
-    const c = await fetchCiclosDesempeno();
+    const [c, t, m] = await Promise.all([fetchCiclosDesempeno(), fetchTableroDesempeno(), fetchMisEvaluacionesDesempeno()]);
     setCiclos(c ?? []);
+    setTablero(t);
+    setMias(m ?? []);
   }, []);
   useEffect(() => {
     void recargar();
@@ -89,6 +99,23 @@ export default function Desempeno() {
       </PageHeader>
 
       {aviso && <AvisoLinea aviso={aviso} onCerrar={() => setAviso(null)} />}
+      {tablero && (
+        <div className="mt-6 grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          <Kpi etiqueta="Pendientes" valor={String(tablero.pendientes)} pie="personas sin completar" icono={<ClipboardList className="h-4 w-4" />} />
+          <Kpi etiqueta="Completadas" valor={String(tablero.completadas)} pie="evaluaciones de personas" icono={<CheckCircle2 className="h-4 w-4" />} />
+          <Kpi etiqueta="Promedio" valor={tablero.promedio === null ? "—" : `${tablero.promedio}%`} pie="solo resultados válidos" icono={<TrendingUp className="h-4 w-4" />} />
+          <Kpi etiqueta="Brechas confirmadas" valor={String(tablero.brechasConfirmadas)} pie="por los evaluadores" icono={<Target className="h-4 w-4" />} />
+          <Kpi etiqueta="Acciones abiertas" valor={String(tablero.accionesAbiertas)} pie="de brechas confirmadas" icono={<Trophy className="h-4 w-4" />} />
+        </div>
+      )}
+      {mias.length > 0 && (
+        <Card className="mt-4 p-5">
+          <Eyebrow>Mis evaluaciones</Eyebrow>
+          <p className="mb-3 text-sm text-ink-3">Tus criterios y resultados (solo lectura).</p>
+          <HistorialDesempeno evaluaciones={mias} vacio="" />
+        </Card>
+      )}
+
       {otra.length > 0 && (
         <Card className="mt-4 flex flex-wrap items-center justify-between gap-3 border-warn/30 bg-warn-soft/30 p-4 text-sm">
           <span>Quedó pendiente crear otra evaluación para: {otra.map((o) => `${o.nombre} (${o.puesto || "sin puesto"})`).join(", ")}.</span>
@@ -200,6 +227,11 @@ function DetalleCiclo({ codigo, onVolver, onAbrir, puedeDecidir }: { codigo: str
   const [confirmarCierre, setConfirmarCierre] = useState(false);
   const [editarCriterios, setEditarCriterios] = useState(false);
   const [reutilizar, setReutilizar] = useState<"" | "plantilla" | "duplicar">("");
+  const [cambiarCriterio, setCambiarCriterio] = useState(false);
+  const [historialCiclo, setHistorialCiclo] = useState<CicloDesempeno["historialCambios"]>([]);
+  useEffect(() => {
+    fetchCicloDesempeno(codigo).then((d) => setHistorialCiclo(d?.historialCambios ?? []));
+  }, [codigo, datos?.ciclo.estado]);
 
   async function iniciarCiclo() {
     setOcupado("iniciar");
@@ -243,6 +275,7 @@ function DetalleCiclo({ codigo, onVolver, onAbrir, puedeDecidir }: { codigo: str
             acciones={[
               { etiqueta: "Guardar como plantilla", onClick: () => setReutilizar("plantilla") },
               { etiqueta: "Duplicar evaluación (otro periodo)", onClick: () => setReutilizar("duplicar") },
+              ...(c.estado === "en_curso" ? [{ etiqueta: "Cambiar un criterio o meta (con motivo)", onClick: () => setCambiarCriterio(true) }] : []),
             ]}
           />
         )}
@@ -272,7 +305,7 @@ function DetalleCiclo({ codigo, onVolver, onAbrir, puedeDecidir }: { codigo: str
         <Kpi etiqueta="Colaboradores" valor={String(datos.total)} pie={`${datos.completadas} completadas`} icono={<Users className="h-4 w-4" />} />
         <Kpi etiqueta="Avance" valor={`${datos.avance}%`} pie="completadas ÷ incluidas" icono={<ClipboardList className="h-4 w-4" />} />
         <Kpi etiqueta="Promedio" valor={datos.promedio === null ? "—" : `${datos.promedio}%`} pie="solo resultados válidos" icono={<TrendingUp className="h-4 w-4" />} />
-        <Kpi etiqueta="Brechas detectadas" valor={String(datos.brechas.length)} pie="temas por reforzar" icono={<Target className="h-4 w-4" />} />
+        <Kpi etiqueta="Brechas confirmadas" valor={String(datos.brechas.length)} pie={`${datos.accionesAbiertas ?? 0} acción(es) abierta(s)`} icono={<Target className="h-4 w-4" />} />
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-3">
@@ -376,13 +409,13 @@ function DetalleCiclo({ codigo, onVolver, onAbrir, puedeDecidir }: { codigo: str
           <Card className="p-5">
             <Eyebrow><span className="inline-flex items-center gap-1.5"><Trophy className="h-3.5 w-3.5" /> Fortalezas del equipo</span></Eyebrow>
             {datos.fortalezas.length === 0 ? (
-              <p className="mt-3 text-sm text-ink-3">Aparecen solas: son los objetivos y KPIs con 85% de logro o más.</p>
+              <p className="mt-3 text-sm text-ink-3">Las confirma cada evaluador al cerrar (no se generan solas por un umbral).</p>
             ) : (
               <ul className="mt-3 space-y-2">
                 {datos.fortalezas.map((f) => (
                   <li key={f.tema} className="flex items-center justify-between gap-2 rounded-xl bg-good-soft/50 px-3 py-2 text-sm">
                     <span className="min-w-0 truncate text-ink">{f.tema}</span>
-                    <span className="shrink-0 font-mono text-xs font-bold text-good tabular">{f.promedio}% · {f.personas}</span>
+                    <span className="shrink-0 font-mono text-xs font-bold text-good tabular">{f.personas} {f.personas === 1 ? "persona" : "personas"}</span>
                   </li>
                 ))}
               </ul>
@@ -390,6 +423,18 @@ function DetalleCiclo({ codigo, onVolver, onAbrir, puedeDecidir }: { codigo: str
           </Card>
         </div>
       </div>
+
+      {historialCiclo && historialCiclo.length > 0 && (
+        <div className="mt-4"><HistorialCambios cambios={historialCiclo} /></div>
+      )}
+
+      {cambiarCriterio && (
+        <ModalCambiarCriterio
+          ciclo={c}
+          onClose={() => setCambiarCriterio(false)}
+          onListo={(h) => { setCambiarCriterio(false); setHistorialCiclo(h); setAviso({ tono: "ok", texto: "Criterio actualizado; el cambio quedó en el historial." }); void recargar(); }}
+        />
+      )}
 
       {reutilizar && (
         <ModalReutilizar
@@ -439,11 +484,54 @@ function DetalleCiclo({ codigo, onVolver, onAbrir, puedeDecidir }: { codigo: str
           evaluacion={evaluando}
           ciclo={c}
           soloLectura={evaluando.estado === "completada" || c.estado !== "en_curso" || !puedeDecidir}
+          puedeAcciones={puedeDecidir}
           onClose={() => setEvaluando(null)}
           onGuardado={(msg) => { setEvaluando(null); setAviso({ tono: "ok", texto: msg }); void recargar(); }}
         />
       )}
     </div>
+  );
+}
+
+/* ---------- Cambiar criterio o meta con la evaluación en curso (queda en el historial) ---------- */
+
+function ModalCambiarCriterio({ ciclo, onClose, onListo }: { ciclo: CicloDesempeno; onClose: () => void; onListo: (h: CicloDesempeno["historialCambios"]) => void }) {
+  const [id, setId] = useState(ciclo.criterios[0]?.id ?? "");
+  const criterio = ciclo.criterios.find((x) => x.id === id);
+  const [valor, setValor] = useState("");
+  const [motivo, setMotivo] = useState("");
+  const [error, setError] = useState("");
+
+  async function guardar() {
+    if (!criterio) return;
+    const r = await cambiarCriterioCicloDesempeno(ciclo.id, criterio.id, {
+      motivo, ...(criterio.tipo === "medible" ? { meta: valor === "" ? null : Number(valor) } : { esperado: valor }),
+    });
+    if (!r.ok) return setError(r.error);
+    onListo(r.data.historialCambios ?? []);
+  }
+
+  return (
+    <ModalMarco titulo="Cambiar un criterio o meta" subtitulo="La evaluación ya inició: se guarda el valor anterior, el nuevo, el motivo, la fecha y quién lo cambió." onClose={onClose}>
+      <div className="grid gap-3">
+        <Campo label="Criterio">
+          <select value={id} onChange={(e) => { setId(e.target.value); setValor(""); }} className={inputCls}>
+            {ciclo.criterios.map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+          </select>
+        </Campo>
+        {criterio && (
+          <Campo label={criterio.tipo === "medible" ? `Nueva meta (hoy: ${criterio.meta ?? "sin meta"}${criterio.unidad ? ` ${criterio.unidad}` : ""})` : "Qué se espera observar (nuevo)"}>
+            <input type={criterio.tipo === "medible" ? "number" : "text"} value={valor} onChange={(e) => setValor(e.target.value)} className={inputCls} />
+          </Campo>
+        )}
+        <Campo label="Motivo (obligatorio)"><input value={motivo} onChange={(e) => setMotivo(e.target.value)} className={inputCls} /></Campo>
+      </div>
+      {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
+      <div className="mt-5 flex justify-end gap-2">
+        <Button variant="outline" size="sm" onClick={onClose}>Cancelar</Button>
+        <Button size="sm" onClick={guardar} disabled={!valor.trim() || !motivo.trim()}><CheckCircle2 className="h-4 w-4" /> Guardar cambio</Button>
+      </div>
+    </ModalMarco>
   );
 }
 
@@ -575,9 +663,14 @@ function cumplimientoLocal(c: CriterioDesempeno, r: ResultadoDesempeno | undefin
   return Math.max(0, Math.min(100, (real / meta) * 100));
 }
 
-function ModalEvaluar({ evaluacion, ciclo, soloLectura, onClose, onGuardado }: {
-  evaluacion: EvaluacionDesempeno; ciclo: CicloDesempeno; soloLectura: boolean; onClose: () => void; onGuardado: (msg: string) => void;
+function ModalEvaluar({ evaluacion: inicial, ciclo, soloLectura, puedeAcciones, onClose, onGuardado }: {
+  evaluacion: EvaluacionDesempeno; ciclo: CicloDesempeno; soloLectura: boolean; puedeAcciones: boolean; onClose: () => void; onGuardado: (msg: string) => void;
 }) {
+  const [evaluacion, setEvaluacion] = useState(inicial);
+  const [cierre, setCierre] = useState<ValorCierre>({
+    resumen: inicial.resumen ?? "", fortalezas: inicial.fortalezas ?? [], brechas: inicial.brechas ?? [], conclusion: inicial.conclusion ?? "",
+  });
+  const [guardado, setGuardado] = useState("");
   const [criterios, setCriterios] = useState<CriterioDesempeno[]>(evaluacion.criterios ?? ciclo.criterios);
   const [ajustando, setAjustando] = useState<{ id: string; valor: string; motivo: string } | null>(null);
 
@@ -599,8 +692,6 @@ function ModalEvaluar({ evaluacion, ciclo, soloLectura, onClose, onGuardado }: {
     for (const r of evaluacion.resultados ?? []) if (r.criterio_id) inicial[r.criterio_id] = r;
     return inicial;
   });
-  const [brechas, setBrechas] = useState(evaluacion.brechas.length ? evaluacion.brechas : [{ tema: "", brecha: "", accion_sugerida: "" }]);
-  const [comentarios, setComentarios] = useState(evaluacion.comentarios ?? "");
   const [ocupado, setOcupado] = useState("");
   const [error, setError] = useState("");
 
@@ -623,15 +714,21 @@ function ModalEvaluar({ evaluacion, ciclo, soloLectura, onClose, onGuardado }: {
     setError("");
     const r = await guardarEvaluacionDesempeno(evaluacion.id, {
       resultados: criterios.map((c) => res[c.id] ?? { criterio_id: c.id }),
-      brechas: brechas.filter((b) => (b.tema ?? "").trim()),
-      comentarios,
+      brechas: cierre.brechas.filter((b) => (b.tema ?? "").trim()),
+      fortalezas: cierre.fortalezas,
+      resumen: cierre.resumen,
+      conclusion: cierre.conclusion,
       completar,
     });
     setOcupado("");
     if (!r.ok) return setError(r.error);
-    onGuardado(completar
-      ? `Evaluación de ${evaluacion.colaborador} completada${r.data.calificacion !== null ? ` · ${r.data.calificacion}%` : ""}.`
-      : `Borrador guardado · ${evaluacion.colaborador} queda «${ESTADO_PERSONA[r.data.estado]}».`);
+    if (completar) {
+      return onGuardado(`Evaluación de ${evaluacion.colaborador} completada${r.data.calificacion !== null ? ` · ${r.data.calificacion}%` : ""}.`);
+    }
+    // borrador: el modal sigue abierto (las brechas confirmadas ya guardadas habilitan sus acciones)
+    setEvaluacion(r.data);
+    setCierre({ resumen: r.data.resumen ?? "", fortalezas: r.data.fortalezas ?? [], brechas: r.data.brechas ?? [], conclusion: r.data.conclusion ?? "" });
+    setGuardado(`Borrador guardado · ${evaluacion.colaborador} queda «${ESTADO_PERSONA[r.data.estado]}».`);
   }
 
   return (
@@ -755,26 +852,13 @@ function ModalEvaluar({ evaluacion, ciclo, soloLectura, onClose, onGuardado }: {
         <span className="font-display text-2xl font-bold tabular">{preview === null ? "—" : `${preview}%`}</span>
       </div>
 
-      {!soloLectura && (
-        <>
-          <ListaEditable
-            titulo="Brechas y acciones"
-            filas={brechas}
-            onCambio={setBrechas}
-            nuevo={() => ({ tema: "", brecha: "", accion_sugerida: "" })}
-            render={(b, setB) => (
-              <>
-                <input value={b.tema ?? ""} onChange={(e) => setB({ ...b, tema: e.target.value })} placeholder="Tema (ej. Atención a cliente)" className={cn(inputCls, "sm:col-span-2")} />
-                <input value={b.brecha ?? ""} onChange={(e) => setB({ ...b, brecha: e.target.value })} placeholder="Qué falta" className={cn(inputCls, "sm:col-span-1")} />
-                <input value={b.accion_sugerida ?? ""} onChange={(e) => setB({ ...b, accion_sugerida: e.target.value })} placeholder="Acción sugerida" className={cn(inputCls, "sm:col-span-2")} />
-              </>
-            )}
-          />
-          <Campo label="Comentarios de la evaluación">
-            <textarea value={comentarios} onChange={(e) => setComentarios(e.target.value)} rows={3} placeholder="Notas para la conversación de retroalimentación…" className="w-full rounded-xl border border-border-soft bg-surface px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
-          </Campo>
-        </>
-      )}
+      <div className="mt-5 flex flex-col gap-5 border-t border-border-faint pt-5">
+        <NotasAvance evaluacion={evaluacion} criterios={criterios} soloLectura={soloLectura} onActualizada={setEvaluacion} />
+        <HistorialCambios cambios={evaluacion.historialCambios ?? []} />
+        <CierreEvaluacion evaluacion={evaluacion} valor={cierre} onCambio={setCierre} soloLectura={soloLectura} />
+        <AccionesBrechas evaluacion={evaluacion} brechasGuardadas={evaluacion.brechas ?? []} puedeEditar={puedeAcciones} />
+      </div>
+      {guardado && <p className="mt-3 text-sm font-semibold text-good">{guardado}</p>}
 
       {error && <p className="mt-3 whitespace-pre-line text-sm font-semibold text-bad">{error}</p>}
       <div className="mt-5 flex flex-wrap justify-end gap-2">
@@ -791,7 +875,7 @@ function ModalEvaluar({ evaluacion, ciclo, soloLectura, onClose, onGuardado }: {
         )}
       </div>
       <p className="mt-2 text-[11px] text-ink-3">
-        Solo se completa con todos los criterios aplicables capturados. La evaluación la firma una persona: Red Human solo calcula.
+        Se completa con todos los criterios aplicables capturados y la conclusión. La evaluación la firma una persona: Red Human solo calcula y propone.
       </p>
     </ModalMarco>
   );
