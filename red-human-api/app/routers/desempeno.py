@@ -15,8 +15,10 @@ Flujo:
 Todo cálculo sale de `services.desempeno_calculo` (vacío ≠ cero; avance = completadas ÷ incluidas).
 """
 
+import re
+import unicodedata
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -32,6 +34,7 @@ from ..models import (
     Cuenta,
     EvaluacionDesempeno,
     Usuario,
+    UsuarioCuenta,
     normalizar_estado_ciclo,
     normalizar_estado_persona,
     registrar,
@@ -86,6 +89,26 @@ def generar_plan(datos: GenerarPlanIn, _: Usuario = Depends(usuario_decisor), __
         "kpis": [k.model_dump() for k in plan.kpis],
         "generadoConIa": con_ia,
     }
+
+
+class GenerarCriteriosIn(BaseModel):
+    puesto: str          # puesto o equipo que se evalúa (obligatorio: la IA lo recibe ANTES de proponer)
+    periodo: str = ""
+    contexto: str = ""
+
+
+@router.post("/criterios/generar")
+def generar_criterios(datos: GenerarCriteriosIn, _: Usuario = Depends(usuario_decisor), __: Cuenta = Depends(cuenta_actual)):
+    """Paso 3 «Proponer con Red Human»: criterios medibles y descriptivos para el puesto/equipo. Los
+    medibles salen SIN meta (la IA nunca inventa cifras). NO guarda nada: RH revisa en el paso 4."""
+    if not datos.puesto.strip():
+        raise HTTPException(400, "Indica el puesto o equipo antes de pedir la propuesta.")
+    prop, con_ia = ia.criterios_desempeno(datos.puesto, datos.periodo, datos.contexto)
+    crudos = [{**c.model_dump(), "meta": None} for c in prop.criterios]
+    for c in crudos:
+        if c["tipo"] == "descriptivo" and len(c.get("escala") or []) != 5:
+            c["escala"] = []  # la normalización pone la escala por defecto
+    return {"criterios": _criterios(crudos), "generadoConIa": con_ia}
 
 
 class CicloIn(BaseModel):
@@ -249,7 +272,76 @@ def cerrar(codigo: str, datos: CerrarIn, db: Session = Depends(get_db), u: Usuar
 
 class ParticipantesIn(BaseModel):
     colaborador_ids: List[str] = []  # códigos COL-#### del roster
-    evaluador: str = ""              # nombre del evaluador (default: quien lo asigna)
+    evaluador: str = ""              # nombre del evaluador (compatibilidad; default: quien lo asigna)
+    evaluador_usuario_id: Optional[int] = None      # evaluador para todos los agregados
+    evaluadores: Dict[str, Optional[int]] = {}      # {COL-####: usuario_id} evaluador por persona
+
+
+def _palabras_puesto(texto: str) -> set:
+    """«Gerentes de Proyectos» ≈ «Gerente de proyecto»: minúsculas, sin acentos ni plurales simples."""
+    plano = unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode().lower()
+    palabras = set()
+    for w in re.findall(r"[a-z0-9]+", plano):
+        if len(w) <= 2 or w in ("del", "los", "las"):
+            continue
+        if len(w) > 4 and w.endswith("s"):
+            w = w[:-1]
+        if len(w) > 4 and w.endswith("e"):
+            w = w[:-1]  # «gerentes»/«gerente» → «gerent», «profesores» → «profesor»
+        palabras.add(w)
+    return palabras
+
+
+def mismo_puesto(equipo: str, puesto: str) -> bool:
+    a, b = _palabras_puesto(equipo), _palabras_puesto(puesto)
+    if not a or not b:
+        return True  # sin datos no se advierte
+    return a <= b or b <= a
+
+
+def _usuario_de_cuenta(db: Session, usuario_id: Optional[int], cuenta_id: int) -> Optional[Usuario]:
+    if not usuario_id:
+        return None
+    ok = db.query(UsuarioCuenta).filter(UsuarioCuenta.usuario_id == usuario_id, UsuarioCuenta.cuenta_id == cuenta_id).first()
+    u = db.get(Usuario, usuario_id) if ok else None
+    if not u or not u.activo:
+        raise HTTPException(400, "El evaluador elegido no es un usuario activo de esta Cuenta.")
+    return u
+
+
+@router.get("/evaluadores")
+def evaluadores(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Usuarios de la Cuenta que pueden evaluar (entran al sistema y guardan borradores)."""
+    filas = (
+        db.query(Usuario).join(UsuarioCuenta, UsuarioCuenta.usuario_id == Usuario.id)
+        .filter(UsuarioCuenta.cuenta_id == cuenta.id, Usuario.activo.is_(True)).order_by(Usuario.nombre).all()
+    )
+    return [{"id": u.id, "nombre": u.nombre, "correo": u.correo, "puesto": u.puesto or ""} for u in filas]
+
+
+class RevisarIn(BaseModel):
+    colaborador_ids: List[str] = []
+
+
+@router.post("/ciclos/{codigo}/participantes/revisar")
+def revisar_participantes(codigo: str, datos: RevisarIn, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Antes de agregar: quiénes tienen un puesto distinto al de la evaluación (podrían necesitar otros
+    criterios). RH decide aplicar los mismos criterios o crear otra evaluación; nunca bloquea."""
+    c = _ciclo(db, codigo, cuenta.id)
+    equipo = c.equipo or c.puesto_objetivo or ""
+    otros = []
+    for cod in datos.colaborador_ids:
+        col = db.query(Colaborador).filter(Colaborador.codigo == cod, Colaborador.cuenta_id == cuenta.id, Colaborador.eliminado_en.is_(None)).first()
+        if col and not mismo_puesto(equipo, col.puesto or ""):
+            otros.append({"id": col.codigo, "nombre": col.nombre, "puesto": col.puesto or ""})
+    return {
+        "equipo": equipo,
+        "otrosPuestos": otros,
+        "advertencia": (
+            f"{len(otros)} persona(s) tienen un puesto distinto a «{equipo}» y podrían necesitar criterios distintos. "
+            "Puedes aplicarles los mismos criterios o crear otra evaluación para su puesto."
+        ) if otros else "",
+    }
 
 
 @router.post("/ciclos/{codigo}/participantes", status_code=201)
@@ -274,9 +366,11 @@ def agregar_participantes(codigo: str, datos: ParticipantesIn, db: Session = Dep
         if prev:
             existentes.append(prev)
             continue
+        ev_u = _usuario_de_cuenta(db, datos.evaluadores.get(cod) or datos.evaluador_usuario_id, cuenta.id)
         e = EvaluacionDesempeno(
             codigo="TMP", cuenta_id=cuenta.id, ciclo_id=c.id, colaborador_id=col.id,
-            evaluador=(datos.evaluador.strip() or u.nombre), estado="pendiente",
+            evaluador=(ev_u.nombre if ev_u else (datos.evaluador.strip() or u.nombre)),
+            evaluador_usuario_id=ev_u.id if ev_u else None, estado="pendiente",
         )
         db.add(e)
         db.flush()
@@ -376,6 +470,69 @@ def evaluar(codigo: str, datos: EvaluarIn, db: Session = Depends(get_db), u: Usu
               {"colaborador": e.colaborador.codigo if e.colaborador else None, "calificacion": e.calificacion, "estado": e.estado, "correo_rh": u.correo})
     db.commit()
     return evaluacion_desempeno_dict(e, detalle=True)
+
+
+class AjusteIn(BaseModel):
+    criterio_id: str
+    motivo: str = ""
+    quitar: bool = False                  # True = vuelve al criterio general
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+    esperado: Optional[str] = None
+    unidad: Optional[str] = None
+    meta: Optional[float] = None
+    sentido: Optional[str] = None
+
+
+CAMPOS_AJUSTABLES = ("nombre", "descripcion", "esperado", "unidad", "meta", "sentido")
+
+
+@router.patch("/evaluaciones/{codigo}/ajustes")
+def ajustar_criterio(codigo: str, datos: AjusteIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Ajuste INDIVIDUAL de un criterio o meta para esta persona (queda marcado como tal, con motivo). Si
+    la evaluación ya inició, el cambio queda en su historial (valor anterior, nuevo, motivo, fecha, usuario)."""
+    e = _evaluacion(db, codigo, cuenta.id)
+    if normalizar_estado_ciclo(e.ciclo.estado) == "cerrada":
+        raise HTTPException(409, "La evaluación está cerrada.")
+    if normalizar_estado_persona(e.estado) == "completada":
+        raise HTTPException(409, "Esta persona ya está completada.")
+    base = {c["id"]: c for c in calc.criterios_de(e.ciclo)}
+    if datos.criterio_id not in base:
+        raise HTTPException(404, "Ese criterio no existe en la evaluación.")
+    if not datos.motivo.strip():
+        raise HTTPException(400, "Indica el motivo del ajuste individual.")
+    ajustes = dict(e.ajustes or {})
+    anterior = {k: v for k, v in {**base[datos.criterio_id], **ajustes.get(datos.criterio_id, {})}.items() if k in CAMPOS_AJUSTABLES}
+    if datos.quitar:
+        ajustes.pop(datos.criterio_id, None)
+        nuevo = {k: v for k, v in base[datos.criterio_id].items() if k in CAMPOS_AJUSTABLES}
+    else:
+        cambios = {k: getattr(datos, k) for k in CAMPOS_AJUSTABLES if getattr(datos, k) is not None}
+        if not cambios:
+            raise HTTPException(400, "No indicaste qué cambiar.")
+        if cambios.get("sentido") and cambios["sentido"] not in ("mayor_es_mejor", "menor_es_mejor"):
+            raise HTTPException(400, "Sentido inválido.")
+        ajustes[datos.criterio_id] = {**ajustes.get(datos.criterio_id, {}), **cambios, "motivo": datos.motivo.strip()}
+        nuevo = {**anterior, **cambios}
+    e.ajustes = ajustes
+    if normalizar_estado_ciclo(e.ciclo.estado) == "en_curso":
+        registrar_cambio(e, u, datos.criterio_id, base[datos.criterio_id]["nombre"], anterior, nuevo, datos.motivo.strip(), "persona")
+    e.calificacion = calc.calcular(e)["calificacion"]
+    registrar(db, u.nombre, "desempeno_ajuste_individual", "desempeno", e.codigo,
+              {"criterio": datos.criterio_id, "quitar": datos.quitar, "motivo": datos.motivo.strip(), "correo_rh": u.correo})
+    db.commit()
+    return evaluacion_desempeno_dict(e, detalle=True)
+
+
+def registrar_cambio(obj, u: Usuario, criterio_id: str, criterio: str, anterior: dict, nuevo: dict, motivo: str, nivel: str) -> None:
+    """Historial de cambios a criterios/metas DESPUÉS de iniciar: un renglón por campo que cambió."""
+    ahora = datetime.now(timezone.utc).isoformat()
+    filas = list(obj.historial_cambios or [])
+    for campo in sorted(set(anterior) | set(nuevo)):
+        if anterior.get(campo) != nuevo.get(campo):
+            filas.append({"fecha": ahora, "usuario": u.nombre, "criterio_id": criterio_id, "criterio": criterio, "campo": campo,
+                          "anterior": anterior.get(campo), "nuevo": nuevo.get(campo), "motivo": motivo, "nivel": nivel})
+    obj.historial_cambios = filas
 
 
 @router.get("/evaluaciones/{codigo}")

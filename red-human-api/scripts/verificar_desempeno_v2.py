@@ -60,6 +60,12 @@ with TestClient(app) as client:
     db.add(UsuarioCuenta(usuario_id=admin.id, cuenta_id=cuenta.id))
     for i, nombre in enumerate(["Sandra López", "Mario Ruiz"], start=1):
         db.add(Colaborador(codigo=f"COL-{i}", cuenta_id=cuenta.id, nombre=nombre, puesto="Gerente de proyectos", area="PMO"))
+    db.add(Colaborador(codigo="COL-3", cuenta_id=cuenta.id, nombre="Ana Datos", puesto="Analista de datos", area="BI"))
+    evaluadora = Usuario(correo="jefa.pmo@empresa.mx", nombre="Jefa PMO", rol="Usuario", hash_pass="x", activo=True)
+    ajeno = Usuario(correo="otro@otra.mx", nombre="Usuario de otra Cuenta", rol="Usuario", hash_pass="x", activo=True)
+    db.add_all([evaluadora, ajeno])
+    db.flush()
+    db.add(UsuarioCuenta(usuario_id=evaluadora.id, cuenta_id=cuenta.id))
     db.commit()
     for dep in (usuario_actual, usuario_decisor):
         app.dependency_overrides[dep] = lambda: admin
@@ -142,5 +148,44 @@ with TestClient(app) as client:
     db.expire_all()
     check(calc.calcular(db.query(EvaluacionDesempeno).filter_by(codigo="EVD-9999").one())["calificacion"] == 82.0,
           "datos previos: logros y pesos capturados se respetan ((90×60 + 70×40)/100 = 82)")
+
+    print("\n--- Fase 2 · Orden de creación, tipos de criterio, pesos, evaluadores y ajustes ---")
+    check(client.post("/desempeno/criterios/generar", json={"puesto": " "}).status_code == 400, "la IA no propone sin puesto/equipo")
+    r = client.post("/desempeno/criterios/generar", json={"puesto": "Gerentes de proyectos", "periodo": "2027-S1"})
+    prop = r.json()["criterios"]
+    check(r.status_code == 200 and {c["tipo"] for c in prop} == {"medible", "descriptivo"}, "propone criterios medibles y descriptivos para el puesto")
+    check(all(c["meta"] is None for c in prop if c["tipo"] == "medible"), "la IA NO inventa metas numéricas (medibles sin meta)")
+    med = next(c for c in prop if c["tipo"] == "medible")
+    desc = next(c for c in prop if c["tipo"] == "descriptivo")
+    check({"unidad", "meta", "sentido", "formula"} <= set(med) and "escala" not in med, "medible: unidad, meta, sentido y fórmula (sin escala)")
+    check({"esperado", "escala"} <= set(desc) and "meta" not in desc and len(desc["escala"]) == 5, "descriptivo: qué se espera y escala 1-5 con significado (sin meta ni real)")
+    r = client.post("/desempeno/ciclos", json={"nombre": "Gerentes 2027-S1", "periodo": "2027-S1", "equipo": "Gerentes de proyectos",
+                                               "criterios": prop, "origen_criterios": "ia"})
+    CIC2 = r.json()["id"]
+    check(r.json()["origenCriterios"] == "ia" and not r.json()["pesosPersonalizados"], "por defecto todos los pesos son iguales")
+    rev = client.post(f"/desempeno/ciclos/{CIC2}/participantes/revisar", json={"colaborador_ids": ["COL-1", "COL-3"]}).json()
+    check([o["id"] for o in rev["otrosPuestos"]] == ["COL-3"] and "criterios distintos" in rev["advertencia"],
+          "advierte que alguien de otro puesto podría necesitar criterios distintos (sin marcar a Sandra)")
+    check(client.post(f"/desempeno/ciclos/{CIC2}/participantes", json={"colaborador_ids": ["COL-1"], "evaluador_usuario_id": ajeno.id}).status_code == 400,
+          "el evaluador debe ser un usuario de ESTA Cuenta")
+    r = client.post(f"/desempeno/ciclos/{CIC2}/participantes", json={"colaborador_ids": ["COL-1", "COL-3"], "evaluadores": {"COL-1": evaluadora.id}})
+    evs = {e["colaboradorId"]: e for e in r.json()["evaluaciones"]}
+    check(evs["COL-1"]["evaluador"] == "Jefa PMO" and evs["COL-1"]["evaluadorUsuarioId"] == evaluadora.id, "evaluador por persona (usuario del sistema)")
+    check(len(evs) == 2, "aplicar los mismos criterios a otro puesto es decisión de RH: no se bloquea")
+    EVS = evs["COL-1"]["id"]
+    crit2 = client.get(f"/desempeno/ciclos/{CIC2}").json()["criterios"]
+    pers = [{**c, "peso": 100 / len(crit2)} for c in crit2]
+    pers[0]["peso"] += 5
+    client.patch(f"/desempeno/ciclos/{CIC2}", json={"pesos_personalizados": True, "criterios": pers})
+    check("deben sumar 100" in client.post(f"/desempeno/ciclos/{CIC2}/iniciar").json()["detail"], "«Personalizar pesos» exige sumar 100 % antes de iniciar")
+    pers[0]["peso"] -= 5
+    client.patch(f"/desempeno/ciclos/{CIC2}", json={"criterios": pers})
+    check(client.post(f"/desempeno/ciclos/{CIC2}/iniciar").status_code == 200, "con 100 % exacto se inicia")
+    check(client.patch(f"/desempeno/evaluaciones/{EVS}/ajustes", json={"criterio_id": med["id"], "meta": 12}).status_code == 400, "un ajuste individual exige motivo")
+    r = client.patch(f"/desempeno/evaluaciones/{EVS}/ajustes", json={"criterio_id": med["id"], "meta": 12, "motivo": "Sandra lleva la cartera más grande"})
+    ajustado = next(c for c in r.json()["criterios"] if c["id"] == med["id"])
+    check(ajustado["meta"] == 12 and ajustado["ajustado"] and ajustado["motivo_ajuste"], "el ajuste individual queda marcado como tal, con su motivo")
+    general = next(c for c in client.get(f"/desempeno/ciclos/{CIC2}").json()["criterios"] if c["id"] == med["id"])
+    check(general["meta"] is None, "el ajuste individual NO cambia el criterio general de la evaluación")
 
 print(f"\n🎉 Desempeño v2 verificado: {OK} comprobaciones OK.")

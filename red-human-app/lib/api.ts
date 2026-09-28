@@ -2514,14 +2514,45 @@ export function generarPlanDesempeno(datos: { puesto?: string; periodo?: string;
     puesto: datos.puesto ?? "", periodo: datos.periodo ?? "", contexto: datos.contexto ?? "",
   });
 }
+export function generarCriteriosDesempeno(datos: { puesto: string; periodo?: string; contexto?: string }) {
+  return post<{ criterios: CriterioDesempeno[]; generadoConIa: boolean }>("/desempeno/criterios/generar", {
+    puesto: datos.puesto, periodo: datos.periodo ?? "", contexto: datos.contexto ?? "",
+  });
+}
 export function crearCicloDesempeno(datos: {
-  nombre: string; periodo?: string; descripcion?: string; puestoObjetivo?: string;
-  objetivos: ObjetivoDesempeno[]; kpis: KpiDesempeno[]; escalaMaxima?: number; generadoConIa?: boolean;
+  nombre: string; periodo?: string; descripcion?: string; equipo: string; criterios: CriterioDesempeno[];
+  pesosPersonalizados?: boolean; origenCriterios?: "ia" | "plantilla" | "manual"; plantillaId?: number | null;
 }) {
   return post<CicloDesempeno>("/desempeno/ciclos", {
-    nombre: datos.nombre, periodo: datos.periodo ?? "", descripcion: datos.descripcion ?? "",
-    puesto_objetivo: datos.puestoObjetivo ?? "", objetivos: datos.objetivos, kpis: datos.kpis,
-    escala_maxima: datos.escalaMaxima ?? 100, generado_con_ia: datos.generadoConIa ?? false,
+    nombre: datos.nombre, periodo: datos.periodo ?? "", descripcion: datos.descripcion ?? "", equipo: datos.equipo,
+    criterios: datos.criterios, pesos_personalizados: datos.pesosPersonalizados ?? false,
+    origen_criterios: datos.origenCriterios ?? "manual", plantilla_id: datos.plantillaId ?? null,
+  });
+}
+export function editarCicloDesempeno(codigo: string, datos: { nombre?: string; periodo?: string; equipo?: string; criterios?: CriterioDesempeno[]; pesosPersonalizados?: boolean }) {
+  return patch<CicloDesempeno>(`/desempeno/ciclos/${codigo}`, {
+    ...(datos.nombre !== undefined ? { nombre: datos.nombre } : {}),
+    ...(datos.periodo !== undefined ? { periodo: datos.periodo } : {}),
+    ...(datos.equipo !== undefined ? { equipo: datos.equipo } : {}),
+    ...(datos.criterios !== undefined ? { criterios: datos.criterios } : {}),
+    ...(datos.pesosPersonalizados !== undefined ? { pesos_personalizados: datos.pesosPersonalizados } : {}),
+  });
+}
+export interface EvaluadorDesempeno { id: number; nombre: string; correo: string; puesto: string }
+export function fetchEvaluadoresDesempeno() {
+  return get<EvaluadorDesempeno[]>("/desempeno/evaluadores");
+}
+export function revisarParticipantesDesempeno(codigo: string, colaboradorIds: string[]) {
+  return post<{ equipo: string; otrosPuestos: { id: string; nombre: string; puesto: string }[]; advertencia: string }>(
+    `/desempeno/ciclos/${codigo}/participantes/revisar`, { colaborador_ids: colaboradorIds },
+  );
+}
+export function ajustarCriterioDesempeno(evaluacion: string, datos: { criterioId: string; motivo: string; quitar?: boolean; meta?: number | null; esperado?: string; nombre?: string }) {
+  return patch<EvaluacionDesempeno>(`/desempeno/evaluaciones/${evaluacion}/ajustes`, {
+    criterio_id: datos.criterioId, motivo: datos.motivo, quitar: datos.quitar ?? false,
+    ...(datos.meta !== undefined && datos.meta !== null ? { meta: datos.meta } : {}),
+    ...(datos.esperado !== undefined ? { esperado: datos.esperado } : {}),
+    ...(datos.nombre !== undefined ? { nombre: datos.nombre } : {}),
   });
 }
 export function fetchCiclosDesempeno() {
@@ -2538,9 +2569,9 @@ export function iniciarCicloDesempeno(codigo: string) {
 export function cerrarCicloDesempeno(codigo: string, aunConPendientes = false) {
   return post<CicloDesempeno>(`/desempeno/ciclos/${codigo}/cerrar`, { aun_con_pendientes: aunConPendientes });
 }
-export function agregarParticipantesDesempeno(codigo: string, colaboradorIds: string[], evaluador = "") {
+export function agregarParticipantesDesempeno(codigo: string, colaboradorIds: string[], evaluadores: Record<string, number | null> = {}) {
   return post<{ ciclo: CicloDesempeno; evaluaciones: EvaluacionDesempeno[]; noEncontrados: string[] }>(
-    `/desempeno/ciclos/${codigo}/participantes`, { colaborador_ids: colaboradorIds, evaluador },
+    `/desempeno/ciclos/${codigo}/participantes`, { colaborador_ids: colaboradorIds, evaluadores },
   );
 }
 export function fetchEvaluacionDesempeno(codigo: string) {
