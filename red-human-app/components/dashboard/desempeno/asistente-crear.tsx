@@ -8,11 +8,12 @@
    pesos ni notas. */
 
 import { useState } from "react";
-import { ArrowLeft, ArrowRight, Check, LayoutTemplate, Loader2, PenLine, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, FileSpreadsheet, LayoutTemplate, Loader2, PenLine, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui";
 import { CampoRH, ModalMarco, inputRH } from "@/components/dashboard/modulos-rh";
 import { EditorCriterios, criterioVacio, criteriosParaGuardar, sumaPesos } from "@/components/dashboard/desempeno/editor-criterios";
 import { SelectorParticipantes, type SeleccionParticipantes } from "@/components/dashboard/desempeno/selector-participantes";
+import { ImportarCriterios } from "@/components/dashboard/desempeno/importar-criterios";
 import { cn } from "@/lib/utils";
 import {
   agregarParticipantesDesempeno, crearCicloDesempeno, generarCriteriosDesempeno,
@@ -48,6 +49,7 @@ export function AsistenteCrearEvaluacion({ onClose, onCreada, plantillas, inicia
   const [ocupado, setOcupado] = useState(false);
   const [error, setError] = useState("");
   const [conIa, setConIa] = useState<boolean | null>(null);
+  const [importar, setImportar] = useState(false);
 
   async function elegir(o: "ia" | "plantilla" | "manual") {
     setError("");
@@ -149,10 +151,11 @@ export function AsistenteCrearEvaluacion({ onClose, onCreada, plantillas, inicia
             <Button size="sm" variant="ghost" className="self-start" onClick={() => setLista(null)}><ArrowLeft className="h-4 w-4" /> Otra forma</Button>
           </div>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             <OpcionOrigen icono={<Sparkles className="h-5 w-5" />} titulo="Proponer con Red Human" texto={`Criterios para «${equipo}». Sin metas inventadas: tú las capturas.`} onClick={() => elegir("ia")} ocupado={ocupado && origen === "ia"} />
             {plantillas && <OpcionOrigen icono={<LayoutTemplate className="h-5 w-5" />} titulo="Usar plantilla" texto="Criterios, definiciones, forma de evaluar y pesos ya guardados." onClick={() => elegir("plantilla")} ocupado={ocupado && origen === "plantilla"} />}
             <OpcionOrigen icono={<PenLine className="h-5 w-5" />} titulo="Capturar manualmente" texto="Empiezas con un criterio medible y uno descriptivo." onClick={() => elegir("manual")} />
+            <OpcionOrigen icono={<FileSpreadsheet className="h-5 w-5" />} titulo="Importar de Excel" texto="Vista previa con columnas y errores; confirmas antes de usarlos." onClick={() => setImportar(true)} />
           </div>
         )
       )}
@@ -172,6 +175,13 @@ export function AsistenteCrearEvaluacion({ onClose, onCreada, plantillas, inicia
       )}
 
       {paso === 4 && <SelectorParticipantes equipo={equipo} valor={sel} onCambio={setSel} />}
+
+      {importar && (
+        <ImportarCriterios
+          onClose={() => setImportar(false)}
+          onConfirmar={(cs) => { setCriterios(cs); setPesos(cs.some((c) => c.peso !== null && c.peso !== undefined)); setOrigen("manual"); setImportar(false); setPaso(3); }}
+        />
+      )}
 
       {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
       <div className="mt-5 flex flex-wrap items-center justify-between gap-2">

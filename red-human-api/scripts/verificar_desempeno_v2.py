@@ -188,4 +188,55 @@ with TestClient(app) as client:
     general = next(c for c in client.get(f"/desempeno/ciclos/{CIC2}").json()["criterios"] if c["id"] == med["id"])
     check(general["meta"] is None, "el ajuste individual NO cambia el criterio general de la evaluación")
 
+    print("\n--- Fase 3 · Plantillas, duplicar e importar criterios ---")
+    antes_plantillas = len(client.get("/desempeno/plantillas").json())
+    r = client.post(f"/desempeno/ciclos/{CIC2}/plantilla", json={"nombre": "Gerentes de proyectos base"})
+    PL = r.json()["id"]
+    lista = {c["id"]: c for c in r.json()["listaCriterios"]}
+    check(r.status_code == 201 and lista[med["id"]]["meta"] is None and r.json()["pesosPersonalizados"],
+          "«Guardar como plantilla» toma criterios, definiciones, forma de evaluar y pesos generales (sin el ajuste de Sandra)")
+    crit_cic2_antes = client.get(f"/desempeno/ciclos/{CIC2}").json()["criterios"]
+    crit_cic_antes = client.get(f"/desempeno/ciclos/{CIC}").json()["criterios"]
+    r = client.post("/desempeno/ciclos", json={"nombre": "Desde plantilla", "periodo": "2027-S2", "equipo": "Gerentes de proyectos",
+                                               "criterios": r.json()["listaCriterios"], "pesos_personalizados": True, "origen_criterios": "plantilla", "plantilla_id": PL})
+    DESDE = r.json()["id"]
+    check(r.json()["origenCriterios"] == "plantilla", "una evaluación nace de la plantilla (copia de sus criterios)")
+    editados = [{**c, "nombre": c["nombre"] + " (v2)"} for c in client.get(f"/desempeno/plantillas/{PL}").json()["listaCriterios"]]
+    client.patch(f"/desempeno/plantillas/{PL}", json={"criterios": editados})
+    check(client.get(f"/desempeno/plantillas/{PL}").json()["listaCriterios"][0]["nombre"].endswith("(v2)"), "la plantilla se edita")
+    check(client.get(f"/desempeno/ciclos/{CIC2}").json()["criterios"] == crit_cic2_antes
+          and client.get(f"/desempeno/ciclos/{CIC}").json()["criterios"] == crit_cic_antes
+          and not client.get(f"/desempeno/ciclos/{DESDE}").json()["criterios"][0]["nombre"].endswith("(v2)"),
+          "editar la plantilla NO modifica evaluaciones iniciadas, cerradas ni creadas con ella (cada una conserva su versión)")
+
+    client.patch(f"/desempeno/evaluaciones/{EVS}", json={"resultados": [{"criterio_id": med["id"], "real": 10, "comentario": "va bien"}],
+                                                         "brechas": [{"tema": "Planeación"}], "comentarios": "Notas"})
+    r = client.post(f"/desempeno/ciclos/{CIC2}/duplicar", json={"nombre": "Gerentes 2027-S2", "periodo": "2027-S2"})
+    dup = r.json()
+    check(r.status_code == 201 and dup["estado"] == "borrador" and dup["duplicadoDe"] == CIC2 and dup["periodo"] == "2027-S2",
+          "«Duplicar evaluación» crea un borrador para otro periodo")
+    check(dup["criterios"] == crit_cic2_antes and dup["pesosPersonalizados"], "copia la configuración (criterios y pesos)")
+    check(dup["participantes"] == 0 and dup["evaluaciones"] == [], "NO copia personas evaluadas, resultados, comentarios, brechas ni ajustes")
+
+    csv = ("tipo,nombre,descripcion,unidad,meta,sentido,esperado,peso,nivel_1,nivel_2,nivel_3,nivel_4,nivel_5,columna_rara\n"
+           "medible,Proyectos a tiempo,,%,95,mayor,,,,,,,,x\n"
+           "descriptivo,Liderazgo,,,,,Guía al equipo,,Nada,Poco,Suficiente,Mucho,Referente,\n"
+           "raro,Sin tipo valido,,,,,,,,,,,,\n"
+           "medible,Meta mala,,,abc,menor,,,,,,,,\n")
+    ciclos_antes = len(client.get("/desempeno/ciclos").json())
+    r = client.post("/desempeno/criterios/importar", files={"archivo": ("criterios.csv", csv.encode("utf-8"), "text/csv")})
+    prev = r.json()
+    check(r.status_code == 200 and len(prev["validos"]) == 2 and prev["conErrores"] == 2, "vista previa: 2 criterios válidos y 2 filas con error")
+    check(any("no reconocido" in e for f in prev["filas"] for e in f["errores"]) and any("no es un número" in e for f in prev["filas"] for e in f["errores"]),
+          "cada fila con error dice por qué")
+    check(prev["columnasDesconocidas"] == ["columna_rara"] and "tipo" in prev["columnasDetectadas"], "muestra las columnas detectadas y las que no reconoce")
+    desc_imp = next(c for c in prev["validos"] if c["tipo"] == "descriptivo")
+    check([n["significado"] for n in desc_imp["escala"]] == ["Nada", "Poco", "Suficiente", "Mucho", "Referente"], "la escala con significado viene del archivo")
+    check(len(client.get("/desempeno/ciclos").json()) == ciclos_antes and len(client.get("/desempeno/plantillas").json()) == antes_plantillas + 1,
+          "la importación NO guarda nada hasta confirmar")
+    r = client.post("/desempeno/plantillas", json={"nombre": "Importada", "criterios": prev["validos"]})
+    check(r.status_code == 201 and r.json()["criterios"] == 2, "al confirmar, los criterios válidos se guardan (aquí como plantilla)")
+    client.delete(f"/desempeno/plantillas/{PL}")
+    check(all(p["id"] != PL for p in client.get("/desempeno/plantillas").json()), "eliminar plantilla = desactivar (ya no se ofrece)")
+
 print(f"\n🎉 Desempeño v2 verificado: {OK} comprobaciones OK.")

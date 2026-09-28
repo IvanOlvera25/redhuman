@@ -70,8 +70,8 @@ def check(cond, msg):
 
 print("\n--- 0. Regla de oro: ninguna tabla nueva de personas ---")
 nuevas = set(TABLAS_MODULOS_RH)
-check(nuevas == {"ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima", "participaciones_clima", "plantillas_clima"},
-      "solo 6 tablas nuevas (Clima v2 agrega participación y plantillas), ninguna de personas")
+check(nuevas == {"ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima", "participaciones_clima", "plantillas_clima", "plantillas_desempeno"},
+      "solo 7 tablas nuevas (Clima v2 y Desempeño v2 agregan participación y plantillas), ninguna de personas")
 for nombre in sorted(nuevas):
     columnas = set(Base.metadata.tables[nombre].columns.keys())
     # una tabla de personas tendría datos de contacto propios; `nombre`/`titulo` describen al ciclo o a

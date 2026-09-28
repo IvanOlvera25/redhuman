@@ -15,12 +15,13 @@ Flujo:
 Todo cálculo sale de `services.desempeno_calculo` (vacío ≠ cero; avance = completadas ÷ incluidas).
 """
 
+import copy
 import re
 import unicodedata
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -33,6 +34,7 @@ from ..models import (
     Colaborador,
     Cuenta,
     EvaluacionDesempeno,
+    PlantillaDesempeno,
     Usuario,
     UsuarioCuenta,
     normalizar_estado_ciclo,
@@ -41,7 +43,7 @@ from ..models import (
 )
 from ..serial import ciclo_desempeno_dict, evaluacion_desempeno_dict
 from ..services import desempeno_calculo as calc
-from ..services import ia
+from ..services import ia, masivo
 from ..services.modulos_rh import requiere_modulos_rh
 
 router = APIRouter(prefix="/desempeno", tags=["desempeno"], dependencies=[Depends(requiere_modulos_rh)])
@@ -595,4 +597,214 @@ def resultados(codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(
         "pendientes": [evaluacion_desempeno_dict(e) for e in evs if normalizar_estado_persona(e.estado) != "completada"],
         "brechas": sorted(brechas.values(), key=lambda b: b["personas"], reverse=True),
         "fortalezas": sorted(fortalezas.values(), key=lambda f: (f["personas"], f["promedio"]), reverse=True),
+    }
+
+
+# ------------------------------------------------------------
+# 5. Reutilización: plantillas, duplicar evaluación e importar criterios
+# ------------------------------------------------------------
+
+
+def _plantilla_dict(p: PlantillaDesempeno, detalle: bool = False) -> dict:
+    salida = {
+        "id": p.id, "nombre": p.nombre, "descripcion": p.descripcion or "", "equipo": p.equipo or "",
+        "criterios": len(p.criterios or []), "pesosPersonalizados": bool(p.pesos_personalizados), "activa": bool(p.activa),
+        "creadoPor": p.creado_por or "", "actualizada": p.actualizada_en.isoformat() if p.actualizada_en else None,
+        "tipos": sorted({c.get("tipo") for c in (p.criterios or [])}),
+    }
+    if detalle:
+        salida["listaCriterios"] = list(p.criterios or [])
+    return salida
+
+
+def _plantilla(db: Session, pid: int, cuenta_id: int) -> PlantillaDesempeno:
+    p = db.query(PlantillaDesempeno).filter(PlantillaDesempeno.id == pid, PlantillaDesempeno.cuenta_id == cuenta_id).first()
+    if not p:
+        raise HTTPException(404, "Plantilla no encontrada.")
+    return p
+
+
+class PlantillaIn(BaseModel):
+    nombre: str
+    descripcion: str = ""
+    equipo: str = ""
+    criterios: List[dict] = []
+    pesos_personalizados: bool = False
+
+
+def _crear_plantilla(db: Session, cuenta_id: int, datos: PlantillaIn, por: str) -> PlantillaDesempeno:
+    if not datos.nombre.strip():
+        raise HTTPException(400, "El nombre de la plantilla es obligatorio.")
+    criterios = _criterios(datos.criterios)
+    if not criterios:
+        raise HTTPException(400, "La plantilla necesita al menos un criterio.")
+    p = PlantillaDesempeno(cuenta_id=cuenta_id, nombre=datos.nombre.strip(), descripcion=datos.descripcion.strip(),
+                           equipo=datos.equipo.strip(), criterios=criterios, pesos_personalizados=bool(datos.pesos_personalizados), creado_por=por)
+    db.add(p)
+    db.flush()
+    return p
+
+
+@router.get("/plantillas")
+def listar_plantillas(db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    filas = db.query(PlantillaDesempeno).filter(PlantillaDesempeno.cuenta_id == cuenta.id, PlantillaDesempeno.activa.is_(True)).order_by(PlantillaDesempeno.nombre).all()
+    return [_plantilla_dict(p, detalle=True) for p in filas]
+
+
+@router.post("/plantillas", status_code=201)
+def crear_plantilla(datos: PlantillaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    p = _crear_plantilla(db, cuenta.id, datos, u.nombre)
+    registrar(db, u.nombre, "plantilla_desempeno_creada", "desempeno", str(p.id), {"nombre": p.nombre, "correo_rh": u.correo})
+    db.commit()
+    return _plantilla_dict(p, detalle=True)
+
+
+class GuardarPlantillaIn(BaseModel):
+    nombre: str
+    descripcion: str = ""
+
+
+@router.post("/ciclos/{codigo}/plantilla", status_code=201)
+def guardar_como_plantilla(codigo: str, datos: GuardarPlantillaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Guardar como plantilla»: copia los criterios generales (sin ajustes individuales, personas ni resultados)."""
+    c = _ciclo(db, codigo, cuenta.id)
+    p = _crear_plantilla(db, cuenta.id, PlantillaIn(nombre=datos.nombre, descripcion=datos.descripcion, equipo=c.equipo or c.puesto_objetivo or "",
+                                                    criterios=copy.deepcopy(calc.criterios_de(c)), pesos_personalizados=calc.usa_pesos(c)), u.nombre)
+    registrar(db, u.nombre, "plantilla_desempeno_creada", "desempeno", str(p.id), {"nombre": p.nombre, "desde": c.codigo, "correo_rh": u.correo})
+    db.commit()
+    return _plantilla_dict(p, detalle=True)
+
+
+@router.get("/plantillas/{pid}")
+def ver_plantilla(pid: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    return _plantilla_dict(_plantilla(db, pid, cuenta.id), detalle=True)
+
+
+class EditarPlantillaIn(BaseModel):
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+    equipo: Optional[str] = None
+    criterios: Optional[List[dict]] = None
+    pesos_personalizados: Optional[bool] = None
+
+
+@router.patch("/plantillas/{pid}")
+def editar_plantilla(pid: int, datos: EditarPlantillaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Editar la plantilla NO toca ninguna evaluación: cada una conserva la copia que se hizo al usarla."""
+    p = _plantilla(db, pid, cuenta.id)
+    if datos.nombre is not None:
+        if not datos.nombre.strip():
+            raise HTTPException(400, "El nombre de la plantilla es obligatorio.")
+        p.nombre = datos.nombre.strip()
+    for campo in ("descripcion", "equipo"):
+        if getattr(datos, campo) is not None:
+            setattr(p, campo, getattr(datos, campo).strip())
+    if datos.criterios is not None:
+        criterios = _criterios(datos.criterios)
+        if not criterios:
+            raise HTTPException(400, "La plantilla necesita al menos un criterio.")
+        p.criterios = criterios
+    if datos.pesos_personalizados is not None:
+        p.pesos_personalizados = bool(datos.pesos_personalizados)
+    registrar(db, u.nombre, "plantilla_desempeno_editada", "desempeno", str(p.id), {"nombre": p.nombre, "correo_rh": u.correo})
+    db.commit()
+    return _plantilla_dict(p, detalle=True)
+
+
+@router.delete("/plantillas/{pid}")
+def eliminar_plantilla(pid: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    p = _plantilla(db, pid, cuenta.id)
+    p.activa = False
+    registrar(db, u.nombre, "plantilla_desempeno_desactivada", "desempeno", str(p.id), {"nombre": p.nombre, "correo_rh": u.correo})
+    db.commit()
+    return _plantilla_dict(p)
+
+
+class DuplicarIn(BaseModel):
+    nombre: str = ""
+    periodo: str = ""
+
+
+@router.post("/ciclos/{codigo}/duplicar", status_code=201)
+def duplicar(codigo: str, datos: DuplicarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Duplicar evaluación» para otro periodo: copia la CONFIGURACIÓN (nombre, puesto/equipo, criterios y
+    pesos). NUNCA copia personas evaluadas, resultados, comentarios, brechas ni ajustes individuales."""
+    c = _ciclo(db, codigo, cuenta.id)
+    nuevo = CicloDesempeno(
+        codigo="TMP", cuenta_id=cuenta.id, nombre=(datos.nombre.strip() or f"{c.nombre} (copia)"), periodo=datos.periodo.strip(),
+        descripcion=c.descripcion or "", puesto_objetivo=c.puesto_objetivo or "", equipo=c.equipo or c.puesto_objetivo or "",
+        criterios=copy.deepcopy(calc.criterios_de(c)), pesos_personalizados=calc.usa_pesos(c),
+        origen_criterios=c.origen_criterios or "manual", plantilla_id=c.plantilla_id, duplicado_de=c.codigo,
+        escala_maxima=100, generado_con_ia=bool(c.generado_con_ia), estado="borrador", creado_por=u.nombre,
+    )
+    db.add(nuevo)
+    db.flush()
+    nuevo.codigo = f"DES-{700 + nuevo.id}"
+    registrar(db, u.nombre, "ciclo_desempeno_duplicado", "desempeno", nuevo.codigo, {"desde": c.codigo, "periodo": nuevo.periodo, "correo_rh": u.correo})
+    db.commit()
+    return ciclo_desempeno_dict(nuevo, detalle=True)
+
+
+COLUMNAS_IMPORTAR = ["tipo", "nombre", "descripcion", "unidad", "meta", "sentido", "esperado", "peso",
+                     "nivel_1", "nivel_2", "nivel_3", "nivel_4", "nivel_5"]
+TIPOS_IMPORTAR = {"medible": "medible", "cuantitativo": "medible", "kpi": "medible", "descriptivo": "descriptivo",
+                  "cualitativo": "descriptivo", "competencia": "descriptivo", "objetivo": "descriptivo"}
+SENTIDOS_IMPORTAR = {"": "mayor_es_mejor", "mayor": "mayor_es_mejor", "mayor es mejor": "mayor_es_mejor", "mayor_es_mejor": "mayor_es_mejor",
+                     "menor": "menor_es_mejor", "menor es mejor": "menor_es_mejor", "menor_es_mejor": "menor_es_mejor"}
+
+
+@router.get("/criterios/formato")
+def formato_criterios(_: Usuario = Depends(usuario_actual)):
+    return masivo.csv_plantilla("criterios_desempeno.csv", COLUMNAS_IMPORTAR, [
+        ["medible", "Proyectos entregados a tiempo", "Entregas en la fecha comprometida", "%", "95", "mayor", "", "", "", "", "", "", ""],
+        ["descriptivo", "Comunicación con el cliente", "", "", "", "", "Informa avances y riesgos a tiempo", "",
+         "No informa", "Informa a destiempo", "Informa a tiempo", "Anticipa riesgos", "Es referente"],
+    ])
+
+
+@router.post("/criterios/importar")
+async def vista_previa_importacion(archivo: UploadFile = File(...), _: Usuario = Depends(usuario_decisor), __: Cuenta = Depends(cuenta_actual)):
+    """VISTA PREVIA de criterios desde Excel/CSV: columnas detectadas, cada fila normalizada y sus errores.
+    NO guarda nada — el usuario confirma y los criterios válidos pasan al editor (evaluación o plantilla)."""
+    filas = await masivo.leer_tabla(archivo)
+    detectadas = sorted({k for _, f in filas for k in f})
+    salida, validos = [], []
+    for n, f in filas:
+        errores = []
+        tipo_txt = (f.get("tipo") or "").strip().lower()
+        sentido_txt = (f.get("sentido") or "").strip().lower()
+        tipo = TIPOS_IMPORTAR.get(tipo_txt)
+        sentido = SENTIDOS_IMPORTAR.get(sentido_txt)
+        if not (f.get("nombre") or "").strip():
+            errores.append("Falta el nombre.")
+        if not tipo:
+            errores.append(f"Tipo «{tipo_txt}» no reconocido (usa medible o descriptivo).")
+        if tipo == "medible" and sentido is None:
+            errores.append(f"Sentido «{sentido_txt}» no reconocido (usa mayor o menor).")
+        meta_txt = (f.get("meta") or "").strip()
+        if tipo == "medible" and meta_txt and calc._num(meta_txt) is None:
+            errores.append(f"La meta «{meta_txt}» no es un número.")
+        peso_txt = (f.get("peso") or "").strip()
+        if peso_txt and calc._num(peso_txt) is None:
+            errores.append(f"El peso «{peso_txt}» no es un número.")
+        niveles = [f.get(f"nivel_{i}") or "" for i in range(1, 6)]
+        criterio = None
+        if not errores:
+            crudo = {"tipo": tipo, "nombre": f.get("nombre"), "descripcion": f.get("descripcion"), "unidad": f.get("unidad"),
+                     "meta": meta_txt or None, "sentido": sentido, "esperado": f.get("esperado"), "peso": peso_txt or None,
+                     "escala": [{"valor": i, "significado": t} for i, t in enumerate(niveles, start=1)] if all(t.strip() for t in niveles) else []}
+            try:
+                criterio = calc.normalizar_criterios([crudo])[0]
+                criterio["id"] = f"c{len(validos) + 1}"
+                validos.append(criterio)
+            except calc.CriterioInvalido as ex:
+                errores.append(str(ex))
+        salida.append({"fila": n, "valores": f, "criterio": criterio, "errores": errores})
+    return {
+        "columnasDetectadas": detectadas,
+        "columnasEsperadas": COLUMNAS_IMPORTAR,
+        "columnasDesconocidas": [c for c in detectadas if c not in COLUMNAS_IMPORTAR],
+        "filas": salida,
+        "validos": validos,
+        "conErrores": sum(1 for x in salida if x["errores"]),
     }

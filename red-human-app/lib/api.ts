@@ -2582,6 +2582,62 @@ export function guardarEvaluacionDesempeno(codigo: string, datos: { resultados: 
     resultados: datos.resultados, brechas: datos.brechas ?? [], comentarios: datos.comentarios ?? "", completar: datos.completar ?? false,
   });
 }
+/* Desempeño v2 · Reutilización (Fase 3) */
+export interface PlantillaDesempeno {
+  id: number;
+  nombre: string;
+  descripcion: string;
+  equipo: string;
+  criterios: number;
+  pesosPersonalizados: boolean;
+  activa: boolean;
+  creadoPor: string;
+  actualizada: string | null;
+  tipos: string[];
+  listaCriterios: CriterioDesempeno[];
+}
+export function fetchPlantillasDesempeno() {
+  return get<PlantillaDesempeno[]>("/desempeno/plantillas");
+}
+export function crearPlantillaDesempeno(datos: { nombre: string; descripcion?: string; equipo?: string; criterios: CriterioDesempeno[]; pesosPersonalizados?: boolean }) {
+  return post<PlantillaDesempeno>("/desempeno/plantillas", {
+    nombre: datos.nombre, descripcion: datos.descripcion ?? "", equipo: datos.equipo ?? "", criterios: datos.criterios,
+    pesos_personalizados: datos.pesosPersonalizados ?? false,
+  });
+}
+export function editarPlantillaDesempeno(id: number, datos: { nombre?: string; equipo?: string; criterios?: CriterioDesempeno[]; pesosPersonalizados?: boolean }) {
+  return patch<PlantillaDesempeno>(`/desempeno/plantillas/${id}`, {
+    ...(datos.nombre !== undefined ? { nombre: datos.nombre } : {}),
+    ...(datos.equipo !== undefined ? { equipo: datos.equipo } : {}),
+    ...(datos.criterios !== undefined ? { criterios: datos.criterios } : {}),
+    ...(datos.pesosPersonalizados !== undefined ? { pesos_personalizados: datos.pesosPersonalizados } : {}),
+  });
+}
+export function eliminarPlantillaDesempeno(id: number) {
+  return eliminar<PlantillaDesempeno>(`/desempeno/plantillas/${id}`);
+}
+export function guardarComoPlantillaDesempeno(codigo: string, nombre: string) {
+  return post<PlantillaDesempeno>(`/desempeno/ciclos/${codigo}/plantilla`, { nombre });
+}
+export function duplicarCicloDesempeno(codigo: string, datos: { nombre: string; periodo: string }) {
+  return post<CicloDesempeno>(`/desempeno/ciclos/${codigo}/duplicar`, datos);
+}
+export interface VistaPreviaCriterios {
+  columnasDetectadas: string[];
+  columnasEsperadas: string[];
+  columnasDesconocidas: string[];
+  filas: { fila: number; valores: Record<string, string>; criterio: CriterioDesempeno | null; errores: string[] }[];
+  validos: CriterioDesempeno[];
+  conErrores: number;
+}
+export function vistaPreviaCriteriosDesempeno(archivo: File) {
+  const form = new FormData();
+  form.append("archivo", archivo);
+  return subir<VistaPreviaCriterios>("/desempeno/criterios/importar", form);
+}
+export function urlFormatoCriteriosDesempeno() {
+  return `${API}/desempeno/criterios/formato`;
+}
 export function fetchResultadosCiclo(codigo: string) {
   return get<ResultadosCiclo>(`/desempeno/ciclos/${codigo}/resultados`);
 }

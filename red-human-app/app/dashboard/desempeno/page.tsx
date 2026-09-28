@@ -16,6 +16,8 @@ import { PageHeader } from "@/components/dashboard/parts";
 import { AvisoLinea, CampoRH as Campo, Cargando, KpiRH as Kpi, ListaEditable, ModalMarco, inputRH as inputCls, type AvisoRH } from "@/components/dashboard/modulos-rh";
 import { usePuedeDecidir } from "@/components/sesion";
 import { AsistenteCrearEvaluacion } from "@/components/dashboard/desempeno/asistente-crear";
+import { VistaPlantillasDesempeno } from "@/components/dashboard/desempeno/plantillas-desempeno";
+import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import { EditorCriterios, criteriosParaGuardar } from "@/components/dashboard/desempeno/editor-criterios";
 import { SelectorParticipantes, type SeleccionParticipantes } from "@/components/dashboard/desempeno/selector-participantes";
 import { usePolling } from "@/lib/use-polling";
@@ -24,7 +26,10 @@ import {
   agregarParticipantesDesempeno,
   ajustarCriterioDesempeno,
   cerrarCicloDesempeno,
+  duplicarCicloDesempeno,
   editarCicloDesempeno,
+  fetchPlantillasDesempeno,
+  guardarComoPlantillaDesempeno,
   fetchCiclosDesempeno,
   fetchEvaluacionDesempeno,
   fetchResultadosCiclo,
@@ -51,6 +56,7 @@ export default function Desempeno() {
   const [crear, setCrear] = useState<{ equipo?: string; ids?: string[] } | null>(null);
   const [aviso, setAviso] = useState<Aviso>(null);
   const [otra, setOtra] = useState<SeleccionParticipantes["paraOtraEvaluacion"]>([]);
+  const [verPlantillas, setVerPlantillas] = useState(false);
 
   const recargar = useCallback(async () => {
     const c = await fetchCiclosDesempeno();
@@ -61,8 +67,11 @@ export default function Desempeno() {
   }, [recargar]);
   usePolling(recargar);
 
+  if (verPlantillas) {
+    return <VistaPlantillasDesempeno puedeDecidir={puedeDecidir} onVolver={() => setVerPlantillas(false)} />;
+  }
   if (abierto) {
-    return <DetalleCiclo codigo={abierto} onVolver={() => { setAbierto(null); void recargar(); }} puedeDecidir={puedeDecidir} />;
+    return <DetalleCiclo codigo={abierto} onVolver={() => { setAbierto(null); void recargar(); }} onAbrir={(cod) => setAbierto(cod)} puedeDecidir={puedeDecidir} />;
   }
 
   return (
@@ -71,6 +80,7 @@ export default function Desempeno() {
         title="Desempeño"
         subtitle="Evaluaciones por periodo sobre el roster de colaboradores: objetivos y KPIs, resultados, brechas y plan de acción."
       >
+        <Button size="sm" variant="outline" onClick={() => setVerPlantillas(true)}>Plantillas</Button>
         {puedeDecidir && (
           <Button size="sm" onClick={() => setCrear({})}>
             <Plus className="h-4 w-4" /> Crear evaluación
@@ -143,6 +153,11 @@ export default function Desempeno() {
       {crear && (
         <AsistenteCrearEvaluacion
           inicial={crear}
+          plantillas={{
+            cargar: async () => ((await fetchPlantillasDesempeno()) ?? []).map((p) => ({
+              id: p.id, nombre: p.nombre, criterios: p.listaCriterios, pesosPersonalizados: p.pesosPersonalizados,
+            })),
+          }}
           onClose={() => setCrear(null)}
           onCreada={(c, pendientesOtra) => {
             setCrear(null);
@@ -161,7 +176,7 @@ export default function Desempeno() {
    Pasos 2-5 — Participantes · Evaluar · Resultados · Acciones
    ============================================================ */
 
-function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVolver: () => void; puedeDecidir: boolean }) {
+function DetalleCiclo({ codigo, onVolver, onAbrir, puedeDecidir }: { codigo: string; onVolver: () => void; onAbrir: (codigo: string) => void; puedeDecidir: boolean }) {
   const [datos, setDatos] = useState<ResultadosCiclo | null>(null);
   const [aviso, setAviso] = useState<Aviso>(null);
   const [agregar, setAgregar] = useState(false);
@@ -184,6 +199,7 @@ function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVo
 
   const [confirmarCierre, setConfirmarCierre] = useState(false);
   const [editarCriterios, setEditarCriterios] = useState(false);
+  const [reutilizar, setReutilizar] = useState<"" | "plantilla" | "duplicar">("");
 
   async function iniciarCiclo() {
     setOcupado("iniciar");
@@ -222,6 +238,14 @@ function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVo
 
       <PageHeader title={c.nombre} subtitle={`${c.id}${c.periodo ? ` · ${c.periodo}` : ""} · creada por ${c.creadoPor || "RH"}`}>
         <Badge tone={ESTADO_TONO[c.estado] ?? "neutral"} dot>{ESTADO_LABEL[c.estado] ?? c.estado}</Badge>
+        {puedeDecidir && (
+          <MenuAcciones
+            acciones={[
+              { etiqueta: "Guardar como plantilla", onClick: () => setReutilizar("plantilla") },
+              { etiqueta: "Duplicar evaluación (otro periodo)", onClick: () => setReutilizar("duplicar") },
+            ]}
+          />
+        )}
         {puedeDecidir && c.estado !== "cerrada" && (
           <>
             <Button size="sm" variant="outline" onClick={() => setAgregar(true)}>
@@ -367,6 +391,15 @@ function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVo
         </div>
       </div>
 
+      {reutilizar && (
+        <ModalReutilizar
+          ciclo={c}
+          modo={reutilizar}
+          onClose={() => setReutilizar("")}
+          onListo={(texto, nuevo) => { setReutilizar(""); setAviso({ tono: "ok", texto }); if (nuevo) onAbrir(nuevo); }}
+        />
+      )}
+
       {editarCriterios && (
         <ModalEditarCriterios
           ciclo={c}
@@ -411,6 +444,52 @@ function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVo
         />
       )}
     </div>
+  );
+}
+
+/* ---------- Guardar como plantilla / Duplicar evaluación ---------- */
+
+function ModalReutilizar({ ciclo, modo, onClose, onListo }: {
+  ciclo: CicloDesempeno; modo: "plantilla" | "duplicar"; onClose: () => void; onListo: (texto: string, nuevoCiclo?: string) => void;
+}) {
+  const [nombre, setNombre] = useState(modo === "plantilla" ? `${ciclo.equipo || ciclo.nombre}` : `${ciclo.nombre} (siguiente periodo)`);
+  const [periodo, setPeriodo] = useState("");
+  const [ocupado, setOcupado] = useState(false);
+  const [error, setError] = useState("");
+
+  async function guardar() {
+    if (!nombre.trim()) return setError("Escribe un nombre.");
+    setOcupado(true);
+    if (modo === "plantilla") {
+      const r = await guardarComoPlantillaDesempeno(ciclo.id, nombre);
+      setOcupado(false);
+      if (!r.ok) return setError(r.error);
+      return onListo(`Plantilla «${r.data.nombre}» guardada con ${r.data.criterios} criterios.`);
+    }
+    const r = await duplicarCicloDesempeno(ciclo.id, { nombre, periodo });
+    setOcupado(false);
+    if (!r.ok) return setError(r.error);
+    onListo(`Evaluación duplicada en Borrador («${r.data.nombre}»). Agrega a las personas e iníciala.`, r.data.id);
+  }
+
+  return (
+    <ModalMarco
+      titulo={modo === "plantilla" ? "Guardar como plantilla" : "Duplicar evaluación"}
+      subtitulo={modo === "plantilla"
+        ? "Se guardan los criterios, sus definiciones, la forma de evaluar y los pesos (sin personas ni resultados)."
+        : "Copia la configuración para otro periodo. No copia personas, resultados, comentarios ni brechas."}
+      onClose={onClose}
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Campo label={modo === "plantilla" ? "Nombre de la plantilla" : "Nombre de la nueva evaluación"}><input value={nombre} onChange={(e) => setNombre(e.target.value)} className={inputCls} /></Campo>
+        {modo === "duplicar" && <Campo label="Periodo"><input value={periodo} onChange={(e) => setPeriodo(e.target.value)} placeholder="Ej. 2027-S1" className={inputCls} /></Campo>}
+      </div>
+      {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
+      <div className="mt-5 flex justify-end gap-2">
+        <Button variant="outline" size="sm" onClick={onClose} disabled={ocupado}>Cancelar</Button>
+        <Button size="sm" onClick={guardar} disabled={ocupado}>{ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />} {modo === "plantilla" ? "Guardar plantilla" : "Duplicar"}</Button>
+      </div>
+    </ModalMarco>
   );
 }
 

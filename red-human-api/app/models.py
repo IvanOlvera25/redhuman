@@ -1535,6 +1535,7 @@ class IntegracionTeams(Base):
 TABLAS_MODULOS_RH = (
     "ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima",
     "participaciones_clima", "plantillas_clima",  # Clima v2 (2026-09-27)
+    "plantillas_desempeno",  # Desempeño v2 (2026-09-27)
 )
 
 # --- Desempeño ---
@@ -1638,6 +1639,26 @@ class EvaluacionDesempeno(Base):
     colaborador: Mapped["Colaborador"] = relationship()
 
     __table_args__ = (UniqueConstraint("ciclo_id", "colaborador_id", name="uq_evaluacion_ciclo_colaborador"),)
+
+
+class PlantillaDesempeno(Base):
+    """Plantilla de Desempeño v2 (2026-09-27): criterios con sus definiciones, forma de evaluar (tipo,
+    meta/sentido o escala) y pesos, para reutilizar. Usarla COPIA los criterios a la evaluación: editar la
+    plantilla nunca modifica evaluaciones ya creadas, iniciadas o cerradas (cada una conserva su versión)."""
+
+    __tablename__ = "plantillas_desempeno"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    nombre: Mapped[str] = mapped_column(String(200))
+    descripcion: Mapped[str] = mapped_column(Text, default="")
+    equipo: Mapped[str] = mapped_column(String(200), default="")
+    criterios: Mapped[list] = mapped_column(JSON, default=list)
+    pesos_personalizados: Mapped[bool] = mapped_column(Boolean, default=False)
+    activa: Mapped[bool] = mapped_column(Boolean, default=True)  # «eliminar» = desactivar
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
 
 
 # --- Clima ---
