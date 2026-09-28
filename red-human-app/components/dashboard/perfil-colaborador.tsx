@@ -25,14 +25,18 @@ import {
 } from "lucide-react";
 import { Avatar, Badge, Button, Card, Eyebrow } from "@/components/ui";
 import { Aviso } from "@/components/dashboard/subida";
+import { ModalEditarColaborador } from "@/components/dashboard/colaboradores/alta-importar";
+import { HistorialDesempeno } from "@/components/dashboard/desempeno/cierre-evaluacion";
 import {
   darDeBajaColaborador,
+  fetchHistorialDesempenoColaborador,
   eliminarColaborador,
   fetchColaborador,
   reactivarColaborador,
   urlDocumento,
   type Colaborador,
   type ColaboradorDetalle,
+  type EvaluacionDesempeno,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -73,6 +77,12 @@ export function PerfilColaborador({
   const [ocupado, setOcupado] = useState(false);
   const [error, setError] = useState("");
   const [aviso, setAviso] = useState("");
+  const [editar, setEditar] = useState(false);
+  const [pestana, setPestana] = useState<"datos" | "desempeno">("datos");
+  const [desempeno, setDesempeno] = useState<EvaluacionDesempeno[] | null>(null);
+  useEffect(() => {
+    if (pestana === "desempeno" && desempeno === null) fetchHistorialDesempenoColaborador(colaborador.id).then((d) => setDesempeno(d ?? []));
+  }, [pestana, desempeno, colaborador.id]);
 
   useEffect(() => {
     let vivo = true;
@@ -146,7 +156,24 @@ export function PerfilColaborador({
           </div>
         </div>
 
-        <div className="flex flex-col gap-5 p-6">
+        <div className="scroll-x flex gap-1 border-b border-border-soft px-6" role="tablist">
+          {([["datos", "Datos"], ["desempeno", "Desempeño"]] as const).map(([k, t]) => (
+            <button key={k} role="tab" aria-selected={pestana === k} onClick={() => setPestana(k)}
+              className={cn("border-b-2 px-3 py-2.5 text-sm font-semibold", pestana === k ? "border-brand text-ink" : "border-transparent text-ink-3 hover:text-ink")}>
+              {t}
+            </button>
+          ))}
+        </div>
+
+        {pestana === "desempeno" && (
+          <div className="p-6">
+            {desempeno === null ? <div className="h-16 animate-pulse rounded-xl bg-surface-2/60" /> : (
+              <HistorialDesempeno evaluaciones={desempeno} vacio="Todavía no tiene evaluaciones de desempeño." />
+            )}
+          </div>
+        )}
+
+        <div className={cn("flex flex-col gap-5 p-6", pestana !== "datos" && "hidden")}>
           {aviso && <Aviso tono="ok" onCerrar={() => setAviso("")}>{aviso}</Aviso>}
           {error && !confirmar && <Aviso tono="error" onCerrar={() => setError("")}>{error}</Aviso>}
           {!c.activo && (
@@ -160,6 +187,7 @@ export function PerfilColaborador({
           {/* Acciones administrativas */}
           {puedeDecidir && (
             <div className="flex flex-wrap items-center justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setEditar(true)} disabled={ocupado}>Editar datos</Button>
               {c.activo ? (
                 <Button variant="outline" size="sm" onClick={() => setConfirmar("baja")} disabled={ocupado}>
                   <UserMinus className="h-4 w-4" /> Dar de baja
@@ -184,7 +212,8 @@ export function PerfilColaborador({
               <Dato etiqueta="Tipo de contratación" valor={c.tipoContratacion} />
               <Dato etiqueta="Fecha de ingreso" valor={c.fechaIngreso ? new Date(c.fechaIngreso).toLocaleDateString("es-MX") : ""} />
               <Dato etiqueta="Ubicación" valor={c.ubicacion} />
-              <Dato etiqueta="Jefe(a) directo(a)" valor={c.jefeDirecto} />
+              <Dato etiqueta="Jefe(a) directo(a)" valor={c.jefeDirecto ? `${c.jefeDirecto}${c.jefeId ? ` (${c.jefeId})` : ""}` : ""} />
+              <Dato etiqueta="Área" valor={c.area} />
               <Dato etiqueta="Empresa" valor={c.empresa} />
               <Dato etiqueta="Cliente" valor={c.clienteNombre ?? "Directo (sin Cliente)"} />
             </div>
@@ -261,6 +290,14 @@ export function PerfilColaborador({
             </div>
           </Card>
         </div>
+
+        {editar && detalle && (
+          <ModalEditarColaborador
+            colaborador={detalle}
+            onClose={() => setEditar(false)}
+            onGuardado={(d) => { setEditar(false); setDetalle(d); setAviso("Datos actualizados."); onCambio(d); }}
+          />
+        )}
 
         {confirmar && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !ocupado && setConfirmar(null)}>

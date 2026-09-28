@@ -785,6 +785,16 @@ def expediente_dict(e: Expediente) -> dict:
 # ------------------------------------------------------------
 
 
+def _jefe_codigo(col) -> Optional[str]:
+    if not col.jefe_id:
+        return None
+    from sqlalchemy.orm import object_session
+
+    sesion = object_session(col)
+    jefe = sesion.get(Colaborador, col.jefe_id) if sesion else None
+    return jefe.codigo if jefe else None
+
+
 def colaborador_dict(col: Colaborador) -> dict:
     return {
         "id": col.codigo,
@@ -799,6 +809,8 @@ def colaborador_dict(col: Colaborador) -> dict:
         "condicionesIngreso": col.condiciones_ingreso or {},
         "ubicacion": col.ubicacion,
         "jefeDirecto": col.jefe_directo,
+        "jefeId": _jefe_codigo(col),  # 2026-09-27: jefe como otro colaborador del roster
+        "origenAlta": "contratacion" if (col.candidato_origen_id or col.expediente_id) else "manual",
         "estatus": "Activo" if col.activo else "Inactivo",
         "cvNombre": col.cv_nombre,
         "tieneCv": bool(col.cv_ruta),
@@ -847,33 +859,53 @@ def colaborador_detalle_dict(col: Colaborador) -> dict:
 
 
 def ciclo_desempeno_dict(c, detalle: bool = False) -> dict:
-    evs = [e for e in (c.evaluaciones or []) if e.colaborador and e.colaborador.eliminado_en is None]
-    completadas = [e for e in evs if e.estado == "completada"]
+    from .models import normalizar_estado_ciclo
+    from .services import desempeno_calculo as calc
+
+    av = calc.avance(c)
     salida = {
         "id": c.codigo,
         "nombre": c.nombre,
         "periodo": c.periodo or "",
         "descripcion": c.descripcion or "",
         "puestoObjetivo": c.puesto_objetivo or "",
-        "objetivos": list(c.objetivos or []),
-        "kpis": list(c.kpis or []),
-        "escalaMaxima": c.escala_maxima,
+        "equipo": c.equipo or c.puesto_objetivo or "",
+        "criterios": calc.criterios_de(c),
+        "pesosPersonalizados": calc.usa_pesos(c),
+        "origenCriterios": c.origen_criterios or "",
+        "objetivos": list(c.objetivos or []),  # legado (antes de v2)
+        "kpis": list(c.kpis or []),            # legado (antes de v2)
+        "escalaMaxima": 100,
         "generadoConIa": bool(c.generado_con_ia),
-        "estado": c.estado,
-        "participantes": len(evs),
-        "completadas": len(completadas),
-        "avance": round(len(completadas) / len(evs) * 100) if evs else 0,
+        "estado": normalizar_estado_ciclo(c.estado),
+        "participantes": av["incluidas"],
+        "completadas": av["completadas"],
+        # avance = personas completadas ÷ personas incluidas (nunca por filas vacías)
+        "avance": av["porcentaje"],
         "creadoPor": c.creado_por or "",
         "creado": hace(c.creado_en),
         "creadoEn": iso(c.creado_en),
+        "iniciadoEn": iso(c.iniciado_en),
         "cerradoEn": iso(c.cerrado_en),
+        "cerradoPor": c.cerrado_por or "",
+        "duplicadoDe": c.duplicado_de or "",
     }
     if detalle:
-        salida["evaluaciones"] = [evaluacion_desempeno_dict(e) for e in evs]
+        salida["evaluaciones"] = [evaluacion_desempeno_dict(e) for e in calc.incluidas(c)]
+        salida["historialCambios"] = list(c.historial_cambios or [])
     return salida
 
 
+def _brechas(e) -> list:
+    from .routers.desempeno import normalizar_brechas  # import tardío
+
+    return normalizar_brechas(list(e.brechas or []))
+
+
 def evaluacion_desempeno_dict(e, detalle: bool = False) -> dict:
+    from .models import normalizar_estado_persona
+    from .services import desempeno_calculo as calc
+
     col = e.colaborador
     salida = {
         "id": e.codigo,
@@ -885,19 +917,38 @@ def evaluacion_desempeno_dict(e, detalle: bool = False) -> dict:
         "colaborador": col.nombre if col else "",
         "puesto": col.puesto if col else "",
         "area": (col.area or "") if col else "",
+        "empresa": (col.empresa or "") if col else "",   # Desempeño toma empresa/área/puesto/jefe de la base maestra
+        "jefe": (col.jefe_directo or "") if col else "",
         "evaluador": e.evaluador or "",
-        "estado": e.estado,
+        "evaluadorUsuarioId": e.evaluador_usuario_id,
+        "estado": normalizar_estado_persona(e.estado),
         "calificacion": e.calificacion,
-        "escalaMaxima": e.ciclo.escala_maxima if e.ciclo else 100,
-        "brechas": list(e.brechas or []),
+        "escalaMaxima": 100,
+        "brechas": _brechas(e),
         "creadoEn": iso(e.creado_en),
         "completadaEn": iso(e.completada_en),
+        "completadaPor": e.completada_por or "",
     }
     if detalle:
+        calculo = calc.calcular(e)
+        salida["criterios"] = calc.criterios_efectivos(e)
         salida["resultados"] = list(e.resultados or [])
+        salida["cumplimiento"] = calculo["detalle"]
+        salida["faltantes"] = calculo["faltantes"]
         salida["comentarios"] = e.comentarios or ""
-        salida["objetivos"] = list(e.ciclo.objetivos or []) if e.ciclo else []
-        salida["kpis"] = list(e.ciclo.kpis or []) if e.ciclo else []
+        salida["conclusion"] = e.conclusion or ""
+        salida["resumen"] = e.resumen or ""
+        salida["fortalezas"] = list(e.fortalezas or [])
+        salida["propuestaIa"] = dict(e.propuesta_ia or {}) or None
+        salida["notas"] = list(e.notas or [])
+        ids = {c["id"] for c in salida["criterios"]}
+        # historial: cambios de la evaluación general a sus criterios + ajustes individuales de la persona
+        salida["historialCambios"] = sorted(
+            [h for h in (e.ciclo.historial_cambios or []) if h.get("criterio_id") in ids] + list(e.historial_cambios or []),
+            key=lambda h: h.get("fecha") or "",
+        ) if e.ciclo else list(e.historial_cambios or [])
+        salida["objetivos"] = list(e.ciclo.objetivos or []) if e.ciclo else []  # legado
+        salida["kpis"] = list(e.ciclo.kpis or []) if e.ciclo else []            # legado
     return salida
 
 

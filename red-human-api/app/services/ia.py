@@ -2140,3 +2140,129 @@ def analisis_clima(metricas: dict, titulo: str = "", empresa: str = "") -> Tuple
     except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea
         print(f"[ia] análisis de clima demo ({ex})", flush=True)
         return _analisis_clima_demo(metricas), False
+
+
+# ============================================================
+# Desempeño v2 (2026-09-27): criterios con tipo (medible | descriptivo)
+# ============================================================
+
+
+class NivelEscalaIA(BaseModel):
+    valor: int = Field(description="1 a 5")
+    significado: str = Field(description="Qué conducta observable corresponde a este nivel, breve.")
+
+
+class CriterioDesempenoIA(BaseModel):
+    tipo: Literal["medible", "descriptivo"] = Field(
+        description="medible = se cuenta con un número (unidad y sentido); descriptivo = se observa una conducta y se valora 1-5."
+    )
+    nombre: str = Field(description="Nombre corto y claro del criterio.")
+    descripcion: str = Field(description="Qué mide y por qué importa para el puesto, 1 frase.")
+    unidad: str = Field(default="", description="SOLO medible: unidad (%, proyectos, días, incidencias…).")
+    sentido: Literal["mayor_es_mejor", "menor_es_mejor"] = Field(default="mayor_es_mejor", description="SOLO medible.")
+    esperado: str = Field(default="", description="SOLO descriptivo: qué se espera observar en el día a día.")
+    escala: List[NivelEscalaIA] = Field(default_factory=list, description="SOLO descriptivo: exactamente 5 niveles, del 1 al 5.")
+
+
+class PropuestaCriteriosIA(BaseModel):
+    criterios: List[CriterioDesempenoIA] = Field(description="4 a 7 criterios, mezclando medibles y descriptivos cuando tenga sentido.")
+
+
+def _criterios_demo(puesto: str) -> PropuestaCriteriosIA:
+    p = puesto.strip() or "el puesto"
+    return PropuestaCriteriosIA(criterios=[
+        CriterioDesempenoIA(tipo="medible", nombre="Cumplimiento de entregas", descripcion=f"Entregables de {p} terminados en la fecha comprometida.",
+                            unidad="%", sentido="mayor_es_mejor"),
+        CriterioDesempenoIA(tipo="medible", nombre="Retrabajos o errores", descripcion="Entregables que tuvieron que corregirse en el periodo.",
+                            unidad="incidencias", sentido="menor_es_mejor"),
+        CriterioDesempenoIA(tipo="descriptivo", nombre="Comunicación y seguimiento", descripcion="Mantiene informadas a las partes interesadas.",
+                            esperado="Informa avances, riesgos y cambios a tiempo y por escrito."),
+        CriterioDesempenoIA(tipo="descriptivo", nombre="Trabajo en equipo", descripcion="Colabora y comparte información con su equipo.",
+                            esperado="Apoya a sus compañeros y cumple los acuerdos de equipo."),
+    ])
+
+
+def criterios_desempeno(puesto: str, periodo: str = "", contexto: str = "") -> Tuple[PropuestaCriteriosIA, bool]:
+    """Propuesta de criterios para un PUESTO o EQUIPO (obligatorio: sin él no se propone nada). Nunca
+    inventa metas numéricas: los medibles salen SIN meta y RH la captura. Regresa (propuesta, con_ia)."""
+    client = _client()
+    if client is None:
+        return _criterios_demo(puesto), False
+    try:
+        resp = client.responses.parse(
+            model=MODEL,
+            instructions=(
+                "Diseñas evaluaciones de desempeño para empresas en México (Red Human AI). Para el puesto o equipo indicado "
+                "propones 4 a 7 CRITERIOS de dos tipos: `medible` (se cuenta: unidad y sentido del indicador) y `descriptivo` "
+                "(se observa una conducta: qué se espera ver y una escala 1-5 donde cada nivel describe una conducta "
+                "observable). Reglas: (1) NUNCA propongas metas ni cifras de negocio — el campo meta no existe: RH la "
+                "captura; (2) nada de datos sensibles ni rasgos de personalidad, solo conducta y resultados de trabajo; "
+                "(3) específicos para ESE puesto, no genéricos; (4) español de México, claro."
+            ),
+            input=f"Puesto o equipo: {puesto}\nPeriodo: {periodo or 'sin especificar'}\nContexto de RH: {contexto.strip()[:2000] or 'sin contexto adicional'}",
+            text_format=PropuestaCriteriosIA,
+        )
+        prop = resp.output_parsed
+        if not prop or not prop.criterios:
+            return _criterios_demo(puesto), False
+        return prop, True
+    except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea: RH captura a mano
+        print(f"[ia] criterios de desempeño demo ({ex})", flush=True)
+        return _criterios_demo(puesto), False
+
+
+class BrechaIA(BaseModel):
+    tema: str = Field(description="Tema corto de la brecha.")
+    descripcion: str = Field(description="Qué falta, con la evidencia de los resultados capturados.")
+    criterio: str = Field(default="", description="Nombre EXACTO del criterio del que sale la evidencia, si aplica.")
+
+
+class ResumenDesempenoIA(BaseModel):
+    resumen: str = Field(description="2-3 frases sobre el periodo, usando SOLO los resultados capturados.")
+    fortalezas: List[str] = Field(default_factory=list, description="0 a 4 fortalezas con evidencia de los resultados.")
+    brechas: List[BrechaIA] = Field(default_factory=list, description="0 a 4 brechas con evidencia; VACÍO si el desempeño es bueno.")
+
+
+def _resumen_desempeno_demo(datos: dict) -> ResumenDesempenoIA:
+    con_valor = [c for c in datos.get("criterios", []) if c.get("cumplimiento") is not None]
+    altos = sorted(con_valor, key=lambda c: c["cumplimiento"], reverse=True)[:2]
+    bajos = [c for c in con_valor if c["cumplimiento"] < 60]
+    calif = datos.get("calificacion")
+    return ResumenDesempenoIA(
+        resumen=(f"Calificación de {calif}% con {len(con_valor)} criterio(s) evaluado(s)." if calif is not None
+                 else "Aún no hay resultados válidos para resumir."),
+        fortalezas=[f"{c['nombre']}: {c['cumplimiento']}% de cumplimiento." for c in altos if c["cumplimiento"] >= 75],
+        brechas=[BrechaIA(tema=c["nombre"], descripcion=f"Cumplimiento de {c['cumplimiento']}% en «{c['nombre']}».", criterio=c["nombre"]) for c in bajos],
+    )
+
+
+def resumen_desempeno(datos: dict) -> Tuple[ResumenDesempenoIA, bool]:
+    """Propuesta de resumen, fortalezas y brechas basada ESTRICTAMENTE en los resultados capturados (el
+    evaluador la edita o confirma). Nunca inventa datos ni fuerza brechas: un buen periodo puede no tener
+    ninguna. Regresa (propuesta, con_ia)."""
+    client = _client()
+    if client is None:
+        return _resumen_desempeno_demo(datos), False
+    try:
+        import json as _json
+
+        resp = client.responses.parse(
+            model=MODEL,
+            instructions=(
+                "Eres analista de desempeño de Red Human AI (México). Recibes los criterios de UNA persona con su resultado "
+                "capturado, el % de cumplimiento calculado, comentarios y notas de avance. Redacta: resumen, fortalezas y "
+                "brechas. Reglas: (1) usa SOLO lo capturado; nunca inventes cifras, hechos ni criterios; (2) un criterio sin "
+                "resultado o «No aplica» NO es fortaleza ni brecha; (3) si el desempeño es bueno, deja `brechas` vacío — no "
+                "fuerces brechas; (4) nada de datos sensibles ni rasgos de personalidad; (5) es una propuesta: la confirma "
+                "o edita el evaluador."
+            ),
+            input=_json.dumps(datos, ensure_ascii=False)[:20000],
+            text_format=ResumenDesempenoIA,
+        )
+        prop = resp.output_parsed
+        if not prop:
+            return _resumen_desempeno_demo(datos), False
+        return prop, True
+    except Exception as ex:  # noqa: BLE001 — la IA nunca bloquea
+        print(f"[ia] resumen de desempeño demo ({ex})", flush=True)
+        return _resumen_desempeno_demo(datos), False

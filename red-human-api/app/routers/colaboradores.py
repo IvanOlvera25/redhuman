@@ -5,11 +5,12 @@ detallado (GET /{codigo}), la BAJA (activo=False, conserva historial; reversible
 lógica (limpieza de pruebas; desaparece de listados y conteos, la fila se conserva).
 """
 
-from typing import Optional
+import re
+from typing import List, Optional
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -18,6 +19,7 @@ from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import AsignacionCurso, Cliente, Colaborador, Cuenta, Usuario, registrar
 from ..serial import colaborador_detalle_dict, colaborador_dict
+from ..services import masivo
 
 router = APIRouter(prefix="/colaboradores", tags=["colaboradores"])
 
@@ -70,6 +72,235 @@ def _por_codigo(db: Session, codigo: str, cuenta_id: int) -> Colaborador:
     if not col:
         raise HTTPException(404, "Colaborador no encontrado")
     return col
+
+
+# ------------------------------------------------------------
+# Alta manual e importación básica (Desempeño v2 · Fase 4, 2026-09-27)
+# Empleados que YA trabajan en la empresa entran al roster sin pasar por Vacantes, Contratación ni
+# Onboarding. Sigue siendo la base maestra: Desempeño, Clima y Conocimiento toman de aquí empresa, área,
+# puesto y jefe.
+# ------------------------------------------------------------
+
+
+def _norm_tel(t: str) -> str:
+    digitos = re.sub(r"\D", "", t or "")
+    return digitos[-10:] if len(digitos) >= 10 else digitos
+
+
+def _roster(db: Session, cuenta_id: int) -> List[Colaborador]:
+    return db.query(Colaborador).filter(Colaborador.cuenta_id == cuenta_id, Colaborador.eliminado_en.is_(None)).all()
+
+
+def posibles_duplicados(roster: List[Colaborador], nombre: str, correo: str, telefono: str) -> List[dict]:
+    """Coincidencias por correo, teléfono (10 dígitos) o nombre idéntico. Solo se muestran: RH decide."""
+    salida = []
+    correo_n, tel_n, nombre_n = (correo or "").strip().lower(), _norm_tel(telefono), " ".join((nombre or "").lower().split())
+    for c in roster:
+        motivos = []
+        if correo_n and (c.correo or "").strip().lower() == correo_n:
+            motivos.append("mismo correo")
+        if tel_n and _norm_tel(c.telefono) == tel_n:
+            motivos.append("mismo teléfono")
+        if nombre_n and " ".join((c.nombre or "").lower().split()) == nombre_n:
+            motivos.append("mismo nombre")
+        if motivos:
+            salida.append({"id": c.codigo, "nombre": c.nombre, "motivos": motivos})
+    return salida
+
+
+def _resolver_jefe(roster: List[Colaborador], ref: str) -> Optional[Colaborador]:
+    """El jefe se indica con su código COL-####, su correo o su nombre exacto (del mismo roster)."""
+    ref_n = (ref or "").strip().lower()
+    if not ref_n:
+        return None
+    for c in roster:
+        if c.codigo.lower() == ref_n or (c.correo and c.correo.strip().lower() == ref_n):
+            return c
+    por_nombre = [c for c in roster if " ".join(c.nombre.lower().split()) == " ".join(ref_n.split())]
+    return por_nombre[0] if len(por_nombre) == 1 else None
+
+
+class ColaboradorIn(BaseModel):
+    nombre: str
+    correo: str = ""
+    telefono: str = ""
+    puesto: str = ""
+    area: str = ""
+    empresa: str = ""
+    ubicacion: str = ""
+    jefe: str = ""               # COL-####, correo o nombre del jefe en el roster
+    fecha_ingreso: str = ""      # AAAA-MM-DD
+    tipo_contratacion: str = ""
+    confirmar_duplicado: bool = False
+
+
+def _crear(db: Session, cuenta: Cuenta, datos: ColaboradorIn, por: str, roster: List[Colaborador]) -> Colaborador:
+    if not datos.nombre.strip():
+        raise HTTPException(400, "El nombre es obligatorio.")
+    fecha = None
+    if datos.fecha_ingreso.strip():
+        try:
+            fecha = datetime.fromisoformat(datos.fecha_ingreso.strip()[:10]).replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(400, f"Fecha de ingreso inválida «{datos.fecha_ingreso}» (usa AAAA-MM-DD).")
+    jefe = _resolver_jefe(roster, datos.jefe)
+    col = Colaborador(
+        codigo="TMP", cuenta_id=cuenta.id, nombre=datos.nombre.strip(), correo=datos.correo.strip().lower(),
+        telefono=datos.telefono.strip(), puesto=datos.puesto.strip(), area=datos.area.strip(),
+        empresa=datos.empresa.strip() or (cuenta.razon_social or cuenta.nombre_visible), ubicacion=datos.ubicacion.strip(),
+        jefe_id=jefe.id if jefe else None, jefe_directo=jefe.nombre if jefe else datos.jefe.strip(),
+        fecha_ingreso=fecha, tipo_contratacion=datos.tipo_contratacion.strip(), activo=True, dado_de_alta_por=por,
+    )
+    db.add(col)
+    db.flush()
+    col.codigo = f"COL-{100 + col.id}"
+    return col
+
+
+@router.post("", status_code=201)
+def alta_manual(datos: ColaboradorIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Alta manual de un empleado existente. Si parece duplicado (correo, teléfono o nombre), responde 409
+    con las coincidencias; RH confirma con `confirmar_duplicado` si de verdad es otra persona."""
+    roster = _roster(db, cuenta.id)
+    dups = posibles_duplicados(roster, datos.nombre, datos.correo, datos.telefono)
+    if dups and not datos.confirmar_duplicado:
+        raise HTTPException(409, "Posible duplicado: " + "; ".join(f"{d['nombre']} ({d['id']}, {', '.join(d['motivos'])})" for d in dups)
+                            + ". Confirma si es otra persona.")
+    col = _crear(db, cuenta, datos, u.nombre, roster)
+    registrar(db, u.nombre, "colaborador_alta_manual", "colaborador", col.codigo, {"nombre": col.nombre, "puesto": col.puesto, "correo_rh": u.correo})
+    db.commit()
+    return colaborador_dict(col)
+
+
+ALIAS_IMPORTAR = {
+    "nombre": ("nombre", "nombre_completo", "colaborador", "empleado"),
+    "correo": ("correo", "email", "correo_electronico"),
+    "telefono": ("telefono", "celular", "whatsapp", "telefono_celular"),
+    "puesto": ("puesto", "cargo"),
+    "area": ("area", "departamento"),
+    "empresa": ("empresa", "razon_social"),
+    "ubicacion": ("ubicacion", "sede", "sucursal"),
+    "jefe": ("jefe", "jefe_directo", "jefe_inmediato", "correo_jefe"),
+    "fecha_ingreso": ("fecha_ingreso", "ingreso", "fecha_de_ingreso"),
+    "tipo_contratacion": ("tipo_contratacion", "contrato", "tipo_de_contrato"),
+}
+
+
+def _fila_importacion(f: dict) -> dict:
+    return {campo: next((str(f[a]).strip() for a in alias if f.get(a) not in (None, "")), "") for campo, alias in ALIAS_IMPORTAR.items()}
+
+
+@router.get("/importar/formato")
+def formato_importacion(_: Usuario = Depends(usuario_actual)):
+    return masivo.csv_plantilla("colaboradores.csv", list(ALIAS_IMPORTAR), [
+        ["Sandra López Ruiz", "sandra.lopez@empresa.mx", "5512345678", "Gerente de proyectos", "PMO", "", "CDMX", "director.pmo@empresa.mx", "2024-03-01", "Tiempo indeterminado"],
+    ])
+
+
+@router.post("/importar/vista-previa")
+async def vista_previa_importacion(archivo: UploadFile = File(...), db: Session = Depends(get_db), _: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Lee el archivo y muestra, por fila: datos normalizados, errores y POSIBLES DUPLICADOS (contra el roster
+    y dentro del mismo archivo). NO guarda nada: RH revisa y confirma con /importar/confirmar."""
+    filas = await masivo.leer_tabla(archivo)
+    roster = _roster(db, cuenta.id)
+    salida, vistos = [], []
+    for n, f in filas:
+        d = _fila_importacion(f)
+        errores = []
+        if not d["nombre"]:
+            errores.append("Falta el nombre.")
+        if d["correo"] and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", d["correo"]):
+            errores.append(f"Correo inválido «{d['correo']}».")
+        if d["fecha_ingreso"]:
+            try:
+                datetime.fromisoformat(d["fecha_ingreso"][:10])
+            except ValueError:
+                errores.append(f"Fecha de ingreso inválida «{d['fecha_ingreso']}» (usa AAAA-MM-DD).")
+        dups = posibles_duplicados(roster, d["nombre"], d["correo"], d["telefono"])
+        for otra in vistos:
+            if (d["correo"] and d["correo"].lower() == otra["datos"]["correo"].lower()) or (d["telefono"] and _norm_tel(d["telefono"]) == _norm_tel(otra["datos"]["telefono"])):
+                dups.append({"id": f"fila {otra['fila']}", "nombre": otra["datos"]["nombre"], "motivos": ["repetido en el archivo"]})
+        fila = {"fila": n, "datos": d, "errores": errores, "duplicados": dups}
+        vistos.append(fila)
+        salida.append(fila)
+    return {
+        "filas": salida,
+        "validas": sum(1 for x in salida if not x["errores"]),
+        "conErrores": sum(1 for x in salida if x["errores"]),
+        "posiblesDuplicados": sum(1 for x in salida if x["duplicados"]),
+    }
+
+
+class ConfirmarImportacionIn(BaseModel):
+    filas: List[dict] = []               # los `datos` de la vista previa que RH aceptó
+    incluir_duplicados: bool = False     # False = se omiten las filas con posible duplicado
+
+
+@router.post("/importar/confirmar", status_code=201)
+def confirmar_importacion(datos: ConfirmarImportacionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Da de alta las filas confirmadas (vuelve a validar). El jefe puede venir en el mismo archivo: se
+    enlaza en una segunda pasada. Una fila mala no tumba las demás (savepoint por fila)."""
+    roster = _roster(db, cuenta.id)
+    creados, omitidos, errores, pendientes_jefe = [], [], [], []
+    for i, d in enumerate(datos.filas, start=1):
+        entrada = ColaboradorIn(**{k: str(d.get(k) or "") for k in ALIAS_IMPORTAR})
+        if posibles_duplicados(roster, entrada.nombre, entrada.correo, entrada.telefono) and not datos.incluir_duplicados:
+            omitidos.append({"fila": i, "nombre": entrada.nombre, "motivo": "posible duplicado"})
+            continue
+        sp = db.begin_nested()
+        try:
+            col = _crear(db, cuenta, entrada, u.nombre, roster)
+            sp.commit()
+        except HTTPException as ex:
+            sp.rollback()
+            errores.append({"fila": i, "nombre": entrada.nombre, "error": ex.detail})
+            continue
+        roster.append(col)
+        creados.append(col)
+        if entrada.jefe and not col.jefe_id:
+            pendientes_jefe.append((col, entrada.jefe))
+    for col, ref in pendientes_jefe:
+        jefe = _resolver_jefe(roster, ref)
+        if jefe and jefe.id != col.id:
+            col.jefe_id, col.jefe_directo = jefe.id, jefe.nombre
+    registrar(db, u.nombre, "colaboradores_importados", "colaborador", str(len(creados)),
+              {"creados": [c.codigo for c in creados], "omitidos": len(omitidos), "errores": len(errores), "correo_rh": u.correo})
+    db.commit()
+    return {"creados": [colaborador_dict(c) for c in creados], "omitidos": omitidos, "errores": errores}
+
+
+class EditarColaboradorIn(BaseModel):
+    correo: Optional[str] = None
+    telefono: Optional[str] = None
+    puesto: Optional[str] = None
+    area: Optional[str] = None
+    empresa: Optional[str] = None
+    ubicacion: Optional[str] = None
+    jefe: Optional[str] = None   # COL-#### / correo / nombre del roster; "" = sin jefe
+
+
+@router.patch("/{codigo}")
+def editar(codigo: str, datos: EditarColaboradorIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Datos base del roster (los que leen Desempeño, Clima y Conocimiento), incluido el jefe."""
+    col = _por_codigo(db, codigo, cuenta.id)
+    cambios = {}
+    for campo in ("correo", "telefono", "puesto", "area", "empresa", "ubicacion"):
+        valor = getattr(datos, campo)
+        if valor is not None:
+            setattr(col, campo, valor.strip().lower() if campo == "correo" else valor.strip())
+            cambios[campo] = getattr(col, campo)
+    if datos.jefe is not None:
+        if not datos.jefe.strip():
+            col.jefe_id, col.jefe_directo = None, ""
+        else:
+            jefe = _resolver_jefe(_roster(db, cuenta.id), datos.jefe)
+            if not jefe or jefe.id == col.id:
+                raise HTTPException(400, "No encontré a ese jefe en el roster (usa su código COL-####, correo o nombre exacto).")
+            col.jefe_id, col.jefe_directo = jefe.id, jefe.nombre
+        cambios["jefe"] = col.jefe_directo
+    registrar(db, u.nombre, "colaborador_editado", "colaborador", col.codigo, {**cambios, "correo_rh": u.correo})
+    db.commit()
+    return colaborador_detalle_dict(col)
 
 
 @router.get("/{codigo}")
