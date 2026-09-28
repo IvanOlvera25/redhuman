@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from .config import settings
-from .models import NIVELES_RECORDATORIO, AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
+from .models import NIVELES_RECORDATORIO, estado_documento_onboarding, AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
 from .services.avatar import avatar_activo
 from .services.ia import texto_preguntas, texto_util_candidato
 
@@ -676,7 +676,11 @@ def documento_dict(d: Documento) -> dict:
     v = d.validacion or {}
     return {
         "nombre": d.tipo,
-        "estado": d.estado,  # pendiente | revision | recibido | rechazado
+        "estado": d.estado,  # pendiente | revision | recibido | rechazado | no_aplica
+        # Onboarding v2 (2026-09-28): Pendiente | Por revisar | Aprobado | Rechazado | No aplica
+        "estadoOnboarding": estado_documento_onboarding(d),
+        "motivoNoAplica": d.motivo_no_aplica or "",
+        "noAplicaPor": d.no_aplica_por or "",
         "obligatorio": d.obligatorio,
         "notas": d.notas_ia or "",
         "archivo": d.nombre_archivo or "",
@@ -692,7 +696,7 @@ def documento_dict(d: Documento) -> dict:
         "recibidoEn": iso(d.recibido_en),
         "recibidoCanal": d.recibido_canal or "",
         # Estado simple para la pestaña «CV y documentos»: Pendiente | Recibido (recibido o digital en revisión)
-        "estadoSimple": "Recibido" if d.entregado else ("Rechazado" if d.estado == "rechazado" else "Pendiente"),
+        "estadoSimple": "Recibido" if d.entregado else ("Rechazado" if d.estado == "rechazado" else ("No aplica" if d.estado == "no_aplica" else "Pendiente")),
         "validacion": {
             "tipoDetectado": v.get("tipo_detectado"),
             "coincideTipo": v.get("coincide_tipo"),
@@ -1014,4 +1018,57 @@ def medicion_clima_publica_dict(m) -> dict:
             if m.anonima
             else "Esta medición es identificada: tus respuestas quedan ligadas a tu nombre."
         ),
+    }
+
+
+# ------------------------------------------------------------
+# Onboarding v2 (2026-09-28)
+# ------------------------------------------------------------
+
+
+def plantilla_onboarding_dict(p, curso_titulo: str = "") -> dict:
+    from .services import onboarding as onb
+
+    cfg = onb.config_de_plantilla(p)
+    return {
+        "id": p.id,
+        "nombre": p.nombre,
+        "alcance": p.alcance,
+        "empresa": p.empresa or "",
+        "puesto": p.puesto or "",
+        "documentos": cfg["documentos"],
+        "recursos": cfg["recursos"],
+        "responsables": cfg["responsables"],
+        "plazos": cfg["plazos"],
+        "cursoInduccionId": p.curso_induccion_id,
+        "cursoInduccion": curso_titulo,
+        "activa": bool(p.activa),
+        "creadoPor": p.creado_por or "",
+        "actualizada": iso(p.actualizada_en),
+    }
+
+
+def tarea_onboarding_dict(t) -> dict:
+    from .services import onboarding as onb
+
+    return {
+        "id": t.id,
+        "expedienteId": t.expediente_id,
+        "clave": t.clave,
+        "nombre": t.nombre,
+        "tipo": t.tipo,
+        "fija": bool(t.fija),
+        "obligatoria": bool(t.obligatoria),
+        "responsable": t.responsable or "",
+        "diasRelativos": t.dias_relativos,
+        "fechaLimite": iso(t.fecha_limite),
+        "estado": t.estado,  # pendiente | realizada | cancelada
+        "atrasada": onb.atrasada(t),
+        "motivoCancelacion": t.motivo_cancelacion or "",
+        "notas": t.notas or "",
+        "realizadaPor": t.realizada_por or "",
+        "realizadaEn": iso(t.realizada_en),
+        "canceladaPor": t.cancelada_por or "",
+        "canceladaEn": iso(t.cancelada_en),
+        "cierreConAccion": onb.CIERRE_CON_ACCION.get(t.clave, ""),
     }

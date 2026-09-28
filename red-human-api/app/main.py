@@ -18,7 +18,7 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .migraciones import crear_tablas_base, crear_tablas_conocimiento, crear_tablas_modulos_rh, candidatos_sin_postulacion, relajar_not_null, sincronizar
 from .migraciones import asegurar_reglas_entrevistador
-from .routers import agente, auth, candidatos, capacitacion, clientes, clima, colaboradores, configuracion, conocimiento, contratacion, cuentas, desempeno, emails_preview, empleados, entrevista_humana, entrevistas, expediente_publico, feeds, metricas, notificaciones, plantillas, requisiciones, vacantes, webhooks, integraciones
+from .routers import agente, auth, candidatos, capacitacion, clientes, clima, colaboradores, configuracion, conocimiento, contratacion, cuentas, desempeno, emails_preview, empleados, entrevista_humana, entrevistas, expediente_publico, feeds, metricas, notificaciones, onboarding, plantillas, requisiciones, vacantes, webhooks, integraciones
 from .seed import rellenar_slugs_cuentas, sembrar, sembrar_admin
 from .models import TABLAS_CONOCIMIENTO, TABLAS_MODULOS_RH
 from .services import modulos_rh, rag
@@ -197,6 +197,7 @@ app.include_router(webhooks.router)
 app.include_router(agente.router)
 app.include_router(integraciones.router)
 app.include_router(feeds.router)  # 2026-09-27: feeds XML públicos (Jooble, Talent.com)
+app.include_router(onboarding.router)  # 2026-09-28: Onboarding v2 (plantillas y tareas)
 
 
 @app.get("/salud")

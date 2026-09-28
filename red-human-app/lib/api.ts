@@ -2968,6 +2968,93 @@ export function urlFormatoPlantillaClima() {
   return `${API}/clima/plantillas/formato`;
 }
 
+/* -------------------- Onboarding v2 (2026-09-28): plantillas y tareas -------------------- */
+
+export type AlcancePlantillaOnboarding = "empresa" | "puesto";
+export type TipoRecursoOnboarding = "correo" | "equipo" | "accesos" | "otro";
+export interface DocumentoPlantillaOnboarding { tipo: string; obligatorio: boolean }
+export interface RecursoPlantillaOnboarding { nombre: string; tipo: TipoRecursoOnboarding; responsable: string; dias: number }
+export type ClavePlazoOnboarding = "documentos" | "contrato_firmado" | "alta_imss_nomina" | "confirmar_ingreso";
+export interface PlantillaOnboarding {
+  id: number;
+  nombre: string;
+  alcance: AlcancePlantillaOnboarding;
+  empresa: string;
+  puesto: string;
+  documentos: DocumentoPlantillaOnboarding[];
+  recursos: RecursoPlantillaOnboarding[];
+  responsables: Record<ClavePlazoOnboarding, string>;
+  plazos: Record<ClavePlazoOnboarding, number>;
+  cursoInduccionId: number | null;
+  cursoInduccion: string;
+  activa: boolean;
+  creadoPor: string;
+  actualizada: string | null;
+}
+export interface OpcionesPlantillaOnboarding {
+  razonesSociales: string[];
+  puestos: string[];
+  cursos: { id: number; codigo: string; titulo: string; estado: string }[];
+  documentosBase: string[];
+  tareasFijas: { clave: ClavePlazoOnboarding; nombre: string }[];
+  tiposRecurso: TipoRecursoOnboarding[];
+  plazosDefault: Record<ClavePlazoOnboarding, number>;
+  estadosDocumento: string[];
+}
+export interface PlantillaOnboardingIn {
+  nombre: string;
+  alcance: AlcancePlantillaOnboarding;
+  empresa: string;
+  puesto: string;
+  documentos: DocumentoPlantillaOnboarding[];
+  recursos: RecursoPlantillaOnboarding[];
+  responsables: Partial<Record<ClavePlazoOnboarding, string>>;
+  plazos: Partial<Record<ClavePlazoOnboarding, number>>;
+  curso_induccion_id: number | null;
+}
+export interface TareaOnboarding {
+  id: number;
+  expedienteId: number;
+  clave: string;
+  nombre: string;
+  tipo: string;
+  fija: boolean;
+  obligatoria: boolean;
+  responsable: string;
+  diasRelativos: number | null;
+  fechaLimite: string | null;
+  estado: "pendiente" | "realizada" | "cancelada";
+  atrasada: boolean;
+  motivoCancelacion: string;
+  notas: string;
+  realizadaPor: string;
+  realizadaEn: string | null;
+  canceladaPor: string;
+  canceladaEn: string | null;
+  cierreConAccion: string;
+}
+export function fetchPlantillasOnboarding(incluirInactivas = false) {
+  return get<PlantillaOnboarding[]>(`/onboarding/plantillas${incluirInactivas ? "?incluir_inactivas=true" : ""}`);
+}
+export function fetchOpcionesPlantillaOnboarding() {
+  return get<OpcionesPlantillaOnboarding>("/onboarding/plantillas/opciones");
+}
+export function crearPlantillaOnboarding(datos: PlantillaOnboardingIn) {
+  return post<PlantillaOnboarding>("/onboarding/plantillas", datos);
+}
+export function editarPlantillaOnboarding(id: number, datos: Partial<PlantillaOnboardingIn> & { activa?: boolean; quitar_curso?: boolean }) {
+  return patch<PlantillaOnboarding>(`/onboarding/plantillas/${id}`, datos);
+}
+export function desactivarPlantillaOnboarding(id: number) {
+  return eliminar<PlantillaOnboarding>(`/onboarding/plantillas/${id}`);
+}
+export function fetchTareasOnboarding(expedienteId: number) {
+  return get<TareaOnboarding[]>(`/onboarding/expedientes/${expedienteId}/tareas`);
+}
+export function cambiarTareaOnboarding(id: number, datos: { estado?: TareaOnboarding["estado"]; motivo?: string; responsable?: string; notas?: string }) {
+  return patch<TareaOnboarding>(`/onboarding/tareas/${id}`, datos);
+}
+
 /* -------------------- Conocimiento: generación y permisos -------------------- */
 
 export function generarDocumentoConocimiento(datos: { tema: string; tipo?: string; notas?: string }) {

@@ -672,6 +672,24 @@ DOCUMENTOS_BASE = [
 ]
 
 
+# Onboarding v2 (2026-09-28): vocabulario visible de los documentos. NO se migran datos: los valores
+# guardados (pendiente | revision | recibido | rechazado) se LEEN así. «Aprobado» exige que una persona de
+# RH lo haya confirmado (`revisado_por`); lo que la IA validó sola sigue «Por revisar» (HITL).
+ESTADOS_DOCUMENTO_ONBOARDING = ("Pendiente", "Por revisar", "Aprobado", "Rechazado", "No aplica")
+
+
+def estado_documento_onboarding(d: "Documento") -> str:
+    if d.estado == "no_aplica":
+        return "No aplica"
+    if d.estado == "rechazado":
+        return "Rechazado"
+    if d.estado == "recibido":
+        return "Aprobado" if d.revisado_por else "Por revisar"
+    if d.estado == "revision" and d.archivo:
+        return "Por revisar"
+    return "Pendiente"
+
+
 # 2026-09-20 (B2): tipo de contratación con vigencia y unidades de duración permitidas.
 TIPO_CONTRATACION_DETERMINADO = "Tiempo determinado"
 UNIDADES_DURACION = ("días", "meses", "años")
@@ -745,6 +763,9 @@ class Expediente(Base):
     # enviados (automáticos y manuales); el nivel del SIGUIENTE es min(enviados+1, 3). Tras el
     # definitivo no salen más automáticos: RH da seguimiento (bitácora `recordatorios_agotados`).
     recordatorios_enviados: Mapped[int] = mapped_column(Integer, default=0)
+    # Onboarding v2 (2026-09-28): plantilla que se aplicó (Configuración → Plantillas de Onboarding).
+    # Null = aún no se generó el Onboarding o se usó la configuración predeterminada.
+    plantilla_onboarding_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     candidato: Mapped[Optional[Candidato]] = relationship(foreign_keys=[candidato_id])
     postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="expediente")
@@ -754,7 +775,8 @@ class Expediente(Base):
 
     @property
     def obligatorios(self) -> List["Documento"]:
-        return [d for d in self.documentos if d.obligatorio]
+        """Obligatorios que SÍ aplican a esta persona (RH puede marcar uno «No aplica» con motivo)."""
+        return [d for d in self.documentos if d.obligatorio and d.estado != "no_aplica"]
 
     @property
     def progreso(self) -> int:
@@ -797,7 +819,9 @@ class Documento(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     expediente_id: Mapped[int] = mapped_column(ForeignKey("expedientes.id"), index=True)
     tipo: Mapped[str] = mapped_column(String(80))
-    estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # pendiente | revision | recibido | rechazado
+    # pendiente | revision | recibido | rechazado | no_aplica (Onboarding v2, 2026-09-28: SOLO RH, con motivo).
+    # Vocabulario de Onboarding (Pendiente / Por revisar / Aprobado / Rechazado / No aplica) = `estado_documento_onboarding`.
+    estado: Mapped[str] = mapped_column(String(20), default="pendiente")
     obligatorio: Mapped[bool] = mapped_column(Boolean, default=True)
     archivo: Mapped[str] = mapped_column(String(300), default="")  # ruta en disco
     nombre_archivo: Mapped[str] = mapped_column(String(255), default="")  # nombre original
@@ -817,6 +841,14 @@ class Documento(Base):
     solicitudes: Mapped[list] = mapped_column(JSON, default=list)  # [{en, canal, tipo: solicitud|recordatorio, por}]
     recibido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     recibido_canal: Mapped[str] = mapped_column(String(40), default="")  # whatsapp | liga | rh | fisico
+    # Onboarding v2 (2026-09-28): «No aplica» lo marca SOLO una persona de RH y siempre con motivo.
+    motivo_no_aplica: Mapped[str] = mapped_column(Text, default="")
+    no_aplica_por: Mapped[str] = mapped_column(String(150), default="")
+    no_aplica_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def aplica(self) -> bool:
+        return self.estado != "no_aplica"
 
     @property
     def entregado(self) -> bool:
@@ -1536,6 +1568,7 @@ TABLAS_MODULOS_RH = (
     "ciclos_desempeno", "evaluaciones_desempeno", "mediciones_clima", "respuestas_clima",
     "participaciones_clima", "plantillas_clima",  # Clima v2 (2026-09-27)
     "plantillas_desempeno", "acciones_desempeno",  # Desempeño v2 (2026-09-27)
+    "plantillas_onboarding", "tareas_onboarding",  # Onboarding v2 (2026-09-28)
 )
 
 # --- Desempeño ---
@@ -1824,3 +1857,71 @@ def puede_ver_conocimiento(doc: "DocumentoConocimiento", colaborador: Optional["
     area_col = (colaborador.area or "").strip().lower()
     puesto_col = (colaborador.puesto or "").strip().lower()
     return bool((area_col and area_col in areas) or (puesto_col and puesto_col in puestos))
+
+
+# --- Onboarding v2 (2026-09-28) ---
+# Plantillas de Onboarding (Configuración): qué documentos se piden, qué recursos internos se preparan
+# (correo, equipo, accesos), quién es responsable por defecto, el curso de inducción y los plazos RELATIVOS a
+# la fecha de ingreso. Jerarquía: la plantilla de PUESTO prevalece sobre la de EMPRESA; sin ninguna aplica la
+# configuración predeterminada (DOCUMENTOS_BASE + las tres tareas fijas). Aplicarla a una persona COPIA la
+# configuración: cambiar la selección de un candidato nunca altera la plantilla, ni al revés.
+ALCANCES_PLANTILLA_ONBOARDING = ("empresa", "puesto")
+TIPOS_RECURSO_ONBOARDING = ("correo", "equipo", "accesos", "otro")
+ESTADOS_TAREA_ONBOARDING = ("pendiente", "realizada", "cancelada")
+# Tareas FIJAS y obligatorias de todo Onboarding (clave, nombre). No se eliminan ni se cancelan una por una.
+TAREAS_FIJAS_ONBOARDING = (
+    ("contrato_firmado", "Contrato firmado"),
+    ("alta_imss_nomina", "Alta IMSS / nómina"),
+    ("confirmar_ingreso", "Confirmar ingreso"),
+)
+# Plazos predeterminados en días respecto a la fecha de ingreso (negativo = antes del ingreso).
+PLAZOS_ONBOARDING_DEFAULT = {"documentos": -3, "contrato_firmado": -1, "alta_imss_nomina": 0, "confirmar_ingreso": 0}
+
+
+class PlantillaOnboarding(Base):
+    __tablename__ = "plantillas_onboarding"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    nombre: Mapped[str] = mapped_column(String(200))
+    alcance: Mapped[str] = mapped_column(String(20), default="empresa")  # ALCANCES_PLANTILLA_ONBOARDING
+    # Razón social contratante (una de `cuentas.razones_sociales_de`); vacío = cualquiera de la Cuenta.
+    empresa: Mapped[str] = mapped_column(String(200), default="")
+    puesto: Mapped[str] = mapped_column(String(200), default="")  # solo alcance «puesto»
+    documentos: Mapped[list] = mapped_column(JSON, default=list)  # [{tipo, obligatorio}]
+    recursos: Mapped[list] = mapped_column(JSON, default=list)  # [{nombre, tipo, responsable, dias}]
+    responsables: Mapped[dict] = mapped_column(JSON, default=dict)  # {documentos, contrato_firmado, alta_imss_nomina, confirmar_ingreso}
+    plazos: Mapped[dict] = mapped_column(JSON, default=dict)  # días relativos a la fecha de ingreso
+    curso_induccion_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    activa: Mapped[bool] = mapped_column(Boolean, default=True)  # «eliminar» = desactivar
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+
+class TareaOnboarding(Base):
+    """Tarea del Onboarding de UNA persona (expediente). Estados: pendiente → realizada | cancelada (con
+    motivo). Las tres fijas (`TAREAS_FIJAS_ONBOARDING`) nacen siempre y no se cancelan una por una."""
+
+    __tablename__ = "tareas_onboarding"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    expediente_id: Mapped[int] = mapped_column(Integer, index=True)
+    clave: Mapped[str] = mapped_column(String(40), default="")  # contrato_firmado | alta_imss_nomina | confirmar_ingreso | recurso | otra
+    nombre: Mapped[str] = mapped_column(String(200))
+    tipo: Mapped[str] = mapped_column(String(20), default="otro")  # fija | correo | equipo | accesos | otro
+    fija: Mapped[bool] = mapped_column(Boolean, default=False)
+    obligatoria: Mapped[bool] = mapped_column(Boolean, default=True)
+    responsable: Mapped[str] = mapped_column(String(150), default="")
+    dias_relativos: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # respecto a la fecha de ingreso
+    fecha_limite: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # ESTADOS_TAREA_ONBOARDING
+    motivo_cancelacion: Mapped[str] = mapped_column(Text, default="")
+    notas: Mapped[str] = mapped_column(Text, default="")
+    realizada_por: Mapped[str] = mapped_column(String(150), default="")
+    realizada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelada_por: Mapped[str] = mapped_column(String(150), default="")
+    cancelada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    creada_por: Mapped[str] = mapped_column(String(150), default="")
+    creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)

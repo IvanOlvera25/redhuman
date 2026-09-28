@@ -227,6 +227,8 @@ async def subir_documento_interno(db: Session, e: Expediente, tipo: str, archivo
     if e.estado == "alta":
         raise HTTPException(409, "El expediente ya fue dado de alta; no admite cambios.")
     doc = _documento(e, tipo)
+    if doc.estado == "no_aplica" and subido_por == "candidato":
+        raise HTTPException(409, f"«{doc.tipo}» no se requiere en tu expediente.")
     validado = await fs.validar(archivo, f"documento «{doc.tipo}»")
     return _registrar_documento(db, e, doc, validado, subido_por)
 
@@ -264,7 +266,7 @@ def documento_para_adjunto(db: Session, e: Expediente, pie: str, nombre_archivo:
     obligatorio pendiente/rechazado; (3) si no falta ninguno, el primer opcional pendiente; (4) si
     tampoco, se agrega como documento adicional (RH lo reclasifica desde el expediente)."""
     pista = _norm(f"{pie} {nombre_archivo}")
-    docs = sorted(e.documentos, key=lambda d: d.id)
+    docs = sorted((d for d in e.documentos if d.estado != "no_aplica"), key=lambda d: d.id)
     if pista.strip():
         for d in docs:
             if _norm(d.tipo) in pista:
@@ -365,10 +367,15 @@ def descargar_documento(
     return FileResponse(doc.archivo, media_type=doc.mime or "application/octet-stream", filename=doc.nombre_archivo or doc.tipo)
 
 
+# Onboarding v2 (2026-09-28): también se acepta el vocabulario nuevo; se guarda con los valores de siempre.
+ALIAS_ESTADO_DOC = {"aprobado": "recibido", "por_revisar": "revision", "por revisar": "revision", "no aplica": "no_aplica"}
+
+
 class EstadoDocIn(BaseModel):
     tipo: str
-    estado: str  # recibido | rechazado | revision | pendiente
+    estado: str  # recibido (Aprobado) | rechazado | revision (Por revisar) | pendiente | no_aplica (solo RH, con motivo)
     notas: str = ""
+    motivo: str = ""  # obligatorio para «No aplica»
     # el documento se entregó en físico o fuera del sistema: RH lo da por recibido bajo su responsabilidad
     recibido_fisico: bool = False
 
@@ -381,8 +388,25 @@ def marcar_documento(
     """Revisión humana manual de un documento (el agente propone, RH dispone)."""
     e = _expediente(db, exp_id, cuenta.id)
     doc = _documento(e, datos.tipo)
-    if datos.estado not in ESTADOS_DOC:
-        raise HTTPException(400, f"Estado inválido. Usa uno de: {', '.join(ESTADOS_DOC)}")
+    datos.estado = ALIAS_ESTADO_DOC.get((datos.estado or "").strip().lower(), (datos.estado or "").strip().lower())
+    if datos.estado not in ESTADOS_DOC + ("no_aplica",):
+        raise HTTPException(400, f"Estado inválido. Usa uno de: {', '.join(ESTADOS_DOC + ('no_aplica',))}")
+    if datos.estado == "no_aplica":
+        # «No aplica» lo decide SOLO una persona de RH (esta ruta exige sesión con permiso de decisión) y con motivo
+        motivo = (datos.motivo or datos.notas or "").strip()
+        if not motivo:
+            raise HTTPException(400, "Indica el motivo por el que este documento no aplica.")
+        anterior = doc.estado
+        doc.estado, doc.motivo_no_aplica, doc.no_aplica_por = "no_aplica", motivo[:1000], u.nombre
+        doc.no_aplica_en = datetime.now(timezone.utc)
+        doc.revisado_por = u.nombre
+        _sincronizar_estado(e)
+        registrar(db, u.nombre, "documento_no_aplica", "documento", f"{e.id}:{doc.tipo}", {"de": anterior, "motivo": motivo[:300], "correo_rh": u.correo})
+        db.commit()
+        return expediente_dict(e)
+    if doc.estado == "no_aplica":
+        # vuelve a aplicar: se limpia el motivo (queda en bitácora)
+        doc.motivo_no_aplica, doc.no_aplica_por, doc.no_aplica_en = "", "", None
     # confirmar uno ya recibido es válido; darlo por recibido de la nada exige archivo o entrega física declarada
     if datos.estado == "recibido" and not doc.archivo and doc.estado != "recibido" and not datos.recibido_fisico:
         raise HTTPException(

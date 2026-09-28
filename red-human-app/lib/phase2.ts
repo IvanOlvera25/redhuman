@@ -4,7 +4,9 @@
    ============================================================ */
 
 /* -------------------- Onboarding (3.11) -------------------- */
-export type EstadoDoc = "recibido" | "revision" | "pendiente" | "rechazado";
+/** Onboarding v2 (2026-09-28): «no_aplica» lo marca SOLO RH con motivo (ver `estadoOnboarding`). */
+export type EstadoDoc = "recibido" | "revision" | "pendiente" | "rechazado" | "no_aplica";
+export type EstadoDocOnboarding = "Pendiente" | "Por revisar" | "Aprobado" | "Rechazado" | "No aplica";
 
 export interface ValidacionDoc {
   tipoDetectado?: string | null;
@@ -35,7 +37,11 @@ export interface DocExpediente {
   solicitudes?: { en: string; canal: string; tipo: "solicitud" | "recordatorio"; por: string }[];
   recibidoEn?: string | null;
   recibidoCanal?: string;
-  estadoSimple?: "Pendiente" | "Recibido" | "Rechazado";
+  estadoSimple?: "Pendiente" | "Recibido" | "Rechazado" | "No aplica";
+  /** Onboarding v2: Pendiente | Por revisar | Aprobado (confirmado por RH) | Rechazado | No aplica */
+  estadoOnboarding?: EstadoDocOnboarding;
+  motivoNoAplica?: string;
+  noAplicaPor?: string;
 }
 
 export interface NuevoIngreso {

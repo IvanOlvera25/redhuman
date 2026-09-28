@@ -38,6 +38,7 @@ def publica(token: str, db: Session = Depends(get_db)):
         "estado": e.estado,
         "documentos": [
             {"tipo": d.tipo, "estado": d.estado, "obligatorio": d.obligatorio} for d in e.documentos
+            if d.estado != "no_aplica"  # Onboarding v2: lo que RH marcó «No aplica» no se le pide al candidato
         ],
         # 2026-09-19: la carta de intención se descarga desde la misma liga (la comparte RH por WhatsApp)
         "cartaDisponible": bool(e.puesto and e.sueldo),

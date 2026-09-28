@@ -55,6 +55,7 @@ const docConfig: Record<
   revision: { tone: "warn", label: "En revisión", icon: Clock },
   rechazado: { tone: "bad", label: "Rechazado", icon: X },
   pendiente: { tone: "neutral", label: "Pendiente", icon: FileText },
+  no_aplica: { tone: "neutral", label: "No aplica", icon: FileText },
 };
 
 const iconoFondo: Record<EstadoDoc, string> = {
@@ -62,6 +63,7 @@ const iconoFondo: Record<EstadoDoc, string> = {
   revision: "bg-warn-soft text-warn",
   rechazado: "bg-bad-soft text-bad",
   pendiente: "bg-surface-2 text-ink-3",
+  no_aplica: "bg-surface-2 text-ink-3",
 };
 
 type AvisoEstado = { tono: "ok" | "error" | "warn" | "info"; texto: string } | null;
@@ -831,7 +833,7 @@ function Documento({
   const c = docConfig[d.estado];
 
   // Vista simplificada que pide el bloque 3: Recibido / Pendiente / No aplica.
-  const noAplica = d.obligatorio === false;
+  const noAplica = d.obligatorio === false || d.estado === "no_aplica";
   const badgeLabel = noAplica ? "No aplica" : d.estado === "recibido" ? "Recibido" : "Pendiente";
   const badgeTone: "good" | "warn" | "neutral" = noAplica ? "neutral" : d.estado === "recibido" ? "good" : "warn";
 

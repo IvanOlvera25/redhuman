@@ -38,6 +38,7 @@ import { invalidarReglasNotificacion } from "@/components/dashboard/linea-notifi
 import { BotonCargaMasiva } from "@/components/dashboard/carga-masiva";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import { SeccionPlantillasClima } from "@/components/dashboard/clima/seccion-plantillas-clima";
+import { SeccionPlantillasOnboarding } from "@/components/dashboard/onboarding/seccion-plantillas-onboarding";
 import {
   actualizarCliente,
   actualizarConfiguracion,
@@ -123,6 +124,7 @@ export default function Configuracion() {
       <SeccionClientes />
       <SeccionPlantillas />
       <SeccionPlantillasClima />
+      <SeccionPlantillasOnboarding />
       <SeccionNotificaciones />
       <SeccionIntegraciones />
       <SeccionModoPrueba />
