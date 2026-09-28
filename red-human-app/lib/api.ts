@@ -3136,6 +3136,29 @@ export function registrarNoIngreso(expedienteId: number, motivo: string) {
   return post<EstadoOnboardingDetalle & { avisosResponsables: AvisoOnboarding[] }>(`/onboarding/expedientes/${expedienteId}/no-ingreso`, { motivo });
 }
 
+/* -------------------- Tablero de control (2026-09-28): SOLO datos reales, por Cuenta -------------------- */
+export interface TableroControl {
+  cuentaId: number;
+  generado: string;
+  kpis: { candidatosActivos: number; candidatosNuevos7d: number; colaboradoresActivos: number; altas30d: number; vacantesPublicadas: number };
+  actividad: { dia: string; fecha: string; candidatos: number; entrevistas: number }[];
+  fuentes: { name: string; value: number }[];
+  tiempoContratacion: { serie: { mes: string; dias: number }[]; promedio: number | null };
+  recientes: { id: string; nombre: string; puesto: string; ubicacion: string; fuente: string; estado: string; score: number; etapa: string; aplicado: string }[];
+  pendientesRH: { modulo: number; tipo: string; cantidad: number; texto: string; ruta: string }[];
+  /** null = el módulo no está disponible en este servidor (sus tablas no se pudieron crear). */
+  onboarding: { activos: number; tareasAtrasadas: number; avancePromedio: number | null; sinTareas: number; listosParaCerrar: number } | null;
+  evaluaciones: { pendientes: number; enEsperaConsentimiento: number; enProceso: number; resultadoRecibido: number; revisadas: number; porEstado: Record<string, number> } | null;
+  desempeno: {
+    activos: number; borradores: number; personasIncluidas: number; personasCompletadas: number; avance: number | null;
+    ciclos: { id: string; nombre: string; periodo: string; incluidas: number; completadas: number; porcentaje: number }[];
+  } | null;
+  clima: { abiertas: number; borradores: number; cerradas: number } | null;
+}
+export function fetchTablero() {
+  return get<TableroControl>("/metricas/tablero");
+}
+
 /* -------------------- Evaluaciones y verificaciones (2026-09-28) -------------------- */
 export type TipoEvaluacion = "psicometrica" | "tecnica" | "referencias" | "medico" | "socioeconomico" | "otra";
 export const TIPOS_EVALUACION: { valor: TipoEvaluacion; texto: string }[] = [

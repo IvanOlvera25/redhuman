@@ -38,25 +38,34 @@ export function KpiCard({
   delta,
   tone = "brand",
   spark,
+  detalle,
 }: {
   label: string;
   value: string;
-  delta: string;
+  /** Solo se pinta si viene de datos reales (2026-09-28: nada de deltas inventados). */
+  delta?: string;
   tone?: string;
-  spark: number[];
+  spark?: number[];
+  /** Texto secundario real (p. ej. «+3 en 7 días»). */
+  detalle?: string;
 }) {
   return (
     <Card hover className="overflow-hidden p-5">
       <div className="flex items-start justify-between">
         <p className="text-sm text-ink-2">{label}</p>
-        <span className="inline-flex items-center gap-0.5 rounded-full bg-good-soft px-2 py-0.5 text-[11px] font-semibold text-good">
-          <ArrowUpRight className="h-3 w-3" /> {delta}
-        </span>
+        {delta && (
+          <span className="inline-flex items-center gap-0.5 rounded-full bg-good-soft px-2 py-0.5 text-[11px] font-semibold text-good">
+            <ArrowUpRight className="h-3 w-3" /> {delta}
+          </span>
+        )}
       </div>
       <div className="mt-2 font-display text-3xl font-extrabold tracking-tight tabular">{value}</div>
-      <div className="mt-3 -mx-1">
-        <Sparkline data={spark} color={toneColor[tone] ?? "var(--brand)"} />
-      </div>
+      {detalle && <p className="mt-1 text-[12px] text-ink-3">{detalle}</p>}
+      {spark && spark.length > 1 && (
+        <div className="mt-3 -mx-1">
+          <Sparkline data={spark} color={toneColor[tone] ?? "var(--brand)"} />
+        </div>
+      )}
     </Card>
   );
 }
@@ -69,7 +78,7 @@ const estadoConfig: Record<EstadoPrefiltro, { tone: "good" | "warn" | "bad" | "n
 };
 
 export function EstadoBadge({ estado, prefijo = "" }: { estado: EstadoPrefiltro; prefijo?: string }) {
-  const c = estadoConfig[estado];
+  const c = estadoConfig[estado] ?? estadoConfig.pendiente;
   return (
     <Badge tone={c.tone} dot>
       {prefijo}
