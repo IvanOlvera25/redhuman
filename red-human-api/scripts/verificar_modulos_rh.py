@@ -105,7 +105,8 @@ with TestClient(app) as client:
     propuesta = r.json()
     check(all("peso" in o for o in propuesta["objetivos"]), "los objetivos traen peso para ponderar")
     r = client.post("/desempeno/ciclos", json={"nombre": "Desempeño 2026-S2", "periodo": "2026-S2", "puesto_objetivo": "Cajera",
-                                               "objetivos": propuesta["objetivos"], "kpis": propuesta["kpis"], "generado_con_ia": propuesta["generadoConIa"]})
+                                               "objetivos": [{"titulo": "Cumplir responsabilidades", "peso": 60}],
+                                               "kpis": [{"nombre": "Calidad", "meta": "95%", "peso": 40}], "generado_con_ia": propuesta["generadoConIa"]})
     check(r.status_code == 201 and r.json()["id"].startswith("DES-"), f"ciclo creado ({r.status_code})")
     CICLO = r.json()["id"]
     check(client.post("/desempeno/ciclos", json={"nombre": "Sin nada"}).status_code == 400, "un ciclo sin objetivos ni KPIs se rechaza")
@@ -113,12 +114,13 @@ with TestClient(app) as client:
     check(r.status_code == 201, f"participantes agregados ({r.status_code})")
     check(len(r.json()["evaluaciones"]) == 2 and "COL-3" in r.json()["noEncontrados"] and "NO-EXISTE" in r.json()["noEncontrados"],
           "solo entran colaboradores ACTIVOS del roster (el inactivo y el inexistente quedan fuera)")
-    check(r.json()["ciclo"]["estado"] == "en_curso", "el ciclo pasa a «en curso» al tener participantes")
+    check(r.json()["ciclo"]["estado"] == "borrador", "agregar participantes NO inicia la evaluación (Desempeño v2)")
     EV1, EV2 = [e["id"] for e in r.json()["evaluaciones"]]
     r2 = client.post(f"/desempeno/ciclos/{CICLO}/participantes", json={"colaborador_ids": ["COL-1"]})
     check(len(r2.json()["evaluaciones"]) == 1 and r2.json()["evaluaciones"][0]["id"] == EV1, "agregar dos veces a la misma persona NO duplica su evaluación")
     ev = client.get(f"/desempeno/evaluaciones/{EV1}").json()
     check(ev["colaborador"] and ev["puesto"] == "Cajera" and ev["area"] == "Ventas", "la ficha toma nombre, puesto y área del roster (no se recapturan)")
+    check(client.post(f"/desempeno/ciclos/{CICLO}/iniciar").json()["estado"] == "en_curso", "RH inicia la evaluación (Borrador → En curso)")
     r = client.patch(f"/desempeno/evaluaciones/{EV1}", json={
         "resultados": [{"tipo": "objetivo", "nombre": "Cumplir responsabilidades", "meta": "100%", "real": "90%", "logro": 90, "peso": 60},
                        {"tipo": "kpi", "nombre": "Calidad", "meta": "95%", "real": "70%", "logro": 70, "peso": 40}],
@@ -127,7 +129,8 @@ with TestClient(app) as client:
     })
     check(r.status_code == 200 and r.json()["estado"] == "completada", "evaluación capturada y completada")
     check(r.json()["calificacion"] == 82.0, f"calificación ponderada (90×60 + 70×40)/100 = 82 → {r.json()['calificacion']}")
-    client.patch(f"/desempeno/evaluaciones/{EV2}", json={"resultados": [{"tipo": "objetivo", "nombre": "Cumplir responsabilidades", "logro": 60, "peso": 100}],
+    client.patch(f"/desempeno/evaluaciones/{EV2}", json={"resultados": [{"tipo": "objetivo", "nombre": "Cumplir responsabilidades", "logro": 60},
+                                                                     {"tipo": "kpi", "nombre": "Calidad", "logro": 60}],
                                                          "brechas": [{"tema": "Atención a cliente", "brecha": "Tiempos de respuesta", "accion_sugerida": "Curso de servicio"}], "completar": True})
     r = client.get(f"/desempeno/ciclos/{CICLO}/resultados").json()
     check(r["total"] == 2 and r["completadas"] == 2 and r["avance"] == 100, "avance del ciclo")

@@ -850,7 +850,9 @@ class Colaborador(Base):
     tipo_contratacion: Mapped[str] = mapped_column(String(60), default="")
     condiciones_ingreso: Mapped[dict] = mapped_column(JSON, default=dict)
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
-    jefe_directo: Mapped[str] = mapped_column(String(150), default="")
+    jefe_directo: Mapped[str] = mapped_column(String(150), default="")  # nombre a mostrar
+    # 2026-09-27 (Desempeño v2): el jefe como otro colaborador del roster (para proponer evaluador).
+    jefe_id: Mapped[Optional[int]] = mapped_column(ForeignKey("colaboradores.id", use_alter=True, name="fk_colaborador_jefe"), nullable=True)
     cv_ruta: Mapped[str] = mapped_column(String(400), default="")
     cv_nombre: Mapped[str] = mapped_column(String(255), default="")
     fecha_ingreso: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -1536,8 +1538,30 @@ TABLAS_MODULOS_RH = (
 )
 
 # --- Desempeño ---
-ESTADOS_CICLO_DESEMPENO = ("borrador", "en_curso", "cerrado")
-ESTADOS_EVALUACION_DESEMPENO = ("pendiente", "en_curso", "completada")
+# Desempeño v2 (2026-09-27). Evaluación general: Borrador → En curso → Cerrada (flujo de ida).
+# Por persona: Pendiente → En proceso → Completada. Valores viejos («cerrado», «en_curso» de persona) se
+# leen con `normalizar_estado_ciclo` / `normalizar_estado_persona` (sin migrar datos).
+ESTADOS_CICLO_DESEMPENO = ("borrador", "en_curso", "cerrada")
+TRANSICIONES_CICLO_DESEMPENO = {"borrador": ("en_curso",), "en_curso": ("cerrada",), "cerrada": ()}
+ESTADOS_EVALUACION_DESEMPENO = ("pendiente", "en_proceso", "completada")
+TIPOS_CRITERIO_DESEMPENO = ("medible", "descriptivo")
+SENTIDOS_INDICADOR = ("mayor_es_mejor", "menor_es_mejor")
+# Escala por defecto de un criterio descriptivo (1-5 con significado). Cumplimiento = (valor-1)/4 → 1=0 %, 5=100 %.
+ESCALA_DESCRIPTIVA_DEFAULT = [
+    {"valor": 1, "significado": "No cumple lo esperado"},
+    {"valor": 2, "significado": "Cumple parcialmente"},
+    {"valor": 3, "significado": "Cumple lo esperado"},
+    {"valor": 4, "significado": "Supera lo esperado"},
+    {"valor": 5, "significado": "Es referente para el equipo"},
+]
+
+
+def normalizar_estado_ciclo(estado: str) -> str:
+    return "cerrada" if estado in ("cerrado", "cerrada") else (estado or "borrador")
+
+
+def normalizar_estado_persona(estado: str) -> str:
+    return "en_proceso" if estado in ("en_curso", "en_proceso") else (estado or "pendiente")
 
 
 class CicloDesempeno(Base):
@@ -1555,6 +1579,18 @@ class CicloDesempeno(Base):
     puesto_objetivo: Mapped[str] = mapped_column(String(200), default="")  # contexto para la IA (no filtra)
     objetivos: Mapped[list] = mapped_column(JSON, default=list)  # [{titulo, descripcion, peso}]
     kpis: Mapped[list] = mapped_column(JSON, default=list)       # [{nombre, descripcion, unidad, meta, peso}]
+    # Desempeño v2: criterios unificados (reemplazan a objetivos/kpis, que quedan como LEGADO de solo
+    # lectura: `services.desempeno_calculo.criterios_de` los convierte al leer). Ver ese módulo.
+    criterios: Mapped[list] = mapped_column(JSON, default=list)
+    equipo: Mapped[str] = mapped_column(String(200), default="")  # puesto/equipo que se evalúa (contexto de la IA)
+    origen_criterios: Mapped[str] = mapped_column(String(20), default="")  # ia | plantilla | manual
+    pesos_personalizados: Mapped[bool] = mapped_column(Boolean, default=False)  # False = todos pesan igual
+    plantilla_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # trazabilidad, sin FK
+    duplicado_de: Mapped[str] = mapped_column(String(20), default="")  # DES-#### de origen al duplicar
+    # cambios a criterios/metas DESPUÉS de iniciar: [{fecha, usuario, criterio_id, campo, anterior, nuevo, motivo}]
+    historial_cambios: Mapped[list] = mapped_column(JSON, default=list)
+    iniciado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    cerrado_por: Mapped[str] = mapped_column(String(150), default="")
     escala_maxima: Mapped[int] = mapped_column(Integer, default=100)  # calificación 0-100 por defecto
     generado_con_ia: Mapped[bool] = mapped_column(Boolean, default=False)
     estado: Mapped[str] = mapped_column(String(20), default="borrador")  # ver ESTADOS_CICLO_DESEMPENO
@@ -1576,9 +1612,22 @@ class EvaluacionDesempeno(Base):
     cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
     ciclo_id: Mapped[int] = mapped_column(ForeignKey("ciclos_desempeno.id"), index=True)
     colaborador_id: Mapped[int] = mapped_column(ForeignKey("colaboradores.id"), index=True)
-    evaluador: Mapped[str] = mapped_column(String(150), default="")  # quién de RH/jefatura evalúa (HITL)
+    evaluador: Mapped[str] = mapped_column(String(150), default="")  # nombre a mostrar del evaluador (HITL)
+    # Desempeño v2: el evaluador es un Usuario del sistema (puede entrar y guardar borradores). Si el
+    # colaborador tiene jefe en el roster y ese jefe tiene usuario (mismo correo), se propone solo.
+    evaluador_usuario_id: Mapped[Optional[int]] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
+    # Ajustes INDIVIDUALES a criterios/metas de esta persona: {criterio_id: {campo: valor, ..., "motivo": str}}
+    ajustes: Mapped[dict] = mapped_column(JSON, default=dict)
+    conclusion: Mapped[str] = mapped_column(Text, default="")  # obligatoria para completar (Fase 5)
+    resumen: Mapped[str] = mapped_column(Text, default="")
+    fortalezas: Mapped[list] = mapped_column(JSON, default=list)  # confirmadas por el evaluador (nunca automáticas)
+    propuesta_ia: Mapped[dict] = mapped_column(JSON, default=dict)  # última propuesta de la IA (editable)
+    notas: Mapped[list] = mapped_column(JSON, default=list)  # [{id, fecha, texto, criterio_id?, autor}]
+    historial_cambios: Mapped[list] = mapped_column(JSON, default=list)
+    completada_por: Mapped[str] = mapped_column(String(150), default="")
     estado: Mapped[str] = mapped_column(String(20), default="pendiente")  # ver ESTADOS_EVALUACION_DESEMPENO
-    resultados: Mapped[list] = mapped_column(JSON, default=list)  # [{tipo, nombre, meta, real, logro, peso, comentario}]
+    # v2: [{criterio_id, real, valoracion, no_aplica, motivo_no_aplica, comentario}]; LEGADO: [{tipo, nombre, logro, …}]
+    resultados: Mapped[list] = mapped_column(JSON, default=list)
     calificacion: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 0-escala_maxima
     brechas: Mapped[list] = mapped_column(JSON, default=list)  # [{tema, brecha, accion_sugerida}] → plan de capacitación
     comentarios: Mapped[str] = mapped_column(Text, default="")

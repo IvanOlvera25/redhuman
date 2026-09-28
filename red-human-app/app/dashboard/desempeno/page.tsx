@@ -19,7 +19,7 @@ import { usePolling } from "@/lib/use-polling";
 import { cn } from "@/lib/utils";
 import {
   agregarParticipantesDesempeno,
-  cambiarEstadoCiclo,
+  cerrarCicloDesempeno,
   crearCicloDesempeno,
   fetchCiclosDesempeno,
   fetchColaboradores,
@@ -27,7 +27,9 @@ import {
   fetchResultadosCiclo,
   generarPlanDesempeno,
   guardarEvaluacionDesempeno,
+  iniciarCicloDesempeno,
   type CicloDesempeno,
+  type CriterioDesempeno,
   type Colaborador,
   type EvaluacionDesempeno,
   type KpiDesempeno,
@@ -38,8 +40,10 @@ import {
 
 type Aviso = AvisoRH;
 
-const ESTADO_TONO: Record<string, "neutral" | "brand" | "good"> = { borrador: "neutral", en_curso: "brand", cerrado: "good" };
-const ESTADO_LABEL: Record<string, string> = { borrador: "Borrador", en_curso: "En curso", cerrado: "Cerrado" };
+const ESTADO_TONO: Record<string, "neutral" | "brand" | "good"> = { borrador: "neutral", en_curso: "brand", cerrada: "good" };
+const ESTADO_LABEL: Record<string, string> = { borrador: "Borrador", en_curso: "En curso", cerrada: "Cerrada" };
+const ESTADO_PERSONA: Record<string, string> = { pendiente: "Pendiente", en_proceso: "En proceso", completada: "Completada" };
+const TONO_PERSONA: Record<string, "neutral" | "brand" | "good"> = { pendiente: "neutral", en_proceso: "brand", completada: "good" };
 
 export default function Desempeno() {
   const puedeDecidir = usePuedeDecidir();
@@ -108,8 +112,8 @@ export default function Desempeno() {
                 <Badge tone={ESTADO_TONO[c.estado] ?? "neutral"} dot>{ESTADO_LABEL[c.estado] ?? c.estado}</Badge>
               </div>
               <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
-                <span className="rounded-lg bg-surface-2 px-2 py-1 text-ink-2">{c.objetivos.length} objetivos</span>
-                <span className="rounded-lg bg-surface-2 px-2 py-1 text-ink-2">{c.kpis.length} KPIs</span>
+                <span className="rounded-lg bg-surface-2 px-2 py-1 text-ink-2">{c.criterios.length} criterios</span>
+                {c.equipo && <span className="rounded-lg bg-surface-2 px-2 py-1 text-ink-2">{c.equipo}</span>}
                 {c.generadoConIa && (
                   <span className="inline-flex items-center gap-1 rounded-lg bg-brand-soft px-2 py-1 font-semibold text-brand">
                     <Sparkles className="h-3 w-3" /> con IA
@@ -118,7 +122,7 @@ export default function Desempeno() {
               </div>
               <div className="mt-auto pt-4">
                 <div className="flex items-baseline justify-between text-xs">
-                  <span className="text-ink-3">{c.completadas} de {c.participantes} evaluados</span>
+                  <span className="text-ink-3">{c.completadas} de {c.participantes} completadas</span>
                   <span className="font-mono font-bold tabular">{c.avance}%</span>
                 </div>
                 <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-surface-2">
@@ -275,13 +279,27 @@ function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVo
     setEvaluando(completa ?? e);
   }
 
-  async function cerrarCiclo() {
-    if (!datos) return;
-    setOcupado("cerrar");
-    const r = await cambiarEstadoCiclo(codigo, datos.ciclo.estado === "cerrado" ? "en_curso" : "cerrado");
+  const [confirmarCierre, setConfirmarCierre] = useState(false);
+
+  async function iniciarCiclo() {
+    setOcupado("iniciar");
+    const r = await iniciarCicloDesempeno(codigo);
     setOcupado("");
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
-    setAviso({ tono: "ok", texto: r.data.estado === "cerrado" ? "Evaluación cerrada: los resultados quedan como histórico." : "Evaluación reabierta." });
+    setAviso({ tono: "ok", texto: "Evaluación iniciada: ya se pueden capturar resultados." });
+    void recargar();
+  }
+
+  async function cerrarCiclo(aunConPendientes: boolean) {
+    setOcupado("cerrar");
+    const r = await cerrarCicloDesempeno(codigo, aunConPendientes);
+    setOcupado("");
+    setConfirmarCierre(false);
+    if (!r.ok) {
+      if (!aunConPendientes && r.error.includes("sin completar")) return setConfirmarCierre(true);
+      return setAviso({ tono: "error", texto: r.error });
+    }
+    setAviso({ tono: "ok", texto: "Evaluación cerrada: los resultados quedan como histórico." });
     void recargar();
   }
 
@@ -291,7 +309,6 @@ function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVo
 
   const c = datos.ciclo;
   const pendientes = datos.pendientes;
-  const escala = datos.escalaMaxima || 100;
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
@@ -301,14 +318,18 @@ function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVo
 
       <PageHeader title={c.nombre} subtitle={`${c.id}${c.periodo ? ` · ${c.periodo}` : ""} · creada por ${c.creadoPor || "RH"}`}>
         <Badge tone={ESTADO_TONO[c.estado] ?? "neutral"} dot>{ESTADO_LABEL[c.estado] ?? c.estado}</Badge>
-        {puedeDecidir && (
+        {puedeDecidir && c.estado !== "cerrada" && (
           <>
             <Button size="sm" variant="outline" onClick={() => setAgregar(true)}>
               <UserPlus className="h-4 w-4" /> Agregar colaboradores
             </Button>
-            <Button size="sm" variant="secondary" onClick={cerrarCiclo} disabled={ocupado === "cerrar"}>
-              {c.estado === "cerrado" ? "Reabrir" : "Cerrar evaluación"}
-            </Button>
+            {c.estado === "borrador" ? (
+              <Button size="sm" onClick={iniciarCiclo} disabled={ocupado === "iniciar"}>
+                {ocupado === "iniciar" ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />} Iniciar evaluación
+              </Button>
+            ) : (
+              <Button size="sm" variant="secondary" onClick={() => cerrarCiclo(false)} disabled={ocupado === "cerrar"}>Cerrar evaluación</Button>
+            )}
           </>
         )}
       </PageHeader>
@@ -317,9 +338,9 @@ function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVo
 
       {/* Resumen */}
       <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Kpi etiqueta="Colaboradores" valor={String(datos.total)} pie={`${datos.completadas} evaluados`} icono={<Users className="h-4 w-4" />} />
-        <Kpi etiqueta="Avance" valor={`${datos.avance}%`} pie="de las evaluaciones" icono={<ClipboardList className="h-4 w-4" />} />
-        <Kpi etiqueta="Calificación promedio" valor={datos.promedio === null ? "—" : `${datos.promedio}`} pie={`sobre ${escala}`} icono={<TrendingUp className="h-4 w-4" />} />
+        <Kpi etiqueta="Colaboradores" valor={String(datos.total)} pie={`${datos.completadas} completadas`} icono={<Users className="h-4 w-4" />} />
+        <Kpi etiqueta="Avance" valor={`${datos.avance}%`} pie="completadas ÷ incluidas" icono={<ClipboardList className="h-4 w-4" />} />
+        <Kpi etiqueta="Promedio" valor={datos.promedio === null ? "—" : `${datos.promedio}%`} pie="solo resultados válidos" icono={<TrendingUp className="h-4 w-4" />} />
         <Kpi etiqueta="Brechas detectadas" valor={String(datos.brechas.length)} pie="temas por reforzar" icono={<Target className="h-4 w-4" />} />
       </div>
 
@@ -359,30 +380,28 @@ function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVo
                       </td>
                       <td className="px-5 py-3 text-ink-2">{[e.area, e.puesto].filter(Boolean).join(" · ") || "—"}</td>
                       <td className="px-5 py-3">
-                        <Badge tone={e.estado === "completada" ? "good" : e.estado === "en_curso" ? "brand" : "neutral"} dot>
-                          {e.estado === "completada" ? "Evaluado" : e.estado === "en_curso" ? "En curso" : "Pendiente"}
-                        </Badge>
+                        <Badge tone={TONO_PERSONA[e.estado] ?? "neutral"} dot>{ESTADO_PERSONA[e.estado] ?? e.estado}</Badge>
                       </td>
                       <td className="px-5 py-3">
                         {e.calificacion === null ? (
                           <span className="text-ink-3">—</span>
                         ) : (
                           <div className="flex items-center gap-2">
-                            <span className="font-mono font-bold tabular">{e.calificacion}</span>
+                            <span className="font-mono font-bold tabular">{e.calificacion}%</span>
                             <div className="h-1.5 w-16 overflow-hidden rounded-full bg-surface-2">
                               <div
-                                className={cn("h-full rounded-full", e.calificacion >= escala * 0.8 ? "bg-good" : e.calificacion >= escala * 0.6 ? "bg-warn" : "bg-bad")}
-                                style={{ width: `${Math.min(100, (e.calificacion / escala) * 100)}%` }}
+                                className={cn("h-full rounded-full", e.calificacion >= 80 ? "bg-good" : e.calificacion >= 60 ? "bg-warn" : "bg-bad")}
+                                style={{ width: `${Math.min(100, e.calificacion)}%` }}
                               />
                             </div>
                           </div>
                         )}
                       </td>
                       <td className="px-5 py-3 text-right">
-                        {puedeDecidir && (
-                          <Button size="sm" variant={e.estado === "completada" ? "outline" : "primary"} onClick={() => abrirEvaluacion(e)}>
-                            {e.estado === "completada" ? "Ver / corregir" : "Evaluar"}
-                          </Button>
+                        {e.estado === "completada" || c.estado !== "en_curso" || !puedeDecidir ? (
+                          <Button size="sm" variant="outline" onClick={() => abrirEvaluacion(e)}>Ver</Button>
+                        ) : (
+                          <Button size="sm" onClick={() => abrirEvaluacion(e)}>Evaluar</Button>
                         )}
                       </td>
                     </tr>
@@ -457,10 +476,20 @@ function DetalleCiclo({ codigo, onVolver, puedeDecidir }: { codigo: string; onVo
         />
       )}
 
+      {confirmarCierre && (
+        <ModalMarco titulo="Cerrar evaluación" subtitulo={`${pendientes.length} persona(s) sin completar quedarán fuera del promedio. Una evaluación cerrada no se reabre.`} onClose={() => setConfirmarCierre(false)}>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setConfirmarCierre(false)}>Cancelar</Button>
+            <Button size="sm" onClick={() => cerrarCiclo(true)} disabled={ocupado === "cerrar"}>Cerrar de todos modos</Button>
+          </div>
+        </ModalMarco>
+      )}
+
       {evaluando && (
         <ModalEvaluar
           evaluacion={evaluando}
           ciclo={c}
+          soloLectura={evaluando.estado === "completada" || c.estado !== "en_curso" || !puedeDecidir}
           onClose={() => setEvaluando(null)}
           onGuardado={(msg) => { setEvaluando(null); setAviso({ tono: "ok", texto: msg }); void recargar(); }}
         />
@@ -552,40 +581,56 @@ function ModalParticipantes({ codigo, yaDentro, onClose, onListo }: {
   );
 }
 
-/* ---------- Paso 3: evaluar ---------- */
+/* ---------- Paso 3: evaluar (una tarjeta por criterio, texto completo, sin scroll horizontal) ---------- */
 
-function ModalEvaluar({ evaluacion, ciclo, onClose, onGuardado }: {
-  evaluacion: EvaluacionDesempeno; ciclo: CicloDesempeno; onClose: () => void; onGuardado: (msg: string) => void;
+/** Mismo cálculo que el backend (`services/desempeno_calculo`): solo para mostrar la vista previa. */
+function cumplimientoLocal(c: CriterioDesempeno, r: ResultadoDesempeno | undefined): number | null {
+  if (!r || r.no_aplica) return null;
+  if (c.tipo === "descriptivo") {
+    const v = r.valoracion;
+    return v === null || v === undefined || v < 1 || v > 5 ? null : ((v - 1) / 4) * 100;
+  }
+  const real = r.real === "" || r.real === null || r.real === undefined ? null : Number(r.real);
+  const meta = c.meta === null || c.meta === undefined ? null : Number(c.meta);
+  if (real === null || Number.isNaN(real) || meta === null || Number.isNaN(meta)) return null;
+  if (c.sentido === "menor_es_mejor") return real <= 0 ? 100 : Math.max(0, Math.min(100, (meta / real) * 100));
+  if (meta <= 0) return real >= meta ? 100 : 0;
+  return Math.max(0, Math.min(100, (real / meta) * 100));
+}
+
+function ModalEvaluar({ evaluacion, ciclo, soloLectura, onClose, onGuardado }: {
+  evaluacion: EvaluacionDesempeno; ciclo: CicloDesempeno; soloLectura: boolean; onClose: () => void; onGuardado: (msg: string) => void;
 }) {
-  const base: ResultadoDesempeno[] = useMemo(() => {
-    if (evaluacion.resultados?.length) return evaluacion.resultados;
-    const objs = (evaluacion.objetivos ?? ciclo.objetivos).map((o) => ({ tipo: "objetivo" as const, nombre: o.titulo, meta: "", real: "", logro: null, peso: o.peso ?? 0, comentario: "" }));
-    const kp = (evaluacion.kpis ?? ciclo.kpis).map((k) => ({ tipo: "kpi" as const, nombre: k.nombre, meta: k.meta ?? "", real: "", logro: null, peso: k.peso ?? 0, comentario: "" }));
-    return [...objs, ...kp];
-  }, [evaluacion, ciclo]);
-
-  const [filas, setFilas] = useState<ResultadoDesempeno[]>(base);
+  const criterios = evaluacion.criterios ?? ciclo.criterios;
+  const [res, setRes] = useState<Record<string, ResultadoDesempeno>>(() => {
+    const inicial: Record<string, ResultadoDesempeno> = {};
+    for (const r of evaluacion.resultados ?? []) if (r.criterio_id) inicial[r.criterio_id] = r;
+    return inicial;
+  });
   const [brechas, setBrechas] = useState(evaluacion.brechas.length ? evaluacion.brechas : [{ tema: "", brecha: "", accion_sugerida: "" }]);
   const [comentarios, setComentarios] = useState(evaluacion.comentarios ?? "");
   const [ocupado, setOcupado] = useState("");
   const [error, setError] = useState("");
 
-  const escala = ciclo.escalaMaxima || 100;
+  const set = (id: string, cambio: Partial<ResultadoDesempeno>) => setRes({ ...res, [id]: { ...(res[id] ?? { criterio_id: id }), ...cambio, criterio_id: id } });
+  const pesos = useMemo(() => Object.fromEntries(criterios.map((c) => [c.id, ciclo.pesosPersonalizados ? Number(c.peso ?? 0) : 1])), [criterios, ciclo.pesosPersonalizados]);
   const preview = useMemo(() => {
-    const conLogro = filas.filter((f) => f.logro !== null && f.logro !== undefined);
-    if (!conLogro.length) return null;
-    const pesos = conLogro.reduce((a, f) => a + Number(f.peso || 0), 0);
-    const val = pesos > 0
-      ? conLogro.reduce((a, f) => a + Number(f.logro) * Number(f.peso || 0), 0) / pesos
-      : conLogro.reduce((a, f) => a + Number(f.logro), 0) / conLogro.length;
-    return Math.round((val * escala) / 100 * 10) / 10;
-  }, [filas, escala]);
+    let suma = 0;
+    let total = 0;
+    for (const c of criterios) {
+      const v = cumplimientoLocal(c, res[c.id]);
+      if (v === null) continue;
+      suma += v * pesos[c.id];
+      total += pesos[c.id];
+    }
+    return total > 0 ? Math.round((suma / total) * 10) / 10 : null;
+  }, [criterios, res, pesos]);
 
   async function guardar(completar: boolean) {
     setOcupado(completar ? "completar" : "guardar");
     setError("");
     const r = await guardarEvaluacionDesempeno(evaluacion.id, {
-      resultados: filas,
+      resultados: criterios.map((c) => res[c.id] ?? { criterio_id: c.id }),
       brechas: brechas.filter((b) => (b.tema ?? "").trim()),
       comentarios,
       completar,
@@ -593,8 +638,8 @@ function ModalEvaluar({ evaluacion, ciclo, onClose, onGuardado }: {
     setOcupado("");
     if (!r.ok) return setError(r.error);
     onGuardado(completar
-      ? `Evaluación de ${evaluacion.colaborador} completada${r.data.calificacion !== null ? ` · ${r.data.calificacion}/${escala}` : ""}.`
-      : `Avance guardado en la evaluación de ${evaluacion.colaborador}.`);
+      ? `Evaluación de ${evaluacion.colaborador} completada${r.data.calificacion !== null ? ` · ${r.data.calificacion}%` : ""}.`
+      : `Borrador guardado · ${evaluacion.colaborador} queda «${ESTADO_PERSONA[r.data.estado]}».`);
   }
 
   return (
@@ -604,81 +649,132 @@ function ModalEvaluar({ evaluacion, ciclo, onClose, onGuardado }: {
       onClose={onClose}
       ancho="max-w-3xl"
     >
-      <div className="scroll-x rounded-2xl border border-border-soft">
-        <table className="w-full min-w-[680px] text-left text-sm">
-          <thead className="bg-surface-2 text-[11px] uppercase tracking-wide text-ink-3">
-            <tr>
-              <th className="px-3 py-2 font-semibold">Objetivo / KPI</th>
-              <th className="px-3 py-2 font-semibold">Meta</th>
-              <th className="px-3 py-2 font-semibold">Real</th>
-              <th className="px-3 py-2 font-semibold">Logro %</th>
-              <th className="px-3 py-2 font-semibold">Peso</th>
-              <th className="px-3 py-2 font-semibold">Comentario</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border-faint">
-            {filas.map((f, i) => {
-              const set = (nueva: ResultadoDesempeno) => setFilas(filas.map((x, k) => (k === i ? nueva : x)));
-              return (
-                <tr key={i}>
-                  <td className="px-3 py-2">
-                    <p className="text-sm font-medium text-ink">{f.nombre}</p>
-                    <p className="text-[10px] uppercase tracking-wide text-ink-3">{f.tipo}</p>
-                  </td>
-                  <td className="px-3 py-2"><input value={f.meta ?? ""} onChange={(e) => set({ ...f, meta: e.target.value })} className="h-10 w-24 rounded-lg border border-border-soft bg-surface px-2 text-sm outline-none focus:border-brand" /></td>
-                  <td className="px-3 py-2"><input value={f.real ?? ""} onChange={(e) => set({ ...f, real: e.target.value })} className="h-10 w-24 rounded-lg border border-border-soft bg-surface px-2 text-sm outline-none focus:border-brand" /></td>
-                  <td className="px-3 py-2">
+      <ol className="flex flex-col gap-3">
+        {criterios.map((c, i) => {
+          const r = res[c.id];
+          const v = cumplimientoLocal(c, r);
+          return (
+            <li key={c.id} className={cn("rounded-2xl border p-4", r?.no_aplica ? "border-border-faint bg-surface-2/40" : "border-border-soft")}>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-ink">
+                    <span className="mr-1.5 font-mono text-[11px] text-ink-3">{i + 1}.</span>{c.nombre}
+                    {c.ajustado && <Badge tone="warn" className="ml-2">Ajuste individual</Badge>}
+                  </p>
+                  {(c.tipo === "descriptivo" ? c.esperado || c.descripcion : c.descripcion) && (
+                    <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{c.tipo === "descriptivo" ? c.esperado || c.descripcion : c.descripcion}</p>
+                  )}
+                  <p className="mt-1 text-[11px] text-ink-3">
+                    {c.tipo === "medible"
+                      ? `Medible · meta ${c.meta ?? "sin capturar"}${c.unidad ? ` ${c.unidad}` : ""} · ${c.sentido === "menor_es_mejor" ? "menor es mejor" : "mayor es mejor"} · ${c.formula || "Real ÷ Meta"}`
+                      : "Descriptivo · valoración 1 a 5 (1 = 0 %, 5 = 100 %)"}
+                    {ciclo.pesosPersonalizados && ` · peso ${c.peso ?? 0} %`}
+                  </p>
+                </div>
+                <span className="shrink-0 font-mono text-sm font-bold tabular">{v === null ? "—" : `${Math.round(v * 10) / 10}%`}</span>
+              </div>
+
+              {!r?.no_aplica && (
+                c.tipo === "medible" ? (
+                  <label className="mt-3 flex max-w-xs flex-col gap-1.5">
+                    <span className="text-xs font-medium text-ink-2">Resultado real{c.unidad ? ` (${c.unidad})` : ""}</span>
                     <input
-                      type="number" min={0} max={120}
-                      value={f.logro ?? ""}
-                      onChange={(e) => set({ ...f, logro: e.target.value === "" ? null : Number(e.target.value) })}
-                      className="h-10 w-20 rounded-lg border border-border-soft bg-surface px-2 text-sm outline-none focus:border-brand"
+                      type="number"
+                      disabled={soloLectura}
+                      value={r?.real ?? ""}
+                      onChange={(e) => set(c.id, { real: e.target.value === "" ? null : Number(e.target.value) })}
+                      className={inputCls}
                     />
-                  </td>
-                  <td className="px-3 py-2"><input type="number" min={0} max={100} value={f.peso ?? 0} onChange={(e) => set({ ...f, peso: Number(e.target.value) })} className="h-10 w-16 rounded-lg border border-border-soft bg-surface px-2 text-sm outline-none focus:border-brand" /></td>
-                  <td className="px-3 py-2"><input value={f.comentario ?? ""} onChange={(e) => set({ ...f, comentario: e.target.value })} placeholder="Opcional" className="h-10 w-44 rounded-lg border border-border-soft bg-surface px-2 text-sm outline-none focus:border-brand" /></td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                  </label>
+                ) : (
+                  <div className="mt-3 grid gap-1.5 sm:grid-cols-5">
+                    {(c.escala ?? []).map((n) => (
+                      <button
+                        key={n.valor}
+                        type="button"
+                        disabled={soloLectura}
+                        onClick={() => set(c.id, { valoracion: n.valor })}
+                        className={cn(
+                          "rounded-xl border px-2 py-2 text-left text-[12px] leading-snug transition",
+                          r?.valoracion === n.valor ? "border-brand bg-brand-soft text-ink ring-2 ring-brand/20" : "border-border-soft hover:border-brand/40",
+                        )}
+                      >
+                        <b className="font-mono">{n.valor}</b> · {n.significado}
+                      </button>
+                    ))}
+                  </div>
+                )
+              )}
+
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <label className="inline-flex items-center gap-2 text-[12px] text-ink-2">
+                  <input type="checkbox" disabled={soloLectura} checked={Boolean(r?.no_aplica)} onChange={(e) => set(c.id, { no_aplica: e.target.checked })} className="h-4 w-4 rounded border-border-soft text-brand" />
+                  No aplica
+                </label>
+                {r?.no_aplica && (
+                  <input
+                    disabled={soloLectura}
+                    value={r.motivo_no_aplica ?? ""}
+                    onChange={(e) => set(c.id, { motivo_no_aplica: e.target.value })}
+                    placeholder="Motivo (obligatorio)"
+                    className={cn(inputCls, "min-w-0 flex-1")}
+                  />
+                )}
+              </div>
+              <input
+                disabled={soloLectura}
+                value={r?.comentario ?? ""}
+                onChange={(e) => set(c.id, { comentario: e.target.value })}
+                placeholder="Comentario (opcional)"
+                className={cn(inputCls, "mt-2")}
+              />
+            </li>
+          );
+        })}
+      </ol>
 
       <div className="mt-3 flex items-center justify-between rounded-xl bg-surface-2 px-4 py-3">
-        <span className="text-sm text-ink-2">Calificación calculada (promedio ponderado)</span>
-        <span className="font-display text-2xl font-bold tabular">{preview === null ? "—" : `${preview} / ${escala}`}</span>
+        <span className="text-sm text-ink-2">Calificación (solo resultados válidos; vacío no cuenta como cero)</span>
+        <span className="font-display text-2xl font-bold tabular">{preview === null ? "—" : `${preview}%`}</span>
       </div>
 
-      <ListaEditable
-        titulo="Brechas y acciones"
-        filas={brechas}
-        onCambio={setBrechas}
-        nuevo={() => ({ tema: "", brecha: "", accion_sugerida: "" })}
-        render={(b, set) => (
+      {!soloLectura && (
+        <>
+          <ListaEditable
+            titulo="Brechas y acciones"
+            filas={brechas}
+            onCambio={setBrechas}
+            nuevo={() => ({ tema: "", brecha: "", accion_sugerida: "" })}
+            render={(b, setB) => (
+              <>
+                <input value={b.tema ?? ""} onChange={(e) => setB({ ...b, tema: e.target.value })} placeholder="Tema (ej. Atención a cliente)" className={cn(inputCls, "sm:col-span-2")} />
+                <input value={b.brecha ?? ""} onChange={(e) => setB({ ...b, brecha: e.target.value })} placeholder="Qué falta" className={cn(inputCls, "sm:col-span-1")} />
+                <input value={b.accion_sugerida ?? ""} onChange={(e) => setB({ ...b, accion_sugerida: e.target.value })} placeholder="Acción sugerida" className={cn(inputCls, "sm:col-span-2")} />
+              </>
+            )}
+          />
+          <Campo label="Comentarios de la evaluación">
+            <textarea value={comentarios} onChange={(e) => setComentarios(e.target.value)} rows={3} placeholder="Notas para la conversación de retroalimentación…" className="w-full rounded-xl border border-border-soft bg-surface px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+          </Campo>
+        </>
+      )}
+
+      {error && <p className="mt-3 whitespace-pre-line text-sm font-semibold text-bad">{error}</p>}
+      <div className="mt-5 flex flex-wrap justify-end gap-2">
+        <Button variant="outline" size="sm" onClick={onClose} disabled={Boolean(ocupado)}>{soloLectura ? "Cerrar" : "Cancelar"}</Button>
+        {!soloLectura && (
           <>
-            <input value={b.tema ?? ""} onChange={(e) => set({ ...b, tema: e.target.value })} placeholder="Tema (ej. Atención a cliente)" className={cn(inputCls, "sm:col-span-2")} />
-            <input value={b.brecha ?? ""} onChange={(e) => set({ ...b, brecha: e.target.value })} placeholder="Qué falta" className={cn(inputCls, "sm:col-span-1")} />
-            <input value={b.accion_sugerida ?? ""} onChange={(e) => set({ ...b, accion_sugerida: e.target.value })} placeholder="Acción sugerida (ej. curso de servicio)" className={cn(inputCls, "sm:col-span-2")} />
+            <Button variant="secondary" size="sm" onClick={() => guardar(false)} disabled={Boolean(ocupado)}>
+              {ocupado === "guardar" ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Guardar borrador
+            </Button>
+            <Button size="sm" onClick={() => guardar(true)} disabled={Boolean(ocupado)}>
+              {ocupado === "completar" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />} Completar evaluación
+            </Button>
           </>
         )}
-      />
-
-      <Campo label="Comentarios de la evaluación">
-        <textarea value={comentarios} onChange={(e) => setComentarios(e.target.value)} rows={3} placeholder="Notas para la conversación de retroalimentación…" className="w-full rounded-xl border border-border-soft bg-surface px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
-      </Campo>
-
-      {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
-      <div className="mt-5 flex flex-wrap justify-end gap-2">
-        <Button variant="outline" size="sm" onClick={onClose} disabled={Boolean(ocupado)}>Cancelar</Button>
-        <Button variant="secondary" size="sm" onClick={() => guardar(false)} disabled={Boolean(ocupado)}>
-          {ocupado === "guardar" ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Guardar avance
-        </Button>
-        <Button size="sm" onClick={() => guardar(true)} disabled={Boolean(ocupado)}>
-          {ocupado === "completar" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />} Completar evaluación
-        </Button>
       </div>
       <p className="mt-2 text-[11px] text-ink-3">
-        La evaluación la firma una persona de RH o la jefatura: Red Human solo propone el marco y calcula.
+        Solo se completa con todos los criterios aplicables capturados. La evaluación la firma una persona: Red Human solo calcula.
       </p>
     </ModalMarco>
   );

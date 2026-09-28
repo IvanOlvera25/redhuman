@@ -2407,27 +2407,69 @@ export function fetchConsultasConocimiento() {
 
 export interface ObjetivoDesempeno { titulo: string; descripcion?: string; peso?: number }
 export interface KpiDesempeno { nombre: string; descripcion?: string; unidad?: string; meta?: string; peso?: number }
+/* Desempeño v2 (2026-09-27): criterios unificados. Medible = unidad, meta, sentido y fórmula (tope 100 %);
+   Descriptivo = qué se espera observar + escala 1-5 con significado (1 = 0 % … 5 = 100 %). */
+export type TipoCriterio = "medible" | "descriptivo";
+export type SentidoIndicador = "mayor_es_mejor" | "menor_es_mejor";
+export interface NivelEscala { valor: number; significado: string }
+export interface CriterioDesempeno {
+  id: string;
+  tipo: TipoCriterio;
+  nombre: string;
+  descripcion?: string;
+  peso?: number | null;
+  unidad?: string;
+  meta?: number | null;
+  sentido?: SentidoIndicador;
+  formula?: string;
+  esperado?: string;
+  escala?: NivelEscala[];
+  /** Ajuste individual para esta persona (marcado como tal). */
+  ajustado?: boolean;
+  motivo_ajuste?: string;
+  legado?: boolean;
+}
+export type EstadoCicloDesempeno = "borrador" | "en_curso" | "cerrada";
+export type EstadoPersonaDesempeno = "pendiente" | "en_proceso" | "completada";
 export interface CicloDesempeno {
   id: string;
   nombre: string;
   periodo: string;
   descripcion: string;
   puestoObjetivo: string;
+  equipo: string;
+  criterios: CriterioDesempeno[];
+  pesosPersonalizados: boolean;
+  origenCriterios: string;
   objetivos: ObjetivoDesempeno[];
   kpis: KpiDesempeno[];
   escalaMaxima: number;
   generadoConIa: boolean;
-  estado: "borrador" | "en_curso" | "cerrado" | string;
+  estado: EstadoCicloDesempeno;
   participantes: number;
   completadas: number;
+  /** personas completadas ÷ personas incluidas */
   avance: number;
   creadoPor: string;
   creado: string;
   creadoEn: string | null;
+  iniciadoEn: string | null;
   cerradoEn: string | null;
+  cerradoPor: string;
+  duplicadoDe: string;
   evaluaciones?: EvaluacionDesempeno[];
+  historialCambios?: CambioDesempeno[];
 }
-export interface ResultadoDesempeno { tipo: "objetivo" | "kpi" | string; nombre: string; meta?: string; real?: string; logro?: number | null; peso?: number; comentario?: string }
+export interface CambioDesempeno { fecha: string; usuario: string; criterio_id?: string; criterio?: string; campo: string; anterior: unknown; nuevo: unknown; motivo: string; nivel?: string }
+/** Resultado por criterio. Un valor vacío se guarda vacío (nunca como 0). */
+export interface ResultadoDesempeno {
+  criterio_id: string;
+  real?: number | string | null;
+  valoracion?: number | null;
+  no_aplica?: boolean;
+  motivo_no_aplica?: string;
+  comentario?: string;
+}
 export interface BrechaDesempeno { tema: string; brecha?: string; accion_sugerida?: string }
 export interface EvaluacionDesempeno {
   id: string;
@@ -2439,16 +2481,20 @@ export interface EvaluacionDesempeno {
   puesto: string;
   area: string;
   evaluador: string;
-  estado: "pendiente" | "en_curso" | "completada" | string;
+  evaluadorUsuarioId?: number | null;
+  estado: EstadoPersonaDesempeno;
   calificacion: number | null;
   escalaMaxima: number;
   brechas: BrechaDesempeno[];
   creadoEn: string | null;
   completadaEn: string | null;
+  completadaPor?: string;
+  criterios?: CriterioDesempeno[];
   resultados?: ResultadoDesempeno[];
+  cumplimiento?: { criterio_id: string; cumplimiento: number | null; no_aplica: boolean }[];
+  faltantes?: string[];
   comentarios?: string;
-  objetivos?: ObjetivoDesempeno[];
-  kpis?: KpiDesempeno[];
+  conclusion?: string;
 }
 export interface ResultadosCiclo {
   ciclo: CicloDesempeno;
@@ -2484,8 +2530,13 @@ export function fetchCiclosDesempeno() {
 export function fetchCicloDesempeno(codigo: string) {
   return get<CicloDesempeno>(`/desempeno/ciclos/${codigo}`);
 }
-export function cambiarEstadoCiclo(codigo: string, estado: "borrador" | "en_curso" | "cerrado") {
-  return patch<CicloDesempeno>(`/desempeno/ciclos/${codigo}`, { estado });
+/** Borrador → En curso (valida criterios, pesos y que haya personas). */
+export function iniciarCicloDesempeno(codigo: string) {
+  return post<CicloDesempeno>(`/desempeno/ciclos/${codigo}/iniciar`, {});
+}
+/** En curso → Cerrada (no se reabre). Con personas sin completar exige `aunConPendientes`. */
+export function cerrarCicloDesempeno(codigo: string, aunConPendientes = false) {
+  return post<CicloDesempeno>(`/desempeno/ciclos/${codigo}/cerrar`, { aun_con_pendientes: aunConPendientes });
 }
 export function agregarParticipantesDesempeno(codigo: string, colaboradorIds: string[], evaluador = "") {
   return post<{ ciclo: CicloDesempeno; evaluaciones: EvaluacionDesempeno[]; noEncontrados: string[] }>(
