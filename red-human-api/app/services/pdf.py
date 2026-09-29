@@ -32,12 +32,53 @@ def wordmark_red_human(pdf: FPDF, x: float, y: float, tam: int = 20) -> None:
     pdf.set_text_color(26, 26, 26)
 
 
+# --- Bloque de firmas con zonas para firma electrónica (2026-09-29) ---
+# Dropbox Sign coloca sus campos con `form_fields_per_document` (sistema «nuevo» con `page`): 72 DPI, origen arriba a
+# la izquierda y Y hacia abajo = exactamente los puntos PDF de una hoja carta (612 × 792). fpdf2 trabaja en mm con el
+# mismo origen, así que basta multiplicar por `pdf.k` (puntos por mm). Con campos definidos Dropbox Sign NO anexa su
+# «Signature page»: la firma se estampa sobre NUESTRO documento.
+ALTO_ZONA_FIRMA_MM = 15
+ALTO_BLOQUE_FIRMAS_MM = 40
+
+
+def _zona(pdf: FPDF, rol: str, tipo: str, x: float, y: float, w: float, h: float) -> dict:
+    k = pdf.k
+    return {"rol": rol, "tipo": tipo, "pagina": pdf.page_no(),
+            "x": round(x * k), "y": round(y * k), "ancho": round(w * k), "alto": round(h * k)}
+
+
+def bloque_firmas(pdf: FPDF, izquierda: tuple, derecha: tuple) -> list:
+    """Dos firmas lado a lado (rol, leyenda) como ÚLTIMO elemento del documento. Nunca se parte: si no cabe, empieza
+    en una página nueva (así siempre queda en la última). Regresa las zonas en puntos PDF para los campos de firma."""
+    limite = pdf.h - pdf.b_margin
+    if pdf.get_y() + ALTO_BLOQUE_FIRMAS_MM > limite:
+        pdf.add_page()
+    y_linea = pdf.get_y() + ALTO_ZONA_FIRMA_MM + 4
+    ancho = 80
+    zonas = []
+    pdf.set_draw_color(26, 26, 26)
+    for x, (rol, leyenda) in ((pdf.l_margin, izquierda), (pdf.w - pdf.r_margin - ancho, derecha)):
+        pdf.line(x, y_linea, x + ancho, y_linea)
+        zonas.append(_zona(pdf, rol, "firma", x, y_linea - ALTO_ZONA_FIRMA_MM - 1, ancho, ALTO_ZONA_FIRMA_MM))
+        pdf.set_xy(x, y_linea + 1.5)
+        pdf.set_font(_FUENTE, "", 10)
+        pdf.set_text_color(85, 85, 85)
+        pdf.cell(ancho, 5, _latin(leyenda))
+        pdf.set_xy(x, y_linea + 8)
+        pdf.set_font(_FUENTE, "", 9)
+        pdf.cell(26, 5, _latin("Fecha de firma:"))
+        zonas.append(_zona(pdf, rol, "fecha", x + 26, y_linea + 7.5, 40, 6))
+    pdf.set_text_color(26, 26, 26)
+    pdf.set_y(y_linea + 16)
+    return zonas
+
+
 def _latin(texto: str) -> str:
     """Helvetica base solo cubre Latin-1: se reemplazan los símbolos que no existen ahí."""
     return (texto or "").replace("·", "-").replace("—", "-").replace("–", "-").encode("latin-1", "replace").decode("latin-1")
 
 
-def pdf_carta_intencion(d: dict) -> bytes:
+def pdf_carta_intencion(d: dict, con_zonas: bool = False):
     """Carta de intención de contratación: encabezado, condiciones en tabla, aviso legal y firma."""
     pdf = _Carta(format="letter")
     pdf.set_margins(22, 20, 22)
@@ -100,20 +141,14 @@ def pdf_carta_intencion(d: dict) -> bytes:
             "las condiciones definitivas quedarán formalizadas en el contrato individual de trabajo correspondiente."
         ),
     )
-    pdf.ln(18)
+    pdf.ln(12)
     pdf.set_font(_FUENTE, "", 12)
     pdf.cell(0, 7, _latin("Saludos cordiales,"), new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(18)
-    pdf.set_draw_color(26, 26, 26)
-    x = pdf.get_x()
-    y = pdf.get_y()
-    pdf.line(x, y, x + 95, y)
-    pdf.set_y(y + 1.5)
-    pdf.set_font(_FUENTE, "", 10)
-    pdf.cell(95, 6, _latin(f"{d['empresa']} - Recursos Humanos"), new_x="LMARGIN", new_y="NEXT")
-
-    salida = pdf.output()
-    return bytes(salida)
+    pdf.ln(4)
+    # 2026-09-29: la carta la firman la empresa y el candidato (aceptación) — ambos sobre esta misma página
+    zonas = bloque_firmas(pdf, ("empresa", f"{d['empresa']} - Recursos Humanos"), ("candidato", f"Acepto: {d.get('nombre') or 'Candidato'}"))
+    salida = bytes(pdf.output())
+    return (salida, zonas) if con_zonas else salida
 
 
 class _Curso(FPDF):
@@ -212,7 +247,7 @@ def pdf_curso(d: dict) -> bytes:
     return bytes(pdf.output())
 
 
-def pdf_contrato(d: dict) -> bytes:
+def pdf_contrato(d: dict, con_zonas: bool = False):
     """Contrato individual de trabajo (2026-09-19, Bloque 3) generado con las condiciones FINALES guardadas
     en el expediente: empresa, colaborador, puesto, sueldo, tipo de contratación, fecha de ingreso, ubicación,
     jefe directo. Cláusulas base y espacio de firmas; el texto legal definitivo lo revisa RH/legal."""
@@ -269,19 +304,17 @@ def pdf_contrato(d: dict) -> bytes:
         pdf.set_font(_FUENTE, "", 11)
         pdf.multi_cell(0, 6, _latin(texto), new_x="LMARGIN", new_y="NEXT")
         pdf.ln(2)
-    pdf.ln(10)
-    y = pdf.get_y()
-    if y > 230:
+    pdf.ln(4)
+    # la cláusula de cierre viaja SIEMPRE junto a las firmas (nunca una hoja de firmas suelta, que se podría separar)
+    if pdf.get_y() + 16 + ALTO_BLOQUE_FIRMAS_MM > pdf.h - pdf.b_margin:
         pdf.add_page()
-        y = pdf.get_y() + 10
-    pdf.set_font(_FUENTE, "", 10)
-    pdf.set_text_color(85, 85, 85)
-    pdf.set_xy(22, y + 14)
-    pdf.cell(80, 6, "______________________________", new_x="RIGHT")
-    pdf.set_x(115)
-    pdf.cell(80, 6, "______________________________", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_x(22)
-    pdf.cell(80, 6, _latin(f"{d['empresa']} - Representante"), new_x="RIGHT")
-    pdf.set_x(115)
-    pdf.cell(80, 6, _latin(d["nombre"]), new_x="LMARGIN", new_y="NEXT")
-    return bytes(pdf.output())
+    pdf.set_font(_FUENTE, "", 11)
+    pdf.set_text_color(26, 26, 26)
+    pdf.multi_cell(0, 6, _latin(
+        f"Leído que fue el presente contrato y enteradas las partes de su contenido y alcance, lo firman de conformidad "
+        f"el {d['hoy']}."
+    ), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+    zonas = bloque_firmas(pdf, ("empresa", f"{d['empresa']} - Representante"), ("candidato", d["nombre"]))
+    salida = bytes(pdf.output())
+    return (salida, zonas) if con_zonas else salida

@@ -66,6 +66,18 @@ def _sign_url(f: FirmaDocumento, rol: str) -> Optional[str]:
         raise HTTPException(502 if (ex.status or 500) >= 500 or ex.status is None else 409, str(ex))
 
 
+# Orden de `signers` en la solicitud: 0 = representante de RH (empresa), 1 = candidato. Los campos usan este índice.
+INDICE_FIRMANTE = {"empresa": 0, "candidato": 1}
+
+
+def _paginas(pdf: bytes) -> int:
+    import io
+
+    from pypdf import PdfReader
+
+    return len(PdfReader(io.BytesIO(pdf)).pages)
+
+
 class CrearFirmaIn(BaseModel):
     documento: str  # carta | contrato
 
@@ -107,7 +119,11 @@ def crear_firma(exp_id: int, datos: CrearFirmaIn, db: Session = Depends(get_db),
     if u.correo.strip().lower() == correo_cand.strip().lower():
         raise HTTPException(409, "El correo del candidato es el mismo que el tuyo: cada firmante necesita su propio correo.")
     d = _datos_carta_intencion(e)
-    pdf = pdf_carta_intencion(d) if datos.documento == "carta" else pdf_contrato({**d, "borrador": False})
+    # 2026-09-29 (marca blanca): el PDF trae la posición exacta de cada firma; los campos se colocan SOBRE su última
+    # página y Dropbox Sign ya no anexa su «Signature page».
+    pdf, zonas = pdf_carta_intencion(d, con_zonas=True) if datos.documento == "carta" else pdf_contrato({**d, "borrador": False}, con_zonas=True)
+    if not zonas or {z["pagina"] for z in zonas} != {_paginas(pdf)}:
+        raise HTTPException(500, "No se pudieron ubicar las firmas en la última página del documento.")
     nombre_cand = (p.nombre if p else "") or (e.candidato.nombre if e.candidato else "Candidato")
     titulo = f"{DOCUMENTOS_FIRMA[datos.documento]} — {nombre_cand}"
     try:
@@ -116,6 +132,7 @@ def crear_firma(exp_id: int, datos: CrearFirmaIn, db: Session = Depends(get_db),
             f"{d.get('empresa') or cuenta.nombre_visible}: firma de {DOCUMENTOS_FIRMA[datos.documento].lower()} para el puesto {e.puesto}.",
             [{"nombre": u.nombre, "correo": u.correo}, {"nombre": nombre_cand, "correo": correo_cand}],
             {"expediente_id": e.id, "cuenta_id": cuenta.id, "documento": datos.documento},
+            zonas=zonas, indice_por_rol=INDICE_FIRMANTE,
         )
     except dsign.FirmaError as ex:
         raise HTTPException(503 if ex.status == 503 else 502, str(ex))

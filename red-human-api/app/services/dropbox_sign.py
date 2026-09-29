@@ -2,7 +2,7 @@
 
 * Llaves SOLO por entorno: DROPBOX_SIGN_API_KEY y DROPBOX_SIGN_CLIENT_ID (`settings`). Sin ellas `configurado()` es
   False y el flujo sigue como antes (PDF + carga manual del firmado): nunca rompe la contratación.
-* Marca blanca: la firma se hace en un modal dentro de NUESTRA interfaz (`@dropbox/sign-embedded` con el client_id de
+* Marca blanca: la firma se hace en un modal dentro de NUESTRA interfaz (`hellosign-embedded` con el client_id de
   la API app). El logo/colores del modal se configuran en la API app de Dropbox Sign (white labeling), no aquí.
 * Callbacks: llegan como multipart con el campo `json`; se validan con HMAC-SHA256 (llave = API key, mensaje =
   event_time + event_type), la misma fórmula de `dropbox_sign.EventCallbackHelper`, comparada en tiempo constante.
@@ -44,9 +44,31 @@ def _error_sdk(ex: Exception) -> FirmaError:
     return FirmaError(f"Dropbox Sign respondió {status or 'error'}: {cuerpo}", status)
 
 
+def campos_de_zonas(zonas: List[dict], indice_por_rol: dict) -> list:
+    """Zonas del PDF (services.pdf.bloque_firmas, en puntos PDF) → `form_fields_per_document` del SDK. Sistema de
+    coordenadas «nuevo» (con `page`): 72 DPI, origen arriba a la izquierda = puntos PDF de una hoja carta.
+    `signer` es el índice (base 0) en la lista de firmantes: se pasa EXPLÍCITO, sin depender de text tags."""
+    import dropbox_sign as ds
+
+    campos = []
+    for i, z in enumerate(zonas):
+        clase = ds.models.SubFormFieldsPerDocumentSignature if z["tipo"] == "firma" else ds.models.SubFormFieldsPerDocumentDateSigned
+        extra = {"font_size": 10} if z["tipo"] == "fecha" else {}
+        campos.append(clase(
+            type="signature" if z["tipo"] == "firma" else "date_signed",
+            document_index=0, api_id=f"{z['tipo']}_{z['rol']}_{i}", name=f"{'Firma' if z['tipo'] == 'firma' else 'Fecha'} ({z['rol']})",
+            required=True, signer=indice_por_rol[z["rol"]], page=z["pagina"],
+            x=int(z["x"]), y=int(z["y"]), width=int(z["ancho"]), height=int(z["alto"]), **extra,
+        ))
+    return campos
+
+
 def crear_solicitud_embebida(pdf: bytes, nombre_archivo: str, titulo: str, asunto: str, mensaje: str,
-                             firmantes: List[dict], metadata: dict) -> dict:
-    """firmantes = [{nombre, correo}] → {signature_request_id, signatures: [{signature_id, correo, nombre}]}."""
+                             firmantes: List[dict], metadata: dict, zonas: Optional[List[dict]] = None,
+                             indice_por_rol: Optional[dict] = None) -> dict:
+    """firmantes = [{nombre, correo}] → {signature_request_id, signatures: [{signature_id, correo, nombre}]}.
+    `zonas` (de services.pdf.bloque_firmas) coloca los campos SOBRE el documento: sin ellas Dropbox Sign anexaría su
+    propia «Signature page» con su logo (rompe la marca blanca)."""
     ds, cliente = _cliente()
     archivo = io.BytesIO(pdf)
     archivo.name = nombre_archivo
@@ -62,6 +84,7 @@ def crear_solicitud_embebida(pdf: bytes, nombre_archivo: str, titulo: str, asunt
                 files=[archivo],
                 metadata={k: str(v)[:500] for k, v in metadata.items()},
                 test_mode=bool(settings.dropbox_sign_test_mode),
+                form_fields_per_document=campos_de_zonas(zonas, indice_por_rol or {}) if zonas else None,
             )
             resp = api.signature_request_create_embedded(req)
     except FirmaError:
