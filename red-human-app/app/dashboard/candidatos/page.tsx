@@ -121,7 +121,9 @@ import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import { ModalIniciarOnboarding } from "@/components/dashboard/onboarding/iniciar-onboarding";
 import { PanelTareasOnboarding } from "@/components/dashboard/onboarding/tareas-onboarding";
 import { ModalAgregarEvaluacion, PanelEvaluaciones } from "@/components/dashboard/evaluaciones/panel-evaluaciones";
-import { ClipboardCheck as IconoEvaluacion } from "lucide-react";
+import { ClipboardCheck as IconoEvaluacion, PenLine as IconoFirma } from "lucide-react";
+import { abrirFirmaEmbebida } from "@/lib/firma-embebida";
+import { asegurarExpediente, crearFirmaDocumento, fetchEstadoFirmas, fetchFirmasExpediente, type FirmaDocumento } from "@/lib/api";
 import { SwitchModoPrueba } from "@/components/dashboard/switch-modo-prueba";
 import { Toast, type ToastMsg } from "@/components/dashboard/toast";
 import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
@@ -4397,6 +4399,10 @@ function PanelContratacion({
   const [guardando, setGuardando] = useState(false);
   // 2026-09-19 (Bloque 3): vista previa en la misma pantalla de carta / contrato con 3 acciones
   const [docPreview, setDocPreview] = useState<null | "carta" | "contrato">(null);
+  // 2026-09-29: firma electrónica incrustada (Dropbox Sign). Sin llaves en el servidor → vista previa del PDF como antes.
+  const [firmaCfg, setFirmaCfg] = useState<{ configurado: boolean; clientId: string | null; testMode: boolean } | null>(null);
+  const [firmas, setFirmas] = useState<FirmaDocumento[]>([]);
+  const [firmando, setFirmando] = useState<"" | "carta" | "contrato">("");
   const [enviandoDoc, setEnviandoDoc] = useState<"" | "whatsapp" | "correo">("");
   const [resultadoDoc, setResultadoDoc] = useState<{ ok: boolean; texto: string } | null>(null);
   const condicionesListas = Boolean(cond?.completas);
@@ -4429,6 +4435,57 @@ function PanelContratacion({
     void cargarExpediente();
   }, [cargarExpediente]);
   usePolling(cargarExpediente, 20000);
+
+  // 2026-09-29 (red de seguridad): postulación en Contratación/Onboarding sin expediente (p. ej. carga masiva) →
+  // se abre en ese momento para ESA postulación (el backend exige consentimiento y es idempotente).
+  const asegurando = useRef(false);
+  useEffect(() => {
+    if (!live || c.expedienteId != null || asegurando.current) return;
+    if (c.etapa !== "Contratación" && c.etapa !== "Onboarding") return;
+    asegurando.current = true;
+    asegurarExpediente(c.id).then((r) => {
+      if (r.ok) onCambio(r.data);
+      else setAviso({ tono: "error", texto: r.error });
+    });
+  }, [live, c.expedienteId, c.etapa, c.id, onCambio, setAviso]);
+
+  const cargarFirmas = useCallback(async () => {
+    if (c.expedienteId == null) return;
+    setFirmas((await fetchFirmasExpediente(c.expedienteId)) ?? []);
+  }, [c.expedienteId]);
+  useEffect(() => {
+    fetchEstadoFirmas().then((x) => setFirmaCfg(x ?? { configurado: false, clientId: null, testMode: false }));
+    void cargarFirmas();
+  }, [cargarFirmas]);
+
+  /** «Generar carta de intención» / «Generar contrato»: con Dropbox Sign configurado crea la solicitud y abre el modal
+   * de firma incrustado (RH firma aquí; el candidato, en su liga de expediente). Sin él, vista previa del PDF. */
+  async function firmarOVer(doc: "carta" | "contrato") {
+    setResultadoDoc(null);
+    if (!firmaCfg?.configurado || !firmaCfg.clientId || c.expedienteId == null) return setDocPreview(doc);
+    setFirmando(doc);
+    const r = await crearFirmaDocumento(c.expedienteId, doc);
+    setFirmando("");
+    if (!r.ok) {
+      setAviso({ tono: "error", texto: r.error });
+      return;
+    }
+    void cargarFirmas();
+    if (!r.data.signUrl) {
+      setAviso({ tono: "ok", texto: `${r.data.documentoTexto}: tu firma ya está registrada; falta la del candidato (la hace desde su liga de expediente).` });
+      return;
+    }
+    await abrirFirmaEmbebida({
+      clientId: firmaCfg.clientId,
+      signUrl: r.data.signUrl,
+      testMode: firmaCfg.testMode,
+      onFirmado: () => {
+        setAviso({ tono: "ok", texto: `${r.data.documentoTexto} firmada por ti. El candidato la firma desde su liga de expediente; el PDF final se guarda solo en el expediente.` });
+        setTimeout(() => void cargarFirmas(), 1500);
+      },
+      onError: (m) => setAviso({ tono: "error", texto: `Firma electrónica: ${m}` }),
+    });
+  }
 
   async function guardar() {
     if (esDeterminado && (!duracion || Number(duracion) <= 0)) return setAviso({ tono: "error", texto: "Tiempo determinado: captura la duración del contrato (número mayor a cero)." });
@@ -4582,8 +4639,9 @@ function PanelContratacion({
       {/* 2026-09-19 (Bloque 3): flujo lineal — con condiciones guardadas aparecen aquí mismo las acciones */}
       {live && condicionesListas && c.expedienteId != null && (
         <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-border-soft bg-surface p-3">
-          <Button size="sm" variant="outline" onClick={() => { setResultadoDoc(null); setDocPreview("carta"); }}>
-            <FileText className="h-4 w-4" /> Generar carta de intención
+          <Button size="sm" variant="outline" onClick={() => void firmarOVer("carta")} disabled={firmando !== ""}
+            title={firmaCfg?.configurado ? "Se firma aquí mismo (firma electrónica); el candidato firma desde su liga" : "Vista previa del PDF"}>
+            <FileText className="h-4 w-4" /> {firmando === "carta" ? "Preparando firma…" : "Generar carta de intención"}
           </Button>
           {/* Onboarding v2: «Solicitar documentos» ya no vive en Contratación — la primera solicitud la hace «Iniciar Onboarding» */}
           {onDocumentos && c.etapa === "Onboarding" && (
@@ -4594,12 +4652,20 @@ function PanelContratacion({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => { setResultadoDoc(null); setDocPreview("contrato"); }}
-            disabled={!documentosListos && !modoPrueba}
+            onClick={() => void firmarOVer("contrato")}
+            disabled={(!documentosListos && !modoPrueba) || firmando !== ""}
             title={documentosListos || modoPrueba ? "Borrador del contrato con las condiciones finales (el firmado se carga en el Onboarding)" : `Se habilita cuando el expediente tenga el 100 % de documentos Aprobados (hoy ${c.expedienteProgreso ?? 0} %)`}
           >
-            <FileCheck2 className="h-4 w-4" /> Generar contrato (borrador)
+            <FileCheck2 className="h-4 w-4" /> {firmando === "contrato" ? "Preparando firma…" : firmaCfg?.configurado ? "Generar contrato" : "Generar contrato (borrador)"}
           </Button>
+          {firmaCfg?.configurado && (
+            <MenuAcciones
+              acciones={[
+                { etiqueta: "Ver PDF de la carta (enviar por WhatsApp / correo)", icono: <FileText className="h-4 w-4" />, onClick: () => { setResultadoDoc(null); setDocPreview("carta"); } },
+                { etiqueta: "Ver PDF del contrato", icono: <FileCheck2 className="h-4 w-4" />, onClick: () => { setResultadoDoc(null); setDocPreview("contrato"); }, disabled: !documentosListos && !modoPrueba },
+              ]}
+            />
+          )}
           {c.etapa === "Contratación" && (
             <Button
               size="sm"
@@ -4614,6 +4680,27 @@ function PanelContratacion({
             >
               Enviar a Onboarding
             </Button>
+          )}
+        </div>
+      )}
+
+      {firmas.length > 0 && (
+        <div className="mt-3 rounded-xl border border-border-soft bg-surface p-3">
+          <p className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-2"><IconoFirma className="h-3.5 w-3.5" /> Firma electrónica</p>
+          <ul className="mt-2 space-y-1.5 text-[12px]">
+            {firmas.map((f) => (
+              <li key={f.id} className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-ink-2">
+                  {f.documentoTexto}{f.testMode ? " (prueba)" : ""} · {f.firmantes.map((x) => `${x.rol === "rh" ? "RH" : "Candidato"}: ${x.estado === "firmado" ? "firmó" : "pendiente"}`).join(" · ")}
+                </span>
+                <Badge tone={f.estado === "descargada" ? "good" : f.estado === "cancelada" ? "neutral" : f.estado === "firmada" ? "brand" : "warn"}>
+                  {f.estado === "descargada" ? "Firmada · PDF en el expediente" : f.estado === "firmada" ? "Firmada · descargando PDF" : f.estado === "cancelada" ? "Cancelada" : "En firma"}
+                </Badge>
+              </li>
+            ))}
+          </ul>
+          {firmas.some((f) => f.estado === "enviada" && f.firmantes.some((x) => x.rol === "candidato" && x.estado !== "firmado")) && (
+            <p className="mt-2 text-[11px] text-ink-3">El candidato firma desde su liga de expediente (compártela con «Ver PDF de la carta» → WhatsApp o correo).</p>
           )}
         </div>
       )}

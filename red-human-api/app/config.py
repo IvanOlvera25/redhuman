@@ -98,6 +98,29 @@ class Settings(BaseSettings):
     teams_client_secret: str = ""
     teams_redirect_uri: str = ""
 
+    # --- Dropbox Sign: firma electrónica incrustada (2026-09-29) ---
+    # Nombres EXACTOS: DROPBOX_SIGN_API_KEY, DROPBOX_SIGN_CLIENT_ID (API app con dominio y marca blanca configurados
+    # en Dropbox Sign). Vacías = firma electrónica no disponible: se sigue generando el PDF y se carga el firmado a mano.
+    # DROPBOX_SIGN_TEST_MODE=true manda las solicitudes en modo prueba (sin validez legal, no consume cuota).
+    dropbox_sign_api_key: str = ""
+    dropbox_sign_client_id: str = ""
+    dropbox_sign_test_mode: bool = False
+
+    # --- Psicométricas.mx (2026-09-29) --- https://admin.psicometricas.mx/api/
+    # La API autentica con `Token` + `Password` (20 caracteres cada uno). Nombres: PSICOMETRICAS_TOKEN y
+    # PSICOMETRICAS_PASSWORD; por compatibilidad con lo ya inyectado en producción, si falta PSICOMETRICAS_PASSWORD
+    # se usa PSICOMETRICAS_USUARIO como `Password`. Vacías = modo Integrada simulado (a mano).
+    psicometricas_token: str = ""
+    psicometricas_password: str = ""
+    psicometricas_usuario: str = ""
+    psicometricas_base_url: str = "https://admin.psicometricas.mx/api"
+    # Su webhook NO trae firma: se protege con un secreto propio en la URL registrada en Psicométricas
+    # (…/api/webhooks/psicometricas?secreto=XXXX) y además cada aviso se CONFIRMA consultando su API.
+    psicometricas_webhook_secret: str = ""
+    # La API no devuelve la liga del candidato (Psicométricas se la manda por correo con su clave). Si se conoce la
+    # liga de acceso, se puede configurar con {clave}, p. ej. https://…/{clave}; vacío = solo se muestra la clave.
+    psicometricas_url_candidato: str = ""
+
     cors_origins: str = "http://localhost:3000"
 
 

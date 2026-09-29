@@ -112,8 +112,13 @@ function eliminar<T>(ruta: string) {
   return enviar<T>(ruta, { method: "DELETE" });
 }
 
+/** Ligas de archivo (<iframe>, <a href>): el navegador NO manda cabeceras, así que la Cuenta activa viaja
+ * en `?cuenta_id=` (el backend la valida igual que X-Cuenta-Id). 2026-09-29: sin esto, con varias Cuentas,
+ * la carta/contrato de un candidato de otra Cuenta respondía «Expediente no encontrado». */
 export function urlArchivo(ruta: string) {
-  return `${API}${ruta}`;
+  const id = typeof window === "undefined" ? null : window.localStorage.getItem("rh-cuenta-id");
+  if (!id) return `${API}${ruta}`;
+  return `${API}${ruta}${ruta.includes("?") ? "&" : "?"}cuenta_id=${encodeURIComponent(id)}`;
 }
 
 /* ============================================================
@@ -3136,6 +3141,42 @@ export function registrarNoIngreso(expedienteId: number, motivo: string) {
   return post<EstadoOnboardingDetalle & { avisosResponsables: AvisoOnboarding[] }>(`/onboarding/expedientes/${expedienteId}/no-ingreso`, { motivo });
 }
 
+/* -------------------- Firma electrónica incrustada (Dropbox Sign, 2026-09-29) -------------------- */
+export interface FirmaDocumento {
+  id: number; expedienteId: number; documento: "carta" | "contrato"; documentoTexto: string;
+  estado: "enviada" | "firmada" | "descargada" | "cancelada" | "error"; testMode: boolean;
+  firmantes: { rol: "rh" | "candidato"; nombre: string; estado: "pendiente" | "firmado" }[];
+  firmadoPdf: boolean; error: string; creadoPor: string; creadoEn: string | null; firmadaEn: string | null;
+  signUrl?: string | null; reutilizada?: boolean;
+}
+export function fetchEstadoFirmas() {
+  return get<{ configurado: boolean; clientId: string | null; testMode: boolean }>("/firmas/estado");
+}
+export function crearFirmaDocumento(expedienteId: number, documento: "carta" | "contrato") {
+  return post<FirmaDocumento>(`/firmas/expedientes/${expedienteId}`, { documento });
+}
+export function fetchFirmasExpediente(expedienteId: number) {
+  return get<FirmaDocumento[]>(`/firmas/expedientes/${expedienteId}`);
+}
+export function signUrlFirmaRH(firmaId: number) {
+  return post<FirmaDocumento>(`/firmas/${firmaId}/sign-url`, {});
+}
+export function fetchFirmasPublicas(token: string) {
+  return get<{ configurado: boolean; clientId: string | null; testMode: boolean; firmas: { id: number; documento: string; estado: string; yoFirme: boolean }[] }>(
+    `/firmas/publica/${token}`,
+  );
+}
+export function signUrlFirmaCandidato(token: string, firmaId: number) {
+  return post<{ signUrl: string; clientId: string; testMode: boolean }>(`/firmas/publica/${token}/${firmaId}/sign-url`, {});
+}
+/** Red de seguridad (2026-09-29): abre el expediente de una postulación en Contratación/Onboarding que no lo tenga. */
+export function asegurarExpediente(codigo: string) {
+  return post<Candidato>(`/candidatos/${codigo}/expediente`, {});
+}
+export function sincronizarEvaluacion(codigo: string) {
+  return post<EvaluacionCandidato & { sincronizacion: string }>(`/evaluaciones/${codigo}/sincronizar`, {});
+}
+
 /* -------------------- Tablero de control (2026-09-28): SOLO datos reales, por Cuenta -------------------- */
 export interface TableroControl {
   cuentaId: number;
@@ -3190,7 +3231,9 @@ export interface EvaluacionCandidato {
   dictamen: string | null; dictamenTexto: string; dictamenesPosibles: { valor: string; texto: string }[];
   revisadaPor: string; revisadaEn: string | null;
   requiereConsentimientoExpreso: boolean; consentimientoAceptadoEn: string | null; ligaConsentimiento: string | null;
-  tieneInforme: boolean; resultadoCargadoPor: string; resultadoCargadoEn: string | null; informeRestringido: boolean;
+  tieneInforme: boolean; resultadoCargadoPor: string;
+  /** Psicométricas.mx (2026-09-29): clave del candidato en el proveedor y su liga (solo si se configuró). */
+  claveProveedor?: string | null; urlCandidato?: string | null; conectadaProveedor?: boolean; resultadoCargadoEn: string | null; informeRestringido: boolean;
   asignadaPor: string; creada: string | null; historial: { fecha: string; usuario: string; de: string; a: string; detalle: string }[];
   resultadoResumen?: string; nombreArchivo?: string; notas?: string; comentarioRevision?: string;
 }

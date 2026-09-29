@@ -79,9 +79,10 @@ def siguiente_paso(ev: EvaluacionCandidato) -> Optional[str]:
     return PASOS_INTEGRADA[i + 1] if i + 1 < len(PASOS_INTEGRADA) else None
 
 
-def aplicar_paso(ev: EvaluacionCandidato, paso: str, usuario: str) -> None:
+def aplicar_paso(ev: EvaluacionCandidato, paso: str, usuario: str, origen: str = "simulado") -> None:
+    """`origen`: «simulado» (RH a mano) o el nombre del proveedor cuando el paso lo reporta su API/webhook."""
     ev.paso_integrada = paso
-    mover(ev, ESTADO_POR_PASO[paso], usuario, f"Modo integrada (simulado): {paso}")
+    mover(ev, ESTADO_POR_PASO[paso], usuario, f"Modo integrada ({origen}): {paso}")
 
 
 def normalizar_sugeridas(lista: List[dict], pruebas_validas: dict) -> List[dict]:
@@ -129,3 +130,48 @@ def avisos_antes_onboarding(p: Postulacion, evaluaciones: List[EvaluacionCandida
 
 def etiqueta_modo(modo: str) -> str:
     return MODOS_PRUEBA.get(modo, modo)
+
+
+# ---------- Psicométricas.mx (2026-09-29) ----------
+
+def usa_psicometricas(ev: EvaluacionCandidato) -> bool:
+    from . import psicometricas as psi
+
+    return ev.modo == "integrada" and psi.es_psicometricas(ev.proveedor)
+
+
+def resumen_resultado(datos) -> str:
+    """Texto breve para RH a partir del JSON del proveedor (sin interpretar: lo revisa y dictamina una persona)."""
+    import json as _json
+
+    texto = _json.dumps(datos, ensure_ascii=False)
+    return f"Resultado recibido de Psicométricas.mx ({len(texto)} caracteres). Revisa el informe PDF adjunto."
+
+
+def sincronizar_psicometricas(db, ev: EvaluacionCandidato, por: str = "Psicométricas.mx (automático)") -> str:
+    """Confirma con su API (consultaCandidato → fecha_fin) y, si ya terminó, descarga el resultado (JSON + PDF) y lo
+    deja en la evaluación: Completada → Resultado recibido. Idempotente. Regresa: sin_clave | en_curso | ya_estaba |
+    resultado_recibido."""
+    from . import archivos as fs
+    from . import psicometricas as psi
+
+    if not ev.clave_proveedor:
+        return "sin_clave"
+    if ev.estado in ("resultado_recibido", "revisada", "fallida"):
+        return "ya_estaba"
+    filas = psi.consultar_candidato(ev.clave_proveedor)
+    if not psi.terminado(filas):
+        return "en_curso"
+    datos = psi.resultado_json(ev.clave_proveedor)
+    pdf = psi.resultado_pdf(ev.clave_proveedor)
+    ev.resultado_json = datos if isinstance(datos, dict) else {"resultados": datos}
+    ev.resultado_resumen = resumen_resultado(datos)
+    if pdf:
+        validado = fs.validar_bytes(pdf, f"psicometricas-{ev.clave_proveedor}.pdf", f"informe «{ev.nombre}»")
+        ev.archivo = fs.guardar(validado, f"evaluaciones/{ev.id}", f"informe_{ev.codigo}")
+        ev.nombre_archivo, ev.mime = validado.nombre, validado.mime
+    ev.resultado_cargado_por, ev.resultado_cargado_en = por, datetime.now(timezone.utc)
+    if ev.paso_integrada != "completada":
+        aplicar_paso(ev, "completada", por, "Psicométricas.mx")
+    aplicar_paso(ev, "resultado_recibido", por, "Psicométricas.mx")
+    return "resultado_recibido"

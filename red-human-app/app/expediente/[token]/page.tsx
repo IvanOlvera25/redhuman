@@ -19,7 +19,10 @@ import {
   type DocumentoExpedientePublico,
   type ExpedientePublico,
   urlCartaIntencionPublica,
+  fetchFirmasPublicas,
+  signUrlFirmaCandidato,
 } from "@/lib/api";
+import { abrirFirmaEmbebida } from "@/lib/firma-embebida";
 
 type Fase = "cargando" | "no_disponible" | "lista";
 
@@ -38,6 +41,34 @@ export default function ExpedientePublico() {
   const [info, setInfo] = useState<ExpedientePublico | null>(null);
   const [subiendo, setSubiendo] = useState<string | null>(null);
   const [error, setError] = useState("");
+  // 2026-09-29: documentos por firmar (Dropbox Sign) — se firman AQUÍ, en un modal incrustado, sin salir de la página
+  const [firmas, setFirmas] = useState<Awaited<ReturnType<typeof fetchFirmasPublicas>>>(null);
+  const [firmando, setFirmando] = useState<number | null>(null);
+  const [avisoFirma, setAvisoFirma] = useState("");
+  const cargarFirmas = useCallback(() => {
+    fetchFirmasPublicas(token).then(setFirmas);
+  }, [token]);
+  useEffect(() => {
+    cargarFirmas();
+  }, [cargarFirmas]);
+
+  async function firmar(id: number) {
+    setFirmando(id);
+    setAvisoFirma("");
+    const r = await signUrlFirmaCandidato(token, id);
+    setFirmando(null);
+    if (!r.ok) return setAvisoFirma(r.error);
+    await abrirFirmaEmbebida({
+      clientId: r.data.clientId,
+      signUrl: r.data.signUrl,
+      testMode: r.data.testMode,
+      onFirmado: () => {
+        setAvisoFirma("¡Listo! Tu firma quedó registrada. Recursos Humanos recibirá el documento firmado.");
+        setTimeout(cargarFirmas, 1500);
+      },
+      onError: (m) => setAvisoFirma(m),
+    });
+  }
 
   const cargar = useCallback(() => {
     fetchExpedientePublico(token).then((i) => {
@@ -108,6 +139,34 @@ export default function ExpedientePublico() {
                 </a>
               )}
             </div>
+
+            {firmas && firmas.firmas.length > 0 && (
+              <Card className="mt-6 p-5">
+                <p className="text-sm font-semibold text-ink">Documentos para firmar</p>
+                <p className="mt-0.5 text-[12px] text-ink-3">Se firman aquí mismo con firma electrónica.</p>
+                <ul className="mt-3 flex flex-col gap-2">
+                  {firmas.firmas.map((f) => (
+                    <li key={f.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border-soft px-3.5 py-2.5">
+                      <span className="text-sm">{f.documento}</span>
+                      {f.yoFirme || f.estado === "firmada" || f.estado === "descargada" ? (
+                        <Badge tone="good" dot>Firmado</Badge>
+                      ) : f.estado === "enviada" ? (
+                        <button
+                          onClick={() => void firmar(f.id)}
+                          disabled={firmando !== null}
+                          className="inline-flex min-h-10 items-center rounded-xl bg-brand px-4 text-sm font-semibold text-brand-ink transition hover:brightness-110 disabled:opacity-60 totem:min-h-16 totem:text-xl"
+                        >
+                          {firmando === f.id ? "Abriendo…" : "Firmar"}
+                        </button>
+                      ) : (
+                        <Badge tone="neutral">No disponible</Badge>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                {avisoFirma && <p className="mt-3 text-[13px] text-ink-2">{avisoFirma}</p>}
+              </Card>
+            )}
 
             {info.estado === "alta" ? (
               <Card className="mt-6 p-6 text-center">

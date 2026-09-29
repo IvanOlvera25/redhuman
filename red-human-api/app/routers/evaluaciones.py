@@ -263,11 +263,25 @@ def enviar(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usua
     _exigir_consentimiento(ev, p)
     if ev.estado != "pendiente":
         raise HTTPException(409, "Solo se envía una evaluación pendiente.")
-    if ev.modo == "integrada":
+    from ..services import psicometricas as psi
+
+    if sev.usa_psicometricas(ev) and psi.configurado():
+        # 2026-09-29: envío REAL a Psicométricas.mx (agregaCandidato). Si falla, nada cambia (502 con el motivo).
+        if not (p and p.correo):
+            raise HTTPException(409, "Psicométricas.mx necesita el correo del candidato para mandarle su liga.")
+        try:
+            tests = psi.tests_de(ev.id_proveedor)
+            clave = psi.agregar_candidato(p.nombre, p.correo, p.vacante.titulo if p.vacante else ev.nombre, tests)
+        except psi.PsicometricasError as ex:
+            raise HTTPException(400 if ex.status == 400 else 502, str(ex))
+        ev.clave_proveedor = clave
+        sev.aplicar_paso(ev, "enviada", u.nombre, "Psicométricas.mx")
+    elif ev.modo == "integrada":
         sev.aplicar_paso(ev, "enviada", u.nombre)
     else:
         sev.mover(ev, "en_proceso", u.nombre, "Enviada" + (f" ({ev.url})" if ev.url else ""))
-    registrar(db, u.nombre, "evaluacion_enviada", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "modo": ev.modo, "correo_rh": u.correo})
+    registrar(db, u.nombre, "evaluacion_enviada", "postulacion", p.codigo if p else "",
+              {"evaluacion": ev.codigo, "modo": ev.modo, "proveedor": ev.proveedor, "clave_proveedor": ev.clave_proveedor, "correo_rh": u.correo})
     db.commit()
     return evaluacion_candidato_dict(ev, u)
 
@@ -280,6 +294,8 @@ def avanzar_integrada(codigo: str, db: Session = Depends(get_db), u: Usuario = D
     p = _post_de(db, ev)
     if ev.modo != "integrada":
         raise HTTPException(409, "Solo las evaluaciones en modo Integrada avanzan por pasos.")
+    if ev.clave_proveedor:
+        raise HTTPException(409, "Esta evaluación está conectada a Psicométricas.mx: su avance llega del proveedor (usa «Consultar resultado»).")
     _abierta(ev)
     _exigir_consentimiento(ev, p)
     paso = sev.siguiente_paso(ev)
@@ -289,6 +305,23 @@ def avanzar_integrada(codigo: str, db: Session = Depends(get_db), u: Usuario = D
     registrar(db, u.nombre, "evaluacion_paso_simulado", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "paso": paso, "correo_rh": u.correo})
     db.commit()
     return evaluacion_candidato_dict(ev, u)
+
+
+@router.post("/{codigo}/sincronizar")
+def sincronizar(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Consultar resultado» en Psicométricas.mx (por si el webhook no llegó). Solo guarda si su API confirma que terminó."""
+    from ..services import psicometricas as psi
+
+    ev = _evaluacion(db, codigo, cuenta.id)
+    if not ev.clave_proveedor:
+        raise HTTPException(409, "Esta evaluación no está conectada a Psicométricas.mx.")
+    try:
+        r = sev.sincronizar_psicometricas(db, ev)
+    except psi.PsicometricasError as ex:
+        raise HTTPException(502, str(ex))
+    registrar(db, u.nombre, "evaluacion_sincronizada", "evaluaciones", ev.codigo, {"resultado": r, "correo_rh": u.correo})
+    db.commit()
+    return {**evaluacion_candidato_dict(ev, u), "sincronizacion": r}
 
 
 @router.post("/{codigo}/resultado")

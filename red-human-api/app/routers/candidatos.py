@@ -1741,6 +1741,26 @@ def _abrir_expediente(db: Session, p: Postulacion, u: Usuario) -> Expediente:
     return exp
 
 
+@router.post("/{codigo}/expediente")
+def asegurar_expediente(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """2026-09-29: red de seguridad para postulaciones que llegaron a Contratación/Onboarding SIN expediente
+    (cargas masivas o scripts que no pasaron por `_abrir_expediente`). Idempotente: si ya existe lo regresa tal
+    cual; nunca crea uno para otra postulación ni en otra Cuenta. Exige el consentimiento (LFPDPPP)."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    if p.expediente:
+        return postulacion_dict(p, detalle=True)
+    if p.etapa not in ("Contratación", "Onboarding"):
+        raise HTTPException(409, "El expediente se abre al llegar a Contratación.")
+    if not p.consentimiento:
+        raise HTTPException(409, "El candidato no tiene consentimiento registrado para el tratamiento de sus datos (LFPDPPP). Regístralo antes de abrir su expediente.")
+    exp = _abrir_expediente(db, p, u)
+    registrar(db, u.nombre, "expediente_inicializado", "postulacion", p.codigo, {"expediente": exp.id, "motivo": "faltaba al generar documentos", "correo_rh": u.correo})
+    db.commit()
+    return postulacion_dict(p, detalle=True)
+
+
 @router.patch("/{codigo}/etapa")
 async def mover_etapa(
     codigo: str, datos: EtapaIn, forzar_prueba: bool = False,

@@ -66,7 +66,11 @@ def cuenta_actual(request: Request, db: Session = Depends(get_db), u: Usuario = 
         raise HTTPException(403, "Tu usuario no tiene ninguna Cuenta activa asignada.")
     if len(cuentas) == 1:
         return cuentas[0]
-    solicitada = request.headers.get(CABECERA_CUENTA)
+    # 2026-09-29 (bug «Expediente no encontrado»): las ligas de archivo (<iframe>/<a href> de carta, contrato,
+    # documentos, informes) NO pueden mandar cabeceras; traen la Cuenta en `?cuenta_id=`. Se valida EXACTAMENTE
+    # igual que la cabecera (solo Cuentas vinculadas al usuario). Sin esto caían en la Cuenta predeterminada y
+    # un expediente de otra Cuenta del mismo usuario respondía 404.
+    solicitada = request.headers.get(CABECERA_CUENTA) or request.query_params.get("cuenta_id")
     if not solicitada:
         # Fase 2 (2026-09-15): sin cabecera, la Cuenta predeterminada del usuario (si sigue activa).
         pred = next((c for c in cuentas if c.id == u.cuenta_predeterminada_id), None)
