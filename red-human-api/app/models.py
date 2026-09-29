@@ -682,6 +682,7 @@ DOCUMENTOS_BASE = [
 ESTADOS_DOCUMENTO_ONBOARDING = ("Pendiente", "Por revisar", "Aprobado", "Rechazado", "No aplica")
 # Documento interno que cierra la tarea fija «Contrato firmado» (Fase 2).
 TIPO_CONTRATO_FIRMADO = "Contrato firmado"
+TIPO_CARTA_FIRMADA = "Carta de intención firmada"  # Dropbox Sign (2026-09-29), también documento interno
 
 
 def estado_documento_onboarding(d: "Documento") -> str:
@@ -1607,6 +1608,7 @@ TABLAS_MODULOS_RH = (
     "plantillas_desempeno", "acciones_desempeno",  # Desempeño v2 (2026-09-27)
     "plantillas_onboarding", "tareas_onboarding",  # Onboarding v2 (2026-09-28)
     "pruebas_psicometricas", "evaluaciones_candidato",  # Evaluaciones y verificaciones (2026-09-28)
+    "firmas_documentos",  # Dropbox Sign (2026-09-29)
 )
 
 # --- Desempeño ---
@@ -2041,6 +2043,9 @@ class EvaluacionCandidato(Base):
     proveedor: Mapped[str] = mapped_column(String(150), default="")
     id_proveedor: Mapped[str] = mapped_column(String(150), default="")
     url: Mapped[str] = mapped_column(String(500), default="")
+    # Psicométricas.mx (2026-09-29): «clave» del candidato en el proveedor (la usa su webhook) y el resultado crudo.
+    clave_proveedor: Mapped[str] = mapped_column(String(60), default="", index=True)
+    resultado_json: Mapped[dict] = mapped_column(JSON, default=dict)
     estado: Mapped[str] = mapped_column(String(30), default="pendiente")  # ESTADOS_EVALUACION
     paso_integrada: Mapped[str] = mapped_column(String(20), default="")  # PASOS_INTEGRADA (solo modo integrada)
     motivo_fallida: Mapped[str] = mapped_column(Text, default="")
@@ -2070,3 +2075,31 @@ class EvaluacionCandidato(Base):
     @property
     def es_medico(self) -> bool:
         return self.tipo == "medico"
+
+
+# --- Firma electrónica incrustada con Dropbox Sign (2026-09-29) ---
+DOCUMENTOS_FIRMA = {"carta": "Carta de intención", "contrato": "Contrato individual de trabajo"}
+ESTADOS_FIRMA = ("enviada", "firmada", "descargada", "cancelada", "error")
+
+
+class FirmaDocumento(Base):
+    """Una solicitud de firma (carta o contrato) de un expediente. Firmantes: la persona de RH que la crea
+    (representante de la empresa) y el candidato. Cada quien firma en NUESTRA interfaz (modal incrustado): RH en el
+    tablero, el candidato en su liga de expediente. El PDF final firmado se guarda en el expediente por webhook."""
+
+    __tablename__ = "firmas_documentos"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cuenta_id: Mapped[int] = mapped_column(Integer, index=True)
+    expediente_id: Mapped[int] = mapped_column(Integer, index=True)
+    documento: Mapped[str] = mapped_column(String(20))  # DOCUMENTOS_FIRMA
+    signature_request_id: Mapped[str] = mapped_column(String(80), index=True)
+    firmantes: Mapped[list] = mapped_column(JSON, default=list)  # [{rol: rh|candidato, nombre, correo, signature_id, estado}]
+    estado: Mapped[str] = mapped_column(String(20), default="enviada")  # ESTADOS_FIRMA
+    test_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    documento_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # Documento interno con el PDF firmado
+    error: Mapped[str] = mapped_column(Text, default="")
+    eventos: Mapped[list] = mapped_column(JSON, default=list)  # [{fecha, tipo}]
+    creado_por: Mapped[str] = mapped_column(String(150), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    firmada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

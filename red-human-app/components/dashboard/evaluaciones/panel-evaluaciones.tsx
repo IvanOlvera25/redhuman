@@ -7,14 +7,14 @@
    se avanza a mano («Simular siguiente paso»). */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Ban, CheckCircle2, ClipboardCheck, Copy, FileUp, Loader2, Lock, Send, SkipForward, Stethoscope, XCircle } from "lucide-react";
+import { Ban, CheckCircle2, ClipboardCheck, Copy, FileUp, Loader2, Lock, RefreshCw, Send, SkipForward, Stethoscope, XCircle } from "lucide-react";
 import { Badge, Button, Card, Eyebrow } from "@/components/ui";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import { CampoRH, ModalMarco, inputRH } from "@/components/dashboard/modulos-rh";
 import {
   TIPOS_EVALUACION, agregarEvaluacionCandidato, avanzarEvaluacionIntegrada, cancelarEvaluacion, cargarResultadoEvaluacion,
   enviarEvaluacion, enviarLigaConsentimientoMedico, fetchEvaluacionesCandidato, fetchPruebasPsicometricas, lineasResultados,
-  revisarEvaluacion, urlInformeEvaluacion,
+  revisarEvaluacion, sincronizarEvaluacion, urlInformeEvaluacion,
   type EvaluacionCandidato, type ModoPrueba, type PruebaPsicometrica, type TipoEvaluacion,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -94,7 +94,17 @@ export function PanelEvaluaciones({ codigo, puesto, live, version }: { codigo: s
                       {ocupado === e.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Enviar
                     </Button>
                   )}
-                  {live && e.estado === "en_proceso" && e.modo === "integrada" && e.siguientePaso && (
+                  {live && e.estado === "en_proceso" && e.conectadaProveedor && (
+                    <Button size="sm" variant="outline" disabled={Boolean(ocupado)} title="Pregunta a Psicométricas.mx si ya terminó (por si su aviso no llegó)"
+                      onClick={() => accion(e.id, async () => {
+                        const r = await sincronizarEvaluacion(e.id);
+                        if (r.ok) setAviso(r.data.sincronizacion === "resultado_recibido" ? "Resultado recibido de Psicométricas.mx." : "El candidato aún no termina sus pruebas.");
+                        return r;
+                      })}>
+                      {ocupado === e.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Consultar resultado
+                    </Button>
+                  )}
+                  {live && e.estado === "en_proceso" && e.modo === "integrada" && e.siguientePaso && !e.conectadaProveedor && (
                     <Button size="sm" variant="outline" disabled={Boolean(ocupado)} title="Sin proveedor conectado todavía: el paso se registra a mano"
                       onClick={() => accion(e.id, () => avanzarEvaluacionIntegrada(e.id))}>
                       <SkipForward className="h-4 w-4" /> Simular: {PASOS[e.siguientePaso]}
@@ -126,6 +136,18 @@ export function PanelEvaluaciones({ codigo, puesto, live, version }: { codigo: s
                     />
                   )}
                 </div>
+                {e.claveProveedor && (
+                  <p className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-ink-2">
+                    Psicométricas.mx · clave <span className="font-mono">{e.claveProveedor}</span>
+                    {e.urlCandidato ? (
+                      <button type="button" className="font-semibold text-brand hover:underline" onClick={() => { void navigator.clipboard?.writeText(e.urlCandidato!); setAviso("Liga del candidato copiada."); }}>
+                        Copiar liga del candidato
+                      </button>
+                    ) : (
+                      <span className="text-ink-3">(Psicométricas.mx le manda su liga por correo)</span>
+                    )}
+                  </p>
+                )}
                 {e.estado === "en_espera_consentimiento" && (
                   <p className="mt-2 text-[12px] text-warn">
                     {e.requiereConsentimientoExpreso

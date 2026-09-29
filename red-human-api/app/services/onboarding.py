@@ -180,10 +180,14 @@ def generar_tareas(db: Session, e: Expediente, cuenta_id: int, config: dict, por
         if clave in por_clave:
             continue
         dias = _entero(plazos.get(clave), PLAZOS_ONBOARDING_DEFAULT.get(clave))
-        db.add(TareaOnboarding(
+        t = TareaOnboarding(
             cuenta_id=cuenta_id, expediente_id=e.id, clave=clave, nombre=nombre, tipo="fija", fija=True, obligatoria=True,
             responsable=responsables.get(clave, ""), dias_relativos=dias, fecha_limite=fecha_limite(fecha_base(e), dias), creada_por=por,
-        ))
+        )
+        if clave == "contrato_firmado" and contrato_ya_firmado(e):
+            # el contrato se firmó (Dropbox Sign o carga manual) antes de iniciar el Onboarding
+            t.estado, t.realizada_por, t.realizada_en, t.notas = "realizada", por, datetime.now(timezone.utc), "Contrato firmado antes de iniciar el Onboarding."
+        db.add(t)
     for r in normalizar_recursos(config.get("recursos") or []):
         if norm(r["nombre"]) in recursos:
             continue
@@ -403,3 +407,42 @@ def resumen_tablero(e: Expediente, tareas: List[TareaOnboarding]) -> dict:
         "noIngreso": {"en": _iso(e.no_ingreso_en), "por": e.no_ingreso_por or "", "motivo": e.no_ingreso_motivo or ""} if e.no_ingreso_en else None,
         "puedeNoIngreso": e.estado != "alta" and not e.no_ingreso_en,
     }
+
+
+# ---------- Documentos firmados (carga manual o Dropbox Sign, 2026-09-29) ----------
+
+def guardar_documento_firmado(db: Session, e: Expediente, tipo: str, contenido: bytes, nombre_archivo: str, por: str, canal: str = "rh") -> Documento:
+    """Guarda (o reemplaza) un PDF firmado como documento INTERNO del expediente: no suma al porcentaje ni se le
+    pide al candidato. Si es el contrato, la tarea fija «Contrato firmado» queda Realizada (quién y cuándo)."""
+    from ..models import TIPO_CONTRATO_FIRMADO
+    from . import archivos as fs
+
+    validado = fs.validar_bytes(contenido, nombre_archivo, tipo)
+    if validado.extension != "pdf":
+        raise ValueError("El documento firmado debe ser un PDF.")
+    doc = next((d for d in e.documentos if d.interno and d.tipo == tipo), None)
+    if doc is None:
+        doc = Documento(expediente_id=e.id, tipo=tipo, obligatorio=False, interno=True)
+        e.documentos.append(doc)
+    ahora = datetime.now(timezone.utc)
+    doc.archivo = fs.guardar(validado, f"expedientes/{e.id}", tipo.replace(" ", "_"))
+    doc.nombre_archivo, doc.mime, doc.tamano = validado.nombre, validado.mime, validado.tamano
+    doc.subido_en = doc.recibido_en = ahora
+    doc.recibido_canal = canal
+    doc.estado, doc.revisado_por = "recibido", por
+    doc.notas_ia = f"Firmado · {por}."
+    if tipo == TIPO_CONTRATO_FIRMADO:
+        tarea = next((t for t in tareas_de(db, e) if t.fija and t.clave == "contrato_firmado"), None)
+        if tarea:
+            tarea.estado, tarea.realizada_por, tarea.realizada_en = "realizada", por, ahora
+            tarea.cancelada_por, tarea.cancelada_en, tarea.motivo_cancelacion = "", None, ""
+            tarea.notas = f"Contrato firmado · {por}."
+        sincronizar_legado(db, e)
+    db.flush()
+    return doc
+
+
+def contrato_ya_firmado(e: Expediente) -> bool:
+    from ..models import TIPO_CONTRATO_FIRMADO
+
+    return any(d.interno and d.tipo == TIPO_CONTRATO_FIRMADO and d.archivo for d in e.documentos)

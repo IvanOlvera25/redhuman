@@ -558,22 +558,11 @@ async def cargar_contrato_firmado(
     validado = await fs.validar(archivo, "contrato firmado")
     if validado.extension != "pdf":
         raise HTTPException(400, "El contrato firmado debe ser un PDF.")
-    doc = next((d for d in e.documentos if d.interno and d.tipo == TIPO_CONTRATO_FIRMADO), None)
-    reemplazo = doc is not None and bool(doc.archivo)
-    if doc is None:
-        doc = Documento(expediente_id=e.id, tipo=TIPO_CONTRATO_FIRMADO, obligatorio=False, interno=True)
-        e.documentos.append(doc)
+    reemplazo = onb.contrato_ya_firmado(e)
     ahora = datetime.now(timezone.utc)
-    doc.archivo = fs.guardar(validado, f"expedientes/{e.id}", "Contrato_firmado")
-    doc.nombre_archivo, doc.mime, doc.tamano = validado.nombre, validado.mime, validado.tamano
-    doc.subido_en = doc.recibido_en = ahora
-    doc.recibido_canal = "rh"
-    doc.estado, doc.revisado_por = "recibido", u.nombre
+    doc = onb.guardar_documento_firmado(db, e, TIPO_CONTRATO_FIRMADO, validado.contenido, validado.nombre, u.nombre, canal="rh")
     doc.notas_ia = f"Cargado manualmente por {u.nombre}."
-    tarea.estado, tarea.realizada_por, tarea.realizada_en = "realizada", u.nombre, ahora
-    tarea.cancelada_por, tarea.cancelada_en, tarea.motivo_cancelacion = "", None, ""
     tarea.notas = f"Contrato firmado cargado por {u.nombre}."
-    onb.sincronizar_legado(db, e)
     registrar(db, u.nombre, "contrato_firmado_cargado", "expediente", str(e.id),
               {"archivo": validado.nombre, "reemplazo": reemplazo, "correo_rh": u.correo})
     db.commit()

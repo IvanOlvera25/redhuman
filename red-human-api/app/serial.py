@@ -1104,6 +1104,12 @@ def prueba_psicometrica_dict(pr) -> dict:
     }
 
 
+def _url_psico(clave: str):
+    from .services import psicometricas as psi
+
+    return psi.url_candidato(clave) if clave else None
+
+
 def evaluacion_candidato_dict(ev, usuario=None) -> dict:
     """El informe médico COMPLETO (archivo, resumen, notas, comentario) solo viaja a quien tiene permiso; el resto
     ve únicamente el estado y el dictamen."""
@@ -1137,6 +1143,10 @@ def evaluacion_candidato_dict(ev, usuario=None) -> dict:
         "consentimientoAceptadoEn": iso(ev.consentimiento_aceptado_en),
         "ligaConsentimiento": f"{settings.app_url}/consentimiento/{ev.consentimiento_token}" if ev.consentimiento_token and not ev.consentimiento_aceptado_en else None,
         "tieneInforme": bool(ev.archivo),
+        # Psicométricas.mx (2026-09-29): clave del candidato en el proveedor y su liga (si se configuró)
+        "claveProveedor": ev.clave_proveedor or None,
+        "urlCandidato": _url_psico(ev.clave_proveedor),
+        "conectadaProveedor": bool(ev.clave_proveedor),
         "resultadoCargadoPor": ev.resultado_cargado_por or "",
         "resultadoCargadoEn": iso(ev.resultado_cargado_en),
         "informeRestringido": restringido,
