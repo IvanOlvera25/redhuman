@@ -121,8 +121,9 @@ with TestClient(app) as client:
     settings.dropbox_sign_client_id = "cliente-abc"
     LLAMADAS = {"crear": [], "sign_url": [], "pdf": []}
 
-    def _crear(pdf, nombre_archivo, titulo, asunto, mensaje, firmantes, metadata):
-        LLAMADAS["crear"].append({"pdf": pdf[:4], "firmantes": firmantes, "metadata": metadata, "nombre": nombre_archivo})
+    def _crear(pdf, nombre_archivo, titulo, asunto, mensaje, firmantes, metadata, zonas=None, indice_por_rol=None):
+        LLAMADAS["crear"].append({"pdf": pdf[:4], "bytes": pdf, "firmantes": firmantes, "metadata": metadata, "nombre": nombre_archivo,
+                                  "zonas": zonas, "indice": indice_por_rol})
         n = len(LLAMADAS["crear"])
         return {"signature_request_id": f"sr-{n}", "signatures": [{"signature_id": f"sig-{n}-{i}", "correo": f["correo"].lower(), "nombre": f["nombre"]} for i, f in enumerate(firmantes)]}
 
@@ -138,6 +139,29 @@ with TestClient(app) as client:
     check(c["pdf"] == b"%PDF" and [f["correo"] for f in c["firmantes"]] == [admin.correo, "masiva@correo.mx"] and c["metadata"]["documento"] == "carta",
           "manda el PDF real de la carta con RH + candidato como firmantes")
     check([x["rol"] for x in F["firmantes"]] == ["rh", "candidato"], "firmantes: representante de RH y candidato")
+
+    print("\n--- 3b. Marca blanca: firmas SOBRE la última página (sin «Signature page» de Dropbox) ---")
+    import io as _io  # noqa: E402
+
+    from pypdf import PdfReader  # noqa: E402
+
+    from app.services.dropbox_sign import campos_de_zonas  # noqa: E402
+
+    zonas = c["zonas"]
+    paginas = len(PdfReader(_io.BytesIO(c["bytes"])).pages)
+    check(zonas and {z["pagina"] for z in zonas} == {paginas}, f"todas las zonas de firma están en la ÚLTIMA página del PDF ({paginas})")
+    check(sorted((z["rol"], z["tipo"]) for z in zonas) == [("candidato", "fecha"), ("candidato", "firma"), ("empresa", "fecha"), ("empresa", "firma")],
+          "firma + fecha para la empresa (RH) y para el candidato")
+    check(c["indice"] == {"empresa": 0, "candidato": 1}, "índice de firmante explícito: 0 = RH (primer firmante), 1 = candidato")
+    check(all(0 <= z["x"] and z["x"] + z["ancho"] <= 612 and 0 <= z["y"] and z["y"] + z["alto"] <= 792 for z in zonas), "coordenadas dentro de la hoja carta (612 × 792 pt)")
+    firma_emp = next(z for z in zonas if z["rol"] == "empresa" and z["tipo"] == "firma")
+    firma_can = next(z for z in zonas if z["rol"] == "candidato" and z["tipo"] == "firma")
+    check(firma_emp["y"] == firma_can["y"] and firma_emp["x"] + firma_emp["ancho"] < firma_can["x"], "las dos firmas lado a lado, sin encimarse")
+    campos = campos_de_zonas(zonas, c["indice"])
+    check(len(campos) == 4 and {x.signer for x in campos} == {0, 1} and all(x.page == paginas for x in campos)
+          and {x.type for x in campos} == {"signature", "date_signed"}, "se arman los form_fields_per_document del SDK (signature / date_signed, con page)")
+    texto = "".join(pg.extract_text() for pg in PdfReader(_io.BytesIO(c["bytes"])).pages)
+    check("Acepto: Masiva Uno" in texto, "la carta trae la línea de aceptación del candidato")
     r = client.post(f"/firmas/expedientes/{EXP}", headers=H, json={"documento": "carta"})
     check(r.json()["reutilizada"] and len(LLAMADAS["crear"]) == 1, "pulsar otra vez REUTILIZA la solicitud viva (no manda doble)")
     check(client.post(f"/firmas/expedientes/{EXP}", headers=H, json={"documento": "contrato"}).status_code == 409, "el contrato exige el 100 % de documentos Aprobados")
@@ -192,6 +216,11 @@ with TestClient(app) as client:
     client.post(f"/onboarding/expedientes/{EXP}/iniciar", headers=H, json={"documentos": res["configuracion"]["documentos"], "notificar_responsables": False, "solicitar_documentos": False})
     r = client.post(f"/firmas/expedientes/{EXP}", headers=H, json={"documento": "contrato"})
     check(r.status_code == 200 and LLAMADAS["crear"][-1]["metadata"]["documento"] == "contrato", "contrato mandado a firma (Modo Prueba)")
+    cz = LLAMADAS["crear"][-1]
+    pag_c = len(PdfReader(_io.BytesIO(cz["bytes"])).pages)
+    ultima = PdfReader(_io.BytesIO(cz["bytes"])).pages[-1].extract_text()
+    check({z["pagina"] for z in cz["zonas"]} == {pag_c} and "firman de conformidad" in " ".join(ultima.split()),
+          "contrato: firmas en la última página junto a la cláusula de cierre (nunca una hoja de firmas suelta)")
     sr2 = f"sr-{len(LLAMADAS['crear'])}"
     client.post("/api/webhooks/dropbox", data={"json": json.dumps(evento("signature_request_downloadable", sr2))})
     tareas = {t["clave"]: t for t in client.get(f"/onboarding/expedientes/{EXP}/tareas", headers=H).json()}
