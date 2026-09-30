@@ -1216,6 +1216,83 @@ def mensaje_inicial_entrevista(titulo_vacante: str) -> str:
     )
 
 
+def mensaje_inicial_ipv(titulo_vacante: str) -> str:
+    """Fraiche (spec §8): introducción de una sesión que es SOLO IPV (Red Human la hace aparte de la inicial)."""
+    puesto = (titulo_vacante or "").strip() or "el puesto"
+    return (
+        f"Hola, soy Red Human. Gracias por continuar en el proceso para {puesto}. "
+        "En esta conversación te voy a plantear algunas situaciones de tienda para conocer cómo actuarías. ¿Comenzamos?"
+    )
+
+
+# ---------- Fraiche (spec §7-8): guion fijo de la entrevista inicial y bloque IPV ----------
+
+PREGUNTAS_INICIAL_FRAICHE = {
+    "experiencia": "Cuéntame de tu experiencia más reciente relacionada con este puesto.",
+    "funciones": "¿Qué funciones realizabas con más frecuencia y cuál se te daba mejor?",
+    "estabilidad laboral": "¿Cuánto tiempo duraste en tus últimos empleos?",
+    "motivos de salida": "¿Por qué saliste de tu empleo más reciente?",
+    "disponibilidad": "¿Cómo es tu disponibilidad de horario y a partir de cuándo podrías iniciar?",
+    "servicio al cliente": "Cuéntame de una vez que atendiste a un cliente difícil.",
+    "expectativa salarial": "¿Cuál es tu expectativa de sueldo mensual?",
+}
+
+
+def guion_entrevista_inicial_fraiche(titulo: str, contexto_previo: Optional[List[str]] = None, enfoque_entrevista: str = "profesional") -> "GuionEntrevista":
+    """Spec §7: temas FIJOS (experiencia, funciones, estabilidad laboral, motivos de salida, disponibilidad,
+    servicio al cliente, expectativa salarial). Determinista: no hace falta la IA para armarlo. Con el enfoque
+    «profesional + personal» de la vacante (Punto 6) se agrega el tema de objetivos personales y visión de futuro."""
+    from .fraiche import TEMAS_ENTREVISTA_INICIAL
+
+    temas = list(TEMAS_ENTREVISTA_INICIAL)
+    preguntas_extra: List[str] = []
+    if _enfoque_valido(enfoque_entrevista) == "profesional_personal":
+        temas.append("objetivos personales y visión de futuro")
+        preguntas_extra.append("¿Cómo te ves en dos o tres años?")
+    return GuionEntrevista(
+        enfoque=(
+            f"Validar experiencia, funciones, estabilidad laboral, motivos de salida, disponibilidad, servicio al cliente "
+            f"y expectativa salarial para {titulo}; partir de lo que ya contestó en el prefiltro y pedir ejemplos concretos."
+        ),
+        temas=temas,
+        preguntas=[PREGUNTAS_INICIAL_FRAICHE[t] for t in temas if t in PREGUNTAS_INICIAL_FRAICHE] + preguntas_extra,
+    )
+
+
+def preguntas_ipv_demo() -> List[str]:
+    """Situación por competencia (spec §8) como pregunta — modo demo y referencia del prompt."""
+    from .fraiche import COMPETENCIAS_IPV
+
+    return [f"{c['situacion']}. Cuéntame un ejemplo concreto de cómo lo manejaste." for c in COMPETENCIAS_IPV]
+
+
+def bloque_ipv_prompt() -> str:
+    from .fraiche import COMPETENCIAS_IPV, MARCADOR_IPV, OBSERVACIONES_IPV
+
+    filas = "\n".join(f"- {c['nombre']} ({c['peso']}%): situación «{c['situacion']}» → evidencia esperada: {c['evidencia']}" for c in COMPETENCIAS_IPV)
+    obs = ", ".join(o["nombre"].lower() for o in OBSERVACIONES_IPV)
+    return (
+        f"ENTREVISTA IPV (rúbrica de competencias): abre la segunda parte diciendo EXACTAMENTE «{MARCADOR_IPV}» y a partir de "
+        "ahí plantea UNA situación por competencia, en este orden, pidiendo SIEMPRE un ejemplo concreto de algo que la "
+        "persona haya vivido; si la respuesta es vaga o no trae evidencia, repregunta UNA vez («¿qué hiciste exactamente?», "
+        "«¿cómo terminó?») antes de pasar a la siguiente. No expliques la rúbrica ni los pesos, no califiques en voz alta.\n"
+        f"{filas}\n"
+        f"Observa además, sin preguntar por ellas: {obs}."
+    )
+
+
+def dividir_transcript_ipv(transcript: List[dict]) -> Tuple[List[dict], List[dict]]:
+    """(bloque inicial, bloque IPV) partidos en el turno de la entrevistadora que trae MARCADOR_IPV.
+    Sin marcador → todo es inicial."""
+    from .fraiche import MARCADOR_IPV
+
+    marca = MARCADOR_IPV.lower()
+    for i, m in enumerate(transcript or []):
+        if m.get("rol") == "assistant" and marca in str(m.get("texto", "")).lower():
+            return list(transcript[:i]), list(transcript[i:])
+    return list(transcript or []), []
+
+
 def prompt_entrevistador(
     titulo: str,
     requisitos: str,
@@ -1231,16 +1308,37 @@ def prompt_entrevistador(
     sueldo: str = "",
     beneficios: Optional[List[str]] = None,
     area: str = "",
+    contexto_previo: Optional[List[str]] = None,
+    incluye_ipv: bool = False,
+    solo_ipv: bool = False,
 ) -> str:
     """System prompt compartido por el avatar (Anam) y el modo texto — misma personalidad en ambos.
 
     Fase 4 (Punto 3): protocolo de inicio y silencio, sin numerar, una pregunta por intervención, de
     lo general a lo específico, sin repetir lo ya respondido, entrevistadora (no lectora de
-    cuestionario). El guion es referencia de temas, nunca script literal ni obligatorio de agotar."""
+    cuestionario). El guion es referencia de temas, nunca script literal ni obligatorio de agotar.
+    Fraiche (spec §7-8): `contexto_previo` = lo ya contestado en el prefiltro (se parte de ahí, no se
+    relee); `incluye_ipv` = tras la inicial sigue el bloque IPV en la misma sesión; `solo_ipv` = la sesión
+    es únicamente IPV."""
     enfoque_entrevista = _enfoque_valido(enfoque_entrevista)
     temas = temas or preguntas or []
     lista_temas = "\n".join(f"- {t}" for t in temas) or "- Experiencia relacionada con el puesto"
     referencia = "\n".join(f"- {p}" for p in (preguntas or []))
+    bloque_previo = (
+        "Lo que la persona YA contestó en el prefiltro (parte de aquí y pide EJEMPLOS; NO vuelvas a hacer estas preguntas ni las leas en voz alta):\n"
+        + "\n".join(f"- {x}" for x in contexto_previo) + "\n"
+    ) if contexto_previo else ""
+    bloque_ipv = ""
+    if solo_ipv:
+        bloque_ipv = (
+            "\nESTA SESIÓN ES ÚNICAMENTE LA ENTREVISTA IPV: tras el «¿Comenzamos?» inicial, di EXACTAMENTE la frase de apertura "
+            "de la segunda parte y sigue la rúbrica.\n" + bloque_ipv_prompt() + "\n"
+        )
+    elif incluye_ipv:
+        bloque_ipv = (
+            "\nCuando hayas cubierto los temas de la entrevista inicial, CONTINÚA en la misma sesión con la entrevista IPV "
+            "(no te despidas entre las dos partes).\n" + bloque_ipv_prompt() + "\n"
+        )
     condiciones = "; ".join(
         x for x in [
             f"ubicación: {ubicacion}" if ubicacion else "",
@@ -1265,6 +1363,7 @@ def prompt_entrevistador(
         f"Enfoque: {enfoque_entrevista} — cubre: {ENFOQUE_ENTREVISTA_TEMAS[enfoque_entrevista]}.\n"
         f"Temas a cubrir (en este orden aproximado):\n{lista_temas}\n"
         + (f"Preguntas de referencia (inspiración de tono, NO script; no tienes que hacerlas todas ni tal cual):\n{referencia}\n" if referencia else "")
+        + bloque_previo + bloque_ipv
         + "\n"
         "PROTOCOLO DE INICIO: tu primer mensaje ya se presentó y terminó con «¿Comenzamos?». Si la respuesta "
         "es afirmativa (sí, claro, vamos, adelante, listo, lista, ok, dale, comencemos), haz DE INMEDIATO la "
@@ -1295,13 +1394,14 @@ class TurnoEntrevista(BaseModel):
     terminada: bool = Field(description="true solo cuando ya cubriste los temas y te despediste en este mensaje.")
 
 
-def entrevista_turno(system_prompt: str, historial: List[dict]) -> Tuple[TurnoEntrevista, bool]:
-    """Modo texto (demo o fallback sin avatar). historial: [{"rol","texto"}], el último es del candidato."""
+def entrevista_turno(system_prompt: str, historial: List[dict], preguntas_demo: Optional[List[str]] = None) -> Tuple[TurnoEntrevista, bool]:
+    """Modo texto (demo o fallback sin avatar). historial: [{"rol","texto"}], el último es del candidato.
+    `preguntas_demo` (Fraiche): guion que sigue el modo demo (inicial y, si aplica, el bloque IPV con su marcador)."""
     client = _client()
     if client is None:
         n_agente = sum(1 for m in historial if m["rol"] == "assistant")
         n_usuario = sum(1 for m in historial if m["rol"] == "user")
-        demo_qs = _guion_demo("el puesto").preguntas
+        demo_qs = list(preguntas_demo) if preguntas_demo else _guion_demo("el puesto").preguntas
         ultimo = (historial[-1]["texto"] if historial else "").strip().lower()
         # Protocolo de inicio: el primer turno del candidato es la confirmación de que está listo.
         if n_usuario == 1 and n_agente == 1:
@@ -1376,6 +1476,122 @@ class EvaluacionEntrevista(BaseModel):
     # 2026-09-13: lo que la entrevista NO alcanzó a cubrir (entrevista suficiente pero corta) — RH lo
     # valida en la Entrevista Humana. Vacío cuando la entrevista fue completa.
     faltante: List[str] = Field(default_factory=list, description="Temas que la entrevista no cubrió y que RH debe validar después.")
+
+
+# ---------- Fraiche (spec §8): evaluación IPV con la MISMA rúbrica que el entrevistador humano ----------
+
+
+class CompetenciaIPV(BaseModel):
+    clave: Literal["orientacion_cliente", "motivacion", "resiliencia", "trabajo_equipo", "etica", "adaptabilidad"]
+    respuesta: str = Field(description="Resumen de lo que contestó la persona sobre la situación planteada (vacío si no se abordó).")
+    evidencia: str = Field(description="Cita o paráfrasis concreta que sustenta el nivel; vacío si no hubo evidencia.")
+    nivel: Literal["alto", "medio", "bajo", "sin_evidencia"] = Field(description="sin_evidencia si la persona no dio un ejemplo concreto.")
+
+
+class ObservacionesIPV(BaseModel):
+    comunicacion: str = Field(default="", description="Observación sobre comunicación (sin peso).")
+    facilidad_palabra: str = Field(default="", description="Observación sobre facilidad de palabra (sin peso).")
+    manejo_objeciones: str = Field(default="", description="Observación sobre manejo de objeciones (sin peso).")
+
+
+class EvaluacionIPV(BaseModel):
+    competencias: List[CompetenciaIPV]
+    observaciones: ObservacionesIPV = Field(default_factory=ObservacionesIPV)
+
+
+def evaluar_ipv(titulo: str, transcript: List[dict], equivalencias: Optional[dict] = None) -> Tuple[dict, bool]:
+    """Spec §8: por competencia guarda respuesta, evidencia y nivel (Alto/Medio/Bajo); si falta evidencia marca
+    «Sin evidencia» y pide revisión, sin nota ficticia. La suma ponderada y la conclusión salen de
+    `fraiche.calcular_ipv` (misma función que usa la captura del entrevistador humano)."""
+    from .fraiche import COMPETENCIAS_IPV, calcular_ipv, normalizar_rubrica
+
+    client = _client()
+    if client is None:
+        # demo: el bloque empieza en el marcador (la situación 1 va en ese mismo turno), así que la i-ésima
+        # respuesta del candidato dentro del bloque corresponde a la competencia i; con texto útil → medio
+        respuestas: dict = {}
+        evidencias: dict = {}
+        niveles: dict = {}
+        turnos_user = [str(m.get("texto", "")) for m in (transcript or []) if m.get("rol") == "user"]
+        for i, c in enumerate(COMPETENCIAS_IPV):
+            r = turnos_user[i] if i < len(turnos_user) else ""
+            r = r if len(" ".join(r.split())) >= 12 else ""
+            respuestas[c["clave"]] = r
+            evidencias[c["clave"]] = f"«{r[:120]}»" if r else ""
+            niveles[c["clave"]] = "medio" if r else "sin_evidencia"
+        rub = normalizar_rubrica({"niveles": niveles, "respuestas": respuestas, "evidencias": evidencias,
+                                  "observaciones": {"comunicacion": "Modo demo: sin observación.", "facilidad_palabra": "", "manejo_objeciones": ""}})
+        return {**rub, "calculo": calcular_ipv(rub["niveles"], equivalencias), "ia": False}, False
+
+    dialogo = "\n".join(f"{'Entrevistadora' if m['rol'] == 'assistant' else 'Candidato'}: {m['texto']}" for m in transcript or [])
+    rubrica_txt = "\n".join(f"- {c['clave']} · {c['nombre']}: situación «{c['situacion']}» → evidencia que se observa: {c['evidencia']}" for c in COMPETENCIAS_IPV)
+    resp = client.responses.parse(
+        model=MODEL,
+        instructions=(
+            "Evalúas la ENTREVISTA IPV de Red Human (México) con una rúbrica de seis competencias. Para CADA competencia "
+            "registra la respuesta de la persona, la evidencia concreta (cita o paráfrasis) y el nivel Alto / Medio / Bajo. "
+            "Nivel alto = ejemplo concreto, propio y con resultado claro que muestra la evidencia esperada; medio = ejemplo "
+            "parcial o genérico; bajo = ejemplo que contradice la evidencia esperada. Si NO hubo ejemplo concreto, marca "
+            "'sin_evidencia' (no inventes ni infieras una nota). Registra además observaciones sobre comunicación, facilidad "
+            "de palabra y manejo de objeciones SIN calificarlas. No uses los pesos ni calcules totales.\n"
+            f"Rúbrica:\n{rubrica_txt}\n"
+            f"CUMPLIMIENTO (NO NEGOCIABLE): nunca registres ni uses datos sobre {DATOS_SENSIBLES_PROHIBIDOS}."
+        ),
+        input=f"Puesto: {titulo}\n\nTranscripción del bloque IPV:\n{dialogo}",
+        text_format=EvaluacionIPV,
+    )
+    out = resp.output_parsed
+    rub = normalizar_rubrica({
+        "niveles": {c.clave: c.nivel for c in out.competencias},
+        "respuestas": {c.clave: c.respuesta for c in out.competencias},
+        "evidencias": {c.clave: c.evidencia for c in out.competencias},
+        "observaciones": out.observaciones.model_dump(),
+    })
+    return {**rub, "calculo": calcular_ipv(rub["niveles"], equivalencias), "ia": True}, True
+
+
+# ---------- Fraiche (spec §10): resumen del estudio socioeconómico — propuesta, sin puntuación ----------
+
+
+class ResumenSocioeconomico(BaseModel):
+    resumen: str = Field(description="3-5 frases que resumen el estudio tal como viene en el documento, sin calificarlo.")
+    hallazgos: List[str] = Field(default_factory=list, description="Hasta 6 hallazgos relevantes citados del documento.")
+    conclusion_documento: str = Field(default="", description="La conclusión que TRAE el documento, textual o parafraseada; vacío si no trae.")
+
+
+def texto_de_pdf(pdf_bytes: bytes, max_chars: int = 20000) -> str:
+    import io
+
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        texto = "\n".join((pg.extract_text() or "") for pg in reader.pages[:30])
+    except Exception:  # noqa: BLE001
+        return ""
+    return texto[:max_chars]
+
+
+def resumen_socioeconomico(texto_documento: str) -> Tuple[dict, bool]:
+    """Red Human PROPONE un resumen basado en el documento; RH puede corregirlo. NUNCA inventa una puntuación ni
+    una conclusión que el documento no traiga. Sin texto legible → propuesta vacía con aviso."""
+    if not (texto_documento or "").strip():
+        return {"resumen": "", "hallazgos": [], "conclusion_documento": "", "aviso": "El documento no tiene texto legible; captura el resumen a mano."}, False
+    client = _client()
+    if client is None:
+        frag = " ".join(texto_documento.split())[:400]
+        return {"resumen": f"Modo demo — extracto del documento: {frag}…", "hallazgos": [], "conclusion_documento": "", "aviso": "Modo demo: agrega OPENAI_API_KEY para el resumen real."}, False
+    resp = client.responses.parse(
+        model=MODEL,
+        instructions=(
+            "Resumes un estudio socioeconómico para RH en México. Reglas: solo lo que dice el documento; sin calificaciones, "
+            "puntajes ni recomendaciones propias; si el documento trae conclusión, cítala. "
+            f"CUMPLIMIENTO (NO NEGOCIABLE): omite cualquier dato sobre {DATOS_SENSIBLES_PROHIBIDOS}."
+        ),
+        input=f"Documento:\n{texto_documento[:20000]}",
+        text_format=ResumenSocioeconomico,
+    )
+    return {**resp.output_parsed.model_dump(), "aviso": ""}, True
 
 
 class SuficienciaEntrevista(BaseModel):

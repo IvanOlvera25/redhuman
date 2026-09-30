@@ -191,6 +191,13 @@ def _entrevista_humana_dict(eh) -> dict:
         "resultado": eh.resultado or None,
         "recomendacion": eh.recomendacion or None,
         "resultadoCapturadoPor": eh.resultado_capturado_por or None,
+        "evaluadaEn": iso(eh.evaluada_en),
+        "token": eh.token,
+        # Fraiche (spec §8): ronda IPV con rúbrica (misma que Red Human)
+        "esIpv": bool(eh.es_ipv),
+        "rubrica": eh.rubrica or None,
+        "resultadoIpv": eh.resultado_ipv or None,
+        "sugiereNuevaIpv": fraiche.sugiere_nueva_ipv(eh.resultado_ipv) if eh.es_ipv else False,
     }
 
 
@@ -507,6 +514,11 @@ def postulacion_dict(p: Postulacion, detalle: bool = False, n_mensajes: Optional
                 "token": e.token,
                 "evaluacion": e.evaluacion or None,
                 "creada": hace(e.creada_en),
+                # Fraiche (spec §7-8): fase, transcripción guardada y resultado IPV (separado de la evaluación)
+                "fase": e.fase or "inicial",
+                "transcript": list(e.transcript or []),
+                "evaluacionIpv": e.evaluacion_ipv or None,
+                "sugiereNuevaIpv": fraiche.sugiere_nueva_ipv((e.evaluacion_ipv or {}).get("calculo")),
             }
             for e in p.entrevistas
         ],
@@ -563,6 +575,9 @@ def entrevista_dict(e: Entrevista) -> dict:
         "intentosPrevios": len(e.intentos_previos or []),
         "tono": (c.id if c else 0) % 4,
         "ligaMeet": e.liga_meet or "",
+        # Fraiche (spec §7-8)
+        "fase": e.fase or "inicial",
+        "evaluacionIpv": e.evaluacion_ipv or None,
     }
 
 
@@ -1138,7 +1153,7 @@ def evaluacion_candidato_dict(ev, usuario=None) -> dict:
     from .services import evaluaciones as sev
 
     restringido = ev.es_medico and not (usuario is not None and usuario.puede_ver_informe_medico())
-    dictamenes = sev.dictamenes_de(ev.tipo)
+    dictamenes = sev.dictamenes_visibles(ev)
     salida = {
         "id": ev.codigo,
         "tipo": ev.tipo,
@@ -1152,11 +1167,34 @@ def evaluacion_candidato_dict(ev, usuario=None) -> dict:
         "url": ev.url or "",
         "estado": ev.estado,
         "estadoTexto": ESTADOS_EVALUACION.get(ev.estado, ev.estado),
+        # Fraiche (spec §10): estado del spec + responsable, cita, liga de acceso, adjuntos, decisión y origen
+        "estadoFraiche": sev.estado_fraiche(ev),
+        "estadoFraicheTexto": sev.etiqueta_estado_fraiche(ev),
+        "responsable": ev.responsable or "",
+        "responsableCorreo": ev.responsable_correo or "",
+        "responsableWhatsapp": ev.responsable_whatsapp or "",
+        "responsableUsuarioId": ev.responsable_usuario_id,
+        "responsableContactoId": ev.responsable_contacto_id,
+        "citaEn": iso(ev.cita_en),
+        "citaLugar": ev.cita_lugar or "",
+        "ligaExterna": f"{settings.app_url}/evaluacion/{ev.token_externo}" if ev.token_externo else None,
+        "ligaEnviadaEn": iso(ev.liga_enviada_en),
+        "realizadaEn": iso(ev.realizada_en),
+        "noRealizada": bool(ev.no_realizada),
+        "adjuntos": [{**a, "ruta": None, "indice": i} for i, a in enumerate(ev.adjuntos or [])] if not restringido else [],
+        "decision": ev.decision_externa or None,
+        "origenResultado": ev.origen_resultado or "",
+        "esFranquiciatario": sev.es_franquiciatario(ev),
+        "esEncargado": sev.es_encargado(ev),
+        "esEvaluatest": sev.es_evaluatest(ev),
+        "evaluatest": (ev.resultado_json or {}).get("evaluatest") if sev.es_evaluatest(ev) else None,
+        "referencias": list(ev.referencias or []) if ev.tipo == "referencias" else None,
+        "cifrado": bool(ev.cifrado),
         "pasoIntegrada": ev.paso_integrada or None,
         "siguientePaso": sev.siguiente_paso(ev) if ev.estado in ("pendiente", "en_proceso") else None,
         "motivoFallida": ev.motivo_fallida or "",
         "dictamen": ev.dictamen or None,
-        "dictamenTexto": dictamenes.get(ev.dictamen, "") if ev.dictamen else "",
+        "dictamenTexto": sev.texto_dictamen(ev),
         "dictamenesPosibles": [{"valor": k, "texto": t} for k, t in dictamenes.items()],
         "revisadaPor": ev.revisada_por or "",
         "revisadaEn": iso(ev.revisada_en),
@@ -1177,9 +1215,10 @@ def evaluacion_candidato_dict(ev, usuario=None) -> dict:
     }
     if not restringido:
         salida.update({
-            "resultadoResumen": ev.resultado_resumen or "",
+            "resultadoResumen": sev.leer_texto(ev, "resultado_resumen"),
             "nombreArchivo": ev.nombre_archivo or "",
-            "notas": ev.notas or "",
-            "comentarioRevision": ev.comentario_revision or "",
+            "notas": sev.leer_texto(ev, "notas"),
+            "comentarioRevision": sev.leer_texto(ev, "comentario_revision"),
+            "resumenIa": sev.leer_texto(ev, "resumen_ia"),
         })
     return salida

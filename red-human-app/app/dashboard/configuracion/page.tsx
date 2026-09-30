@@ -1655,6 +1655,47 @@ function SeccionModoPrueba() {
     setCfg(r.data);
   }
 
+  // Fraiche (spec §8): equivalencia de niveles de la rúbrica IPV (Alto/Medio/Bajo → puntos)
+  const [ipvAlto, setIpvAlto] = useState("");
+  const [ipvMedio, setIpvMedio] = useState("");
+  const [ipvBajo, setIpvBajo] = useState("");
+  // Fraiche (spec §14): días antes de la fecha objetivo para marcar una vacante «en riesgo»
+  const [riesgoDias, setRiesgoDias] = useState("");
+  useEffect(() => {
+    if (cfg) {
+      setIpvAlto(String(cfg.ipvEquivalencias?.alto ?? 100));
+      setIpvMedio(String(cfg.ipvEquivalencias?.medio ?? 70));
+      setIpvBajo(String(cfg.ipvEquivalencias?.bajo ?? 30));
+      setRiesgoDias(String(cfg.riesgoDiasUmbral ?? 7));
+    }
+  }, [cfg]);
+  const ipvActual = { alto: cfg?.ipvEquivalencias?.alto ?? 100, medio: cfg?.ipvEquivalencias?.medio ?? 70, bajo: cfg?.ipvEquivalencias?.bajo ?? 30 };
+  const ipvCambio = cfg ? ipvAlto !== String(ipvActual.alto) || ipvMedio !== String(ipvActual.medio) || ipvBajo !== String(ipvActual.bajo) : false;
+  const riesgoCambio = cfg ? riesgoDias !== String(cfg.riesgoDiasUmbral ?? 7) : false;
+  async function guardarIpv() {
+    const alto = parseInt(ipvAlto, 10);
+    const medio = parseInt(ipvMedio, 10);
+    const bajo = parseInt(ipvBajo, 10);
+    if ([alto, medio, bajo].some((n) => isNaN(n) || n < 0 || n > 100)) return setError("Cada equivalencia debe estar entre 0 y 100.");
+    if (!(alto >= medio && medio >= bajo)) return setError("El orden debe ser Alto ≥ Medio ≥ Bajo.");
+    setGuardando(true);
+    setError("");
+    const r = await actualizarConfiguracion({ ipvEquivalencias: { alto, medio, bajo } });
+    setGuardando(false);
+    if (!r.ok) { setError(r.error); return; }
+    setCfg(r.data);
+  }
+  async function guardarRiesgo() {
+    const n = parseInt(riesgoDias, 10);
+    if (isNaN(n) || n < 0 || n > 365) return setError("El umbral debe estar entre 0 y 365 días.");
+    setGuardando(true);
+    setError("");
+    const r = await actualizarConfiguracion({ riesgoDiasUmbral: n });
+    setGuardando(false);
+    if (!r.ok) { setError(r.error); return; }
+    setCfg(r.data);
+  }
+
   async function confirmarBorrado() {
     setBorrando(true);
     setError("");
@@ -1761,6 +1802,55 @@ function SeccionModoPrueba() {
             {guardando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Guardar
           </Button>
           {cfg && !recCambio && <span className="pb-2.5 text-[12px] text-ink-3"><Check className="mr-1 inline h-3.5 w-3.5" />documentos cada {cfg.recordatorioDocumentosDias} día(s) desde las {cfg.recordatorioDocumentosHora}:00 · entrevista {cfg.recordatorioEntrevistaHoras ?? 24} h antes</span>}
+        </div>
+      </div>
+
+      {/* Fraiche (spec §8): rúbrica IPV — misma para Red Human y el entrevistador humano */}
+      <div className="mt-4 rounded-xl border border-border-soft p-4">
+        <p className="text-sm font-semibold">Rúbrica IPV · equivalencia de niveles</p>
+        <p className="mt-1 text-[12px] leading-relaxed text-ink-3">
+          Puntos que vale cada nivel al ponderar las 6 competencias (Red Human y el entrevistador humano usan exactamente la misma
+          rúbrica). «Sin evidencia» nunca suma: la ronda queda en revisión de RH. Conclusión: 80–100 Recomendable · 60–79 Bajo reserva · menos de 60 No recomendable.
+        </p>
+        <div className="mt-3 flex flex-wrap items-end gap-3">
+          <div>
+            <label className="mb-1 block text-[12px] font-medium text-ink-2">Alto</label>
+            <input type="number" min={0} max={100} value={ipvAlto} onChange={(e) => setIpvAlto(e.target.value)}
+              className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+          </div>
+          <div>
+            <label className="mb-1 block text-[12px] font-medium text-ink-2">Medio</label>
+            <input type="number" min={0} max={100} value={ipvMedio} onChange={(e) => setIpvMedio(e.target.value)}
+              className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+          </div>
+          <div>
+            <label className="mb-1 block text-[12px] font-medium text-ink-2">Bajo</label>
+            <input type="number" min={0} max={100} value={ipvBajo} onChange={(e) => setIpvBajo(e.target.value)}
+              className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+          </div>
+          <Button size="sm" onClick={guardarIpv} disabled={guardando || !ipvCambio}>
+            {guardando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Guardar
+          </Button>
+          {cfg && !ipvCambio && <span className="pb-2.5 text-[12px] text-ink-3"><Check className="mr-1 inline h-3.5 w-3.5" />Alto {ipvActual.alto} · Medio {ipvActual.medio} · Bajo {ipvActual.bajo}</span>}
+        </div>
+      </div>
+
+      {/* Fraiche (spec §14): vacantes en riesgo por fecha objetivo */}
+      <div className="mt-4 rounded-xl border border-border-soft p-4">
+        <p className="text-sm font-semibold">Umbral de vacante en riesgo (días antes de la fecha objetivo)</p>
+        <p className="mt-1 text-[12px] leading-relaxed text-ink-3">
+          Una vacante con fecha objetivo y sin cubrir se marca «en riesgo» cuando faltan estos días o menos (0 = solo al vencer).
+        </p>
+        <div className="mt-3 flex flex-wrap items-end gap-3">
+          <div>
+            <label className="mb-1 block text-[12px] font-medium text-ink-2">Días</label>
+            <input type="number" min={0} max={365} value={riesgoDias} onChange={(e) => setRiesgoDias(e.target.value)}
+              className="h-10 w-24 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+          </div>
+          <Button size="sm" onClick={guardarRiesgo} disabled={guardando || !riesgoCambio}>
+            {guardando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Guardar
+          </Button>
+          {cfg && !riesgoCambio && <span className="pb-2.5 text-[12px] text-ink-3"><Check className="mr-1 inline h-3.5 w-3.5" />{cfg.riesgoDiasUmbral ?? 7} día(s) antes</span>}
         </div>
       </div>
 

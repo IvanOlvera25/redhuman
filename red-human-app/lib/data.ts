@@ -46,6 +46,41 @@ export interface EntrevistaHumana {
   resultado: ResultadoEntrevistaHumana | null;
   recomendacion: RecomendacionEntrevistaHumana | null;
   resultadoCapturadoPor: CapturadoPor | null;
+  evaluadaEn?: string | null;
+  token?: string;
+  /* --- Fraiche (spec §8): ronda IPV con rúbrica (misma que Red Human) --- */
+  esIpv?: boolean;
+  rubrica?: RubricaIPV | null;
+  resultadoIpv?: CalculoIPV | null;
+  /** «Programar nueva IPV humana» cuando la conclusión es Bajo reserva o No recomendable. */
+  sugiereNuevaIpv?: boolean;
+}
+
+/** Fraiche (spec §8): niveles por competencia + respuesta/evidencia + observaciones sin peso. */
+export type NivelIPV = "alto" | "medio" | "bajo" | "sin_evidencia";
+export interface RubricaIPV {
+  niveles: Record<string, NivelIPV>;
+  respuestas: Record<string, string>;
+  evidencias: Record<string, string>;
+  observaciones: Record<string, string>;
+}
+export interface CalculoIPV {
+  puntaje: number | null;
+  conclusion: "recomendable" | "bajo_reserva" | "no_recomendable" | "";
+  requiere_revision: boolean;
+  sin_evidencia: string[];
+  detalle: { clave: string; nombre: string; peso: number; nivel: NivelIPV; puntos: number | null }[];
+  equivalencias?: Record<string, number>;
+  evaluador?: string;
+  evaluada_en?: string;
+}
+/** Resultado IPV de Red Human (Entrevista.evaluacion_ipv): rúbrica + cálculo. */
+export interface EvaluacionIPV extends RubricaIPV {
+  calculo: CalculoIPV;
+  ia?: boolean;
+  evaluador?: string;
+  evaluada_en?: string;
+  motivo?: string;
 }
 
 /** Extracción del CV (services/ia.py::CVExtraido) — ver Punto 2/3.B. Todo es opcional: el
@@ -267,7 +302,19 @@ export interface Candidato {
     subido: string;
   }[];
   vacante?: { id: string; titulo: string; requisitos: string; preguntas: string[] } | null;
-  entrevistas?: { id: string; estado: string; tipo: string; token: string; evaluacion: unknown; creada: string }[];
+  entrevistas?: {
+    id: string;
+    estado: string;
+    tipo: string;
+    token: string;
+    evaluacion: unknown;
+    creada: string;
+    /** Fraiche (spec §7-8): fase de la sesión, transcripción guardada y resultado IPV separado. */
+    fase?: "inicial" | "ipv" | "inicial_ipv";
+    transcript?: { rol: "user" | "assistant"; texto: string }[];
+    evaluacionIpv?: EvaluacionIPV | null;
+    sugiereNuevaIpv?: boolean;
+  }[];
   consentimientoFecha?: string | null;
 }
 

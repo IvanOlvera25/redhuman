@@ -14,11 +14,13 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from typing import Optional
+
 from ..database import get_db
 from ..models import Archivo, EntrevistaHumana, registrar
 from ..serial import iso, nombre_empresa_candidato
 from ..services import archivos as fs
-from ..services import notificaciones
+from ..services import fraiche, notificaciones
 
 router = APIRouter(prefix="/entrevista-humana", tags=["entrevista-humana"])
 
@@ -90,6 +92,14 @@ def publica(token: str, db: Session = Depends(get_db)):
         "resultado": eh.resultado or "",
         "recomendacion": eh.recomendacion or "",
         "expediente": _expediente_para_entrevistador(db, eh),
+        # Fraiche (spec §8): Entrevista IPV con rúbrica — misma que usa Red Human
+        "esIpv": bool(eh.es_ipv),
+        "rubricaIpv": {
+            "competencias": fraiche.COMPETENCIAS_IPV, "observaciones": fraiche.OBSERVACIONES_IPV,
+            "niveles": [{"clave": n, "nombre": fraiche.NOMBRE_NIVEL_IPV[n]} for n in fraiche.NIVELES_IPV],
+            "equivalencias": fraiche.equivalencias_de(db), "conclusiones": fraiche.CONCLUSIONES_IPV,
+        } if eh.es_ipv else None,
+        "resultadoIpv": eh.resultado_ipv or None,
     }
 
 
@@ -104,25 +114,44 @@ def archivo_publico(token: str, archivo_id: int, db: Session = Depends(get_db)):
 
 
 class ResultadoEntrevistaHumanaPublicaIn(BaseModel):
-    resultado: str  # aprobado | no_aprobado
-    recomendacion: str  # avanzar | no_avanzar | segunda_entrevista
+    resultado: str = ""  # aprobado | no_aprobado (en una IPV se deriva de la rúbrica si no viene)
+    recomendacion: str = ""  # avanzar | no_avanzar | segunda_entrevista
     comentario: str = ""
+    # Fraiche (spec §8): rúbrica IPV {niveles, respuestas, evidencias, observaciones}; obligatoria si es IPV
+    rubrica: Optional[dict] = None
+
+
+def aplicar_rubrica_ipv(db: Session, eh: EntrevistaHumana, rubrica: Optional[dict], resultado: str, recomendacion: str):
+    """Fraiche (spec §8): guarda la rúbrica y su cálculo en la EntrevistaHumana IPV. Devuelve (resultado,
+    recomendacion) — los enviados si vienen; si no, los derivados de la conclusión (solo recomendación:
+    ninguna puntuación mueve de etapa ni descarta por sí sola)."""
+    if not eh.es_ipv:
+        return resultado, recomendacion
+    if not rubrica:
+        raise HTTPException(400, "Una Entrevista IPV se registra con la rúbrica de competencias.")
+    rub = fraiche.normalizar_rubrica(rubrica)
+    calculo = fraiche.calcular_ipv(rub["niveles"], fraiche.equivalencias_de(db))
+    eh.rubrica = rub
+    eh.resultado_ipv = {**calculo, "evaluador": eh.entrevistador or "entrevistador", "evaluada_en": datetime.now(timezone.utc).isoformat()}
+    r_der, rec_der = fraiche.resultado_desde_ipv(calculo)
+    return (resultado or r_der), (recomendacion or rec_der)
 
 
 @router.post("/publica/{token}")
 async def enviar_resultado(token: str, datos: ResultadoEntrevistaHumanaPublicaIn, db: Session = Depends(get_db)):
     eh = _por_token(db, token)
 
-    if datos.resultado not in RESULTADOS_ENTREVISTA_HUMANA:
+    resultado, recomendacion = aplicar_rubrica_ipv(db, eh, datos.rubrica, datos.resultado, datos.recomendacion)
+    if resultado not in RESULTADOS_ENTREVISTA_HUMANA and not (eh.es_ipv and resultado == ""):
         raise HTTPException(400, f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_ENTREVISTA_HUMANA)}")
-    if datos.recomendacion not in RECOMENDACIONES_ENTREVISTA_HUMANA:
+    if recomendacion not in RECOMENDACIONES_ENTREVISTA_HUMANA:
         raise HTTPException(400, f"Recomendación inválida. Usa una de: {', '.join(RECOMENDACIONES_ENTREVISTA_HUMANA)}")
     comentario = datos.comentario.strip()  # 2026-09-19: opcional (antes obligatorio en no_aprobado / segunda)
 
     # Autocierre (2026-09-19): la entrevista queda realizada y confirmada con evaluación; el ciclo se cierra aquí.
     eh.realizada = True
-    eh.resultado = datos.resultado
-    eh.recomendacion = datos.recomendacion
+    eh.resultado = resultado
+    eh.recomendacion = recomendacion
     eh.comentario = comentario
     eh.resultado_capturado_por = "entrevistador"
     eh.evaluada_en = datetime.now(timezone.utc)
@@ -142,7 +171,8 @@ async def enviar_resultado(token: str, datos: ResultadoEntrevistaHumanaPublicaIn
         resultados.append(aviso_rh)
     registrar(
         db, "entrevistador-externo", "entrevista_humana_evaluada_por_liga", "postulacion", p.codigo,
-        {"candidato": p.candidato.codigo, "resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario, "notificaciones": resultados, "estatus": "realizada_confirmada"},
+        {"candidato": p.candidato.codigo, "resultado": resultado, "recomendacion": recomendacion, "comentario": comentario, "notificaciones": resultados, "estatus": "realizada_confirmada",
+         **({"ipv": {"puntaje": eh.resultado_ipv.get("puntaje"), "conclusion": eh.resultado_ipv.get("conclusion")}} if eh.es_ipv else {})},
     )
     db.commit()
-    return {"ok": True, "estatus": "realizada", "notificaciones": resultados}
+    return {"ok": True, "estatus": "realizada", "notificaciones": resultados, "resultadoIpv": eh.resultado_ipv or None}

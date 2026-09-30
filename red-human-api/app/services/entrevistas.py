@@ -55,21 +55,29 @@ def crear_entrevista_para_candidato(
     p: Postulacion,
     actor: str,
     programada_para: Optional[datetime] = None,
+    fase: str = "inicial",
 ) -> Tuple[Entrevista, bool]:
-    """Genera el guion con IA y crea la `Entrevista` (con su token) para la postulación `p`,
-    usando su vacante. `actor` firma la bitácora — el nombre de RH en el camino manual,
-    "agente-ia" en Zero-Touch, igual que el resto de acciones automáticas del agente."""
+    """Genera el guion y crea la `Entrevista` (con su token) para la postulación `p`, usando su vacante.
+    `actor` firma la bitácora — el nombre de RH en el camino manual, "agente-ia" en Zero-Touch, igual que
+    el resto de acciones automáticas del agente.
+
+    Fraiche (spec §7-8): la entrevista inicial usa el guion FIJO de temas (experiencia, funciones,
+    estabilidad, motivos de salida, disponibilidad, servicio al cliente, expectativa salarial) y parte
+    del prefiltro; `fase="ipv"` crea una sesión que es solo la Entrevista IPV (rúbrica)."""
+    from . import fraiche
+
     v = p.vacante
-    # Fase 4: guion por temas según el enfoque configurado en la vacante (Punto 6) y con el
-    # contexto real del puesto (perfil ideal, responsabilidades).
-    guion, con_ia = ia.guion_entrevista(
-        v.titulo if v else "vacante general",
-        v.requisitos if v else "",
-        p.experiencia or "",
-        enfoque_entrevista=(v.enfoque_entrevista if v else "profesional") or "profesional",
-        perfil_ideal=(v.perfil_ideal if v else "") or "",
-        responsabilidades=list(v.responsabilidades or []) if v else [],
-    )
+    titulo = v.titulo if v else "vacante general"
+    if fase == "ipv":
+        guion, con_ia = ia.GuionEntrevista(
+            enfoque=f"Entrevista IPV para {titulo}: una situación por competencia, con ejemplo concreto.",
+            temas=[c["nombre"] for c in fraiche.COMPETENCIAS_IPV], preguntas=ia.preguntas_ipv_demo(),
+        ), False
+    else:
+        guion, con_ia = ia.guion_entrevista_inicial_fraiche(
+            titulo, fraiche.contexto_previo_entrevista(p.analisis),
+            enfoque_entrevista=(v.enfoque_entrevista if v else "profesional") or "profesional",
+        ), False
     e = Entrevista(
         codigo="TMP",
         candidato_id=p.candidato_id,
@@ -77,6 +85,7 @@ def crear_entrevista_para_candidato(
         tipo="avatar" if avatar_activo() else "texto",
         guion=guion.model_dump(),
         programada_para=programada_para,
+        fase=fase if fase in fraiche.FASES_ENTREVISTA else "inicial",
     )
     p.entrevistas.append(e)
     db.add(e)
@@ -84,5 +93,5 @@ def crear_entrevista_para_candidato(
     e.codigo = f"ENT-{300 + e.id}"
     if p.etapa == "Prefiltro":
         p.etapa = "Entrevista IA"  # ver ETAPAS_CANDIDATO — la entrevista con avatar también es "IA"
-    registrar(db, actor, "entrevista_agendada", "entrevista", e.codigo, {"candidato": p.candidato.codigo, "postulacion": p.codigo, "ia": con_ia})
+    registrar(db, actor, "entrevista_agendada", "entrevista", e.codigo, {"candidato": p.candidato.codigo, "postulacion": p.codigo, "ia": con_ia, "fase": e.fase})
     return e, con_ia

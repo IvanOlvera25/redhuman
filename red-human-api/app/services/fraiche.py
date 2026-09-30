@@ -7,7 +7,7 @@ evaluados al franquiciatario, quien decide y contrata). Todo lo que aquí vive e
 fuentes, rúbrica IPV y ruta visible. Los routers y `services/ia.py` lo leen; nunca lo duplican.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # ============================================================
 # §2 · Destinos y §4 · Fuentes de postulación
@@ -395,6 +395,71 @@ NOMBRE_NIVEL_IPV = {"alto": "Alto", "medio": "Medio", "bajo": "Bajo", "sin_evide
 EQUIVALENCIAS_IPV_DEFAULT = {"alto": 100, "medio": 70, "bajo": 30}
 
 CONCLUSIONES_IPV = {"recomendable": "Recomendable", "bajo_reserva": "Bajo reserva", "no_recomendable": "No recomendable"}
+
+
+# Frase FIJA con la que Red Human abre la segunda parte cuando hace las dos entrevistas en la misma
+# sesión (spec §8). El servidor parte el transcript aquí para guardar DOS resultados separados.
+MARCADOR_IPV = "Ahora pasemos a la segunda parte de la entrevista"
+
+FASES_ENTREVISTA = ["inicial", "ipv", "inicial_ipv"]
+
+
+def equivalencias_de(db) -> Dict[str, int]:
+    """Equivalencias vigentes (ConfiguracionSistema.ipv_equivalencias sobre los defaults)."""
+    try:
+        from .configuracion import obtener
+
+        cfg = obtener(db)
+        extra = {k: int(v) for k, v in (cfg.ipv_equivalencias or {}).items() if k in EQUIVALENCIAS_IPV_DEFAULT}
+    except Exception:  # noqa: BLE001 — sin tabla/fila de configuración: defaults
+        extra = {}
+    return {**EQUIVALENCIAS_IPV_DEFAULT, **extra}
+
+
+def normalizar_rubrica(rubrica: Optional[dict]) -> dict:
+    """{niveles, respuestas, evidencias, observaciones} solo con claves de la rúbrica; niveles válidos."""
+    r = rubrica or {}
+    claves = [c["clave"] for c in COMPETENCIAS_IPV]
+    niveles = {k: (str((r.get("niveles") or {}).get(k, "sin_evidencia") or "sin_evidencia").lower()) for k in claves}
+    niveles = {k: (v if v in NIVELES_IPV else "sin_evidencia") for k, v in niveles.items()}
+    respuestas = {k: str((r.get("respuestas") or {}).get(k, ""))[:1000] for k in claves}
+    evidencias = {k: str((r.get("evidencias") or {}).get(k, ""))[:1000] for k in claves}
+    obs_claves = [o["clave"] for o in OBSERVACIONES_IPV]
+    observaciones = {k: str((r.get("observaciones") or {}).get(k, ""))[:600] for k in obs_claves}
+    return {"niveles": niveles, "respuestas": respuestas, "evidencias": evidencias, "observaciones": observaciones}
+
+
+def resultado_desde_ipv(calculo: dict) -> Tuple[str, str]:
+    """(resultado, recomendacion) de EntrevistaHumana derivados de la conclusión IPV — solo recomendación:
+    Recomendable → aprobado/avanzar · Bajo reserva → aprobado/segunda_entrevista · No recomendable →
+    no_aprobado/no_avanzar · sin conclusión (falta evidencia) → ""/segunda_entrevista."""
+    c = calculo.get("conclusion") or ""
+    if c == "recomendable":
+        return "aprobado", "avanzar"
+    if c == "bajo_reserva":
+        return "aprobado", "segunda_entrevista"
+    if c == "no_recomendable":
+        return "no_aprobado", "no_avanzar"
+    return "", "segunda_entrevista"
+
+
+def sugiere_nueva_ipv(calculo: Optional[dict]) -> bool:
+    """Spec §8: «Si sale Bajo reserva o No recomendable, mostrar “Programar nueva IPV humana”»."""
+    return bool(calculo) and calculo.get("conclusion") in ("bajo_reserva", "no_recomendable")
+
+
+def contexto_previo_entrevista(analisis: Optional[dict]) -> List[str]:
+    """Spec §7: la entrevista inicial «parte de las respuestas anteriores y repregunta para obtener
+    ejemplos; no vuelve a leerle el prefiltro». Líneas «pregunta → respuesta» del prefiltro web y de
+    WhatsApp (sin BBVA, que es informativa y sensible)."""
+    a = analisis or {}
+    lineas = respuestas_web_resumen(a)
+    for r in a.get("respuestas_prefiltro") or []:
+        if "bbva" in f"{r.get('criterio', '')} {r.get('pregunta', '')}".lower():
+            continue
+        if r.get("pregunta") and r.get("respuesta"):
+            lineas.append(f"{r['pregunta']} → {r['respuesta']}")
+    return lineas[:20]
 
 
 def conclusion_ipv(puntaje: Optional[float]) -> str:

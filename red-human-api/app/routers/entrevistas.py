@@ -18,7 +18,7 @@ from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import CIERRES_COMPLETOS, CIERRES_ENTREVISTA, Candidato, Cuenta, Entrevista, Usuario, Vacante, registrar
 from ..serial import entrevista_dict, nombre_empresa_candidato
-from ..services import ia
+from ..services import fraiche, ia
 from ..services.avatar import AvatarError, avatar_activo, crear_sesion_avatar, probar_avatar
 from ..services.configuracion import modo_prueba_activo
 from ..services.entrevistas import crear_entrevista_para_candidato, reabrir_entrevista
@@ -283,6 +283,7 @@ def consentir(token: str, datos: ConsentirIn, db: Session = Depends(get_db)):
 def _system_prompt(e: Entrevista) -> str:
     p, v, empresa = _contexto(e)
     guion = e.guion or {}
+    fase = e.fase or "inicial"
     return ia.prompt_entrevistador(
         v.titulo if v else "vacante general",
         v.requisitos if v else "",
@@ -297,7 +298,22 @@ def _system_prompt(e: Entrevista) -> str:
         sueldo=(v.sueldo if v else "") or "",
         beneficios=list(v.beneficios or []) if v else [],
         area=(v.area if v else "") or "",
+        # Fraiche (spec §7-8): parte del prefiltro sin releerlo; IPV en la misma sesión o sesión solo IPV
+        contexto_previo=fraiche.contexto_previo_entrevista(p.analisis if p else {}) if fase != "ipv" else [],
+        incluye_ipv=(fase == "inicial_ipv"),
+        solo_ipv=(fase == "ipv"),
     )
+
+
+def _preguntas_demo(e: Entrevista) -> List[str]:
+    """Guion que sigue el modo texto/demo: inicial + (si aplica) apertura IPV con el marcador + situaciones."""
+    guion = e.guion or {}
+    fase = e.fase or "inicial"
+    ipv = [f"{fraiche.MARCADOR_IPV}. {q}" if i == 0 else q for i, q in enumerate(ia.preguntas_ipv_demo())]
+    if fase == "ipv":
+        return ipv
+    base = list(guion.get("preguntas") or [])
+    return base + (ipv if fase == "inicial_ipv" else [])
 
 
 ESTADOS_CERRADOS = ("completada", "evaluada", "interrumpida", "parcial")
@@ -322,7 +338,7 @@ async def sesion(token: str, datos: Optional[SesionIn] = None, db: Session = Dep
     forzar_texto = bool(datos and datos.modo == "texto")
 
     p, v, empresa = _contexto(e)
-    saludo = ia.mensaje_inicial_entrevista(v.titulo if v else "")
+    saludo = ia.mensaje_inicial_ipv(v.titulo if v else "") if (e.fase or "inicial") == "ipv" else ia.mensaje_inicial_entrevista(v.titulo if v else "")
     if e.estado != "en_curso":
         e.estado = "en_curso"
         e.iniciada_en = datetime.now(timezone.utc)
@@ -375,7 +391,7 @@ def turno(token: str, datos: TurnoIn, db: Session = Depends(get_db)):
         raise HTTPException(403, "La entrevista no está en curso.")
 
     historial = list(e.transcript or []) + [{"rol": "user", "texto": datos.texto}]
-    t, con_ia = ia.entrevista_turno(_system_prompt(e), historial)
+    t, con_ia = ia.entrevista_turno(_system_prompt(e), historial, preguntas_demo=_preguntas_demo(e))
     e.transcript = historial + [{"rol": "assistant", "texto": t.respuesta}]
     e.ultima_actividad_en = datetime.now(timezone.utc)
     db.commit()
@@ -524,28 +540,58 @@ async def _evaluar_y_cerrar(db: Session, e: Entrevista, p, v, empresa: str, tema
     el cierre normal y por «Evaluar con lo que hay» (RH, 2026-09-17)."""
     e.estado = "completada"
     e.motivo = ""
-    ev, con_ia = ia.evaluar_entrevista(
-        v.titulo if v else "vacante general",
-        v.requisitos if v else "",
-        e.transcript or [],
-        perfil_ideal=(v.perfil_ideal if v else "") or "",
-        temas=temas,
-        enfoque_entrevista=(v.enfoque_entrevista if v else "profesional") or "profesional",
-        faltante=faltante,
-        analisis_cv=(p.analisis or {}) if p else {},
-        cv_datos=(p.candidato.cv_datos or {}) if p and p.candidato else {},
-    )
-    if faltante and not ev.faltante:
-        ev.faltante = faltante
-    e.evaluacion = ev.model_dump()
+    # Fraiche (spec §8): si Red Human hizo las dos entrevistas en la misma sesión, el transcript se parte en
+    # el marcador y se guardan DOS resultados separados; una sesión solo IPV no genera evaluación inicial.
+    fase = e.fase or "inicial"
+    if fase == "inicial_ipv":
+        bloque_inicial, bloque_ipv = ia.dividir_transcript_ipv(e.transcript or [])
+    elif fase == "ipv":
+        # sesión solo IPV: el bloque arranca en el marcador (antes solo hay saludo y confirmación)
+        _previo, bloque_ipv = ia.dividir_transcript_ipv(e.transcript or [])
+        bloque_inicial, bloque_ipv = [], (bloque_ipv or list(e.transcript or []))
+    else:
+        bloque_inicial, bloque_ipv = list(e.transcript or []), []
+    con_ia = False
+    ev = None
+    if fase != "ipv":
+        ev, con_ia = ia.evaluar_entrevista(
+            v.titulo if v else "vacante general",
+            v.requisitos if v else "",
+            bloque_inicial or (e.transcript or []),
+            perfil_ideal=(v.perfil_ideal if v else "") or "",
+            temas=temas,
+            enfoque_entrevista=(v.enfoque_entrevista if v else "profesional") or "profesional",
+            faltante=faltante,
+            analisis_cv=(p.analisis or {}) if p else {},
+            cv_datos=(p.candidato.cv_datos or {}) if p and p.candidato else {},
+        )
+        if faltante and not ev.faltante:
+            ev.faltante = faltante
+        e.evaluacion = ev.model_dump()
+    if fase in ("ipv", "inicial_ipv"):
+        if bloque_ipv:
+            ipv, con_ia_ipv = ia.evaluar_ipv(v.titulo if v else "vacante general", bloque_ipv, fraiche.equivalencias_de(db))
+            con_ia = con_ia or con_ia_ipv
+        else:
+            ipv = {"calculo": {"puntaje": None, "conclusion": "", "requiere_revision": True, "sin_evidencia": [c["nombre"] for c in fraiche.COMPETENCIAS_IPV], "detalle": []},
+                   "niveles": {}, "respuestas": {}, "evidencias": {}, "observaciones": {}, "ia": False, "motivo": "La sesión no llegó al bloque IPV."}
+        e.evaluacion_ipv = {**ipv, "evaluada_en": datetime.now(timezone.utc).isoformat(), "evaluador": "Red Human"}
+        registrar(db, "agente-ia", "entrevista_ipv_evaluada", "entrevista", e.codigo,
+                  {"puntaje": ipv["calculo"].get("puntaje"), "conclusion": ipv["calculo"].get("conclusion"), "requiere_revision": ipv["calculo"].get("requiere_revision")})
     e.estado = "evaluada"
+    if ev is None:  # sesión solo IPV: la recomendación integral no existe; se deja constancia
+        ev = ia.EvaluacionEntrevista(
+            resumen="Sesión IPV (rúbrica de competencias); la evaluación integral corresponde a la entrevista inicial.",
+            fortalezas=[], riesgos=[], areas_desarrollo=[], calif_experiencia=0, calif_comunicacion=0, match_perfil=0,
+            recomendacion="revision", evidencia="", perfil=None, faltante=[],
+        )
     # p.score / p.evidencia son el resultado de Luna sobre el CV (ver ia.AjustePerfil,
     # candidatos._aplicar_cv) — NUNCA se tocan aquí. El resultado del avatar vive completo y
     # aparte en Entrevista.evaluacion (match_perfil, evidencia, recomendación, perfil profundo).
     registrar(
         db, forzada_por or "agente-ia", "entrevista_evaluada", "entrevista", e.codigo,
         {"ia": con_ia, "recomendacion": ev.recomendacion, "match": ev.match_perfil, "cierre": e.cierre, "turnos_candidato": turnos_candidato,
-         **({"forzada_por_rh": True} if forzada_por else {})},
+         "fase": fase, **({"forzada_por_rh": True} if forzada_por else {})},
     )
 
     # Zero-Touch: mueve el Kanban a Evaluación — NO toca p.estado, la recomendación de la IA

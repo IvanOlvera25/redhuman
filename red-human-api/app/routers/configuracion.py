@@ -14,6 +14,7 @@ from ..database import get_db
 from ..deps import cuenta_actual, usuario_admin
 from ..models import Candidato, Cuenta, Postulacion, Usuario, registrar
 from ..services import configuracion as cfg_service
+from ..services import fraiche
 
 router = APIRouter(prefix="/configuracion", tags=["configuracion"])
 
@@ -33,6 +34,9 @@ def _salida(db: Session, cuenta_id: int) -> dict:
         "recordatorioEntrevistaHoras": cfg.recordatorio_entrevista_horas,  # 2026-09-19
         "candidatosPrueba": candidatos_prueba,
         "postulacionesPrueba": postulaciones_prueba,
+        # Fraiche (spec §8 y §14): equivalencias de la rúbrica IPV y umbral de «vacante en riesgo»
+        "ipvEquivalencias": fraiche.equivalencias_de(db),
+        "riesgoDiasUmbral": cfg.riesgo_dias_umbral if cfg.riesgo_dias_umbral is not None else 7,
     }
 
 
@@ -47,6 +51,8 @@ class ConfiguracionIn(BaseModel):
     recordatorio_documentos_dias: Optional[int] = None  # Fase 3: cada N días (1-30)
     recordatorio_documentos_hora: Optional[int] = None  # Fase 3: a partir de esta hora MX (0-23)
     recordatorio_entrevista_horas: Optional[int] = None  # 2026-09-19: horas antes de la entrevista (0 = apagado, máx 168)
+    ipv_equivalencias: Optional[dict] = None  # Fraiche §8: {alto, medio, bajo} en puntos 0-100
+    riesgo_dias_umbral: Optional[int] = None  # Fraiche §14: días antes de la fecha objetivo para «en riesgo»
 
 
 @router.patch("")
@@ -57,6 +63,28 @@ def actualizar(
     cfg = cfg_service.obtener(db)
     if all(v is None for v in datos.model_dump().values()):
         raise HTTPException(400, "No se enviaron cambios.")
+    if datos.ipv_equivalencias is not None:
+        eq = {}
+        for k in ("alto", "medio", "bajo"):
+            v = datos.ipv_equivalencias.get(k)
+            if v is None:
+                continue
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"La equivalencia «{k}» debe ser un número entero.")
+            if not (0 <= v <= 100):
+                raise HTTPException(400, f"La equivalencia «{k}» debe estar entre 0 y 100.")
+            eq[k] = v
+        nueva = {**fraiche.equivalencias_de(db), **eq}
+        if not (nueva["alto"] >= nueva["medio"] >= nueva["bajo"]):
+            raise HTTPException(400, "Las equivalencias deben cumplir Alto ≥ Medio ≥ Bajo.")
+        cfg.ipv_equivalencias = nueva
+        registrar(db, u.nombre, "ipv_equivalencias_actualizadas", "sistema", "configuracion", {"equivalencias": nueva, "correo_rh": u.correo})
+    if datos.riesgo_dias_umbral is not None:
+        if not (0 <= datos.riesgo_dias_umbral <= 365):
+            raise HTTPException(400, "El umbral de riesgo debe estar entre 0 y 365 días.")
+        cfg.riesgo_dias_umbral = datos.riesgo_dias_umbral
     if datos.recordatorio_documentos_dias is not None:
         if not (1 <= datos.recordatorio_documentos_dias <= 30):
             raise HTTPException(400, "Los recordatorios de documentos deben ser cada 1 a 30 días.")

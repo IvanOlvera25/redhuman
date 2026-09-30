@@ -4,7 +4,10 @@
    candidato (CV extraído y archivo, análisis de Luna, Entrevista Red Human, capacitación, documentos)
    para que el entrevistador vea el proceso antes de evaluar; abajo, el formulario de un solo envío
    (Resultado, Recomendación, Comentarios opcionales). Al enviar, la entrevista queda realizada y
-   confirmada y se cierra el ciclo (autocierre en el backend). */
+   confirmada y se cierra el ciclo (autocierre en el backend).
+   Fraiche (spec §8): si la ronda es IPV (`esIpv`), el formulario es la rúbrica por competencias (misma que
+   Red Human): nivel Alto/Medio/Bajo/Sin evidencia + respuesta + evidencia, observaciones sin peso y vista
+   previa con `calcularIpv`. La puntuación nunca mueve de etapa por sí sola. */
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
@@ -13,12 +16,18 @@ import { Logo, Button, Card, Badge } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 import {
+  calcularIpv,
   enviarEvaluacionEntrevistaHumana,
   fetchEntrevistaHumanaPublica,
   urlArchivoEntrevistaHumanaPublica,
+  COMPETENCIAS_IPV,
+  CONCLUSIONES_IPV,
+  EQUIVALENCIAS_IPV_DEFAULT,
+  NIVELES_IPV,
+  OBSERVACIONES_IPV,
   type EntrevistaHumanaPublica,
 } from "@/lib/api";
-import type { ResultadoEntrevistaHumana, RecomendacionEntrevistaHumana } from "@/lib/data";
+import type { CalculoIPV, NivelIPV, ResultadoEntrevistaHumana, RecomendacionEntrevistaHumana } from "@/lib/data";
 
 type Fase = "cargando" | "no_disponible" | "formulario" | "enviado";
 
@@ -32,6 +41,12 @@ export default function EvaluacionEntrevistaHumana() {
   const [comentario, setComentario] = useState("");
   const [error, setError] = useState("");
   const [enviando, setEnviando] = useState(false);
+  // Fraiche (spec §8): rúbrica IPV por competencia (clave → valor)
+  const [nivelesIpv, setNivelesIpv] = useState<Record<string, NivelIPV>>({});
+  const [respuestasIpv, setRespuestasIpv] = useState<Record<string, string>>({});
+  const [evidenciasIpv, setEvidenciasIpv] = useState<Record<string, string>>({});
+  const [observacionesIpv, setObservacionesIpv] = useState<Record<string, string>>({});
+  const [resultadoIpvEnviado, setResultadoIpvEnviado] = useState<CalculoIPV | null>(null);
 
   useEffect(() => {
     fetchEntrevistaHumanaPublica(token).then((i) => {
@@ -47,23 +62,46 @@ export default function EvaluacionEntrevistaHumana() {
     if (resultado === "no_aprobado" && (!recomendacion || recomendacion === "avanzar")) setRecomendacion("no_avanzar");
   }, [resultado]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const listo = !!resultado && !!recomendacion;
+  // Rúbrica vigente (la manda el servidor; las constantes son el respaldo)
+  const esIpv = !!info?.esIpv;
+  const competencias = info?.rubricaIpv?.competencias ?? COMPETENCIAS_IPV;
+  const observaciones = info?.rubricaIpv?.observaciones ?? OBSERVACIONES_IPV;
+  const nivelesCatalogo = info?.rubricaIpv?.niveles ?? NIVELES_IPV;
+  const equivalencias = info?.rubricaIpv?.equivalencias ?? EQUIVALENCIAS_IPV_DEFAULT;
+  const conclusiones = info?.rubricaIpv?.conclusiones ?? CONCLUSIONES_IPV;
+  const previaIpv = esIpv ? calcularIpv(nivelesIpv, equivalencias) : null;
+
+  const listoIpv = competencias.every((c) => !!nivelesIpv[c.clave]);
+  const listo = esIpv ? listoIpv : !!resultado && !!recomendacion;
 
   async function enviar() {
     if (!listo) return;
     setEnviando(true);
     setError("");
-    const r = await enviarEvaluacionEntrevistaHumana(token, {
-      resultado: resultado as ResultadoEntrevistaHumana,
-      recomendacion: recomendacion as RecomendacionEntrevistaHumana,
-      comentario,
-    });
+    const r = esIpv
+      ? await enviarEvaluacionEntrevistaHumana(token, {
+          rubrica: { niveles: nivelesIpv, respuestas: respuestasIpv, evidencias: evidenciasIpv, observaciones: observacionesIpv },
+          comentario,
+        })
+      : await enviarEvaluacionEntrevistaHumana(token, {
+          resultado: resultado as ResultadoEntrevistaHumana,
+          recomendacion: recomendacion as RecomendacionEntrevistaHumana,
+          comentario,
+        });
     setEnviando(false);
     if (!r.ok) {
       setError(r.error);
       return;
     }
+    setResultadoIpvEnviado(r.data.resultadoIpv ?? null);
     setFase("enviado");
+  }
+
+  // Texto corto del resultado IPV (puntaje · conclusión, o revisión sin calificación)
+  function textoIpv(c: CalculoIPV | null | undefined) {
+    if (!c) return "";
+    if (c.puntaje == null) return `Requiere revisión: sin evidencia en ${c.sin_evidencia.join(", ") || "alguna competencia"}`;
+    return `${c.puntaje} / 100 · ${conclusiones[c.conclusion] || c.conclusion}`;
   }
 
   const exp = info?.expediente;
@@ -94,7 +132,7 @@ export default function EvaluacionEntrevistaHumana() {
         {fase === "formulario" && info && (
           <>
             <div className="text-center">
-              <Badge tone="brand" dot>{info.expediente?.vacante.empresa || "Red Human"} · Entrevista humana</Badge>
+              <Badge tone="brand" dot>{info.expediente?.vacante.empresa || "Red Human"} · {esIpv ? "Entrevista IPV" : "Entrevista humana"}</Badge>
               <h1 className="font-display mt-3 text-2xl font-bold sm:text-3xl">Expediente de {info.candidato}</h1>
               <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">
                 {info.puesto && `Vacante: ${info.puesto}. `}
@@ -196,7 +234,110 @@ export default function EvaluacionEntrevistaHumana() {
               {info.yaEvaluada ? (
                 <div className="mt-3 rounded-xl border border-good/30 bg-good-soft/40 p-4 text-sm text-ink-2">
                   <CheckCircle2 className="mr-1 inline h-4 w-4 text-good" /> Esta entrevista ya fue evaluada
-                  {info.resultado ? ` (${info.resultado === "aprobado" ? "Aprobado" : "No aprobado"})` : ""}. Si necesitas corregirla, contacta al equipo de RH.
+                  {esIpv && info.resultadoIpv ? ` (IPV: ${textoIpv(info.resultadoIpv)})` : info.resultado ? ` (${info.resultado === "aprobado" ? "Aprobado" : "No aprobado"})` : ""}. Si necesitas corregirla, contacta al equipo de RH.
+                </div>
+              ) : esIpv ? (
+                <div className="mt-4 flex flex-col gap-5">
+                  <p className="text-sm leading-relaxed text-ink-2">
+                    Entrevista IPV · misma rúbrica que Red Human. Pide un ejemplo concreto por competencia; si no hay evidencia, marca “Sin evidencia”.
+                  </p>
+
+                  {/* Competencias con peso */}
+                  {competencias.map((c) => (
+                    <div key={c.clave} className="rounded-xl border border-border-soft p-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-semibold text-ink">{c.nombre}</span>
+                        <Badge tone="brand">{c.peso}%</Badge>
+                      </div>
+                      <p className="mt-1.5 text-xs leading-relaxed text-ink-3"><b className="text-ink-2">Situación para preguntar:</b> {c.situacion}</p>
+                      <p className="mt-0.5 text-xs leading-relaxed text-ink-3"><b className="text-ink-2">Evidencia esperada:</b> {c.evidencia}</p>
+
+                      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                        {nivelesCatalogo.map((n) => (
+                          <button
+                            key={n.clave}
+                            type="button"
+                            onClick={() => setNivelesIpv((v) => ({ ...v, [c.clave]: n.clave }))}
+                            className={cn("h-11 rounded-xl border text-sm font-medium transition", nivelesIpv[c.clave] === n.clave ? claseNivel(n.clave) : "border-border-soft text-ink-2")}
+                          >
+                            {n.nombre}
+                          </button>
+                        ))}
+                      </div>
+
+                      <label className="mt-3 flex flex-col gap-1.5">
+                        <span className="text-sm font-medium text-ink-2">Respuesta del candidato</span>
+                        <textarea
+                          value={respuestasIpv[c.clave] ?? ""}
+                          onChange={(e) => setRespuestasIpv((v) => ({ ...v, [c.clave]: e.target.value }))}
+                          rows={2}
+                          placeholder="Ejemplo concreto que dio el candidato"
+                          className="rounded-xl border border-border-soft bg-surface px-3.5 py-2.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                        />
+                      </label>
+                      <label className="mt-2 flex flex-col gap-1.5">
+                        <span className="text-sm font-medium text-ink-2">Evidencia observada</span>
+                        <input
+                          value={evidenciasIpv[c.clave] ?? ""}
+                          onChange={(e) => setEvidenciasIpv((v) => ({ ...v, [c.clave]: e.target.value }))}
+                          placeholder="Qué demostró (o por qué no hay evidencia)"
+                          className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                        />
+                      </label>
+                    </div>
+                  ))}
+
+                  {/* Observaciones: sin peso ni porcentaje */}
+                  <div className="rounded-xl border border-border-soft p-4">
+                    <p className="text-sm font-semibold text-ink">Observaciones <span className="font-normal text-ink-3">· sin peso ni porcentaje</span></p>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                      {observaciones.map((o) => (
+                        <label key={o.clave} className="flex flex-col gap-1.5">
+                          <span className="text-sm font-medium text-ink-2">{o.nombre}</span>
+                          <input
+                            value={observacionesIpv[o.clave] ?? ""}
+                            onChange={(e) => setObservacionesIpv((v) => ({ ...v, [o.clave]: e.target.value }))}
+                            className="h-11 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Vista previa: mismo cálculo que el servidor */}
+                  {previaIpv && (
+                    <div className={cn("rounded-xl border p-4 text-sm", previaIpv.puntaje == null ? "border-warn/30 bg-warn-soft/40" : "border-brand/25 bg-brand-soft/40")}>
+                      <p className="font-mono text-[10px] font-bold uppercase tracking-wider text-ink-3">Vista previa</p>
+                      {previaIpv.puntaje == null ? (
+                        <p className="mt-1 font-semibold text-ink">
+                          <AlertTriangle className="mr-1 inline h-4 w-4 text-warn" />
+                          Sin evidencia en: {previaIpv.sin_evidencia.join(", ")} — se pedirá revisión, sin calificación
+                        </p>
+                      ) : (
+                        <p className="font-display mt-1 text-xl font-bold text-ink">{previaIpv.puntaje} / 100 · {conclusiones[previaIpv.conclusion] || previaIpv.conclusion}</p>
+                      )}
+                      <p className="mt-1 text-xs text-ink-3">80–100 Recomendable · 60–79 Bajo reserva · menos de 60 No recomendable</p>
+                      <ul className="mt-2 grid gap-0.5 text-xs text-ink-2 sm:grid-cols-2">
+                        {previaIpv.detalle.map((d) => (
+                          <li key={d.clave}>
+                            {d.nombre} · {nombreNivel(d.nivel, nivelesCatalogo)} · {d.puntos == null ? "—" : `${d.puntos} pts`}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-sm font-medium text-ink-2">Comentarios <span className="text-ink-3">(opcional)</span></span>
+                    <textarea value={comentario} onChange={(e) => setComentario(e.target.value)} rows={4} className="rounded-xl border border-border-soft bg-surface px-3.5 py-2.5 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+                  </label>
+
+                  {error && <p className="text-sm text-bad">{error}</p>}
+
+                  <Button className="w-full" disabled={!listo || enviando} onClick={enviar}>
+                    {enviando ? "Guardando…" : "Guardar evaluación IPV"}
+                  </Button>
+                  {!listoIpv && <p className="text-center text-xs text-ink-3">Marca un nivel en las {competencias.length} competencias para guardar.</p>}
                 </div>
               ) : (
                 <div className="mt-4 flex flex-col gap-4">
@@ -247,6 +388,16 @@ export default function EvaluacionEntrevistaHumana() {
             <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">
               La entrevista quedó confirmada como realizada y tu evaluación registrada. El equipo de RH ya fue notificado y tomará la decisión final.
             </p>
+            {esIpv && (
+              <>
+                {resultadoIpvEnviado && (
+                  <p className={cn("mx-auto mt-4 inline-block rounded-xl border px-4 py-2 text-sm font-semibold", resultadoIpvEnviado.puntaje == null ? "border-warn/30 bg-warn-soft/40 text-ink" : "border-brand/25 bg-brand-soft/40 text-ink")}>
+                    {textoIpv(resultadoIpvEnviado)}
+                  </p>
+                )}
+                <p className="mx-auto mt-3 max-w-md text-xs text-ink-3">La decisión final la toma RH; ninguna puntuación mueve de etapa por sí sola.</p>
+              </>
+            )}
           </Card>
         )}
       </div>
@@ -265,6 +416,18 @@ function Seccion({ icono: Icono, titulo, abierto = false, children }: { icono: t
       {open && <div className="border-t border-border-faint px-5 py-4">{children}</div>}
     </Card>
   );
+}
+
+// Fraiche (spec §8): tono del botón de nivel seleccionado (alto=good, medio=warn, bajo=bad, sin evidencia=neutral)
+function claseNivel(n: NivelIPV) {
+  if (n === "alto") return "border-good/25 bg-good-soft text-good";
+  if (n === "medio") return "border-warn/25 bg-warn-soft text-warn";
+  if (n === "bajo") return "border-bad/25 bg-bad-soft text-bad";
+  return "border-ink-3 bg-surface-2 text-ink";
+}
+
+function nombreNivel(n: NivelIPV, catalogo: { clave: NivelIPV; nombre: string }[]) {
+  return catalogo.find((x) => x.clave === n)?.nombre ?? n;
 }
 
 function Dato({ k, v }: { k: string; v: string }) {

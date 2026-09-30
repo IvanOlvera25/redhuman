@@ -464,6 +464,13 @@ class EntrevistaHumana(Base):
     cancelada: Mapped[bool] = mapped_column(Boolean, default=False)
     resultado: Mapped[str] = mapped_column(String(20), default="")  # aprobado | no_aprobado
     recomendacion: Mapped[str] = mapped_column(String(30), default="")  # avanzar | no_avanzar | segunda_entrevista
+    # --- Fraiche (spec §8): Entrevista IPV con entrevistador humano — MISMA rúbrica que Red Human ---
+    # `rubrica` = {niveles: {clave: alto|medio|bajo|sin_evidencia}, respuestas: {}, evidencias: {}, observaciones: {}}
+    # `resultado_ipv` = cálculo (puntaje, conclusión recomendable|bajo_reserva|no_recomendable, detalle).
+    # Ninguna puntuación mueve de etapa ni descarta por sí sola; RH decide.
+    es_ipv: Mapped[bool] = mapped_column(Boolean, default=False)
+    rubrica: Mapped[dict] = mapped_column(JSON, default=dict)
+    resultado_ipv: Mapped[dict] = mapped_column(JSON, default=dict)
     # --- evaluación del entrevistador por liga (Lote 3) ---
     token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # liga pública para que el entrevistador registre su evaluación
     # "" hasta que alguien capture el resultado; "rh" | "entrevistador" según quién ganó la
@@ -531,6 +538,11 @@ class Entrevista(Base):
     guion: Mapped[dict] = mapped_column(JSON, default=dict)  # {enfoque, temas[], preguntas[]} (preguntas = legado)
     transcript: Mapped[list] = mapped_column(JSON, default=list)  # [{rol, texto}]
     evaluacion: Mapped[dict] = mapped_column(JSON, default=dict)  # EvaluacionEntrevista (+ perfil profundo, Fase 4)
+    # Fraiche (spec §7-8): fase de la sesión — `inicial` (entrevista inicial), `ipv` (solo IPV, sesión aparte) o
+    # `inicial_ipv` (Red Human hace las dos en la misma sesión de video: el transcript se parte en
+    # ia.MARCADOR_IPV y se guardan DOS resultados separados: `evaluacion` y `evaluacion_ipv`).
+    fase: Mapped[str] = mapped_column(String(20), default="inicial")
+    evaluacion_ipv: Mapped[dict] = mapped_column(JSON, default=dict)
     # Fase 4 (Punto 4): cómo terminó — señal que el backend pudo verificar (ver CIERRES_ENTREVISTA).
     # Vacío mientras sigue abierta. La transición a evaluada/interrumpida SOLO ocurre en /finalizar.
     cierre: Mapped[str] = mapped_column(String(20), default="")
@@ -1394,6 +1406,11 @@ class ConfiguracionSistema(Base):
     # 2026-09-19: horas antes de la Entrevista Humana para el recordatorio automático (0 = apagado).
     recordatorio_entrevista_horas: Mapped[int] = mapped_column(Integer, default=24)
     recordatorio_documentos_hora: Mapped[int] = mapped_column(Integer, default=10)
+    # Fraiche (spec §8): equivalencia de niveles de la rúbrica IPV ({alto, medio, bajo} → puntos 0-100).
+    # Vacío = services.fraiche.EQUIVALENCIAS_IPV_DEFAULT (100 / 70 / 30). Ajustable por Administrador.
+    ipv_equivalencias: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Fraiche (spec §14): umbral de «vacante en riesgo» del Tablero de control (días antes de la fecha objetivo).
+    riesgo_dias_umbral: Mapped[int] = mapped_column(Integer, default=7)
 
 
 # ============================================================
@@ -2101,6 +2118,32 @@ class EvaluacionCandidato(Base):
     asignada_por: Mapped[str] = mapped_column(String(150), default="")
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
     actualizada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+    # --- Demo Fraiche (spec §9-10, 2026-09-29): registro individual con responsable, cita, liga de acceso,
+    # estado del spec, adjuntos e historial; la persona externa accede SOLO a su evaluación. ---
+    responsable: Mapped[str] = mapped_column(String(150), default="")  # nombre visible (interno o externo)
+    responsable_correo: Mapped[str] = mapped_column(String(200), default="")
+    responsable_whatsapp: Mapped[str] = mapped_column(String(30), default="")
+    responsable_usuario_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # Usuario de la Cuenta
+    responsable_contacto_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # ClienteContacto
+    cita_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    cita_lugar: Mapped[str] = mapped_column(String(300), default="")
+    token_externo: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)  # /evaluacion/{token}
+    liga_enviada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    realizada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)  # «Realizada con resultado pendiente»
+    no_realizada: Mapped[bool] = mapped_column(Boolean, default=False)  # «No realizada» (vs «Cancelada»)
+    adjuntos: Mapped[list] = mapped_column(JSON, default=list)  # [{ruta, nombre, mime, subido_por, subido_en}]
+    # Decisión tal como la eligió quien evaluó (médico: apto|apto_condicionado|no_recomendable; franquiciatario:
+    # continuar|no_continuar); `dictamen` guarda el equivalente interno (favorable|con_observaciones|desfavorable).
+    decision_externa: Mapped[str] = mapped_column(String(40), default="")
+    # De dónde salió el resultado: liga_externa | webhook | manual | liga_proveedor_reporte_anonimizado (Evaluatest)
+    origen_resultado: Mapped[str] = mapped_column(String(40), default="")
+    # Socioeconómico: Red Human PROPONE un resumen del documento; RH lo corrige (nunca una puntuación).
+    resumen_ia: Mapped[str] = mapped_column(Text, default="")
+    # Referencias laborales: [{contacto, empresa, telefono, fecha_verificacion, resultado, comentarios, responsable}]
+    referencias: Mapped[list] = mapped_column(JSON, default=list)
+    # Médico: el dictamen/resumen/comentario se guardan CIFRADOS (services/cifrado.py); ver services/evaluaciones.
+    cifrado: Mapped[bool] = mapped_column(Boolean, default=False)
 
     @property
     def es_medico(self) -> bool:

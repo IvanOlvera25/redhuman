@@ -47,7 +47,7 @@ from ..models import (
     Vacante,
     registrar,
 )
-from ..serial import archivo_dict, expediente_dict, nombre_empresa_candidato, postulacion_dict
+from ..serial import archivo_dict, entrevista_dict, expediente_dict, nombre_empresa_candidato, postulacion_dict
 from ..services import archivos as fs
 from ..services import fraiche
 from ..services import ia
@@ -1982,6 +1982,8 @@ class EntrevistaHumanaIn(BaseModel):
     notificar: Optional[NotificarIn] = None  # Punto 12: ajuste solo para esta acción
     # Fase 7B: con Teams conectado en la Cuenta, la videollamada se crea sola; False = «Usar otra liga».
     usar_teams: bool = True
+    # Fraiche (spec §8): esta ronda es la Entrevista IPV con entrevistador humano (misma rúbrica que Red Human).
+    es_ipv: bool = False
 
 
 def _asunto_teams(p: Postulacion) -> str:
@@ -2127,6 +2129,7 @@ async def programar_entrevista_humana(
         telefono_contacto=datos.telefono_contacto.strip() if datos.modalidad == "Llamada" else "",
         comentario=datos.comentario.strip(),
         token=secrets.token_urlsafe(24),
+        es_ipv=bool(datos.es_ipv),
     )
     p.entrevistas_humanas.append(eh)
     db.flush()
@@ -2141,7 +2144,7 @@ async def programar_entrevista_humana(
             "tipo_entrevistador": datos.tipo_entrevistador, "contacto_id": eh.contacto_id,
             "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
             "notificaciones": resultados, "notificar_override": override,
-            "teams_evento_id": teams_evento_id,
+            "teams_evento_id": teams_evento_id, "es_ipv": eh.es_ipv,
         },
     )
     _actualizar_ultima_actividad(p)
@@ -2287,10 +2290,11 @@ async def marcar_entrevista_humana_realizada(
 
 
 class EntrevistaHumanaResultadoIn(BaseModel):
-    resultado: str  # aprobado | no_aprobado
-    recomendacion: str  # avanzar | no_avanzar | segunda_entrevista
+    resultado: str = ""  # aprobado | no_aprobado (en una IPV se deriva de la rúbrica si no viene)
+    recomendacion: str = ""  # avanzar | no_avanzar | segunda_entrevista
     comentario: str = ""
     notificar: Optional[NotificarIn] = None  # aplica a "recomendacion_final"; "candidato_apto" (automático) usa la regla
+    rubrica: Optional[dict] = None  # Fraiche (spec §8): rúbrica IPV, obligatoria si la ronda es IPV
 
 
 @router.post("/{codigo}/entrevista-humana/resultado")
@@ -2305,17 +2309,21 @@ async def registrar_resultado_entrevista_humana(
     p = _por_codigo(db, codigo, cuenta.id)
     if p.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
-    if datos.resultado not in RESULTADOS_ENTREVISTA_HUMANA:
+    eh = _ultima_entrevista_humana(p)
+    # Fraiche (spec §8): en una ronda IPV la rúbrica es obligatoria y resultado/recomendación se derivan si no vienen
+    from .entrevista_humana import aplicar_rubrica_ipv
+
+    resultado, recomendacion = aplicar_rubrica_ipv(db, eh, datos.rubrica, datos.resultado, datos.recomendacion)
+    if resultado not in RESULTADOS_ENTREVISTA_HUMANA and not (eh.es_ipv and resultado == ""):
         raise HTTPException(400, f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_ENTREVISTA_HUMANA)}")
-    if datos.recomendacion not in RECOMENDACIONES_ENTREVISTA_HUMANA:
+    if recomendacion not in RECOMENDACIONES_ENTREVISTA_HUMANA:
         raise HTTPException(400, f"Recomendación inválida. Usa una de: {', '.join(RECOMENDACIONES_ENTREVISTA_HUMANA)}")
     comentario = datos.comentario.strip()  # 2026-09-19 (cambios Raúl): comentarios opcionales
 
-    eh = _ultima_entrevista_humana(p)
     ya_capturada = bool(eh.resultado_capturado_por)
     eh.realizada = True
-    eh.resultado = datos.resultado
-    eh.recomendacion = datos.recomendacion
+    eh.resultado = resultado
+    eh.recomendacion = recomendacion
     eh.comentario = comentario
     eh.resultado_capturado_por = "rh"
     eh.evaluada_en = datetime.now(timezone.utc)
@@ -2326,13 +2334,50 @@ async def registrar_resultado_entrevista_humana(
     registrar(
         db, u.nombre, "entrevista_humana_resultado_capturado_rh", "postulacion", p.codigo,
         {
-            "resultado": datos.resultado, "recomendacion": datos.recomendacion, "comentario": comentario,
+            "resultado": resultado, "recomendacion": recomendacion, "comentario": comentario,
             "corrigio_captura_previa": ya_capturada, "correo_rh": u.correo, "notificaciones": resultados,
             "notificar_override": override,
+            **({"ipv": {"puntaje": eh.resultado_ipv.get("puntaje"), "conclusion": eh.resultado_ipv.get("conclusion")}} if eh.es_ipv else {}),
         },
     )
     db.commit()
     return postulacion_dict(p, detalle=True)
+
+
+# ------------------------------------------------------------
+# Fraiche (spec §8) · Programar la Entrevista IPV con Red Human
+# ------------------------------------------------------------
+
+
+class IpvIn(BaseModel):
+    modo: str = "red_human"  # red_human (la humana se programa con POST /entrevista-humana + es_ipv=true)
+
+
+@router.post("/{codigo}/ipv", status_code=201)
+async def programar_ipv_red_human(
+    codigo: str, datos: IpvIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """«Programar IPV → Red Human». Si la entrevista inicial de Red Human todavía no se realiza, la IPV
+    continúa en ESA misma sesión (fase `inicial_ipv`: se guardan dos resultados separados); si ya se hizo,
+    se crea una sesión nueva solo IPV (fase `ipv`, con su propia liga). Nunca mueve de etapa por sí sola."""
+    from ..services.entrevistas import crear_entrevista_para_candidato
+
+    p = _por_codigo(db, codigo, cuenta.id)
+    if datos.modo != "red_human":
+        raise HTTPException(400, "Para un entrevistador humano usa POST /entrevista-humana con es_ipv=true.")
+    pendiente = next((e for e in reversed(p.entrevistas) if e.fase == "inicial" and e.estado in ("programada", "en_curso")), None)
+    if pendiente is not None:
+        pendiente.fase = "inicial_ipv"
+        registrar(db, u.nombre, "ipv_incluida_en_entrevista_inicial", "entrevista", pendiente.codigo, {"postulacion": p.codigo, "correo_rh": u.correo})
+        _actualizar_ultima_actividad(p)
+        db.commit()
+        return {"modo": "misma_sesion", "entrevista": entrevista_dict(pendiente), "candidato": postulacion_dict(p, detalle=True)}
+    e, _ = crear_entrevista_para_candidato(db, p, u.nombre, fase="ipv")
+    registrar(db, u.nombre, "ipv_programada_red_human", "entrevista", e.codigo, {"postulacion": p.codigo, "correo_rh": u.correo})
+    _actualizar_ultima_actividad(p)
+    db.commit()
+    return {"modo": "sesion_ipv", "entrevista": entrevista_dict(e), "candidato": postulacion_dict(p, detalle=True)}
 
 
 @router.post("/{codigo}/entrevista-humana/recordatorio")

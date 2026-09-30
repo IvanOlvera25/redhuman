@@ -9,9 +9,12 @@
    ============================================================ */
 
 import type {
+  CalculoIPV,
   Candidato,
+  NivelIPV,
   RecomendacionEntrevistaHumana,
   ResultadoEntrevistaHumana,
+  RubricaIPV,
   TipoEntrevistador,
   Vacante,
 } from "@/lib/data";
@@ -202,6 +205,10 @@ export interface ConfiguracionSistema {
   recordatorioDocumentosHora: number;
   candidatosPrueba: number;
   postulacionesPrueba: number;
+  /** Fraiche (spec §8): equivalencia de niveles de la rúbrica IPV (Alto/Medio/Bajo → puntos). */
+  ipvEquivalencias?: { alto: number; medio: number; bajo: number };
+  /** Fraiche (spec §14): días antes de la fecha objetivo para marcar una vacante «en riesgo». */
+  riesgoDiasUmbral?: number;
 }
 
 export function fetchConfiguracion() {
@@ -214,10 +221,14 @@ export function actualizarConfiguracion(cambios: {
   recordatorioDocumentosDias?: number;
   recordatorioDocumentosHora?: number;
   recordatorioEntrevistaHoras?: number;
+  ipvEquivalencias?: { alto?: number; medio?: number; bajo?: number };
+  riesgoDiasUmbral?: number;
 }) {
   return patch<ConfiguracionSistema>("/configuracion", {
     modo_prueba: cambios.modoPrueba,
     modo_prueba_ventana_min: cambios.modoPruebaVentanaMin,
+    ipv_equivalencias: cambios.ipvEquivalencias,
+    riesgo_dias_umbral: cambios.riesgoDiasUmbral,
     recordatorio_documentos_dias: cambios.recordatorioDocumentosDias,
     recordatorio_documentos_hora: cambios.recordatorioDocumentosHora,
     recordatorio_entrevista_horas: cambios.recordatorioEntrevistaHoras,
@@ -1259,6 +1270,8 @@ export function programarEntrevistaHumana(
     telefonoContacto?: string;
     comentario?: string;
     notificar?: NotificarAccion;
+    /** Fraiche (spec §8): esta ronda es la Entrevista IPV con entrevistador humano (misma rúbrica que Red Human). */
+    esIpv?: boolean;
   },
 ) {
   return post<{ resultados: ResultadoNotificacion[]; advertencias?: string[]; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana`, {
@@ -1266,6 +1279,7 @@ export function programarEntrevistaHumana(
     entrevistador_usuario_id: datos.entrevistadorUsuarioId ?? null,
     entrevistador_contacto_id: datos.entrevistadorContactoId ?? null,
     usar_teams: datos.usarTeams ?? true,
+    es_ipv: datos.esIpv ?? false,
     entrevistador_nombre: datos.entrevistadorNombre ?? "",
     entrevistador_correo: datos.entrevistadorCorreo ?? "",
     entrevistador_whatsapp: datos.entrevistadorWhatsapp ?? "",
@@ -1327,15 +1341,84 @@ export function marcarEntrevistaHumanaRealizada(codigo: string, forzarPrueba = f
  * corregir un resultado ya capturado, por eso mismo endpoint para "capturar" y "corregir". */
 export function registrarResultadoEntrevistaHumana(
   codigo: string,
-  datos: { resultado: ResultadoEntrevistaHumana; recomendacion: RecomendacionEntrevistaHumana; comentario?: string; notificar?: NotificarAccion },
+  datos: {
+    /** En una ronda IPV pueden omitirse: el servidor los deriva de la rúbrica (solo recomendación). */
+    resultado?: ResultadoEntrevistaHumana | "";
+    recomendacion?: RecomendacionEntrevistaHumana | "";
+    comentario?: string;
+    notificar?: NotificarAccion;
+    /** Fraiche (spec §8): rúbrica IPV — obligatoria si la ronda es IPV. */
+    rubrica?: RubricaIPV;
+  },
   forzarPrueba = false,
 ) {
   return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/resultado${forzarPrueba ? "?forzar_prueba=true" : ""}`, {
-    resultado: datos.resultado,
-    recomendacion: datos.recomendacion,
+    resultado: datos.resultado ?? "",
+    recomendacion: datos.recomendacion ?? "",
     comentario: datos.comentario ?? "",
     notificar: notificarSnake(datos.notificar),
+    rubrica: datos.rubrica,
   });
+}
+
+/* ============================================================
+   Fraiche (spec §8) · Entrevista IPV — rúbrica compartida por Red Human y el entrevistador humano
+   ============================================================ */
+
+export interface CompetenciaIPV {
+  clave: string;
+  nombre: string;
+  peso: number;
+  situacion: string;
+  evidencia: string;
+}
+/** Misma rúbrica que `services/fraiche.COMPETENCIAS_IPV` (30/15/10/20/20/5). */
+export const COMPETENCIAS_IPV: CompetenciaIPV[] = [
+  { clave: "orientacion_cliente", nombre: "Orientación al cliente", peso: 30, situacion: "Un cliente está molesto o exige demasiado", evidencia: "Escucha, identifica necesidad, ofrece solución" },
+  { clave: "motivacion", nombre: "Motivación y energía", peso: 15, situacion: "Hay pocas ventas durante el día", evidencia: "Iniciativa y constancia" },
+  { clave: "resiliencia", nombre: "Resiliencia y manejo de estrés", peso: 10, situacion: "Existe presión por cumplir la meta", evidencia: "Respuesta ante presión y rechazo" },
+  { clave: "trabajo_equipo", nombre: "Trabajo en equipo", peso: 20, situacion: "Apoyó a un compañero", evidencia: "Colaboración y manejo de conflictos" },
+  { clave: "etica", nombre: "Ética y responsabilidad", peso: 20, situacion: "Cometió un error en tienda", evidencia: "Lo reconoce, comunica y corrige" },
+  { clave: "adaptabilidad", nombre: "Adaptabilidad", peso: 5, situacion: "Cambia una promoción o se asignan otras tareas", evidencia: "Apertura y ejecución" },
+];
+export const OBSERVACIONES_IPV: { clave: string; nombre: string }[] = [
+  { clave: "comunicacion", nombre: "Comunicación" },
+  { clave: "facilidad_palabra", nombre: "Facilidad de palabra" },
+  { clave: "manejo_objeciones", nombre: "Manejo de objeciones" },
+];
+export const NIVELES_IPV: { clave: NivelIPV; nombre: string }[] = [
+  { clave: "alto", nombre: "Alto" },
+  { clave: "medio", nombre: "Medio" },
+  { clave: "bajo", nombre: "Bajo" },
+  { clave: "sin_evidencia", nombre: "Sin evidencia" },
+];
+export const CONCLUSIONES_IPV: Record<string, string> = { recomendable: "Recomendable", bajo_reserva: "Bajo reserva", no_recomendable: "No recomendable" };
+export const EQUIVALENCIAS_IPV_DEFAULT = { alto: 100, medio: 70, bajo: 30 };
+
+/** Misma suma ponderada que `fraiche.calcular_ipv` (vista previa en el navegador; el servidor recalcula). */
+export function calcularIpv(niveles: Record<string, NivelIPV | "">, equivalencias: Record<string, number> = EQUIVALENCIAS_IPV_DEFAULT): CalculoIPV {
+  const eq = { ...EQUIVALENCIAS_IPV_DEFAULT, ...equivalencias };
+  let total = 0;
+  const sinEvidencia: string[] = [];
+  const detalle = COMPETENCIAS_IPV.map((c) => {
+    const nivel = (niveles[c.clave] || "sin_evidencia") as NivelIPV;
+    if (!(nivel in eq)) {
+      sinEvidencia.push(c.nombre);
+      return { clave: c.clave, nombre: c.nombre, peso: c.peso, nivel: "sin_evidencia" as NivelIPV, puntos: null };
+    }
+    const puntos = Math.round((eq[nivel as keyof typeof eq] * c.peso) / 100 * 100) / 100;
+    total += puntos;
+    return { clave: c.clave, nombre: c.nombre, peso: c.peso, nivel, puntos };
+  });
+  if (sinEvidencia.length) return { puntaje: null, conclusion: "", requiere_revision: true, sin_evidencia: sinEvidencia, detalle, equivalencias: eq };
+  const puntaje = Math.round(total * 10) / 10;
+  const conclusion = puntaje >= 80 ? "recomendable" : puntaje >= 60 ? "bajo_reserva" : "no_recomendable";
+  return { puntaje, conclusion, requiere_revision: false, sin_evidencia: [], detalle, equivalencias: eq };
+}
+
+/** «Programar IPV → Red Human»: continúa en la sesión inicial pendiente (misma_sesion) o crea una sesión solo IPV. */
+export function programarIpvRedHuman(codigo: string) {
+  return post<{ modo: "misma_sesion" | "sesion_ipv"; entrevista: { id: string; token: string; fase: string }; candidato: Candidato }>(`/candidatos/${codigo}/ipv`, { modo: "red_human" });
 }
 
 export function recordatorioEntrevistaHumana(codigo: string, forzarPrueba = false, notificar?: NotificarAccion) {
@@ -1369,6 +1452,16 @@ export interface EntrevistaHumanaPublica {
     archivos: { id: number; tipo: string; nombre: string; mime: string }[];
     documentos: { tipo: string; estado: string; obligatorio: boolean }[];
   };
+  /* --- Fraiche (spec §8): ronda IPV — rúbrica y equivalencias vigentes --- */
+  esIpv?: boolean;
+  rubricaIpv?: {
+    competencias: CompetenciaIPV[];
+    observaciones: { clave: string; nombre: string }[];
+    niveles: { clave: NivelIPV; nombre: string }[];
+    equivalencias: Record<string, number>;
+    conclusiones: Record<string, string>;
+  } | null;
+  resultadoIpv?: CalculoIPV | null;
 }
 
 export function urlArchivoEntrevistaHumanaPublica(token: string, archivoId: number) {
@@ -1381,12 +1474,19 @@ export function fetchEntrevistaHumanaPublica(token: string) {
 
 export function enviarEvaluacionEntrevistaHumana(
   token: string,
-  datos: { resultado: ResultadoEntrevistaHumana; recomendacion: RecomendacionEntrevistaHumana; comentario?: string },
+  datos: {
+    resultado?: ResultadoEntrevistaHumana | "";
+    recomendacion?: RecomendacionEntrevistaHumana | "";
+    comentario?: string;
+    /** Fraiche (spec §8): rúbrica IPV (obligatoria en una ronda IPV; resultado/recomendación se derivan si no vienen). */
+    rubrica?: RubricaIPV;
+  },
 ) {
-  return post<{ ok: boolean }>(`/entrevista-humana/publica/${token}`, {
-    resultado: datos.resultado,
-    recomendacion: datos.recomendacion,
+  return post<{ ok: boolean; resultadoIpv?: CalculoIPV | null }>(`/entrevista-humana/publica/${token}`, {
+    resultado: datos.resultado ?? "",
+    recomendacion: datos.recomendacion ?? "",
     comentario: datos.comentario ?? "",
+    rubrica: datos.rubrica,
   });
 }
 

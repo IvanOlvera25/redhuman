@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # horario, sueldo, posiciones, responsable y fecha objetivo). El frontend lo valida SIEMPRE; aquí se puede
     # relajar (FRAICHE_PUBLICACION_ESTRICTA=false) para los scripts de verificación previos a la demo.
     fraiche_publicacion_estricta: bool = True
+    # Demo Fraiche (spec §10): clave para cifrar el dictamen médico en la base (services/cifrado.py). Sin ella se
+    # deriva de META_APP_SECRET o TEAMS_CLIENT_SECRET. Rotarla obliga a recapturar lo cifrado.
+    datos_sensibles_clave: str = ""
 
     # IA (OpenAI)
     openai_api_key: str = ""

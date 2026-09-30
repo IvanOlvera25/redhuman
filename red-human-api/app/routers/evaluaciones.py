@@ -36,6 +36,7 @@ from ..models import (
 )
 from ..serial import evaluacion_candidato_dict, nombre_empresa_candidato, prueba_psicometrica_dict
 from ..services import evaluaciones as sev
+from ..services import fraiche
 from ..services.modulos_rh import requiere_modulos_rh
 
 router = APIRouter(prefix="/evaluaciones", tags=["evaluaciones"], dependencies=[Depends(requiere_modulos_rh)])
@@ -186,6 +187,16 @@ def listar_evaluaciones(codigo: str, db: Session = Depends(get_db), u: Usuario =
     return [evaluacion_candidato_dict(ev, u) for ev in evs]
 
 
+class ResponsableIn(BaseModel):
+    """Fraiche (spec §10): quién realiza la evaluación — Usuario de la Cuenta, contacto del Cliente guardado o
+    persona capturada (proveedor, médico, encargado). Nunca limita a contactos registrados."""
+    usuario_id: Optional[int] = None
+    contacto_id: Optional[int] = None
+    nombre: str = ""
+    correo: str = ""
+    whatsapp: str = ""
+
+
 class AgregarEvaluacionIn(BaseModel):
     tipo: str
     nombre: str = ""
@@ -195,6 +206,58 @@ class AgregarEvaluacionIn(BaseModel):
     id_proveedor: str = ""
     url: str = ""
     notas: str = ""
+    # --- Fraiche (spec §10) ---
+    responsable: Optional[ResponsableIn] = None
+    cita: Optional[str] = None  # ISO «2026-10-05T10:00» (hora de México)
+    cita_lugar: str = ""
+    generar_liga: bool = False  # liga de acceso para la persona externa (/evaluacion/{token})
+
+
+def _resolver_responsable(db: Session, cuenta_id: int, p: Postulacion, r: Optional[ResponsableIn]) -> dict:
+    """→ {nombre, correo, whatsapp, usuario_id, contacto_id}. Interno: datos del perfil del Usuario; contacto del
+    Cliente de la vacante: sus datos; captura manual: lo que venga."""
+    if r is None:
+        return {}
+    if r.usuario_id:
+        u = db.query(Usuario).filter(Usuario.id == r.usuario_id, Usuario.activo.is_(True)).first()
+        if not u:
+            raise HTTPException(400, "El usuario responsable no existe o no está activo.")
+        return {"nombre": u.nombre, "correo": u.correo or "", "whatsapp": u.telefono or "", "usuario_id": u.id, "contacto_id": None}
+    if r.contacto_id:
+        from ..models import ClienteContacto
+
+        cliente_id = p.vacante.cliente_id if p.vacante else None
+        c = db.query(ClienteContacto).filter(ClienteContacto.id == r.contacto_id, ClienteContacto.cliente_id == cliente_id).first() if cliente_id else None
+        if not c:
+            raise HTTPException(400, "El contacto elegido no pertenece al Cliente de la vacante de esta postulación.")
+        return {"nombre": f"{c.nombre} {c.apellidos or ''}".strip(), "correo": c.correo or "", "whatsapp": c.telefono or "", "usuario_id": None, "contacto_id": c.id}
+    nombre = (r.nombre or "").strip()
+    if not nombre:
+        raise HTTPException(400, "Indica el nombre de la persona responsable.")
+    return {"nombre": nombre[:150], "correo": (r.correo or "").strip()[:200], "whatsapp": (r.whatsapp or "").strip()[:30], "usuario_id": None, "contacto_id": None}
+
+
+def _parsear_cita(valor: Optional[str]) -> Optional[datetime]:
+    if not valor or not str(valor).strip():
+        return None
+    from ..services.notificaciones import TZ_MEXICO
+
+    try:
+        dt = datetime.fromisoformat(str(valor).strip())
+    except ValueError:
+        raise HTTPException(400, "La cita debe venir como AAAA-MM-DDTHH:MM (hora de México).")
+    return (dt.replace(tzinfo=TZ_MEXICO) if dt.tzinfo is None else dt).astimezone(timezone.utc)
+
+
+def _aplicar_responsable_y_cita(db: Session, cuenta_id: int, p: Postulacion, ev: EvaluacionCandidato, responsable: Optional[ResponsableIn], cita: Optional[str], cita_lugar: Optional[str]) -> None:
+    datos = _resolver_responsable(db, cuenta_id, p, responsable)
+    if datos:
+        ev.responsable, ev.responsable_correo, ev.responsable_whatsapp = datos["nombre"], datos["correo"], datos["whatsapp"]
+        ev.responsable_usuario_id, ev.responsable_contacto_id = datos["usuario_id"], datos["contacto_id"]
+    if cita is not None:
+        ev.cita_en = _parsear_cita(cita)
+    if cita_lugar is not None:
+        ev.cita_lugar = cita_lugar.strip()[:300]
 
 
 @router.post("/postulaciones/{codigo}", status_code=201)
@@ -230,15 +293,156 @@ def agregar_evaluacion(codigo: str, datos: AgregarEvaluacionIn, db: Session = De
     )
     if ev.requiere_consentimiento_expreso:
         ev.consentimiento_token = secrets.token_urlsafe(24)
+    # Fraiche (spec §10): responsable, cita y liga de acceso de la persona externa
+    _aplicar_responsable_y_cita(db, cuenta.id, p, ev, datos.responsable, datos.cita, datos.cita_lugar)
+    if datos.generar_liga or sev.es_franquiciatario(ev) or sev.es_encargado(ev):
+        ev.token_externo = secrets.token_urlsafe(24)
+    if ev.es_medico:
+        sev.guardar_texto(ev, "notas", ev.notas)  # cifrado desde el primer día
     db.add(ev)
     db.flush()
     ev.codigo = f"EVA-{7000 + ev.id}"
-    sev.mover(ev, "en_espera_consentimiento", u.nombre, "Asignada")
+    sev.mover(ev, "en_espera_consentimiento", u.nombre, "Asignada" + (f" · responsable: {ev.responsable}" if ev.responsable else ""))
     sev.refrescar_consentimiento(ev, p, u.nombre)
     registrar(db, u.nombre, "evaluacion_asignada", "postulacion", p.codigo,
-              {"evaluacion": ev.codigo, "tipo": ev.tipo, "nombre": ev.nombre, "modo": ev.modo, "estado": ev.estado, "correo_rh": u.correo})
+              {"evaluacion": ev.codigo, "tipo": ev.tipo, "nombre": ev.nombre, "modo": ev.modo, "estado": ev.estado, "responsable": ev.responsable, "correo_rh": u.correo})
     db.commit()
     return evaluacion_candidato_dict(ev, u)
+
+
+class EditarEvaluacionIn(BaseModel):
+    responsable: Optional[ResponsableIn] = None
+    cita: Optional[str] = None  # "" = quitar
+    cita_lugar: Optional[str] = None
+    notas: Optional[str] = None
+
+
+@router.patch("/{codigo}")
+def editar_evaluacion(codigo: str, datos: EditarEvaluacionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Fraiche (spec §10): RH cambia responsable, cita (si aplica) o notas de la evaluación."""
+    ev = _evaluacion(db, codigo, cuenta.id)
+    p = _post_de(db, ev)
+    _abierta(ev)
+    _aplicar_responsable_y_cita(db, cuenta.id, p, ev, datos.responsable, datos.cita, datos.cita_lugar)
+    if datos.notas is not None:
+        sev.guardar_texto(ev, "notas", datos.notas.strip()[:2000])
+    registrar(db, u.nombre, "evaluacion_editada", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "responsable": ev.responsable, "cita": ev.cita_en.isoformat() if ev.cita_en else None, "correo_rh": u.correo})
+    db.commit()
+    return evaluacion_candidato_dict(ev, u)
+
+
+class LigaIn(BaseModel):
+    enviar: bool = True  # mandarla al responsable por correo/WhatsApp con lo que tenga
+    regenerar: bool = False
+
+
+@router.post("/{codigo}/liga")
+async def liga_externa(codigo: str, datos: LigaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Fraiche (spec §10): liga limitada para la persona externa (encargado de tienda, proveedor socioeconómico,
+    médico, franquiciatario). Accede SOLO a esta evaluación. Un canal caído nunca rompe la acción."""
+    from ..config import settings
+    from ..services import plantillas_correo
+    from ..services.correo import enviar_correo
+    from ..services.whatsapp import enviar_mensaje
+
+    ev = _evaluacion(db, codigo, cuenta.id)
+    p = _post_de(db, ev)
+    _abierta(ev)
+    if ev.es_medico:
+        _exigir_consentimiento(ev, p)  # spec §10: consentimiento antes de enviar
+    if not ev.token_externo or datos.regenerar:
+        ev.token_externo = secrets.token_urlsafe(24)
+    liga = f"{settings.app_url}/evaluacion/{ev.token_externo}"
+    resultados = []
+    if datos.enviar:
+        empresa = nombre_empresa_candidato(p.vacante) if p and p.vacante else cuenta.nombre_visible
+        texto = (f"Hola {ev.responsable or ''}. {empresa} te asignó «{ev.nombre}» de {p.nombre if p else 'un candidato'}"
+                 f"{(' para ' + p.vacante.titulo) if p and p.vacante else ''}. Registra el resultado aquí: {liga}").replace("  ", " ")
+        if ev.responsable_whatsapp:
+            try:
+                r = await enviar_mensaje(ev.responsable_whatsapp, texto)
+            except Exception as ex:  # noqa: BLE001
+                r = {"enviado": False, "detalle": str(ex)[:200]}
+            resultados.append({"destinatario": "responsable", "canal": "whatsapp", "destino": ev.responsable_whatsapp, "enviado": bool(r.get("enviado")), "detalle": str(r.get("detalle") or "")})
+        if ev.responsable_correo:
+            try:
+                asunto, html = plantillas_correo.html_aviso(f"Evaluación asignada: {ev.nombre}", texto.replace(liga, "").strip(), empresa,
+                                                            [("Candidato", p.nombre if p else ""), ("Vacante", p.vacante.titulo if p and p.vacante else "")] + ([("Cita", ev.cita_en.isoformat())] if ev.cita_en else []),
+                                                            ("Abrir evaluación", liga))
+                r = await enviar_correo(ev.responsable_correo, asunto, html)
+            except Exception as ex:  # noqa: BLE001
+                r = {"enviado": False, "detalle": str(ex)[:200]}
+            resultados.append({"destinatario": "responsable", "canal": "correo", "destino": ev.responsable_correo, "enviado": bool(r.get("enviado")), "detalle": str(r.get("detalle") or "")})
+        if resultados:
+            ev.liga_enviada_en = datetime.now(timezone.utc)
+        sev.mover(ev, ev.estado, u.nombre, "Liga de acceso enviada" if resultados else "Liga de acceso generada")
+    registrar(db, u.nombre, "evaluacion_liga_externa", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "envios": resultados, "correo_rh": u.correo})
+    db.commit()
+    return {"liga": liga, "resultados": resultados, "evaluacion": evaluacion_candidato_dict(ev, u)}
+
+
+class ReferenciasIn(BaseModel):
+    referencias: List[dict] = []
+
+
+@router.post("/{codigo}/referencias")
+def guardar_referencias(codigo: str, datos: ReferenciasIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Fraiche (spec §10): referencias laborales — contactos, fecha de verificación, resultado, comentarios y
+    responsable. Con al menos una referencia verificada la evaluación queda «Con resultado» (RH la revisa después)."""
+    ev = _evaluacion(db, codigo, cuenta.id)
+    p = _post_de(db, ev)
+    if ev.tipo != "referencias":
+        raise HTTPException(409, "Solo una evaluación de Referencias lleva referencias laborales.")
+    _abierta(ev)
+    _exigir_consentimiento(ev, p)
+    ev.referencias = sev.normalizar_referencias(datos.referencias)
+    verificadas = [r for r in ev.referencias if r.get("fecha_verificacion") and r.get("resultado")]
+    if verificadas and ev.estado in ("pendiente", "en_proceso"):
+        ev.resultado_cargado_por, ev.resultado_cargado_en, ev.origen_resultado = u.nombre, datetime.now(timezone.utc), "manual"
+        ev.resultado_resumen = "; ".join(f"{r['contacto']} ({r.get('empresa') or 's/e'}): {r['resultado']}" for r in verificadas)[:5000]
+        sev.mover(ev, "resultado_recibido", u.nombre, f"{len(verificadas)} referencia(s) verificada(s)")
+    registrar(db, u.nombre, "evaluacion_referencias", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "referencias": len(ev.referencias), "verificadas": len(verificadas), "correo_rh": u.correo})
+    db.commit()
+    return evaluacion_candidato_dict(ev, u)
+
+
+@router.get("/{codigo}/detalle-medico")
+def detalle_medico(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Fraiche (spec §10): el dictamen médico completo (cifrado en la base) solo para el rol autorizado; cada
+    consulta queda en la bitácora con quién accedió."""
+    ev = _evaluacion(db, codigo, cuenta.id)
+    if not ev.es_medico:
+        raise HTTPException(409, "Esta evaluación no es médica.")
+    if not u.puede_ver_informe_medico():
+        registrar(db, u.nombre, "informe_medico_acceso_denegado", "evaluaciones", ev.codigo, {"correo_rh": u.correo, "via": "detalle"})
+        db.commit()
+        raise HTTPException(403, "El dictamen médico completo solo lo ven usuarios con permiso; tú ves el estado y la conclusión.")
+    registrar(db, u.nombre, "informe_medico_consultado", "evaluaciones", ev.codigo, {"correo_rh": u.correo, "via": "detalle"})
+    db.commit()
+    return {
+        "id": ev.codigo, "decision": ev.decision_externa or None, "dictamenTexto": sev.texto_dictamen(ev),
+        "resultadoResumen": sev.leer_texto(ev, "resultado_resumen"), "comentarioRevision": sev.leer_texto(ev, "comentario_revision"),
+        "notas": sev.leer_texto(ev, "notas"), "adjuntos": [{**a, "ruta": None, "indice": i} for i, a in enumerate(ev.adjuntos or [])],
+        "tieneInforme": bool(ev.archivo), "cifrado": bool(ev.cifrado), "revisadaPor": ev.revisada_por or "", "revisadaEn": ev.revisada_en.isoformat() if ev.revisada_en else None,
+    }
+
+
+@router.get("/{codigo}/adjuntos/{indice}")
+def descargar_adjunto(codigo: str, indice: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    from ..services import archivos as fs
+
+    ev = _evaluacion(db, codigo, cuenta.id)
+    if ev.es_medico and not u.puede_ver_informe_medico():
+        registrar(db, u.nombre, "informe_medico_acceso_denegado", "evaluaciones", ev.codigo, {"correo_rh": u.correo, "adjunto": indice})
+        db.commit()
+        raise HTTPException(403, "Los adjuntos médicos solo los ven usuarios con permiso.")
+    adj = (ev.adjuntos or [])
+    if indice < 0 or indice >= len(adj) or not fs.existe(adj[indice].get("ruta")):
+        raise HTTPException(404, "Adjunto no disponible.")
+    if ev.es_medico:
+        registrar(db, u.nombre, "informe_medico_consultado", "evaluaciones", ev.codigo, {"correo_rh": u.correo, "adjunto": indice})
+        db.commit()
+    return FileResponse(adj[indice]["ruta"], media_type=adj[indice].get("mime") or "application/octet-stream", filename=adj[indice].get("nombre") or f"adjunto-{indice}")
 
 
 def _exigir_consentimiento(ev: EvaluacionCandidato, p: Optional[Postulacion]) -> None:
@@ -324,36 +528,89 @@ def sincronizar(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends
     return {**evaluacion_candidato_dict(ev, u), "sincronizacion": r}
 
 
+async def registrar_resultado(
+    db: Session, ev: EvaluacionCandidato, p: Optional[Postulacion], *, actor: str, resumen: str = "", archivo: Optional[UploadFile] = None,
+    decision: str = "", origen: str = "manual", evaluatest: Optional[dict] = None, comentarios: str = "",
+) -> dict:
+    """Núcleo compartido por RH (POST /{codigo}/resultado) y por la liga externa (spec §10): adjunta informe,
+    resumen y decisión; un socioeconómico con PDF recibe la PROPUESTA de resumen de Red Human (sin puntuación);
+    lo médico se guarda cifrado; una corrección conserva el resultado anterior en el historial. Regresa avisos."""
+    from ..services import archivos as fs
+    from ..services import ia
+
+    avisos: List[str] = []
+    if ev.resultado_cargado_en or ev.dictamen:
+        sev.archivar_resultado_previo(ev, actor)
+    if archivo is not None and archivo.filename:
+        validado = await fs.validar(archivo, f"informe «{ev.nombre}»")
+        n = len(ev.adjuntos or []) + 1
+        ruta = fs.guardar(validado, f"evaluaciones/{ev.id}", f"informe_{ev.codigo}_{n}")
+        ev.archivo, ev.nombre_archivo, ev.mime = ruta, validado.nombre, validado.mime
+        sev.agregar_adjunto(ev, ruta, validado.nombre, validado.mime, actor)
+        if ev.tipo == "socioeconomico" and validado.mime == "application/pdf":
+            propuesta, _con_ia = ia.resumen_socioeconomico(ia.texto_de_pdf(validado.contenido))
+            texto = propuesta.get("resumen") or ""
+            if propuesta.get("hallazgos"):
+                texto += "\nHallazgos: " + "; ".join(propuesta["hallazgos"])
+            if propuesta.get("conclusion_documento"):
+                texto += "\nConclusión del documento: " + propuesta["conclusion_documento"]
+            sev.guardar_texto(ev, "resumen_ia", texto.strip())
+            if propuesta.get("aviso"):
+                avisos.append(propuesta["aviso"])
+    if resumen.strip():
+        sev.guardar_texto(ev, "resultado_resumen", resumen.strip())
+    elif ev.tipo == "socioeconomico" and ev.resumen_ia and not ev.resultado_resumen:
+        sev.guardar_texto(ev, "resultado_resumen", sev.leer_texto(ev, "resumen_ia"))  # propuesta editable por RH
+    if comentarios.strip():
+        sev.guardar_texto(ev, "comentario_revision", comentarios.strip())
+    if evaluatest is not None and sev.es_evaluatest(ev):
+        ev.resultado_json = {**(ev.resultado_json or {}), "evaluatest": sev.evaluatest_normalizado(evaluatest)}
+        origen = "liga_proveedor_reporte_anonimizado"
+    if decision.strip():
+        try:
+            texto_dec = sev.aplicar_decision(ev, decision)
+        except ValueError as ex:
+            raise HTTPException(400, str(ex))
+        avisos.append(f"Decisión registrada: {texto_dec}")
+    ev.origen_resultado = origen
+    ev.resultado_cargado_por, ev.resultado_cargado_en = actor, datetime.now(timezone.utc)
+    ev.realizada_en = ev.realizada_en or ev.resultado_cargado_en
+    if ev.modo == "integrada":
+        ev.paso_integrada = "resultado_recibido"
+    sev.mover(ev, "resultado_recibido", actor, f"Resultado cargado ({origen})" + (" con informe" if ev.archivo else "") + (f" · {decision}" if decision else ""))
+    return {"avisos": avisos}
+
+
 @router.post("/{codigo}/resultado")
 async def cargar_resultado(
-    codigo: str, resumen: str = Form(""), archivo: Optional[UploadFile] = File(None),
+    codigo: str, resumen: str = Form(""), archivo: Optional[UploadFile] = File(None), decision: str = Form(""),
+    evaluatest: str = Form(""), comentarios: str = Form(""),
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
 ):
-    """Adjuntar el informe/resultado manualmente (quién y cuándo). Exige los consentimientos."""
-    from ..services import archivos as fs
+    """Adjuntar el informe/resultado manualmente (quién y cuándo). Exige los consentimientos. Fraiche (spec §9-10):
+    `decision` (Apto/Apto condicionado/No recomendable · Continuar/No continuar · Favorable/…) y `evaluatest`
+    (JSON con indice_afinidad, igi, competencias, fortalezas, areas_oportunidad, riesgo — carga del reporte anonimizado)."""
+    import json as _json
 
     ev = _evaluacion(db, codigo, cuenta.id)
     p = _post_de(db, ev)
     _abierta(ev)
     _exigir_consentimiento(ev, p)
-    if not archivo and not resumen.strip():
+    if not archivo and not resumen.strip() and not evaluatest.strip() and not decision.strip():
         raise HTTPException(400, "Adjunta el informe o escribe el resultado.")
     if ev.es_medico and not u.puede_ver_informe_medico():
         raise HTTPException(403, "Cargar el informe médico requiere el permiso de informes médicos.")
-    if archivo is not None and archivo.filename:
-        validado = await fs.validar(archivo, f"informe «{ev.nombre}»")
-        ev.archivo = fs.guardar(validado, f"evaluaciones/{ev.id}", f"informe_{ev.codigo}")
-        ev.nombre_archivo, ev.mime = validado.nombre, validado.mime
-    if resumen.strip():
-        ev.resultado_resumen = resumen.strip()[:5000]
-    ev.resultado_cargado_por, ev.resultado_cargado_en = u.nombre, datetime.now(timezone.utc)
-    if ev.modo == "integrada":
-        ev.paso_integrada = "resultado_recibido"
-    sev.mover(ev, "resultado_recibido", u.nombre, "Resultado cargado manualmente" + (" (con informe)" if ev.archivo else ""))
+    datos_eval = None
+    if evaluatest.strip():
+        try:
+            datos_eval = _json.loads(evaluatest)
+        except ValueError:
+            raise HTTPException(400, "El reporte Evaluatest debe venir como JSON.")
+    r = await registrar_resultado(db, ev, p, actor=u.nombre, resumen=resumen, archivo=archivo, decision=decision, origen="manual", evaluatest=datos_eval, comentarios=comentarios)
     registrar(db, u.nombre, "evaluacion_resultado_cargado", "postulacion", p.codigo if p else "",
-              {"evaluacion": ev.codigo, "con_archivo": bool(ev.archivo), "correo_rh": u.correo})
+              {"evaluacion": ev.codigo, "con_archivo": bool(ev.archivo), "decision": ev.decision_externa, "origen": ev.origen_resultado, "correo_rh": u.correo})
     db.commit()
-    return evaluacion_candidato_dict(ev, u)
+    return {**evaluacion_candidato_dict(ev, u), "avisos": r["avisos"]}
 
 
 class RevisarIn(BaseModel):
@@ -371,12 +628,16 @@ def revisar(codigo: str, datos: RevisarIn, db: Session = Depends(get_db), u: Usu
         raise HTTPException(409, "Se revisa cuando ya hay resultado recibido.")
     if ev.es_medico and not u.puede_ver_informe_medico():
         raise HTTPException(403, "Transcribir el dictamen médico requiere el permiso de informes médicos.")
-    opciones = sev.dictamenes_de(ev.tipo)
-    if datos.dictamen not in opciones:
-        raise HTTPException(400, f"Dictamen inválido para {ev.nombre}: usa {', '.join(opciones.values())}.")
-    ev.dictamen, ev.comentario_revision = datos.dictamen, datos.comentario.strip()[:2000]
+    # Fraiche (spec §10): médico → Apto / Apto condicionado / No recomendable (se guarda como Favorable / Con
+    # observaciones / Desfavorable); franquiciatario → Continuar / No continuar; resto → conclusión general.
+    try:
+        texto_dictamen = sev.aplicar_decision(ev, datos.dictamen)
+    except ValueError as ex:
+        opciones = sev.dictamenes_visibles(ev)
+        raise HTTPException(400, f"Dictamen inválido para {ev.nombre}: usa {', '.join(opciones.values())}. ({ex})")
+    sev.guardar_texto(ev, "comentario_revision", datos.comentario.strip()[:2000])
     ev.revisada_por, ev.revisada_en = u.nombre, datetime.now(timezone.utc)
-    sev.mover(ev, "revisada", u.nombre, f"Dictamen: {opciones[datos.dictamen]}")
+    sev.mover(ev, "revisada", u.nombre, f"Dictamen: {texto_dictamen}")
     registrar(db, u.nombre, "evaluacion_revisada", "postulacion", p.codigo if p else "",
               {"evaluacion": ev.codigo, "tipo": ev.tipo, "dictamen": datos.dictamen, "correo_rh": u.correo})
     db.commit()
@@ -385,11 +646,12 @@ def revisar(codigo: str, datos: RevisarIn, db: Session = Depends(get_db), u: Usu
 
 class CancelarIn(BaseModel):
     motivo: str = ""
+    no_realizada: bool = False  # Fraiche (spec §10): «No realizada» (la persona no se presentó) vs «Cancelada»
 
 
 @router.post("/{codigo}/cancelar")
 def cancelar(codigo: str, datos: CancelarIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
-    """Fallida/Cancelada: siempre con motivo."""
+    """Fallida/Cancelada: siempre con motivo. Fraiche: `no_realizada=true` la marca «No realizada»."""
     ev = _evaluacion(db, codigo, cuenta.id)
     p = _post_de(db, ev)
     _abierta(ev)
@@ -397,8 +659,29 @@ def cancelar(codigo: str, datos: CancelarIn, db: Session = Depends(get_db), u: U
     if not motivo:
         raise HTTPException(400, "Indica el motivo (fallida o cancelada).")
     ev.motivo_fallida = motivo[:1000]
-    sev.mover(ev, "fallida", u.nombre, motivo)
-    registrar(db, u.nombre, "evaluacion_fallida", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "motivo": motivo[:300], "correo_rh": u.correo})
+    ev.no_realizada = bool(datos.no_realizada)
+    sev.mover(ev, "fallida", u.nombre, ("No realizada: " if datos.no_realizada else "Cancelada: ") + motivo)
+    registrar(db, u.nombre, "evaluacion_fallida", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "motivo": motivo[:300], "no_realizada": ev.no_realizada, "correo_rh": u.correo})
+    db.commit()
+    return evaluacion_candidato_dict(ev, u)
+
+
+class RealizadaIn(BaseModel):
+    nota: str = ""
+
+
+@router.post("/{codigo}/realizada")
+def marcar_realizada(codigo: str, datos: RealizadaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Fraiche (spec §10): «Realizada con resultado pendiente» — ya ocurrió (entrevista, estudio, consulta) y falta el resultado."""
+    ev = _evaluacion(db, codigo, cuenta.id)
+    p = _post_de(db, ev)
+    _abierta(ev)
+    _exigir_consentimiento(ev, p)
+    if ev.estado == "resultado_recibido":
+        raise HTTPException(409, "Esta evaluación ya tiene resultado.")
+    ev.realizada_en = datetime.now(timezone.utc)
+    sev.mover(ev, "en_proceso", u.nombre, "Realizada, resultado pendiente" + (f": {datos.nota.strip()[:300]}" if datos.nota.strip() else ""))
+    registrar(db, u.nombre, "evaluacion_realizada", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "correo_rh": u.correo})
     db.commit()
     return evaluacion_candidato_dict(ev, u)
 

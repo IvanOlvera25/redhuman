@@ -132,6 +132,175 @@ def etiqueta_modo(modo: str) -> str:
     return MODOS_PRUEBA.get(modo, modo)
 
 
+# ---------- Demo Fraiche (spec §9-10, 2026-09-29) ----------
+
+from . import cifrado as _cif  # noqa: E402
+from . import fraiche as _fr  # noqa: E402
+
+CAMPOS_MEDICOS_CIFRADOS = ("resultado_resumen", "comentario_revision", "notas", "resumen_ia")
+
+
+def estado_fraiche(ev: EvaluacionCandidato) -> str:
+    """Estados del spec §10 sobre el seguimiento interno: Pendiente / Realizada con resultado pendiente /
+    Con resultado / No realizada / Cancelada."""
+    if ev.estado == "fallida":
+        return "no_realizada" if ev.no_realizada else "cancelada"
+    if ev.estado in ("resultado_recibido", "revisada"):
+        return "con_resultado"
+    if ev.realizada_en:
+        return "realizada_pendiente"
+    return "pendiente"
+
+
+def etiqueta_estado_fraiche(ev: EvaluacionCandidato) -> str:
+    return _fr.ESTADOS_EVALUACION_EXTERNA.get(estado_fraiche(ev), ESTADOS_EVALUACION.get(ev.estado, ev.estado))
+
+
+def guardar_texto(ev: EvaluacionCandidato, campo: str, valor: str) -> None:
+    """Escribe un campo de texto; en una evaluación MÉDICA queda cifrado (spec §10)."""
+    valor = (valor or "")[:5000]
+    if ev.es_medico and campo in CAMPOS_MEDICOS_CIFRADOS:
+        setattr(ev, campo, _cif.cifrar(valor))
+        ev.cifrado = True
+    else:
+        setattr(ev, campo, valor)
+
+
+def leer_texto(ev: EvaluacionCandidato, campo: str) -> str:
+    """Lee un campo de texto descifrándolo si hace falta. SOLO llamar para quien tiene permiso (el serializador
+    ya recorta el informe médico para el resto)."""
+    return _cif.descifrar(getattr(ev, campo) or "")
+
+
+def dictamen_interno_medico(decision: str) -> Optional[str]:
+    """Apto / Apto condicionado / No recomendable (spec) → Favorable / Con observaciones / Desfavorable. Acepta
+    también los valores previos (apto_con_restricciones, no_apto) para no romper registros anteriores."""
+    mapa = {**_fr.DICTAMEN_MEDICO_A_INTERNO, "apto_con_restricciones": "con_observaciones", "no_apto": "desfavorable"}
+    return mapa.get(decision)
+
+
+def texto_decision_medica(decision: str) -> str:
+    return {**_fr.DICTAMEN_MEDICO_FRAICHE, **DICTAMENES_MEDICOS}.get(decision, "")
+
+
+def dictamenes_visibles(ev: EvaluacionCandidato) -> dict:
+    """Opciones que se ofrecen en la UI: médico → Apto / Apto condicionado / No recomendable; franquiciatario →
+    Continuar / No continuar; el resto → Favorable / Con observaciones / Desfavorable."""
+    if ev.es_medico:
+        return dict(_fr.DICTAMEN_MEDICO_FRAICHE)
+    if es_franquiciatario(ev):
+        return dict(_fr.DECISIONES_FRANQUICIATARIO)
+    return dict(DICTAMENES_GENERALES)
+
+
+def es_franquiciatario(ev: EvaluacionCandidato) -> bool:
+    return ev.tipo == "otra" and (ev.nombre or "").strip().lower() == _fr.NOMBRE_EVALUACION_FRANQUICIATARIO.lower()
+
+
+def es_encargado(ev: EvaluacionCandidato) -> bool:
+    return ev.tipo == "otra" and (ev.nombre or "").strip().lower() == _fr.NOMBRE_EVALUACION_ENCARGADO.lower()
+
+
+def aplicar_decision(ev: EvaluacionCandidato, decision: str) -> str:
+    """Guarda la decisión tal como la eligió quien evaluó y su equivalente interno en `dictamen`. Regresa el
+    texto visible. Lanza ValueError si la decisión no aplica al tipo."""
+    d = (decision or "").strip().lower()
+    if ev.es_medico:
+        interno = dictamen_interno_medico(d)
+        if not interno:
+            raise ValueError("El dictamen médico es Apto, Apto condicionado o No recomendable.")
+        ev.decision_externa, ev.dictamen = d, interno
+        return texto_decision_medica(d)
+    if es_franquiciatario(ev):
+        if d not in _fr.DECISIONES_FRANQUICIATARIO:
+            raise ValueError("La decisión del franquiciatario es Continuar o No continuar.")
+        ev.decision_externa, ev.dictamen = d, _fr.DECISION_FRANQUICIATARIO_A_INTERNO[d]
+        return _fr.DECISIONES_FRANQUICIATARIO[d]
+    if d not in DICTAMENES_GENERALES:
+        raise ValueError("La conclusión es Favorable, Con observaciones o Desfavorable.")
+    ev.decision_externa, ev.dictamen = d, d
+    return DICTAMENES_GENERALES[d]
+
+
+def texto_dictamen(ev: EvaluacionCandidato) -> str:
+    if not ev.dictamen:
+        return ""
+    if ev.decision_externa:
+        return (texto_decision_medica(ev.decision_externa) if ev.es_medico else
+                _fr.DECISIONES_FRANQUICIATARIO.get(ev.decision_externa) if es_franquiciatario(ev) else
+                DICTAMENES_GENERALES.get(ev.decision_externa)) or DICTAMENES_GENERALES.get(ev.dictamen, ev.dictamen)
+    return {**DICTAMENES_GENERALES, **DICTAMENES_MEDICOS}.get(ev.dictamen, ev.dictamen)
+
+
+def archivar_resultado_previo(ev: EvaluacionCandidato, usuario: str) -> None:
+    """Spec §10: «Una corrección conserva el resultado anterior en el historial»."""
+    if not (ev.resultado_cargado_en or ev.dictamen):
+        return
+    ev.historial = list(ev.historial or []) + [{
+        "fecha": datetime.now(timezone.utc).isoformat(), "usuario": usuario, "de": ev.estado, "a": ev.estado,
+        "detalle": "Corrección: se conserva el resultado anterior",
+        "resultado_anterior": {
+            "dictamen": ev.dictamen, "decision": ev.decision_externa, "origen": ev.origen_resultado,
+            "resumen": ("[cifrado]" if ev.es_medico else (ev.resultado_resumen or "")[:500]),
+            "cargado_por": ev.resultado_cargado_por, "cargado_en": ev.resultado_cargado_en.isoformat() if ev.resultado_cargado_en else None,
+            "archivo": ev.nombre_archivo or "",
+        },
+    }]
+
+
+def normalizar_referencias(lista: List[dict]) -> List[dict]:
+    """Referencias laborales (spec §10): contactos, fecha de verificación, resultado, comentarios y responsable."""
+    salida = []
+    for r in lista or []:
+        if not isinstance(r, dict):
+            continue
+        contacto = str(r.get("contacto") or "").strip()[:150]
+        if not contacto:
+            continue
+        resultado = str(r.get("resultado") or "").strip().lower()
+        salida.append({
+            "contacto": contacto, "empresa": str(r.get("empresa") or "").strip()[:150], "telefono": str(r.get("telefono") or "").strip()[:30],
+            "puesto": str(r.get("puesto") or "").strip()[:120], "fecha_verificacion": str(r.get("fecha_verificacion") or "").strip()[:10],
+            "resultado": resultado if resultado in ("favorable", "con_observaciones", "desfavorable", "sin_respuesta", "") else "",
+            "comentarios": str(r.get("comentarios") or "").strip()[:1000], "responsable": str(r.get("responsable") or "").strip()[:150],
+        })
+    return salida[:10]
+
+
+def evaluatest_normalizado(datos: dict) -> dict:
+    """Campos del reporte Evaluatest (spec §9): índice de afinidad, IGI, competencias, fortalezas, áreas de
+    oportunidad y riesgo. Solo lo que venga; nada se inventa."""
+    def _pct(v):
+        try:
+            x = float(str(v).replace("%", "").strip())
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, min(100.0, x))
+
+    def _lista(v):
+        if isinstance(v, list):
+            return [str(x).strip()[:200] for x in v if str(x).strip()][:20]
+        return [x.strip()[:200] for x in str(v or "").replace("\n", ",").split(",") if x.strip()][:20]
+
+    d = datos or {}
+    return {
+        "indice_afinidad": _pct(d.get("indice_afinidad")),
+        "igi": _pct(d.get("igi")),
+        "competencias": _lista(d.get("competencias")),
+        "fortalezas": _lista(d.get("fortalezas")),
+        "areas_oportunidad": _lista(d.get("areas_oportunidad")),
+        "riesgo": str(d.get("riesgo") or "").strip()[:200],
+    }
+
+
+def es_evaluatest(ev: EvaluacionCandidato) -> bool:
+    return ev.tipo == "psicometrica" and (ev.proveedor or "").strip().lower() == _fr.PROVEEDOR_EVALUATEST.lower()
+
+
+def agregar_adjunto(ev: EvaluacionCandidato, ruta: str, nombre: str, mime: str, subido_por: str) -> None:
+    ev.adjuntos = list(ev.adjuntos or []) + [{"ruta": ruta, "nombre": nombre, "mime": mime, "subido_por": subido_por, "subido_en": datetime.now(timezone.utc).isoformat()}]
+
+
 # ---------- Psicométricas.mx (2026-09-29) ----------
 
 def usa_psicometricas(ev: EvaluacionCandidato) -> bool:
