@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  BarChart3,
   Bell,
   BookOpen,
   Briefcase,
@@ -30,7 +31,7 @@ import {
 import { Logo, Avatar, Button } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
-import { useSesion } from "@/components/sesion";
+import { usePuedeVerTableroReclutamiento, useSesion } from "@/components/sesion";
 import { fetchActividadAgente } from "@/lib/api";
 import { usePolling } from "@/lib/use-polling";
 import { BarraAgente } from "@/components/dashboard/agente/barra";
@@ -51,6 +52,9 @@ const navOperacion: NavItem[] = [
   { href: "/dashboard/candidatos", label: "Candidatos", icon: Users },
   { href: "/dashboard/entrevistas", label: "Entrevistas", icon: Video },
 ];
+
+// Fraiche §14: solo Coordinación de Reclutamiento y Administrador (se inserta después de «Tablero de control»).
+const navReclutamiento: NavItem = { href: "/dashboard/reclutamiento", label: "Tablero de reclutamiento", icon: BarChart3 };
 
 const navColaborador: NavItem[] = [
   { href: "/dashboard/colaboradores", label: "Colaboradores", icon: UserSquare2 },
@@ -225,6 +229,8 @@ function ContadorAgente() {
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const { usuario } = useSesion();
+  const veReclutamiento = usePuedeVerTableroReclutamiento();
+  const itemsOperacion = veReclutamiento ? [navOperacion[0], navReclutamiento, ...navOperacion.slice(1)] : navOperacion;
   return (
     <div className="flex min-h-full flex-col gap-5 p-4 lg:h-full lg:gap-6">
       <div className="px-2 pt-1">
@@ -252,7 +258,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <div className="flex-1 space-y-5 lg:overflow-y-auto">
         <div>
           <p className="px-3 pb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-ink-3">Reclutamiento</p>
-          <NavList items={navOperacion} onNavigate={onNavigate} />
+          <NavList items={itemsOperacion} onNavigate={onNavigate} />
         </div>
         <div>
           <p className="px-3 pb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-ink-3">Colaborador</p>

@@ -140,6 +140,13 @@ export interface Candidato {
   /** Fraiche (2026-09-29): fuente de ESTA postulación (portal, indeed, referido, campo…) y quién refirió. */
   fuentePostulacion?: string;
   referidoPor?: string;
+  /** Fraiche (spec §11-12): paso visible de la ruta por destino y estado de franquicia. */
+  paso?: string;
+  pasoNombre?: string;
+  destino?: "tienda_propia" | "franquicia";
+  ruta?: { clave: string; nombre: string; etapa: string }[];
+  franquiciaEstado?: "" | "presentado" | "aceptado" | "no_aceptado";
+  franquiciaEstadoTexto?: string;
   totalPostulaciones?: number;
   yaAplicoAntes?: boolean;
   activa?: boolean;

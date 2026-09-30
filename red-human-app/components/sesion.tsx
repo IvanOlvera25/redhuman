@@ -141,6 +141,12 @@ export function useEsAdmin() {
   return useSesion().usuario?.rol === "Administrador";
 }
 
+/** Tablero de control de Reclutamiento (Fraiche §14): lo ven Coordinación de Reclutamiento y Administrador. */
+export function usePuedeVerTableroReclutamiento() {
+  const rol = useSesion().usuario?.rol;
+  return rol === "Administrador" || rol === "Coordinación";
+}
+
 /** Modo Prueba (Lote 4) — activo, ciertos bloqueos de estado pueden saltarse con
  * `forzarPrueba` (ver moverEtapaCandidato/autorizarAlta/etc. en lib/api.ts); el flag es inerte
  * si esto es `false`, el servidor nunca lo obedece fuera de Modo Prueba. */

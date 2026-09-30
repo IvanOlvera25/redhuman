@@ -1206,7 +1206,9 @@ class UsuarioCuenta(Base):
     cuenta: Mapped["Cuenta"] = relationship(back_populates="usuarios")
 
 
-ROLES = ("Administrador", "Usuario")
+# Fraiche (spec §1/§14): «Coordinación» ve toda la operación en el Tablero de control de Reclutamiento (por equipo,
+# tienda y franquicia). Reclutador = «Usuario». Administrador también lo ve.
+ROLES = ("Administrador", "Usuario", "Coordinación")
 
 
 class Usuario(Base):
@@ -1259,6 +1261,10 @@ class Usuario(Base):
 
     def puede_ver_informe_medico(self) -> bool:
         return self.rol == "Administrador" or bool(self.acceso_informes_medicos)
+
+    def puede_ver_tablero_reclutamiento(self) -> bool:
+        """Fraiche (spec §14): Tablero de control de Reclutamiento — Coordinación y Administrador."""
+        return self.rol in ("Administrador", "Coordinación")
 
     def puede_decidir(self) -> bool:
         """Ya no hay perfil de solo lectura (Fase A): Administrador y Usuario deciden por

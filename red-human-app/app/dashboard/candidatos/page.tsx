@@ -44,6 +44,11 @@ import {
   RefreshCw,
   Trash2,
   ArrowRightLeft,
+  Route,
+  Store,
+  Handshake,
+  Database,
+  FileDown,
 } from "lucide-react";
 import { Card, Badge, Button, Avatar, Eyebrow, Progress } from "@/components/ui";
 import { PageHeader, EstadoBadge, ScoreRing } from "@/components/dashboard/parts";
@@ -123,6 +128,20 @@ import {
   type ContactoCliente,
   type Entrevistador,
   type ResultadoNotificacion,
+  // Fraiche (spec §11-13): ruta visible, franquicia, alta SAP y ficha para presentar
+  type PasoFraiche,
+  type PasoRuta,
+  type DatosAltaSap,
+  ESTADOS_FRANQUICIA,
+  SECCIONES_FICHA,
+  moverPasoCandidato,
+  presentarFranquiciatario,
+  actualizarFranquicia,
+  fetchDatosAltaSap,
+  capturarDatosAltaSap,
+  confirmarDatosAltaSap,
+  urlFichaPresentacion,
+  generarFichaPresentacion,
 } from "@/lib/api";
 import { usePuedeDecidir, useModoPrueba } from "@/components/sesion";
 import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveedor";
@@ -156,6 +175,28 @@ const etapaColor: Record<EtapaCandidato, string> = {
   Contratación: "var(--warn)",
   Onboarding: "var(--good)",
 };
+
+/** Fraiche (spec §11): ruta visible de Tienda propia (11 pasos). La etapa interna de cada paso solo sirve para
+ * el deep-link `?etapa=`; si algún candidato trae `ruta`, se toma de ahí (fuente: el servidor). */
+const RUTA_TIENDA_PROPIA: PasoRuta[] = [
+  { clave: "nuevo", nombre: "Nuevo", etapa: "Prefiltro" },
+  { clave: "prefiltro_web", nombre: "Prefiltro web", etapa: "Prefiltro" },
+  { clave: "filtro_whatsapp", nombre: "Filtro por WhatsApp", etapa: "Prefiltro" },
+  { clave: "entrevista_inicial", nombre: "Entrevista inicial", etapa: "Entrevista IA" },
+  { clave: "ipv", nombre: "Entrevista IPV", etapa: "Entrevista IA" },
+  { clave: "psicometria", nombre: "Psicometría", etapa: "Evaluación" },
+  { clave: "evaluaciones_adicionales", nombre: "Evaluaciones adicionales", etapa: "Evaluación" },
+  { clave: "referencias", nombre: "Referencias", etapa: "Entrevista Humana" },
+  { clave: "documentacion", nombre: "Documentación", etapa: "Contratación" },
+  { clave: "listo_alta", nombre: "Listo para alta", etapa: "Onboarding" },
+  { clave: "listo_sap", nombre: "Listo para SAP", etapa: "Onboarding" },
+];
+/** Último paso de la ruta de Franquicia (la contratación la hace el franquiciatario). */
+const PASO_PRESENTACION: PasoRuta = { clave: "presentacion", nombre: "Presentación al franquiciatario", etapa: "Entrevista Humana" };
+/** Pasos que solo existen en Tienda propia (la ruta de franquicia tiene 7). */
+const PASOS_SOLO_TIENDA: PasoFraiche[] = ["evaluaciones_adicionales", "referencias", "documentacion", "listo_alta", "listo_sap"];
+const DESTINO_NOMBRE: Record<string, string> = { tienda_propia: "Tienda propia", franquicia: "Franquicia" };
+const TEXTO_ACEPTADO_FRANQUICIA = "Se cerrará la postulación: la contratación la realiza el franquiciatario y no cuenta como ingreso de Fraiche";
 
 /** Zero-touch: la IA ya avanzó sola al candidato hasta aquí; esto es solo el siguiente
  * checkpoint humano al que RH puede mandarlo con un botón explícito (no "cualquier etapa
@@ -324,6 +365,8 @@ function CandidatosContenido() {
 
   // Fase C: Vistas, URL params y filtros avanzados
   const [vista, setVista] = useState<"pipeline" | "lista">("pipeline");
+  // Fraiche (spec §11): el Kanban se ve por la ruta visible (pasos) o por etapa interna; se recuerda en localStorage
+  const [vistaRuta, setVistaRuta] = useState(true);
   const [columnaResaltada, setColumnaResaltada] = useState<string | null>(null);
   const [filtrosAvanzados, setFiltrosAvanzados] = useState(false);
   const [fCliente, setFCliente] = useState<number | "">("");
@@ -357,7 +400,18 @@ function CandidatosContenido() {
     if (guardada === "pipeline" || guardada === "lista") {
       setVista(guardada);
     }
+    try {
+      const ruta = localStorage.getItem("rh-candidatos-vista-ruta");
+      if (ruta === "etapas") setVistaRuta(false);
+      if (ruta === "ruta") setVistaRuta(true);
+    } catch {}
   }, [searchParams]);
+  const cambiarVistaRuta = (ruta: boolean) => {
+    setVistaRuta(ruta);
+    try {
+      localStorage.setItem("rh-candidatos-vista-ruta", ruta ? "ruta" : "etapas");
+    } catch {}
+  };
 
   const cambiarVista = (nueva: "pipeline" | "lista") => {
     setVista(nueva);
@@ -510,6 +564,23 @@ function CandidatosContenido() {
   ]);
 
   const vacanteSeleccionada = vacantes.find((v) => v.id === filtroVacante);
+  // Fraiche (spec §11): columnas de la ruta visible. Si el servidor manda `ruta`, sus nombres/etapas mandan;
+  // la columna «Presentación al franquiciatario» solo aparece cuando hay candidatos de franquicia.
+  const columnasRuta = useMemo<PasoRuta[]>(() => {
+    const porClave = new Map<string, PasoRuta>();
+    for (const p of RUTA_TIENDA_PROPIA) porClave.set(p.clave, p);
+    porClave.set(PASO_PRESENTACION.clave, PASO_PRESENTACION);
+    for (const c of datos) for (const p of c.ruta ?? []) porClave.set(p.clave, { clave: p.clave as PasoFraiche, nombre: p.nombre, etapa: p.etapa });
+    const hayFranquicia = datos.some((c) => c.destino === "franquicia");
+    const base = RUTA_TIENDA_PROPIA.map((p) => porClave.get(p.clave) ?? p);
+    return hayFranquicia ? [...base, porClave.get(PASO_PRESENTACION.clave) ?? PASO_PRESENTACION] : base;
+  }, [datos]);
+  /** Columna de una tarjeta: su `paso`; si no trae (registro previo), el primer paso de su etapa. */
+  function pasoDe(c: Candidato): string {
+    if (c.paso && columnasRuta.some((p) => p.clave === c.paso)) return c.paso;
+    return columnasRuta.find((p) => p.etapa === c.etapa)?.clave ?? columnasRuta[0].clave;
+  }
+
   const totalFiltrosAvanzadosActivos =
     (fCliente !== "" ? 1 : 0) +
     (fResponsable !== "" ? 1 : 0) +
@@ -584,6 +655,32 @@ function CandidatosContenido() {
               <List className="h-3.5 w-3.5" /> Lista
             </button>
           </div>
+
+          {/* Fraiche (spec §11): Kanban por ruta visible (pasos) o por etapa interna */}
+          {vista === "pipeline" && (
+            <div className="flex items-center rounded-xl border border-border-soft bg-surface p-1 shadow-sm">
+              <button
+                onClick={() => cambiarVistaRuta(true)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition",
+                  vistaRuta ? "bg-brand text-white shadow-sm" : "text-ink-3 hover:bg-surface-2 hover:text-ink",
+                )}
+                title="Columnas por paso de la ruta (Tienda propia / Franquicia)"
+              >
+                <Route className="h-3.5 w-3.5" /> Ruta Fraiche
+              </button>
+              <button
+                onClick={() => cambiarVistaRuta(false)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition",
+                  !vistaRuta ? "bg-brand text-white shadow-sm" : "text-ink-3 hover:bg-surface-2 hover:text-ink",
+                )}
+                title="Columnas por etapa interna"
+              >
+                Etapas
+              </button>
+            </div>
+          )}
 
           {/* Filtro por vacante */}
           <div className="relative">
@@ -888,8 +985,55 @@ function CandidatosContenido() {
         </div>
       )}
 
-      {/* VISTA 1: PIPELINE (Kanban) */}
-      {!cargando && vista === "pipeline" && (
+      {/* VISTA 1b: RUTA FRAICHE (spec §11) — una columna por paso visible; tablero con desplazamiento horizontal */}
+      {!cargando && vista === "pipeline" && vistaRuta && (
+        <div className="scroll-x mt-6 items-start gap-4 pb-3" style={{ scrollSnapType: "none" }}>
+          {columnasRuta.filter((p) => !columnaResaltada || p.etapa === columnaResaltada).map((p, idx, arr) => {
+            const cols = datosFiltrados.filter((c) => pasoDe(c) === p.clave);
+            const esResaltada = Boolean(columnaResaltada) && p.etapa === columnaResaltada;
+            const soloTienda = PASOS_SOLO_TIENDA.includes(p.clave);
+            const soloFranquicia = p.clave === "presentacion";
+            // id de etapa solo en la primera columna de cada etapa (para el scroll del deep-link ?etapa=)
+            const primeraDeEtapa = arr.findIndex((x) => x.etapa === p.etapa) === idx;
+            return (
+              <div
+                key={p.clave}
+                id={primeraDeEtapa ? `columna-etapa-${p.etapa.replace(/\s/g, "-")}` : `columna-paso-${p.clave}`}
+                className={cn(
+                  "flex w-[15rem] min-w-[15rem] flex-col whitespace-normal rounded-2xl border p-3 transition-all duration-300",
+                  esResaltada ? "border-brand bg-brand/5 ring-2 ring-brand/30 shadow-md" : "border-border-soft bg-surface-2/40",
+                )}
+              >
+                <div className="mb-3 flex items-start justify-between gap-2 px-1">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: etapaColor[p.etapa as EtapaCandidato] ?? "var(--ink-3)" }} />
+                      <span className={cn("truncate text-sm font-semibold", esResaltada && "text-brand")} title={p.nombre}>{p.nombre}</span>
+                    </div>
+                    <p className="mt-0.5 pl-4 text-[10px] text-ink-3">
+                      {soloFranquicia ? "Solo franquicia" : soloTienda ? "Solo tienda propia" : "Tienda propia · Franquicia"}
+                    </p>
+                  </div>
+                  <span className={cn("shrink-0 rounded-full px-2 py-0.5 font-mono text-[11px]", esResaltada ? "bg-brand font-bold text-white" : "bg-surface text-ink-3")}>
+                    {cols.length}
+                  </span>
+                </div>
+                <div className="flex flex-col gap-2.5">
+                  {cols.map((c) => (
+                    <TarjetaKanban key={c.id} c={c} esDup={duplicadosSet.has(c.id)} puedeDecidir={puedeDecidir} mostrarDestino onAbrir={abrir} onAvance={setAvanceKanban} />
+                  ))}
+                  {cols.length === 0 && (
+                    <div className="rounded-xl border border-dashed border-border-soft py-8 text-center text-xs text-ink-3">Sin candidatos</div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* VISTA 1: PIPELINE (Kanban por etapa interna) */}
+      {!cargando && vista === "pipeline" && !vistaRuta && (
         <div className={cn("mt-6 grid gap-4", columnaResaltada ? "grid-cols-1 sm:max-w-md" : "sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6")}>
           {etapas.filter((etapa) => !columnaResaltada || etapa === columnaResaltada).map((etapa) => {
             const cols = datosFiltrados.filter((c) => c.etapa === etapa);
@@ -922,146 +1066,9 @@ function CandidatosContenido() {
                 </div>
 
                 <div className="flex flex-col gap-2.5">
-                  {cols.map((c) => {
-                    const esDup = duplicadosSet.has(c.id);
-                    return (
-                      /* 2026-09-22: el menú «…» va FUERA del botón de la tarjeta (no se anidan botones);
-                         solo aparece donde tiene sentido avanzar directo a Entrevista Humana. */
-                      <div key={c.id} className="relative">
-                      {puedeDecidir && ETAPAS_AVANCE_DIRECTO.includes(c.etapa) && c.activa !== false && (
-                        <div className="absolute right-1.5 top-1.5 z-10">
-                          <MenuAcciones
-                            etiqueta={`Acciones de ${c.nombre}`}
-                            acciones={[{
-                              etiqueta: "Avanzar a Entrevista Humana",
-                              icono: <CalendarClock />,
-                              title: TEXTO_AVANCE_DIRECTO,
-                              onClick: () => setAvanceKanban(c),
-                            }]}
-                          />
-                        </div>
-                      )}
-                      <button
-                        onClick={() => abrir(c)}
-                        className="card-hover group w-full rounded-xl border border-border-soft bg-surface p-3.5 text-left transition-all hover:border-brand/40 hover:shadow-md"
-                      >
-                        <div className="flex items-center gap-3">
-                          <div className="relative">
-                            <ScoreRing score={c.score} />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <p className="truncate text-sm font-semibold group-hover:text-brand">{c.nombre}</p>
-                              {c.esPrueba && (
-                                <span className="shrink-0 rounded bg-brand-soft px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide text-brand">
-                                  Prueba
-                                </span>
-                              )}
-                              {c.yaAplicoAntes && (
-                                <span
-                                  title={`Este candidato tiene ${c.totalPostulaciones} postulaciones`}
-                                  className="shrink-0 rounded bg-blue-500/10 px-1.5 py-0.5 font-mono text-[9px] font-bold text-blue-600"
-                                >
-                                  🔄 Ya aplicó antes
-                                </span>
-                              )}
-                              {c.activa === false && (
-                                <span
-                                  title={`Postulación cerrada (${c.motivoCierre || "sin motivo"}) — queda como historial de la persona`}
-                                  className="shrink-0 rounded bg-ink-3/10 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide text-ink-3"
-                                >
-                                  Cerrada
-                                </span>
-                              )}
-                              {esDup && (
-                                <span
-                                  title="Posible candidato duplicado (coincide teléfono o correo)"
-                                  className="shrink-0 rounded bg-warn-soft px-1.5 py-0.5 font-mono text-[9px] font-bold text-warn"
-                                >
-                                  Duplicado
-                                </span>
-                              )}
-                            </div>
-                            <p className="truncate text-xs text-ink-3">
-                              {c.puesto || "Sin vacante"}
-                              {c.clienteVacante ? ` · ${c.clienteVacante}` : ""}
-                            </p>
-                            <div className="mt-1 flex items-center gap-1.5">
-                              <span className="rounded bg-brand/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand">
-                                Score CV: {c.score}%
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Estado y Apto (Fase C) */}
-                        <div className="mt-3 flex items-center justify-between">
-                          <div className="flex items-center gap-1.5">
-                            <EstadoBadge estado={c.estado} />
-                            {c.resultadoApto === true && (
-                              <span className="rounded-md bg-good-soft px-1.5 py-0.5 text-[10px] font-bold text-good">
-                                Apto
-                              </span>
-                            )}
-                            {c.resultadoApto === false && (
-                              <span className="rounded-md bg-bad-soft px-1.5 py-0.5 text-[10px] font-bold text-bad">
-                                No apto
-                              </span>
-                            )}
-                          </div>
-                          <span className="flex items-center gap-1 font-mono text-[10px] text-ink-3">
-                            {c.fuente === "WhatsApp" ? (
-                              <span className="inline-flex items-center gap-1 font-semibold text-good">
-                                <MessageCircle className="h-3 w-3" /> WhatsApp
-                              </span>
-                            ) : (
-                              c.fuente
-                            )}
-                          </span>
-                        </div>
-
-                        {/* Señales */}
-                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                          {(c.archivos ?? 0) > 0 && (
-                            <Pastilla icon={FileText} tono="neutral">
-                              {c.archivos} CV/doc
-                            </Pastilla>
-                          )}
-                          {(c.mensajes ?? 0) > 0 && (
-                            <Pastilla icon={MessageCircle} tono="good">
-                              {c.mensajes} msgs
-                            </Pastilla>
-                          )}
-                          {c.entrevistaEstado === "evaluada" && (
-                            <Pastilla icon={Video}>match {c.entrevistaMatch ?? "—"}</Pastilla>
-                          )}
-                          {c.expedienteId != null && (
-                            <Pastilla icon={UserCheck} tono="good">
-                              expediente {c.expedienteProgreso ?? 0}%
-                            </Pastilla>
-                          )}
-                          {c.consentimiento === false && (
-                            <Pastilla icon={AlertTriangle} tono="warn">
-                              sin consentimiento
-                            </Pastilla>
-                          )}
-                        </div>
-
-                        {/* Fecha última actividad / aplicación */}
-                        {(c.ultimaActividadEn || c.aplicado) && (
-                          <div className="mt-2.5 flex items-center gap-1 border-t border-border-faint pt-2 text-[10px] text-ink-3">
-                            <Clock className="h-3 w-3" />
-                            <span>
-                              {c.ultimaActividadEn
-                                ? `Actividad ${fechaCorta(c.ultimaActividadEn)}`
-                                : `Aplicó ${fechaCorta(c.aplicado)}`}
-                            </span>
-                          </div>
-                        )}
-                      </button>
-                      </div>
-                    );
-                  })}
+                  {cols.map((c) => (
+                    <TarjetaKanban key={c.id} c={c} esDup={duplicadosSet.has(c.id)} puedeDecidir={puedeDecidir} onAbrir={abrir} onAvance={setAvanceKanban} />
+                  ))}
                   {cols.length === 0 && (
                     <div className="rounded-xl border border-dashed border-border-soft py-8 text-center text-xs text-ink-3">
                       Sin candidatos
@@ -1277,6 +1284,177 @@ export default function Candidatos() {
   );
 }
 
+/** Tarjeta del Kanban (misma en las vistas «Etapas» y «Ruta Fraiche»; `mostrarDestino` solo en la ruta).
+ * El menú «…» va FUERA del botón de la tarjeta (no se anidan botones). */
+function TarjetaKanban({
+  c,
+  esDup,
+  puedeDecidir,
+  mostrarDestino = false,
+  onAbrir,
+  onAvance,
+}: {
+  c: Candidato;
+  esDup: boolean;
+  puedeDecidir: boolean;
+  mostrarDestino?: boolean;
+  onAbrir: (c: Candidato) => void;
+  onAvance: (c: Candidato) => void;
+}) {
+  return (
+    /* 2026-09-22: el menú «…» va FUERA del botón de la tarjeta (no se anidan botones);
+       solo aparece donde tiene sentido avanzar directo a Entrevista Humana. */
+    <div className="relative">
+    {puedeDecidir && ETAPAS_AVANCE_DIRECTO.includes(c.etapa) && c.activa !== false && (
+      <div className="absolute right-1.5 top-1.5 z-10">
+        <MenuAcciones
+          etiqueta={`Acciones de ${c.nombre}`}
+          acciones={[{
+            etiqueta: "Avanzar a Entrevista Humana",
+            icono: <CalendarClock />,
+            title: TEXTO_AVANCE_DIRECTO,
+            onClick: () => onAvance(c),
+          }]}
+        />
+      </div>
+    )}
+    <button
+      onClick={() => onAbrir(c)}
+      className="card-hover group w-full rounded-xl border border-border-soft bg-surface p-3.5 text-left transition-all hover:border-brand/40 hover:shadow-md"
+    >
+      <div className="flex items-center gap-3">
+        <div className="relative">
+          <ScoreRing score={c.score} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <p className="truncate text-sm font-semibold group-hover:text-brand">{c.nombre}</p>
+            {c.esPrueba && (
+              <span className="shrink-0 rounded bg-brand-soft px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide text-brand">
+                Prueba
+              </span>
+            )}
+            {c.yaAplicoAntes && (
+              <span
+                title={`Este candidato tiene ${c.totalPostulaciones} postulaciones`}
+                className="shrink-0 rounded bg-blue-500/10 px-1.5 py-0.5 font-mono text-[9px] font-bold text-blue-600"
+              >
+                🔄 Ya aplicó antes
+              </span>
+            )}
+            {c.activa === false && (
+              <span
+                title={`Postulación cerrada (${c.motivoCierre || "sin motivo"}) — queda como historial de la persona`}
+                className="shrink-0 rounded bg-ink-3/10 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide text-ink-3"
+              >
+                Cerrada
+              </span>
+            )}
+            {esDup && (
+              <span
+                title="Posible candidato duplicado (coincide teléfono o correo)"
+                className="shrink-0 rounded bg-warn-soft px-1.5 py-0.5 font-mono text-[9px] font-bold text-warn"
+              >
+                Duplicado
+              </span>
+            )}
+            {mostrarDestino && c.destino && (
+              <span
+                className={cn(
+                  "shrink-0 rounded px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide",
+                  c.destino === "franquicia" ? "bg-human-soft text-human" : "bg-good-soft text-good",
+                )}
+              >
+                {DESTINO_NOMBRE[c.destino] ?? c.destino}
+              </span>
+            )}
+            {mostrarDestino && c.destino === "franquicia" && c.franquiciaEstadoTexto && (
+              <span className="shrink-0 rounded bg-human/10 px-1.5 py-0.5 font-mono text-[9px] font-bold text-human">
+                {c.franquiciaEstadoTexto}
+              </span>
+            )}
+          </div>
+          <p className="truncate text-xs text-ink-3">
+            {c.puesto || "Sin vacante"}
+            {c.clienteVacante ? ` · ${c.clienteVacante}` : ""}
+          </p>
+          <div className="mt-1 flex items-center gap-1.5">
+            <span className="rounded bg-brand/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand">
+              Score CV: {c.score}%
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Estado y Apto (Fase C) */}
+      <div className="mt-3 flex items-center justify-between">
+        <div className="flex items-center gap-1.5">
+          <EstadoBadge estado={c.estado} />
+          {c.resultadoApto === true && (
+            <span className="rounded-md bg-good-soft px-1.5 py-0.5 text-[10px] font-bold text-good">
+              Apto
+            </span>
+          )}
+          {c.resultadoApto === false && (
+            <span className="rounded-md bg-bad-soft px-1.5 py-0.5 text-[10px] font-bold text-bad">
+              No apto
+            </span>
+          )}
+        </div>
+        <span className="flex items-center gap-1 font-mono text-[10px] text-ink-3">
+          {c.fuente === "WhatsApp" ? (
+            <span className="inline-flex items-center gap-1 font-semibold text-good">
+              <MessageCircle className="h-3 w-3" /> WhatsApp
+            </span>
+          ) : (
+            c.fuente
+          )}
+        </span>
+      </div>
+
+      {/* Señales */}
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        {(c.archivos ?? 0) > 0 && (
+          <Pastilla icon={FileText} tono="neutral">
+            {c.archivos} CV/doc
+          </Pastilla>
+        )}
+        {(c.mensajes ?? 0) > 0 && (
+          <Pastilla icon={MessageCircle} tono="good">
+            {c.mensajes} msgs
+          </Pastilla>
+        )}
+        {c.entrevistaEstado === "evaluada" && (
+          <Pastilla icon={Video}>match {c.entrevistaMatch ?? "—"}</Pastilla>
+        )}
+        {c.expedienteId != null && (
+          <Pastilla icon={UserCheck} tono="good">
+            expediente {c.expedienteProgreso ?? 0}%
+          </Pastilla>
+        )}
+        {c.consentimiento === false && (
+          <Pastilla icon={AlertTriangle} tono="warn">
+            sin consentimiento
+          </Pastilla>
+        )}
+      </div>
+
+      {/* Fecha última actividad / aplicación */}
+      {(c.ultimaActividadEn || c.aplicado) && (
+        <div className="mt-2.5 flex items-center gap-1 border-t border-border-faint pt-2 text-[10px] text-ink-3">
+          <Clock className="h-3 w-3" />
+          <span>
+            {c.ultimaActividadEn
+              ? `Actividad ${fechaCorta(c.ultimaActividadEn)}`
+              : `Aplicó ${fechaCorta(c.aplicado)}`}
+          </span>
+        </div>
+      )}
+    </button>
+    </div>
+  );
+}
+
 function Pastilla({
   icon: Icon,
   children,
@@ -1438,6 +1616,29 @@ function ModalCandidato({
   const [confirmacion, setConfirmacion] = useState<null | "solicitar" | "recordatorio" | "alta">(null);
   // 2026-09-16 (control manual de RH): «Mover a otra etapa» — selector simple + motivo opcional
   const [moverA, setMoverA] = useState<null | { etapa: EtapaCandidato | ""; motivo: string }>(null);
+  // Fraiche (spec §11-13): «Mover en la ruta…», «Presentar al franquiciatario» y «Generar ficha para presentar»
+  const [moverPaso, setMoverPaso] = useState<null | { paso: PasoFraiche | ""; comentario: string }>(null);
+  const [presentarAbierto, setPresentarAbierto] = useState(false);
+  const [fichaAbierta, setFichaAbierta] = useState(false);
+  const esFranquicia = c.destino === "franquicia";
+  async function moverEnRuta() {
+    if (!moverPaso?.paso) return;
+    if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
+    setOcupado("mover-paso");
+    const r = await moverPasoCandidato(c.id, moverPaso.paso, moverPaso.comentario.trim());
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    const nombre = (c.ruta ?? []).find((x) => x.clave === moverPaso.paso)?.nombre ?? moverPaso.paso;
+    setMoverPaso(null);
+    onCambio(r.data);
+    setAviso({ tono: "ok", texto: `Movido a «${nombre}» en la ruta.` });
+  }
+  /** Tras generar la ficha o presentar al franquiciatario: recarga la ficha (historial, evaluaciones). */
+  async function refrescarFicha(texto?: string) {
+    const actualizado = await fetchCandidato(c.id);
+    if (actualizado) onCambio(actualizado);
+    if (texto) setAviso({ tono: "ok", texto });
+  }
   // Evaluaciones (2026-09-28): «Agregar evaluación o verificación» — nunca mueve la columna del pipeline
   const [agregarEval, setAgregarEval] = useState(false);
   const [versionEval, setVersionEval] = useState(0);
@@ -1605,6 +1806,19 @@ function ModalCandidato({
           </div>
         </div>
 
+        {/* Fraiche (spec §11): ruta visible por destino — una línea, se desliza en móvil */}
+        {(c.ruta?.length ?? 0) > 0 && (
+          <div className="flex items-center gap-2 border-b border-border-soft bg-surface px-4 py-1.5 sm:px-6">
+            {c.destino && (
+              <Badge tone={esFranquicia ? "human" : "good"} className="shrink-0">
+                {esFranquicia ? <Handshake className="h-3 w-3" /> : <Store className="h-3 w-3" />} {DESTINO_NOMBRE[c.destino] ?? c.destino}
+              </Badge>
+            )}
+            {esFranquicia && c.franquiciaEstadoTexto && <Badge tone="human" className="shrink-0">{c.franquiciaEstadoTexto}</Badge>}
+            <RutaStepper ruta={c.ruta ?? []} paso={c.paso} />
+          </div>
+        )}
+
         {confirmarEliminar && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !eliminando && setConfirmarEliminar(false)}>
             <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -1703,6 +1917,19 @@ function ModalCandidato({
             </Card>
           )}
 
+          {/* Fraiche (spec §12): ruta de franquicia — presentar, estado y ficha; sin documentación ni alta */}
+          {esFranquicia && (
+            <PanelFranquicia
+              c={c}
+              live={live}
+              ocupado={Boolean(ocupado)}
+              onPresentar={() => setPresentarAbierto(true)}
+              onFicha={() => setFichaAbierta(true)}
+              onCambio={onCambio}
+              setAviso={setAviso}
+            />
+          )}
+
           {c.etapa === "Entrevista Humana" && <PanelEntrevistaHumana c={c} live={live} onCambio={onCambio} onNuevaIpv={abrirAgendaIpvHumana} />}
 
           {tab === "resumen" && <PestanaResumen c={c} live={live} onCambio={onCambio} setTab={setTab} />}
@@ -1718,7 +1945,19 @@ function ModalCandidato({
           {tab === "documentos" && <PestanaDocumentos c={c} live={live} onCambio={onCambio} setAviso={setAviso} />}
           {tab === "whatsapp" && <PestanaWhatsApp c={c} live={live} onCambio={onCambio} />}
           {tab === "contratacion" && (c.etapa === "Contratación" || c.etapa === "Onboarding") && (
-            <PanelContratacion c={c} live={live} onCambio={onCambio} setAviso={setAviso} onDocumentos={setConfirmacion} onDescartar={descartar} />
+            <PanelContratacion
+              c={c}
+              live={live}
+              onCambio={onCambio}
+              setAviso={setAviso}
+              onDocumentos={setConfirmacion}
+              onDescartar={descartar}
+              accionesExtra={[
+                { etiqueta: "Mover en la ruta…", icono: <Route />, onClick: () => setMoverPaso({ paso: "", comentario: "" }), disabled: Boolean(ocupado) || !(c.ruta?.length) },
+                { etiqueta: "Generar ficha para presentar", icono: <FileDown />, onClick: () => setFichaAbierta(true), disabled: Boolean(ocupado) },
+                { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
+              ]}
+            />
           )}
         </div>
 
@@ -1755,6 +1994,14 @@ function ModalCandidato({
               >
                 <ThumbsDown className="h-4 w-4" /> Descartar candidato
               </Button>
+              <MenuAcciones
+                etiqueta="Más acciones"
+                acciones={[
+                  { etiqueta: "Mover en la ruta…", icono: <Route />, onClick: () => setMoverPaso({ paso: "", comentario: "" }), disabled: Boolean(ocupado) || !(c.ruta?.length) },
+                  { etiqueta: "Generar ficha para presentar", icono: <FileDown />, onClick: () => setFichaAbierta(true), disabled: Boolean(ocupado) },
+                  { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
+                ]}
+              />
             </div>
           </div>
         )}
@@ -1777,7 +2024,7 @@ function ModalCandidato({
               {/* Regla de UI (2026-09-16): UNA acción principal = la siguiente esperada; todo lo demás en «…»
                   («Mover a otra etapa» abre un selector simple sin bloqueos de secuencia). */}
               <div className="flex items-center gap-2">
-                {siguientesEtapas[0] && (
+                {siguientesEtapas[0] && !(esFranquicia && siguientesEtapas[0] === "Contratación") && (
                   <Button
                     size="sm"
                     className="flex-1"
@@ -1815,13 +2062,16 @@ function ModalCandidato({
                       : []),
                     { etiqueta: "Agregar evaluación o verificación", icono: <IconoEvaluacion />, onClick: () => setAgregarEval(true), disabled: Boolean(ocupado) || c.activa === false },
                     { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
+                    // Fraiche (spec §11 y §13): el reclutador confirma el paso visible; ficha en PDF para presentar
+                    { etiqueta: "Mover en la ruta…", icono: <Route />, onClick: () => setMoverPaso({ paso: "", comentario: "" }), disabled: Boolean(ocupado) || !(c.ruta?.length) },
+                    { etiqueta: "Generar ficha para presentar", icono: <FileDown />, onClick: () => setFichaAbierta(true), disabled: Boolean(ocupado) },
                     ...(c.etapa === "Entrevista Humana"
                       ? [{ etiqueta: "Agendar otra Entrevista Humana", icono: <CalendarClock />, onClick: () => setModalEntrevista(true), disabled: Boolean(ocupado) }]
                       : []),
                     ...(ETAPAS_IPV.includes(c.etapa)
                       ? [{ etiqueta: "Programar IPV (Red Human o humano)", icono: <Sparkles />, onClick: () => setEligiendoIpv(true), disabled: Boolean(ocupado) || c.activa === false }]
                       : []),
-                    ...(c.etapa === "Onboarding"
+                    ...(c.etapa === "Onboarding" && !esFranquicia
                       ? [
                           { etiqueta: "Solicitar documentos", icono: <Send />, onClick: () => setConfirmacion("solicitar"), disabled: Boolean(ocupado) },
                           { etiqueta: etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).texto, icono: <RotateCw />, onClick: () => setConfirmacion("recordatorio"), disabled: Boolean(ocupado) },
@@ -1834,7 +2084,7 @@ function ModalCandidato({
 
               {/* 2026-09-15 (Fase 1): el error del alta se muestra AQUÍ, pegado al botón — antes solo
                   aparecía arriba del cuerpo scrolleable y RH veía «parpadear» el botón sin explicación. */}
-              {c.etapa === "Onboarding" && aviso && aviso.tono !== "ok" && (
+              {c.etapa === "Onboarding" && !esFranquicia && aviso && aviso.tono !== "ok" && (
                 <div
                   role="alert"
                   className="flex items-start gap-2 rounded-xl border border-bad/40 bg-bad-soft px-3 py-2.5 text-xs font-semibold text-bad"
@@ -1843,8 +2093,9 @@ function ModalCandidato({
                   <span>{aviso.texto}</span>
                 </div>
               )}
-              {/* Botón principal — siempre visible en Onboarding, sin importar el estado de los documentos */}
-              {c.etapa === "Onboarding" && (
+              {/* Botón principal — siempre visible en Onboarding, sin importar el estado de los documentos.
+                  Franquicia (spec §12): no hay alta de Fraiche; la contratación la hace el franquiciatario. */}
+              {c.etapa === "Onboarding" && !esFranquicia && (
                 <>
                   {/* 2026-09-18: switch de Modo Prueba junto al alta. ACTIVO → se permite con expediente
                       incompleto (se manda forzar_prueba directo); INACTIVO → el botón queda bloqueado
@@ -1981,6 +2232,35 @@ function ModalCandidato({
             </div>
           </div>
         )}
+      {moverPaso && (
+        <ModalMoverPaso
+          c={c}
+          valor={moverPaso}
+          ocupado={ocupado === "mover-paso"}
+          onChange={setMoverPaso}
+          onClose={() => setMoverPaso(null)}
+          onMover={moverEnRuta}
+        />
+      )}
+      {fichaAbierta && (
+        <ModalFichaPresentacion
+          c={c}
+          onClose={() => setFichaAbierta(false)}
+          onGenerada={(destinatario) => {
+            setFichaAbierta(false);
+            void refrescarFicha(`Ficha generada para ${destinatario}; quedó registrado en el historial.`);
+          }}
+        />
+      )}
+      {presentarAbierto && (
+        <ModalPresentarFranquiciatario
+          c={c}
+          onClose={() => setPresentarAbierto(false)}
+          onPresentado={(actualizado) => {
+            onCambio(actualizado);
+          }}
+        />
+      )}
         {confirmacion === "solicitar" && (
           <ConfirmacionAccion
             titulo="Solicitar documentos"
@@ -4980,6 +5260,7 @@ function PanelContratacion({
   setAviso,
   onDocumentos,
   onDescartar,
+  accionesExtra,
 }: {
   c: Candidato;
   live: boolean;
@@ -4990,9 +5271,26 @@ function PanelContratacion({
   onDocumentos?: (que: "solicitar" | "recordatorio") => void;
   /** 2026-09-17: «Descartar candidato…» también desde Contratación/Onboarding (menú «…»). */
   onDescartar?: () => void;
+  /** Fraiche: acciones del modal que también deben verse aquí («Mover en la ruta…», ficha, mover etapa). */
+  accionesExtra?: { etiqueta: string; icono: React.ReactNode; onClick: () => void; disabled?: boolean }[];
 }) {
   const modoPrueba = useModoPrueba();
   const cond = c.expedienteCondiciones;
+  // Fraiche (spec §12): en franquicia no hay documentación, socioeconómico, kit ni alta SAP de Fraiche
+  const esFranquicia = c.destino === "franquicia";
+  // Fraiche (spec §11): «Preparar alta de colaborador» (datos para SAP SuccessFactors) y su estado
+  const [sapAbierto, setSapAbierto] = useState(false);
+  const [estadoSap, setEstadoSap] = useState<{ estado: DatosAltaSap["estadoSap"]; texto: string; confirmadoPor: string; confirmadoEn: string | null } | null>(null);
+  useEffect(() => {
+    if (!live || c.expedienteId == null || esFranquicia) return;
+    let vivo = true;
+    fetchDatosAltaSap(c.expedienteId).then((d) => {
+      if (vivo && d) setEstadoSap({ estado: d.estadoSap, texto: d.estadoSapTexto, confirmadoPor: d.confirmadoPor, confirmadoEn: d.confirmadoEn });
+    });
+    return () => {
+      vivo = false;
+    };
+  }, [live, c.expedienteId, esFranquicia]);
   const [puesto, setPuesto] = useState(cond?.puesto ?? c.puesto ?? "");
   const [sueldo, setSueldo] = useState(cond?.sueldo ?? "");
   const [tipo, setTipo] = useState(cond?.tipoContratacion ?? "");
@@ -5267,11 +5565,12 @@ function PanelContratacion({
             <FileText className="h-4 w-4" /> {firmando === "carta" ? "Preparando firma…" : "Generar carta de intención"}
           </Button>
           {/* Onboarding v2: «Solicitar documentos» ya no vive en Contratación — la primera solicitud la hace «Iniciar Onboarding» */}
-          {onDocumentos && c.etapa === "Onboarding" && (
+          {onDocumentos && c.etapa === "Onboarding" && !esFranquicia && (
             <Button size="sm" variant="outline" onClick={() => onDocumentos("solicitar")} disabled={Boolean(ocupado)}>
               <Send className="h-4 w-4" /> Solicitar documentos
             </Button>
           )}
+          {!esFranquicia && (
           <Button
             size="sm"
             variant="outline"
@@ -5281,6 +5580,7 @@ function PanelContratacion({
           >
             <FileCheck2 className="h-4 w-4" /> {firmando === "contrato" ? "Preparando firma…" : firmaCfg?.configurado ? "Generar contrato" : "Generar contrato (borrador)"}
           </Button>
+          )}
           {firmaCfg?.configurado && (
             <MenuAcciones
               acciones={[
@@ -5289,7 +5589,7 @@ function PanelContratacion({
               ]}
             />
           )}
-          {c.etapa === "Contratación" && (
+          {c.etapa === "Contratación" && !esFranquicia && (
             <Button
               size="sm"
               className="ml-auto"
@@ -5328,7 +5628,31 @@ function PanelContratacion({
         </div>
       )}
 
-      {live && c.etapa === "Contratación" && !requisitosOnboarding && (
+      {esFranquicia && (
+        <Aviso tono="info">Ruta de franquicia: sin documentación, socioeconómico, kit ni alta SAP de Fraiche. La contratación la realiza el franquiciatario.</Aviso>
+      )}
+
+      {/* Fraiche (spec §11): datos para el alta en SAP SuccessFactors — solo tienda propia; nunca se afirma que el alta ya ocurrió */}
+      {live && !esFranquicia && c.expedienteId != null && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border-soft bg-surface p-3">
+          <div className="min-w-0">
+            <p className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-2"><Database className="h-3.5 w-3.5" /> Alta en SAP SuccessFactors</p>
+            <p className="text-[11px] text-ink-3">
+              {estadoSap?.estado === "listo_para_enviar_sap"
+                ? `${estadoSap.texto || "Listo para enviar a SAP"}${estadoSap.confirmadoPor ? ` · confirmado por ${estadoSap.confirmadoPor}` : ""} · Conexión con SAP pendiente de configurar`
+                : estadoSap?.texto || "Revisa y confirma los datos que se enviarán a SAP (no se envía nada todavía)."}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {estadoSap?.estado === "listo_para_enviar_sap" && <Badge tone="good">Listo para enviar a SAP</Badge>}
+            <Button size="sm" variant={estadoSap?.estado === "listo_para_enviar_sap" ? "outline" : "primary"} onClick={() => setSapAbierto(true)} disabled={Boolean(ocupado)}>
+              <Database className="h-4 w-4" /> Preparar alta de colaborador
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {live && c.etapa === "Contratación" && !requisitosOnboarding && !esFranquicia && (
         <p className="mt-3 text-[12px] text-ink-3">
           Para enviar a Onboarding: {[!condicionesListas && "guarda puesto, sueldo, tipo y fecha de ingreso", !c.consentimiento && "registra el consentimiento de privacidad (LFPDPPP)"].filter(Boolean).join(" y ")}.
           {modoPrueba ? " (Modo Prueba activo: puedes enviarlo de todos modos.)" : ""}
@@ -5375,13 +5699,18 @@ function PanelContratacion({
           >
             Cancelar contratación
           </Button>
-          {c.expedienteId != null && onDocumentos && (
+          {c.expedienteId != null && onDocumentos && !esFranquicia && (
             <Button size="sm" variant="outline" onClick={() => onDocumentos("recordatorio")} disabled={Boolean(ocupado)} title={etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).tono.descripcion}>
               <RotateCw className="h-4 w-4" /> {etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).texto}
             </Button>
           )}
           {onDescartar && (
-            <MenuAcciones acciones={[{ etiqueta: "Descartar candidato…", icono: <ThumbsDown />, peligrosa: true, onClick: onDescartar, disabled: Boolean(ocupado) }]} />
+            <MenuAcciones
+              acciones={[
+                ...(accionesExtra ?? []),
+                { etiqueta: "Descartar candidato…", icono: <ThumbsDown />, peligrosa: true, onClick: onDescartar, disabled: Boolean(ocupado) },
+              ]}
+            />
           )}
         </div>
       )}
@@ -5395,6 +5724,14 @@ function PanelContratacion({
             onCambio(r.candidato);
             setAviso({ tono: "ok", texto: `Onboarding iniciado: ${r.tareas.length} tareas generadas.` });
           }}
+        />
+      )}
+
+      {sapAbierto && c.expedienteId != null && (
+        <ModalDatosAltaSap
+          expedienteId={c.expedienteId}
+          onClose={() => setSapAbierto(false)}
+          onCambio={(d) => setEstadoSap({ estado: d.estadoSap, texto: d.estadoSapTexto, confirmadoPor: d.confirmadoPor, confirmadoEn: d.confirmadoEn })}
         />
       )}
 
@@ -5456,5 +5793,622 @@ function Info({ icon: Icon, v }: { icon: React.ComponentType<{ className?: strin
     <span className="inline-flex items-center gap-1.5 rounded-lg border border-border-soft bg-surface px-2.5 py-1.5 text-xs text-ink-2">
       <Icon className="h-3.5 w-3.5 text-ink-3" /> {v}
     </span>
+  );
+}
+
+/* ============================================================
+   Fraiche (spec §11-13) · Ruta visible, franquicia, alta SAP y ficha para presentar
+   ============================================================ */
+
+/** Chips de la ruta visible: el paso actual resaltado, los anteriores atenuados; una sola línea con scroll-x. */
+function RutaStepper({ ruta, paso }: { ruta: { clave: string; nombre: string }[]; paso?: string }) {
+  const actual = ruta.findIndex((p) => p.clave === paso);
+  return (
+    <div className="scroll-x min-w-0 flex-1 items-center gap-1" style={{ scrollSnapType: "none" }}>
+      {ruta.map((p, i) => {
+        const esActual = i === actual;
+        const hecho = actual >= 0 && i < actual;
+        return (
+          <span key={p.clave} className="flex items-center gap-1">
+            {i > 0 && <span className={cn("h-px w-2", hecho || esActual ? "bg-brand/50" : "bg-border-soft")} />}
+            <span
+              title={p.nombre}
+              className={cn(
+                "rounded-full border px-2 py-0.5 text-[10px] font-semibold",
+                esActual
+                  ? "border-brand bg-brand text-white shadow-sm"
+                  : hecho
+                    ? "border-brand/20 bg-brand-soft/60 text-brand/70"
+                    : "border-border-soft bg-surface text-ink-3",
+              )}
+            >
+              {p.nombre}
+            </span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+/** «Mover en la ruta…»: el reclutador confirma el paso visible; el servidor lo mapea a la etapa interna
+ * (409 con mensaje claro si «Listo para alta / SAP» exige Onboarding). */
+function ModalMoverPaso({
+  c,
+  valor,
+  ocupado,
+  onChange,
+  onClose,
+  onMover,
+}: {
+  c: Candidato;
+  valor: { paso: PasoFraiche | ""; comentario: string };
+  ocupado: boolean;
+  onChange: (v: { paso: PasoFraiche | ""; comentario: string }) => void;
+  onClose: () => void;
+  onMover: () => void;
+}) {
+  const ruta = c.ruta ?? [];
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4" onClick={() => !ocupado && onClose()}>
+      <div className="flex h-[100dvh] w-full max-w-md flex-col border border-border-soft bg-bg shadow-2xl sm:h-auto sm:max-h-[85vh] sm:rounded-3xl" onClick={(e) => e.stopPropagation()}>
+        <div className="px-6 pt-6">
+          <h3 className="font-display text-lg font-bold">Mover en la ruta</h3>
+          <p className="mt-1 text-sm text-ink-2">
+            Ruta de <b className="text-ink">{DESTINO_NOMBRE[c.destino ?? ""] ?? "la vacante"}</b>. El reclutador confirma el movimiento; queda en el historial con tu nombre.
+          </p>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          <div className="flex flex-col gap-1.5">
+            {ruta.map((p) => {
+              const esActual = p.clave === c.paso;
+              return (
+                <label
+                  key={p.clave}
+                  className={cn(
+                    "flex cursor-pointer items-center gap-3 rounded-xl border px-3 py-2 text-sm transition",
+                    esActual ? "cursor-default border-brand/30 bg-brand-soft/40 text-ink-3" : valor.paso === p.clave ? "border-brand bg-brand-soft/60" : "border-border-soft hover:border-brand/40",
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="paso-ruta"
+                    className="accent-brand"
+                    disabled={esActual}
+                    checked={valor.paso === p.clave}
+                    onChange={() => onChange({ ...valor, paso: p.clave as PasoFraiche })}
+                  />
+                  <span className="flex-1">{p.nombre}</span>
+                  {esActual && <Badge tone="brand">Actual</Badge>}
+                </label>
+              );
+            })}
+          </div>
+          <label className="mt-4 flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-ink-2">Comentario (opcional)</span>
+            <input
+              value={valor.comentario}
+              onChange={(e) => onChange({ ...valor, comentario: e.target.value })}
+              placeholder="Ej. ya se aplicó la psicometría en sucursal"
+              className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+            />
+          </label>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-border-soft px-6 py-4">
+          <Button variant="outline" size="sm" onClick={onClose} disabled={ocupado}>Cancelar</Button>
+          <Button size="sm" onClick={onMover} disabled={!valor.paso || ocupado}>
+            <Route className="h-4 w-4" /> {ocupado ? "Moviendo…" : "Mover"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Franquicia (spec §12): presentar al franquiciatario, actualizar su respuesta y generar la ficha. */
+function PanelFranquicia({
+  c,
+  live,
+  ocupado,
+  onPresentar,
+  onFicha,
+  onCambio,
+  setAviso,
+}: {
+  c: Candidato;
+  live: boolean;
+  ocupado: boolean;
+  onPresentar: () => void;
+  onFicha: () => void;
+  onCambio: (c: Candidato) => void;
+  setAviso: (a: AvisoEstado) => void;
+}) {
+  const puedeDecidir = usePuedeDecidir();
+  const [estado, setEstado] = useState<"" | keyof typeof ESTADOS_FRANQUICIA>("");
+  const [comentario, setComentario] = useState("");
+  const [guardando, setGuardando] = useState(false);
+  const sinPresentar = !c.franquiciaEstado;
+  const activa = c.activa !== false;
+
+  async function actualizar() {
+    if (!estado) return;
+    if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
+    if (estado === "aceptado" && !window.confirm(`${TEXTO_ACEPTADO_FRANQUICIA}. ¿Continuar?`)) return;
+    setGuardando(true);
+    const r = await actualizarFranquicia(c.id, estado, comentario.trim());
+    setGuardando(false);
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    setEstado("");
+    setComentario("");
+    onCambio(r.data);
+    setAviso({ tono: "ok", texto: `Franquicia: ${ESTADOS_FRANQUICIA[estado]}.${estado === "aceptado" ? " La postulación quedó cerrada (no cuenta como ingreso de Fraiche)." : ""}` });
+  }
+
+  return (
+    <Card className="border-human/25 bg-human-soft/10 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <Eyebrow>Franquicia</Eyebrow>
+          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
+            {c.clienteVacante ? <>Franquiciatario: <b className="text-ink">{c.clienteVacante}</b>. </> : null}
+            La ruta termina en «Presentación al franquiciatario»: él decide y contrata. Sin documentación, socioeconómico, kit ni alta SAP de Fraiche.
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Badge tone="human"><Handshake className="h-3 w-3" /> Franquicia</Badge>
+            {c.franquiciaEstadoTexto ? <Badge tone={c.franquiciaEstado === "aceptado" ? "good" : c.franquiciaEstado === "no_aceptado" ? "bad" : "brand"}>{c.franquiciaEstadoTexto}</Badge> : <Badge tone="neutral">Sin presentar</Badge>}
+          </div>
+        </div>
+        {puedeDecidir && (
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {sinPresentar && activa && (
+              <Button size="sm" onClick={onPresentar} disabled={ocupado || !live}>
+                <Handshake className="h-4 w-4" /> Presentar al franquiciatario
+              </Button>
+            )}
+            <Button size="sm" variant="outline" onClick={onFicha} disabled={ocupado || !live}>
+              <FileDown className="h-4 w-4" /> Generar ficha para presentar
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {puedeDecidir && !sinPresentar && (
+        <div className="mt-3 grid gap-2 border-t border-border-faint pt-3 sm:grid-cols-[auto_1fr_auto] sm:items-end">
+          <label className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-ink-2">Actualizar</span>
+            <select
+              value={estado}
+              onChange={(e) => setEstado(e.target.value as typeof estado)}
+              disabled={guardando}
+              className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+            >
+              <option value="">Elige…</option>
+              {(Object.keys(ESTADOS_FRANQUICIA) as (keyof typeof ESTADOS_FRANQUICIA)[])
+                .filter((k) => k !== c.franquiciaEstado)
+                .map((k) => (
+                  <option key={k} value={k}>{ESTADOS_FRANQUICIA[k]}</option>
+                ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-ink-2">Comentario (opcional)</span>
+            <input
+              value={comentario}
+              onChange={(e) => setComentario(e.target.value)}
+              placeholder="Ej. el franquiciatario confirmó por teléfono"
+              className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+            />
+          </label>
+          <Button size="sm" onClick={actualizar} disabled={!estado || guardando || ocupado}>
+            {guardando ? "Guardando…" : "Actualizar"}
+          </Button>
+          {estado === "aceptado" && (
+            <p className="text-[11px] text-warn sm:col-span-3">{TEXTO_ACEPTADO_FRANQUICIA}.</p>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/** «Presentar al franquiciatario»: contacto del Cliente (o uno nuevo) + liga de la Entrevista con franquiciatario. */
+function ModalPresentarFranquiciatario({
+  c,
+  onClose,
+  onPresentado,
+}: {
+  c: Candidato;
+  onClose: () => void;
+  onPresentado: (c: Candidato) => void;
+}) {
+  const [contactos, setContactos] = useState<ContactoCliente[] | null>(null);
+  const [contactoId, setContactoId] = useState<number | "otro" | "">("");
+  const [nombre, setNombre] = useState("");
+  const [correo, setCorreo] = useState("");
+  const [whatsapp, setWhatsapp] = useState("");
+  const [enviarLiga, setEnviarLiga] = useState(true);
+  const [enviando, setEnviando] = useState(false);
+  const [error, setError] = useState("");
+  const [resultado, setResultado] = useState<{ liga: string; lineas: { ok: boolean; texto: string }[] } | null>(null);
+  const [copiado, setCopiado] = useState(false);
+
+  useEffect(() => {
+    let vivo = true;
+    if (!c.clienteIdVacante) {
+      setContactos([]);
+      setContactoId("otro");
+      return;
+    }
+    fetchCliente(c.clienteIdVacante).then((cl) => {
+      if (!vivo) return;
+      const lista = cl?.listaContactos ?? [];
+      setContactos(lista);
+      setContactoId(lista.length ? lista[0].id : "otro");
+    });
+    return () => {
+      vivo = false;
+    };
+  }, [c.clienteIdVacante]);
+
+  const esOtro = contactoId === "otro";
+  const listo = esOtro ? nombre.trim().length > 0 && (correo.trim().length > 0 || whatsapp.trim().length > 0) : contactoId !== "";
+
+  async function presentar() {
+    setEnviando(true);
+    setError("");
+    const r = await presentarFranquiciatario(c.id, esOtro
+      ? { nombre: nombre.trim(), correo: correo.trim(), whatsapp: whatsapp.trim(), enviarLiga }
+      : { contactoId: Number(contactoId), enviarLiga });
+    setEnviando(false);
+    if (!r.ok) return setError(r.error);
+    setResultado({ liga: r.data.liga, lineas: lineasResultados(r.data.resultados) });
+    onPresentado(r.data.candidato);
+  }
+
+  async function copiar() {
+    if (!resultado) return;
+    try {
+      await navigator.clipboard.writeText(resultado.liga);
+      setCopiado(true);
+      setTimeout(() => setCopiado(false), 2000);
+    } catch {}
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4" onClick={() => !enviando && onClose()}>
+      <div className="flex h-[100dvh] w-full max-w-lg flex-col border border-border-soft bg-bg shadow-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-3xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 px-6 pt-6">
+          <div>
+            <h3 className="font-display text-lg font-bold">Presentar al franquiciatario</h3>
+            <p className="mt-1 text-sm text-ink-2">
+              Se crea la «Entrevista con franquiciatario» de <b className="text-ink">{c.nombre}</b> y se le manda su liga al contacto elegido. El franquiciatario decide y contrata.
+            </p>
+          </div>
+          <button onClick={onClose} className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-ink-3 hover:bg-surface-2" aria-label="Cerrar"><X className="h-4 w-4" /></button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          {resultado ? (
+            <div className="flex flex-col gap-3">
+              <Aviso tono="ok">Candidato presentado. Estado: <b>Presentado</b>.</Aviso>
+              {resultado.lineas.length > 0 && (
+                <ul className="space-y-1 text-[12px]">
+                  {resultado.lineas.map((l) => (
+                    <li key={l.texto} className={l.ok ? "text-good" : "text-bad"}>{l.ok ? "✓" : "✗"} {l.texto}</li>
+                  ))}
+                </ul>
+              )}
+              <div>
+                <span className="text-xs font-medium text-ink-2">Liga para el franquiciatario</span>
+                <div className="mt-1 flex gap-2">
+                  <input readOnly value={resultado.liga} onFocus={(e) => e.currentTarget.select()} className="h-10 flex-1 rounded-xl border border-border-soft bg-surface-2 px-3 font-mono text-xs outline-none" />
+                  <Button size="sm" variant="outline" onClick={copiar}><Copy className="h-4 w-4" /> {copiado ? "Copiada" : "Copiar"}</Button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {contactos === null ? (
+                <p className="text-sm text-ink-3">Cargando contactos del franquiciatario…</p>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs font-medium text-ink-2">Contacto{c.clienteVacante ? ` · ${c.clienteVacante}` : ""}</span>
+                  {contactos.map((k) => (
+                    <label key={k.id} className={cn("flex cursor-pointer items-center gap-3 rounded-xl border px-3 py-2 text-sm transition", contactoId === k.id ? "border-brand bg-brand-soft/60" : "border-border-soft hover:border-brand/40")}>
+                      <input type="radio" name="contacto-franquicia" className="accent-brand" checked={contactoId === k.id} onChange={() => setContactoId(k.id)} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-semibold text-ink">{k.nombreCompleto}{k.puesto ? <span className="font-normal text-ink-3"> · {k.puesto}</span> : null}</span>
+                        <span className="block truncate text-[11px] text-ink-3">{[k.correo, k.telefono].filter(Boolean).join(" · ") || "Sin correo ni teléfono"}</span>
+                      </span>
+                    </label>
+                  ))}
+                  <label className={cn("flex cursor-pointer items-center gap-3 rounded-xl border px-3 py-2 text-sm transition", esOtro ? "border-brand bg-brand-soft/60" : "border-border-soft hover:border-brand/40")}>
+                    <input type="radio" name="contacto-franquicia" className="accent-brand" checked={esOtro} onChange={() => setContactoId("otro")} />
+                    <span className="font-semibold text-ink">Otro contacto</span>
+                  </label>
+                </div>
+              )}
+              {esOtro && (
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <CampoTexto label="Nombre" value={nombre} onChange={setNombre} />
+                  <CampoTexto label="Correo" value={correo} onChange={setCorreo} placeholder="nombre@franquicia.mx" />
+                  <CampoTexto label="WhatsApp" value={whatsapp} onChange={setWhatsapp} placeholder="10 dígitos" />
+                </div>
+              )}
+              <label className="flex items-center gap-2 text-sm text-ink-2">
+                <input type="checkbox" className="accent-brand" checked={enviarLiga} onChange={(e) => setEnviarLiga(e.target.checked)} />
+                Enviar liga ahora (correo y/o WhatsApp según los datos del contacto)
+              </label>
+              {error && <Aviso tono="error">{error}</Aviso>}
+            </div>
+          )}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-border-soft px-6 py-4">
+          {resultado ? (
+            <Button size="sm" onClick={onClose}>Listo</Button>
+          ) : (
+            <>
+              <Button variant="outline" size="sm" onClick={onClose} disabled={enviando}>Cancelar</Button>
+              <Button size="sm" onClick={presentar} disabled={!listo || enviando || contactos === null}>
+                <Handshake className="h-4 w-4" /> {enviando ? "Presentando…" : "Presentar"}
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Campos editables del alta en SAP: personales (bloque `personales`) y del puesto (`campos`). */
+const SAP_EDITABLES_PERSONALES = ["curp", "rfc", "nss", "domicilio", "fecha_nacimiento", "genero"];
+const SAP_EDITABLES_CAMPOS = ["empresa", "sucursal", "puesto", "jefe", "fecha_ingreso", "tipo_contratacion", "sueldo", "horario", "periodicidad"];
+
+/** «Datos para alta en SAP SuccessFactors»: revisar, completar y confirmar. No envía nada a SAP ni muestra número de empleado. */
+function ModalDatosAltaSap({ expedienteId, onClose, onCambio }: { expedienteId: number; onClose: () => void; onCambio: (d: DatosAltaSap) => void }) {
+  const [datos, setDatos] = useState<DatosAltaSap | null>(null);
+  const [error, setError] = useState("");
+  const [cambios, setCambios] = useState<Record<string, string>>({});
+  const [ocupado, setOcupado] = useState<"" | "guardar" | "confirmar">("");
+  const [aviso, setAviso] = useState<AvisoEstado>(null);
+
+  // `onCambio` llega como arrow inline del panel: se guarda en ref para que la carga no se repita en cada render
+  const onCambioRef = useRef(onCambio);
+  onCambioRef.current = onCambio;
+  const cargar = useCallback(async () => {
+    const r = await fetchDatosAltaSap(expedienteId);
+    if (!r) return setError("No se pudieron cargar los datos del expediente.");
+    setDatos(r);
+    onCambioRef.current(r);
+  }, [expedienteId]);
+  useEffect(() => {
+    void cargar();
+  }, [cargar]);
+
+  const confirmado = datos?.estadoSap === "listo_para_enviar_sap";
+  const hayCambios = Object.keys(cambios).length > 0;
+  function editable(bloque: string, campo: string): boolean {
+    if (confirmado) return false;
+    return bloque === "personales" ? SAP_EDITABLES_PERSONALES.includes(campo) : SAP_EDITABLES_CAMPOS.includes(campo);
+  }
+
+  async function guardar() {
+    if (!hayCambios) return;
+    setOcupado("guardar");
+    const personales: Record<string, string> = {};
+    const campos: Record<string, string> = {};
+    for (const [k, v] of Object.entries(cambios)) {
+      const [bloque, campo] = k.split(":");
+      (bloque === "personales" ? personales : campos)[campo] = v;
+    }
+    const r = await capturarDatosAltaSap(expedienteId, { personales, campos });
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    setCambios({});
+    setDatos(r.data);
+    onCambio(r.data);
+    setAviso({ tono: "ok", texto: "Cambios guardados en el expediente." });
+  }
+
+  async function confirmar() {
+    setOcupado("confirmar");
+    const r = await confirmarDatosAltaSap(expedienteId);
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    setDatos(r.data);
+    onCambio(r.data);
+    setAviso({ tono: "ok", texto: `${r.data.estadoSapTexto || "Listo para enviar a SAP"}. ${r.data.mensaje}` });
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4" onClick={() => !ocupado && onClose()}>
+      <div className="flex h-[100dvh] w-full max-w-3xl flex-col border border-border-soft bg-bg shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-3xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 border-b border-border-soft px-6 py-4">
+          <div>
+            <h3 className="font-display text-lg font-bold">Datos para alta en SAP SuccessFactors</h3>
+            <p className="mt-1 text-[12px] text-ink-3">Se toman del expediente y del CV; completa lo faltante y confirma. Aquí no se envía nada a SAP.</p>
+          </div>
+          <button onClick={onClose} className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-ink-3 hover:bg-surface-2" aria-label="Cerrar"><X className="h-4 w-4" /></button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          {error && <Aviso tono="error">{error}</Aviso>}
+          {!datos && !error && <p className="text-sm text-ink-3">Cargando datos del expediente…</p>}
+          {datos && (
+            <div className="flex flex-col gap-3">
+              {aviso && <Aviso tono={aviso.tono} onCerrar={() => setAviso(null)}>{aviso.texto}</Aviso>}
+              {confirmado && (
+                <Aviso tono="ok">
+                  <b>{datos.estadoSapTexto || "Listo para enviar a SAP"}</b>
+                  {datos.confirmadoPor ? ` · confirmado por ${datos.confirmadoPor}${datos.confirmadoEn ? ` el ${fechaHoraCorta(datos.confirmadoEn)}` : ""}` : ""}. {datos.mensaje}
+                </Aviso>
+              )}
+              {!confirmado && datos.faltantes.length > 0 && (
+                <Aviso tono="warn">Faltan {datos.faltantes.length} dato(s) para confirmar: {datos.faltantes.join(", ")}.</Aviso>
+              )}
+              {datos.bloques.map((b) => (
+                <Card key={b.clave} className="p-3">
+                  <Eyebrow>{b.nombre}</Eyebrow>
+                  <div className="mt-2 divide-y divide-border-faint">
+                    {b.campos.map((campo) => {
+                      const k = `${b.clave}:${campo.clave}`;
+                      const valor = cambios[k] ?? campo.valor;
+                      const puede = editable(b.clave, campo.clave);
+                      return (
+                        <div key={campo.clave} className="grid items-center gap-1 py-1.5 sm:grid-cols-[11rem_1fr_auto] sm:gap-3">
+                          <span className="text-[12px] font-medium text-ink-2">{campo.nombre}</span>
+                          {puede ? (
+                            <input
+                              value={valor}
+                              onChange={(e) => setCambios({ ...cambios, [k]: e.target.value })}
+                              placeholder={campo.faltante ? "Captura este dato" : ""}
+                              className={cn("h-9 rounded-lg border bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20", campo.faltante && !valor ? "border-bad/40" : "border-border-soft")}
+                            />
+                          ) : (
+                            <span className={cn("text-sm", valor ? "text-ink" : "text-ink-3")}>{valor || "—"}</span>
+                          )}
+                          <span className="flex items-center gap-1.5">
+                            {campo.faltante && !valor && <Badge tone="bad">Faltante</Badge>}
+                            {campo.origen && <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-ink-3">{campo.origen}</span>}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              ))}
+              {datos.excluye.length > 0 && <p className="text-[11px] text-ink-3">No incluye: {datos.excluye.join(", ")}.</p>}
+            </div>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border-soft px-6 py-4">
+          <Button variant="outline" size="sm" onClick={onClose} disabled={Boolean(ocupado)}>Cerrar</Button>
+          {datos && !confirmado && (
+            <>
+              <Button variant="outline" size="sm" onClick={guardar} disabled={!hayCambios || Boolean(ocupado)}>
+                {ocupado === "guardar" ? "Guardando…" : "Guardar cambios"}
+              </Button>
+              <Button
+                size="sm"
+                onClick={confirmar}
+                disabled={datos.faltantes.length > 0 || hayCambios || Boolean(ocupado)}
+                title={datos.faltantes.length ? "Completa los datos faltantes primero" : hayCambios ? "Guarda los cambios antes de confirmar" : "Deja los datos listos para enviar a SAP (no envía nada)"}
+              >
+                <Database className="h-4 w-4" /> {ocupado === "confirmar" ? "Confirmando…" : "Confirmar datos para alta"}
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** «Generar ficha para presentar» (spec §13): secciones, observaciones, siguiente acción y destinatario; vista previa + PDF. */
+function ModalFichaPresentacion({ c, onClose, onGenerada }: { c: Candidato; onClose: () => void; onGenerada: (destinatario: string) => void }) {
+  const [secciones, setSecciones] = useState<string[]>(SECCIONES_FICHA.map((s) => s.clave));
+  const [observaciones, setObservaciones] = useState("");
+  const [siguienteAccion, setSiguienteAccion] = useState("");
+  const [destinatario, setDestinatario] = useState(c.destino === "franquicia" && c.clienteVacante ? c.clienteVacante : "");
+  const [srcPreview, setSrcPreview] = useState(() => urlFichaPresentacion(c.id, { secciones: SECCIONES_FICHA.map((s) => s.clave) }));
+  const [generando, setGenerando] = useState(false);
+  const [error, setError] = useState("");
+
+  // La vista previa se refresca sola (debounce) al cambiar secciones u observaciones
+  useEffect(() => {
+    const t = setTimeout(() => setSrcPreview(urlFichaPresentacion(c.id, { secciones, observaciones, siguienteAccion })), 600);
+    return () => clearTimeout(t);
+  }, [c.id, secciones, observaciones, siguienteAccion]);
+
+  function alternar(clave: string) {
+    setSecciones((s) => (s.includes(clave) ? s.filter((x) => x !== clave) : SECCIONES_FICHA.map((x) => x.clave).filter((x) => x === clave || s.includes(x))));
+  }
+
+  async function generar() {
+    if (!destinatario.trim()) return;
+    setGenerando(true);
+    setError("");
+    const r = await generarFichaPresentacion(c.id, { destinatario: destinatario.trim(), secciones, observaciones, siguienteAccion });
+    setGenerando(false);
+    if (!r.ok) return setError(r.error);
+    const url = URL.createObjectURL(r.data);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ficha-${c.id}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    onGenerada(destinatario.trim());
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-0 backdrop-blur-sm sm:p-4" onClick={() => !generando && onClose()}>
+      <div className="flex h-[100dvh] w-full max-w-4xl flex-col border border-border-soft bg-bg shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-3xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 border-b border-border-soft px-6 py-4">
+          <div>
+            <h3 className="font-display text-lg font-bold">Generar ficha para presentar</h3>
+            <p className="mt-1 text-[12px] text-ink-3">{c.nombre} · {c.puesto || "Sin vacante"}. La ficha se registra en el historial con destinatario y fecha.</p>
+          </div>
+          <button onClick={onClose} className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-ink-3 hover:bg-surface-2" aria-label="Cerrar"><X className="h-4 w-4" /></button>
+        </div>
+        <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto px-6 py-4 lg:grid-cols-[18rem_1fr]">
+          <div className="flex flex-col gap-3">
+            <div>
+              <span className="text-xs font-medium text-ink-2">Secciones</span>
+              <div className="mt-1.5 flex flex-col gap-1">
+                {SECCIONES_FICHA.map((s) => (
+                  <label key={s.clave} className="flex items-center gap-2 text-sm text-ink-2">
+                    <input type="checkbox" className="accent-brand" checked={secciones.includes(s.clave)} onChange={() => alternar(s.clave)} />
+                    {s.nombre}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-ink-2">Observaciones</span>
+              <textarea
+                value={observaciones}
+                onChange={(e) => setObservaciones(e.target.value)}
+                rows={3}
+                placeholder="Lo que quieres resaltar al presentarlo…"
+                className="rounded-xl border border-border-soft bg-surface px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+            <CampoTexto label="Siguiente acción" value={siguienteAccion} onChange={setSiguienteAccion} placeholder="Ej. entrevista con el gerente de sucursal" />
+            <label className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-ink-2">Destinatario <span className="text-bad">*</span></span>
+              <input
+                value={destinatario}
+                onChange={(e) => setDestinatario(e.target.value)}
+                placeholder="Ej. Gerente de sucursal Polanco / Franquiciatario"
+                className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </label>
+            {error && <Aviso tono="error">{error}</Aviso>}
+          </div>
+          <div className="flex min-h-96 flex-col">
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-xs font-medium text-ink-2">Vista previa</span>
+              <button
+                type="button"
+                onClick={() => {
+                  const base = urlFichaPresentacion(c.id, { secciones, observaciones, siguienteAccion });
+                  setSrcPreview(`${base}${base.includes("?") ? "&" : "?"}_=${Date.now()}`);
+                }}
+                className="flex items-center gap-1 text-[11px] font-semibold text-brand hover:underline"
+              >
+                <RefreshCw className="h-3 w-3" /> Actualizar vista previa
+              </button>
+            </div>
+            <iframe key={srcPreview} title="Vista previa de la ficha" src={srcPreview} className="h-96 w-full flex-1 rounded-xl border border-border-soft bg-surface-2" />
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-border-soft px-6 py-4">
+          <Button variant="outline" size="sm" onClick={onClose} disabled={generando}>Cancelar</Button>
+          <Button size="sm" onClick={generar} disabled={!destinatario.trim() || secciones.length === 0 || generando}>
+            <FileDown className="h-4 w-4" /> {generando ? "Generando…" : "Generar y descargar"}
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }

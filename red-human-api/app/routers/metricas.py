@@ -10,10 +10,14 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from typing import Optional
+
+from fastapi import HTTPException
+
 from ..deps import cuenta_actual, usuario_actual
 from ..database import get_db
-from ..models import ETAPAS_CANDIDATO, Candidato, Cuenta, Entrevista, Expediente, Postulacion, Vacante
-from ..services import conteos
+from ..models import ETAPAS_CANDIDATO, Candidato, Cuenta, Entrevista, Expediente, Postulacion, Usuario, Vacante
+from ..services import conteos, fraiche
 
 router = APIRouter(prefix="/metricas", tags=["metricas"], dependencies=[Depends(usuario_actual)])
 
@@ -362,3 +366,225 @@ def _tablero_clima(db: Session, cuenta_id: int) -> dict:
     filas = db.query(MedicionClima.estado, func.count(MedicionClima.id)).filter(MedicionClima.cuenta_id == cuenta_id).group_by(MedicionClima.estado).all()
     por = {e: int(n) for e, n in filas}
     return {"abiertas": por.get("abierta", 0), "borradores": por.get("borrador", 0), "cerradas": por.get("cerrada", 0)}
+
+
+# ============================================================
+# Demo Fraiche (spec §14, 2026-09-29) · Tablero de control de Reclutamiento
+# ============================================================
+
+DETENIDO_DIAS = 5  # candidato «detenido»: sin seguimiento en más de N días
+PASOS_VIABLES = ("entrevista_inicial", "ipv", "psicometria", "evaluaciones_adicionales", "referencias", "documentacion", "listo_alta", "listo_sap", "presentacion")
+PASOS_PROXIMOS = ("documentacion", "listo_alta", "listo_sap", "presentacion")
+
+
+def _ok(v):
+    return v if v is not None else 0
+
+
+@router.get("/reclutamiento")
+def tablero_reclutamiento(
+    destino: str = "",           # "" (Todas) | tienda_propia | franquicia
+    reclutador_id: Optional[int] = None,
+    zona: str = "",
+    sucursal: str = "",
+    cliente_id: Optional[int] = None,  # franquicia
+    vacante: str = "",           # código VAC-####
+    fuente: str = "",            # fuente de la postulación (services.fraiche.FUENTES_POSTULACION)
+    db: Session = Depends(get_db), u: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Tablero de control de Reclutamiento (spec §14) — visible para Coordinación de Reclutamiento (y Administrador).
+    Selector Todas / Tiendas propias / Franquicias y filtros por reclutador, zona, sucursal, franquicia, vacante y
+    fuente. TODOS los contadores se calculan de los registros; nada se escribe a mano. «En riesgo» usa el umbral
+    configurado (ConfiguracionSistema.riesgo_dias_umbral). Bajas y permanencia quedan como indicadores futuros
+    dependientes de SAP, sin cifras inventadas."""
+    from ..models import Bitacora, EntrevistaHumana, EvaluacionCandidato
+    from ..services import evaluaciones as sev
+    from ..services.configuracion import obtener as cfg_obtener
+    from ..services.notificaciones import TZ_MEXICO
+
+    if not u.puede_ver_tablero_reclutamiento():
+        raise HTTPException(403, "El Tablero de control de Reclutamiento es para Coordinación de Reclutamiento y Administradores.")
+    ahora = datetime.now(timezone.utc)
+    hoy = ahora.astimezone(TZ_MEXICO).date()
+    cfg = cfg_obtener(db)
+    umbral = cfg.riesgo_dias_umbral if cfg.riesgo_dias_umbral is not None else 7
+
+    # --- vacantes en alcance ---
+    qv = db.query(Vacante).filter(Vacante.cuenta_id == cuenta.id, Vacante.estado != "Eliminada")
+    if destino in ("tienda_propia", "franquicia"):
+        qv = qv.filter(Vacante.destino == destino)
+    if reclutador_id:
+        qv = qv.filter(Vacante.responsable_id == reclutador_id)
+    if zona.strip():
+        qv = qv.filter(Vacante.zona.ilike(f"%{zona.strip()}%"))
+    if sucursal.strip():
+        qv = qv.filter(Vacante.sucursal.ilike(f"%{sucursal.strip()}%"))
+    if cliente_id:
+        qv = qv.filter(Vacante.cliente_id == cliente_id)
+    if vacante.strip():
+        qv = qv.filter(Vacante.codigo == vacante.strip())
+    vacantes = qv.all()
+    ids_v = [v.id for v in vacantes]
+
+    # --- postulaciones (activas y cerradas) de esas vacantes, sin Modo Prueba ---
+    qp = db.query(Postulacion).join(Candidato, Postulacion.candidato_id == Candidato.id).filter(
+        Postulacion.cuenta_id == cuenta.id, Postulacion.es_prueba.is_(False), Candidato.eliminado_en.is_(None),
+        Postulacion.vacante_id.in_(ids_v) if ids_v else False,
+    )
+    if fuente.strip():
+        qp = qp.filter(Postulacion.fuente_postulacion == fraiche.normalizar_fuente(fuente))
+    postulaciones = qp.all() if ids_v else []
+    por_vacante: dict = {}
+    for p in postulaciones:
+        por_vacante.setdefault(p.vacante_id, []).append(p)
+
+    # cierres con motivo (descartados) — comentario de la decisión desde la bitácora
+    codigos_desc = [p.codigo for p in postulaciones if p.motivo_cierre == "descartado"]
+    motivos_bitacora: dict = {}
+    if codigos_desc:
+        for b in db.query(Bitacora).filter(Bitacora.accion == "decision_descartar", Bitacora.entidad_id.in_(codigos_desc)).all():
+            det = b.detalle if isinstance(b.detalle, dict) else {}
+            motivos_bitacora[b.entidad_id] = (det.get("comentario") or det.get("motivo") or "").strip()
+
+    def contratados(ps):
+        return [p for p in ps if p.motivo_cierre == "contratado"]
+
+    def aceptados(ps):
+        return [p for p in ps if p.franquicia_estado == "aceptado"]
+
+    filas_vacantes = []
+    en_riesgo = 0
+    activas = cubiertas = pendientes_total = proximas = 0
+    for v in vacantes:
+        ps = por_vacante.get(v.id, [])
+        vivas = [p for p in ps if p.activa]
+        cubre = len(contratados(ps)) if v.destino != "franquicia" else len(aceptados(ps))
+        posiciones = max(1, v.posiciones or 1)
+        pend = max(0, posiciones - cubre)
+        viables = [p for p in vivas if fraiche.paso_visible(p) in PASOS_VIABLES and p.estado != "no_cumple"]
+        prox = [p for p in vivas if fraiche.paso_visible(p) in PASOS_PROXIMOS]
+        dias_obj = (v.fecha_objetivo - hoy).days if v.fecha_objetivo else None
+        riesgo = bool(v.estado == "Publicada" and pend > 0 and dias_obj is not None and dias_obj <= umbral and len(viables) < pend)
+        es_activa = v.estado == "Publicada"
+        activas += 1 if es_activa else 0
+        cubiertas += 1 if (cubre >= posiciones and posiciones > 0) else 0
+        pendientes_total += pend if es_activa else 0
+        proximas += 1 if (es_activa and pend > 0 and prox) else 0
+        en_riesgo += 1 if riesgo else 0
+        antiguedad = (ahora - _utc(v.publicada_en or v.creada_en)).days if (v.publicada_en or v.creada_en) else None
+        filas_vacantes.append({
+            "id": v.codigo, "titulo": v.titulo, "destino": v.destino or "tienda_propia", "estado": v.estado,
+            "sucursal": v.sucursal or "", "zona": v.zona or "", "cliente": v.cliente.nombre_visible if v.cliente else "",
+            "reclutador": v.responsable.nombre if v.responsable else "", "reclutadorId": v.responsable_id,
+            "posiciones": posiciones, "cubiertas": cubre, "pendientes": pend, "antiguedadDias": antiguedad,
+            "fechaObjetivo": v.fecha_objetivo.isoformat() if v.fecha_objetivo else None, "diasParaObjetivo": dias_obj,
+            "enRiesgo": riesgo, "viables": len(viables), "proximos": len(prox), "postulados": len(ps), "activos": len(vivas),
+        })
+
+    # --- embudo de candidatos ---
+    contactados = [p for p in postulaciones if p.prefiltro_completo or (p.analisis or {}).get("respuestas_prefiltro") or fraiche.paso_visible(p) not in ("nuevo", "prefiltro_web")]
+    entrevistados = [p for p in postulaciones if any(e.estado == "evaluada" for e in p.entrevistas) or any(eh.realizada for eh in p.entrevistas_humanas)]
+    viables_tot = [p for p in postulaciones if p.activa and fraiche.paso_visible(p) in PASOS_VIABLES and p.estado != "no_cumple"]
+    descartados = [p for p in postulaciones if p.motivo_cierre == "descartado"]
+    motivos: dict = {}
+    for p in descartados:
+        m = motivos_bitacora.get(p.codigo) or "Sin motivo registrado"
+        motivos[m] = motivos.get(m, 0) + 1
+
+    # --- evaluaciones y documentos pendientes ---
+    ids_p = [p.id for p in postulaciones]
+    evs = db.query(EvaluacionCandidato).filter(EvaluacionCandidato.postulacion_id.in_(ids_p)).all() if ids_p else []
+    ev_pend = [e for e in evs if e.estado not in ("revisada", "fallida")]
+    docs_pend = sum(1 for p in postulaciones if p.activa and p.expediente and p.expediente.no_aprobados)
+
+    # --- seguimiento ---
+    def ult(p):
+        return _utc(p.ultima_actividad_en or p.creado_en)
+
+    detenidos = [p for p in postulaciones if p.activa and (ahora - ult(p)).days > DETENIDO_DIAS]
+    seguimiento = sorted(
+        [{"id": p.codigo, "nombre": p.nombre, "vacante": p.vacante.titulo if p.vacante else "", "paso": fraiche.PASOS[fraiche.paso_visible(p)]["nombre"],
+          "ultimoSeguimiento": ult(p).isoformat(), "diasSinSeguimiento": (ahora - ult(p)).days, "detenido": (ahora - ult(p)).days > DETENIDO_DIAS,
+          "reclutador": p.vacante.responsable.nombre if p.vacante and p.vacante.responsable else ""}
+         for p in postulaciones if p.activa],
+        key=lambda x: -x["diasSinSeguimiento"],
+    )[:50]
+
+    # --- citas y entrevistas por reclutador ---
+    por_reclutador: dict = {}
+
+    def rec_de(p):
+        return (p.vacante.responsable.nombre if p.vacante and p.vacante.responsable else "Sin responsable")
+
+    for p in postulaciones:
+        r = por_reclutador.setdefault(rec_de(p), {"reclutador": rec_de(p), "postulados": 0, "citas": 0, "entrevistasIA": 0, "entrevistasHumanas": 0, "contratados": 0, "aceptadosFranquicia": 0})
+        r["postulados"] += 1
+        r["citas"] += sum(1 for eh in p.entrevistas_humanas if eh.fecha and not eh.cancelada) + sum(1 for e in p.entrevistas if e.programada_para)
+        r["entrevistasIA"] += sum(1 for e in p.entrevistas if e.estado == "evaluada")
+        r["entrevistasHumanas"] += sum(1 for eh in p.entrevistas_humanas if eh.realizada)
+        r["contratados"] += 1 if p.motivo_cierre == "contratado" else 0
+        r["aceptadosFranquicia"] += 1 if p.franquicia_estado == "aceptado" else 0
+    for r in por_reclutador.values():
+        exitos = r["contratados"] + r["aceptadosFranquicia"]
+        r["efectividad"] = round(exitos / r["postulados"] * 100) if r["postulados"] else None
+
+    # --- efectividad por fuente ---
+    por_fuente: dict = {}
+    for p in postulaciones:
+        f = fraiche.nombre_fuente(p.fuente_postulacion) if p.fuente_postulacion else (p.candidato.fuente if p.candidato else "Sin fuente")
+        x = por_fuente.setdefault(f, {"fuente": f, "postulados": 0, "viables": 0, "contratados": 0, "aceptadosFranquicia": 0})
+        x["postulados"] += 1
+        x["viables"] += 1 if (p.activa and fraiche.paso_visible(p) in PASOS_VIABLES and p.estado != "no_cumple") else 0
+        x["contratados"] += 1 if p.motivo_cierre == "contratado" else 0
+        x["aceptadosFranquicia"] += 1 if p.franquicia_estado == "aceptado" else 0
+    for x in por_fuente.values():
+        exitos = x["contratados"] + x["aceptadosFranquicia"]
+        x["efectividad"] = round(exitos / x["postulados"] * 100) if x["postulados"] else None
+
+    # --- ingresos y próximos ingresos (tiendas propias) — NUNCA mezclados con franquicias ---
+    propias = [p for p in postulaciones if p.vacante and p.vacante.destino != "franquicia"]
+    ingresos = [p for p in propias if p.motivo_cierre == "contratado" and p.expediente and p.expediente.alta_fecha]
+    proximos_ingresos = [p for p in propias if p.activa and p.expediente and (p.expediente.fecha_ingreso_real or p.expediente.fecha_ingreso) and not p.expediente.alta_fecha and _utc(p.expediente.fecha_ingreso_real or p.expediente.fecha_ingreso) >= ahora - timedelta(days=1)]
+    ingresos_lista = sorted([
+        {"id": p.codigo, "nombre": p.nombre, "puesto": p.vacante.titulo if p.vacante else "", "sucursal": p.vacante.sucursal if p.vacante else "",
+         "fecha": _utc(p.expediente.fecha_ingreso_real or p.expediente.fecha_ingreso or p.expediente.alta_fecha).date().isoformat(), "listoSap": p.expediente.estado_sap == fraiche.ESTADO_LISTO_SAP}
+        for p in ingresos], key=lambda x: x["fecha"], reverse=True)[:30]
+    proximos_lista = sorted([
+        {"id": p.codigo, "nombre": p.nombre, "puesto": p.vacante.titulo if p.vacante else "", "sucursal": p.vacante.sucursal if p.vacante else "",
+         "fecha": _utc(p.expediente.fecha_ingreso_real or p.expediente.fecha_ingreso).date().isoformat(), "paso": fraiche.PASOS[fraiche.paso_visible(p)]["nombre"]}
+        for p in proximos_ingresos], key=lambda x: x["fecha"])[:30]
+
+    # --- franquicias: presentados y aceptados, por franquicia ---
+    franq = [p for p in postulaciones if p.vacante and p.vacante.destino == "franquicia"]
+    por_franquicia: dict = {}
+    for p in franq:
+        nombre_f = p.vacante.cliente.nombre_visible if p.vacante.cliente else "Sin franquicia"
+        x = por_franquicia.setdefault(nombre_f, {"franquicia": nombre_f, "presentados": 0, "aceptados": 0, "noAceptados": 0})
+        if p.franquicia_estado:
+            x["presentados"] += 1
+        x["aceptados"] += 1 if p.franquicia_estado == "aceptado" else 0
+        x["noAceptados"] += 1 if p.franquicia_estado == "no_aceptado" else 0
+
+    return {
+        "cuentaId": cuenta.id, "generado": ahora.isoformat(),
+        "filtros": {"destino": destino or "", "reclutadorId": reclutador_id, "zona": zona, "sucursal": sucursal, "clienteId": cliente_id, "vacante": vacante, "fuente": fuente, "umbralRiesgoDias": umbral, "detenidoDias": DETENIDO_DIAS},
+        "vacantes": {"activas": activas, "cubiertas": cubiertas, "pendientes": pendientes_total, "proximasACubrir": proximas, "enRiesgo": en_riesgo, "total": len(vacantes), "lista": filas_vacantes},
+        "candidatos": {
+            "postulados": len(postulaciones), "contactados": len(contactados), "entrevistados": len(entrevistados), "viables": len(viables_tot),
+            "descartados": len(descartados), "descartadosPorMotivo": [{"motivo": k, "total": n} for k, n in sorted(motivos.items(), key=lambda kv: -kv[1])],
+        },
+        "pendientes": {"evaluaciones": len(ev_pend), "evaluacionesPorTipo": {t: sum(1 for e in ev_pend if e.tipo == t) for t in {e.tipo for e in ev_pend}}, "documentos": docs_pend},
+        "seguimiento": {"detenidos": len(detenidos), "candidatos": seguimiento},
+        "reclutadores": sorted(por_reclutador.values(), key=lambda r: -r["postulados"]),
+        "fuentes": sorted(por_fuente.values(), key=lambda r: -r["postulados"]),
+        "tiendasPropias": {"ingresos": len(ingresos), "proximosIngresos": len(proximos_ingresos), "listaIngresos": ingresos_lista, "listaProximos": proximos_lista},
+        "franquicias": {"presentados": sum(1 for p in franq if p.franquicia_estado), "aceptados": sum(1 for p in franq if p.franquicia_estado == "aceptado"),
+                        "noAceptados": sum(1 for p in franq if p.franquicia_estado == "no_aceptado"), "porFranquicia": sorted(por_franquicia.values(), key=lambda r: -r["presentados"])},
+        "futuros": {"bajas": None, "permanencia": None, "nota": "Bajas y permanencia dependen de recibir información de SAP; no se muestran cifras inventadas."},
+        "opciones": {
+            "reclutadores": sorted({(v.responsable_id, v.responsable.nombre) for v in db.query(Vacante).filter(Vacante.cuenta_id == cuenta.id, Vacante.responsable_id.isnot(None)).all() if v.responsable}, key=lambda x: x[1]),
+            "zonas": sorted({(v.zona or "").strip() for v in db.query(Vacante).filter(Vacante.cuenta_id == cuenta.id).all() if (v.zona or "").strip()}),
+            "sucursales": sorted({(v.sucursal or "").strip() for v in db.query(Vacante).filter(Vacante.cuenta_id == cuenta.id).all() if (v.sucursal or "").strip()}),
+            "fuentes": [{"clave": k, "nombre": n} for k, n in fraiche.FUENTES_POSTULACION.items()],
+        },
+    }

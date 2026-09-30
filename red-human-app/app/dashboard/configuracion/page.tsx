@@ -791,7 +791,7 @@ function TabUsuariosCuenta({ ficha, onCambio }: { ficha: FichaCuenta; onCambio: 
           <div className="grid gap-3 sm:grid-cols-2">
             <Entrada label="Nombre" value={f.nombre} onChange={(v) => setF((p) => ({ ...p, nombre: v }))} placeholder="Ej. María López" />
             <Entrada label="Correo" value={f.correo} onChange={(v) => setF((p) => ({ ...p, correo: v }))} placeholder="correo@empresa.com" type="email" />
-            <Selector label="Rol" value={f.rol} onChange={(v) => setF((p) => ({ ...p, rol: v as RolUsuario }))} opciones={["Usuario", "Administrador"]} />
+            <Selector label="Rol" value={f.rol} onChange={(v) => setF((p) => ({ ...p, rol: v as RolUsuario }))} opciones={["Usuario", "Coordinación", "Administrador"]} />
             <Entrada label="Puesto (opcional)" value={f.puesto} onChange={(v) => setF((p) => ({ ...p, puesto: v }))} placeholder="Ej. Reclutadora" />
             <Entrada label="WhatsApp (opcional)" value={f.telefono} onChange={(v) => setF((p) => ({ ...p, telefono: v }))} placeholder="10 dígitos — para avisos como entrevistador" />
           </div>
@@ -811,7 +811,7 @@ function TabUsuariosCuenta({ ficha, onCambio }: { ficha: FichaCuenta; onCambio: 
               <p className="truncate text-sm font-medium">{u.nombre}{u.id === usuario?.id && <span className="ml-1.5 text-[11px] text-ink-3">(tú)</span>}</p>
               <p className="truncate text-[12px] text-ink-3">{u.correo}{u.puesto ? ` · ${u.puesto}` : ""}{u.telefono ? ` · WhatsApp ${u.telefono}` : ""}</p>
             </div>
-            <Badge tone={u.rol === "Administrador" ? "brand" : "neutral"}>{u.rol}</Badge>
+            <Badge tone={u.rol === "Administrador" ? "brand" : u.rol === "Coordinación" ? "human" : "neutral"}>{u.rol}</Badge>
             <Badge tone={u.activo ? "good" : "neutral"} dot>{u.activo ? "Activo" : "Inactivo"}</Badge>
             {u.id !== usuario?.id && (
               quitando === u.id ? <Loader2 className="h-4 w-4 animate-spin text-ink-3" /> : <BotonEliminar onClick={() => quitar(u)} title="Quitar de esta Cuenta" />
@@ -886,7 +886,7 @@ function SeccionUsuarios() {
                 <p className="truncate text-sm font-medium">{u.nombre}</p>
                 <p className="truncate text-[12px] text-ink-3">{u.correo}{u.puesto ? ` · ${u.puesto}` : ""}{u.telefono ? ` · WhatsApp ${u.telefono}` : ""}</p>
               </div>
-              <Badge tone={u.rol === "Administrador" ? "brand" : "neutral"}>{u.rol}</Badge>
+              <Badge tone={u.rol === "Administrador" ? "brand" : u.rol === "Coordinación" ? "human" : "neutral"}>{u.rol}</Badge>
               <Badge tone={u.activo ? "good" : "neutral"} dot>{u.activo ? "Activo" : "Inactivo"}</Badge>
               <MenuAcciones
                 etiqueta={`Acciones de ${u.nombre}`}
@@ -948,7 +948,7 @@ function FormUsuario({
         <Entrada label="Puesto" value={puesto} onChange={setPuesto} placeholder="Ej. Reclutadora" />
         {/* Fase 7A: WhatsApp del perfil — lo usa la notificación cuando esta persona es Entrevistador */}
         <Entrada label="WhatsApp (opcional)" value={telefono} onChange={setTelefono} placeholder="10 dígitos — para avisos como entrevistador" />
-        <Selector label="Rol" value={rol} onChange={(v) => setRol(v as RolUsuario)} opciones={["Usuario", "Administrador"]} />
+        <Selector label="Rol" value={rol} onChange={(v) => setRol(v as RolUsuario)} opciones={["Usuario", "Coordinación", "Administrador"]} />
         <Entrada label={usuario ? "Nueva contraseña (opcional)" : "Contraseña"} value={password} onChange={setPassword} type="password" placeholder="Mínimo 8 caracteres" />
         {usuario && (
           <div className="flex items-center gap-2 pt-5">

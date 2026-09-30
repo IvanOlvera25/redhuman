@@ -325,3 +325,68 @@ Reemplaza lo anterior en: `Expediente.progreso` (Fases 1-3 post-demo), «Solicit
 - `POST /api/webhooks/dropbox` (`routers/webhooks_proveedores.py`): multipart campo `json`, HMAC-SHA256 (API key, event_time+event_type) con `compare_digest`; responde EXACTO «Hello API Event Received» y procesa en segundo plano. Al firmarse todo descarga el PDF final (idempotente) y lo guarda como documento INTERNO (`TIPO_CONTRATO_FIRMADO` / `TIPO_CARTA_FIRMADA`) vía `onboarding.guardar_documento_firmado` — el contrato cierra la tarea «Contrato firmado» (si se firmó antes de iniciar el Onboarding, la tarea nace Realizada).
 - Psicométricas.mx (`services/psicometricas.py`, https://admin.psicometricas.mx/api/, form-encoded `Token`+`Password`): solo evaluaciones modo Integrada con proveedor «Psicométricas.mx» y `id_proveedor` = IDs numéricos de sus pruebas («1,7»). «Enviar» → `agregaCandidato` → `EvaluacionCandidato.clave_proveedor`. Su API NO regresa la liga del candidato (la manda por correo): solo se muestra la clave, salvo `PSICOMETRICAS_URL_CANDIDATO` con `{clave}`. `POST /api/webhooks/psicometricas?secreto=…` NO trae firma → secreto propio + CONFIRMACIÓN con `consultaCandidato` (fecha_fin) antes de guardar JSON (`resultado_json`) + PDF → «Resultado recibido» (`services.evaluaciones.sincronizar_psicometricas`, idempotente; «Consultar resultado» en la ficha). Sin llaves: modo Integrada simulado. Regresión: `scripts/verificar_firmas_psicometricas.py`.
 
+
+## Demo Fraiche — rama `demo-fraiche` (2026-09-29)
+
+Especificación: `Fraiche — especificación autónoma para desarrollo de la demo.pdf` (raíz del repo). Vive SOLO en la rama
+`demo-fraiche` (VPS `srv2020737.hstgr.cloud`, `redesplegar.sh --rama demo-fraiche`); NO se mezcla a `main` sin decisión
+explícita. Toda constante/regla del cliente está en `services/fraiche.py` (nunca duplicarla en routers ni prompts).
+
+- **Destino de la vacante** (`Vacante.destino` ∈ `DESTINOS_VACANTE`): tienda propia (`sucursal`) o franquicia (`cliente_id` +
+  `sucursal`). Publicar exige destino, cliente o sucursal, `zona`, `horario`, sueldo, `posiciones`, responsable y
+  `fecha_objetivo` (`routers.vacantes.faltantes_para_publicar`; `FRAICHE_PUBLICACION_ESTRICTA=false` solo en scripts previos).
+  `horario` viaja con la plantilla (`CAMPOS_PLANTILLA`). Textos por portal: `publicaciones.indeed|computrabajo|talenteca`
+  (además de occ/linkedin/portal/whatsapp); se copian, NUNCA se publican solos. Imagen: `POST/GET/DELETE /vacantes/{codigo}/imagen`.
+- **Fuente por postulación**: `Postulacion.fuente_postulacion` (+ `referido_por`) desde `?fuente=`/`?utm_source=`/`?ref=` de la
+  liga (`GET /vacantes/{codigo}/liga`, QR `GET /vacantes/{codigo}/qr`, `segno`). `Postulacion.fuente` (propiedad) sigue siendo
+  el canal de la PERSONA. Bolsa por zona: `GET /vacantes/publicas?cuenta=fraiche&zona=` y `/publicas/zonas`.
+- **Prefiltro web** (spec §5): `fraiche.PREGUNTAS_WEB_COMUNES` (municipio/selector, traslado, L-D, rolados, sueldo con
+  «Necesito conocer más», puesto similar, ventas) + `PREGUNTAS_WEB_PLANTILLA` (Sí/No); placeholders `[sucursal]` y
+  `[monto mensual]` se sustituyen al servir (`preguntas_para_vacante`). `/postular` clasifica con `evaluar_prefiltro_web` →
+  `analisis.prefiltro_web` {resultado cumple|revision|no_cumple, motivo, detalle} y escribe `Postulacion.estado` en Prefiltro;
+  el CV ya NO pisa ese estado. Una respuesta incierta nunca descarta.
+- **Segundo filtro por WhatsApp** (spec §6): guion FIJO `fraiche.GUION_WHATSAPP` (`guion_whatsapp`: la 4 solo si reportó
+  experiencia similar, la 5 solo con duda web, BBVA informativa al final; las propias de la vacante van antes de BBVA);
+  `ia.prefiltro_turno(..., respuestas_web=, guion_fijo=True)` no repite la web ni cierra antes; estado también `revision`.
+  `analisis.adeudo_bbva` se guarda/muestra y NUNCA decide (`sin_bbva`, `cumple=null`); el aviso de privacidad de
+  WhatsApp incluye `AVISO_CAPTURA_BBVA`. Resultado etiquetado `RESULTADOS_WHATSAPP` (Invitar a entrevista inicial /
+  Revisar por reclutador / No cumple indispensable) en `analisis.prefiltro_whatsapp`.
+- **Entrevista inicial** (spec §7): guion fijo `ia.guion_entrevista_inicial_fraiche` (`TEMAS_ENTREVISTA_INICIAL`; + tema
+  personal si el enfoque es profesional_personal); `prompt_entrevistador(contexto_previo=)` parte del prefiltro sin releerlo.
+  La ficha expone `transcript` de cada entrevista.
+- **IPV** (spec §8): rúbrica ÚNICA `COMPETENCIAS_IPV` (30/15/10/20/20/5), niveles alto/medio/bajo/sin_evidencia,
+  equivalencias `ConfiguracionSistema.ipv_equivalencias` (default 100/70/30, `equivalencias_de`), `calcular_ipv` →
+  puntaje y conclusión (80-100 recomendable · 60-79 bajo_reserva · <60 no_recomendable; sin evidencia → requiere_revision,
+  sin nota). Red Human: `Entrevista.fase` inicial|ipv|inicial_ipv, transcript partido en `MARCADOR_IPV`, `evaluacion` y
+  `evaluacion_ipv` SEPARADAS (`ia.evaluar_ipv`); `POST /candidatos/{codigo}/ipv` (misma sesión si la inicial está pendiente,
+  si no sesión solo IPV). Humano: `EntrevistaHumana.es_ipv/rubrica/resultado_ipv` (liga pública y captura de RH,
+  `aplicar_rubrica_ipv`; resultado/recomendación DERIVADOS solo como recomendación). «Programar nueva IPV humana» = nueva
+  fila; ninguna puntuación mueve de etapa ni descarta.
+- **Evaluaciones con personas externas** (spec §9-10): `EvaluacionCandidato` gana responsable (usuario/contacto/captura),
+  `cita_en/lugar`, `token_externo` (liga `/evaluacion/{token}`, router `evaluacion_externa.py`: SOLO esa evaluación),
+  `adjuntos`, estados del spec (`estado_fraiche`: pendiente / realizada_pendiente / con_resultado / no_realizada / cancelada),
+  `decision_externa` + `dictamen` interno (`aplicar_decision`: médico apto|apto_condicionado|no_recomendable → favorable|
+  con_observaciones|desfavorable; franquiciatario continuar|no_continuar), `origen_resultado`, `referencias`, `resumen_ia`
+  (socioeconómico: PROPUESTA sin puntuación). Lo médico se guarda CIFRADO (`services/cifrado.py`, `DATOS_SENSIBLES_CLAVE`)
+  y solo lo descifra el rol autorizado (`GET /{codigo}/detalle-medico` y adjuntos quedan en bitácora). Evaluatest:
+  `resultado_json.evaluatest` (índice de afinidad, IGI, competencias, fortalezas, áreas de oportunidad, riesgo) con
+  `origen_resultado=liga_proveedor_reporte_anonimizado`; `BATERIAS_EVALUATEST` sin Cajero. Recibir un resultado NUNCA
+  mueve de etapa; una corrección conserva el anterior en `historial`.
+- **Ruta visible** (spec §11-12): las 6 etapas internas NO cambian; `Postulacion.paso` (`PASOS`, `RUTA_TIENDA_PROPIA` 11
+  pasos / `RUTA_FRANQUICIA` 7) se mapea a la etapa (`paso_visible`, `avanzar_paso` nunca retrocede; RH confirma con
+  `PATCH /candidatos/{codigo}/paso`, que mueve la etapa con `aplicar_movimiento(manual)`; listo_alta/listo_sap exigen
+  Onboarding). Franquicia: `POST /presentar-franquiciatario` (evaluación fija `NOMBRE_EVALUACION_FRANQUICIATARIO` + liga),
+  `PATCH /franquicia` (presentado|aceptado|no_aceptado; aceptado cierra con `aceptado_franquicia` y NO es ingreso).
+- **Alta SAP** (spec §11): `fraiche.datos_alta_sap` (5 bloques, origen por campo, excluye médico/socioeconómico;
+  `Candidato.datos_personales` + `Expediente.datos_alta`), `GET/PATCH /contratacion/expedientes/{id}/datos-alta`,
+  `POST /confirmar-datos-alta` → `Expediente.estado_sap=listo_para_enviar_sap` + `MENSAJE_SAP_PENDIENTE`. Nunca se envía
+  nada, nunca número de empleado, nunca afirmar que el alta en SAP ocurrió.
+- **Ficha PDF** (spec §13): `pdf.pdf_ficha_presentacion`; `GET /candidatos/{codigo}/ficha-presentacion` (vista previa por
+  `secciones`) y `POST` (registra destinatario y fecha). Jamás detalle médico ni socioeconómico.
+- **Tablero de control de Reclutamiento** (spec §14): `GET /metricas/reclutamiento` (rol `Coordinación` o Administrador —
+  `ROLES` incluye «Coordinación», `Usuario.puede_ver_tablero_reclutamiento`); selector por destino y filtros; «en riesgo»
+  usa `ConfiguracionSistema.riesgo_dias_umbral`; ingresos (tiendas propias) y presentados/aceptados (franquicias) NUNCA
+  se mezclan; bajas y permanencia sin cifras. Página `/dashboard/reclutamiento`.
+- **Datos demo** (spec §15): `scripts/cargar_demo_fraiche.py --ejecutar` (idempotente, cero comunicaciones, nombres
+  ficticios, usuarios reclutador@/coordinacion@/medico.autorizado@fraiche.demo). Regresión: `scripts/verificar_fraiche_f1.py`
+  … `verificar_fraiche_f6.py`.

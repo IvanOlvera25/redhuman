@@ -115,6 +115,19 @@ function eliminar<T>(ruta: string) {
   return enviar<T>(ruta, { method: "DELETE" });
 }
 
+/** Descarga un binario (PDF) generado por un POST/GET autenticado. Regresa el Blob o el error de la API. */
+async function descargar(ruta: string, init: RequestInit = {}): Promise<Resultado<Blob>> {
+  try {
+    const headers = { ...headersCuenta(), ...((init.headers as Record<string, string> | undefined) ?? {}) };
+    const r = await fetch(`${API}${ruta}`, { ...init, credentials: "include", headers });
+    if (r.status === 401) sesionCaida(ruta);
+    if (!r.ok) return { ok: false, error: await detalleError(r) };
+    return { ok: true, data: await r.blob() };
+  } catch {
+    return { ok: false, error: SIN_API };
+  }
+}
+
 /** Ligas de archivo (<iframe>, <a href>): el navegador NO manda cabeceras, así que la Cuenta activa viaja
  * en `?cuenta_id=` (el backend la valida igual que X-Cuenta-Id). 2026-09-29: sin esto, con varias Cuentas,
  * la carta/contrato de un candidato de otra Cuenta respondía «Expediente no encontrado». */
@@ -128,7 +141,7 @@ export function urlArchivo(ruta: string) {
    Autenticación
    ============================================================ */
 
-export type RolUsuario = "Administrador" | "Usuario";
+export type RolUsuario = "Administrador" | "Usuario" | "Coordinación";
 
 export interface UsuarioRH {
   id: number;
@@ -1414,6 +1427,118 @@ export function calcularIpv(niveles: Record<string, NivelIPV | "">, equivalencia
   const puntaje = Math.round(total * 10) / 10;
   const conclusion = puntaje >= 80 ? "recomendable" : puntaje >= 60 ? "bajo_reserva" : "no_recomendable";
   return { puntaje, conclusion, requiere_revision: false, sin_evidencia: [], detalle, equivalencias: eq };
+}
+
+/* ============================================================
+   Fraiche (spec §11-13) · Ruta visible por destino, franquicia, alta SAP y ficha para presentar
+   ============================================================ */
+
+export type PasoFraiche =
+  | "nuevo" | "prefiltro_web" | "filtro_whatsapp" | "entrevista_inicial" | "ipv" | "psicometria" | "evaluaciones_adicionales"
+  | "referencias" | "documentacion" | "listo_alta" | "listo_sap" | "presentacion";
+export interface PasoRuta { clave: PasoFraiche; nombre: string; etapa: string }
+export type EstadoFranquicia = "" | "presentado" | "aceptado" | "no_aceptado";
+export const ESTADOS_FRANQUICIA: Record<Exclude<EstadoFranquicia, "">, string> = { presentado: "Presentado", aceptado: "Aceptado por franquiciatario", no_aceptado: "No aceptado" };
+
+/** El reclutador confirma el movimiento en la ruta visible; el servidor mapea el paso a la etapa interna. */
+export function moverPasoCandidato(codigo: string, paso: PasoFraiche, comentario = "") {
+  return patch<Candidato>(`/candidatos/${codigo}/paso`, { paso, comentario });
+}
+/** «Presentar al franquiciatario»: crea «Entrevista con franquiciatario» asignada al contacto y manda su liga. */
+export function presentarFranquiciatario(codigo: string, datos: { contactoId?: number | null; nombre?: string; correo?: string; whatsapp?: string; enviarLiga?: boolean }) {
+  return post<{ evaluacion: unknown; liga: string; resultados: ResultadoNotificacion[]; candidato: Candidato }>(`/candidatos/${codigo}/presentar-franquiciatario`, {
+    contacto_id: datos.contactoId ?? null, nombre: datos.nombre ?? "", correo: datos.correo ?? "", whatsapp: datos.whatsapp ?? "", enviar_liga: datos.enviarLiga ?? true,
+  });
+}
+/** Presentado / Aceptado por franquiciatario / No aceptado (lo actualiza el reclutador). */
+export function actualizarFranquicia(codigo: string, estado: Exclude<EstadoFranquicia, "">, comentario = "") {
+  return patch<Candidato>(`/candidatos/${codigo}/franquicia`, { estado, comentario });
+}
+
+export interface CampoAltaSap { clave: string; nombre: string; valor: string; origen: string; faltante: boolean }
+export interface DatosAltaSap {
+  bloques: { clave: string; nombre: string; campos: CampoAltaSap[] }[];
+  faltantes: string[];
+  excluye: string[];
+  estadoSap: "" | "listo_para_enviar_sap";
+  estadoSapTexto: string;
+  mensaje: string;
+  confirmadoPor: string;
+  confirmadoEn: string | null;
+}
+export function fetchDatosAltaSap(expedienteId: number) {
+  return get<DatosAltaSap>(`/contratacion/expedientes/${expedienteId}/datos-alta`);
+}
+export function capturarDatosAltaSap(expedienteId: number, datos: { personales?: Record<string, string>; campos?: Record<string, string> }) {
+  return patch<DatosAltaSap>(`/contratacion/expedientes/${expedienteId}/datos-alta`, { personales: datos.personales ?? {}, campos: datos.campos ?? {} });
+}
+/** «Confirmar datos para alta» → «Listo para enviar a SAP» (no envía nada; conexión pendiente de configurar). */
+export function confirmarDatosAltaSap(expedienteId: number) {
+  return post<DatosAltaSap & { expediente: unknown }>(`/contratacion/expedientes/${expedienteId}/confirmar-datos-alta`, {});
+}
+
+export const SECCIONES_FICHA: { clave: string; nombre: string }[] = [
+  { clave: "vacante", nombre: "Vacante y sucursal o cliente" },
+  { clave: "candidato", nombre: "Candidato" },
+  { clave: "experiencia", nombre: "Experiencia" },
+  { clave: "cv", nombre: "CV" },
+  { clave: "entrevista_inicial", nombre: "Resumen de entrevista inicial" },
+  { clave: "ipv", nombre: "Entrevista IPV" },
+  { clave: "psicometria", nombre: "Psicometría disponible" },
+  { clave: "observaciones", nombre: "Observaciones" },
+  { clave: "siguiente_accion", nombre: "Siguiente acción" },
+];
+/** Vista previa (no registra nada). */
+export function urlFichaPresentacion(codigo: string, datos: { secciones?: string[]; observaciones?: string; siguienteAccion?: string } = {}) {
+  const p = new URLSearchParams();
+  if (datos.secciones?.length) p.set("secciones", datos.secciones.join(","));
+  if (datos.observaciones) p.set("observaciones", datos.observaciones);
+  if (datos.siguienteAccion) p.set("siguiente_accion", datos.siguienteAccion);
+  const q = p.toString();
+  return urlArchivo(`/candidatos/${codigo}/ficha-presentacion${q ? `?${q}` : ""}`);
+}
+/** «Generar ficha para presentar»: registra destinatario y fecha; regresa el PDF. */
+export function generarFichaPresentacion(codigo: string, datos: { destinatario: string; secciones: string[]; observaciones?: string; siguienteAccion?: string }) {
+  return descargar(`/candidatos/${codigo}/ficha-presentacion`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ destinatario: datos.destinatario, secciones: datos.secciones, observaciones: datos.observaciones ?? "", siguiente_accion: datos.siguienteAccion ?? "" }),
+  });
+}
+
+/* ============================================================
+   Fraiche (spec §14) · Tablero de control de Reclutamiento (rol Coordinación y Administrador)
+   ============================================================ */
+
+export interface FilaVacanteReclutamiento {
+  id: string; titulo: string; destino: "tienda_propia" | "franquicia"; estado: string; sucursal: string; zona: string; cliente: string;
+  reclutador: string; reclutadorId: number | null; posiciones: number; cubiertas: number; pendientes: number; antiguedadDias: number | null;
+  fechaObjetivo: string | null; diasParaObjetivo: number | null; enRiesgo: boolean; viables: number; proximos: number; postulados: number; activos: number;
+}
+export interface TableroReclutamiento {
+  cuentaId: number; generado: string;
+  filtros: { destino: string; reclutadorId: number | null; zona: string; sucursal: string; clienteId: number | null; vacante: string; fuente: string; umbralRiesgoDias: number; detenidoDias: number };
+  vacantes: { activas: number; cubiertas: number; pendientes: number; proximasACubrir: number; enRiesgo: number; total: number; lista: FilaVacanteReclutamiento[] };
+  candidatos: { postulados: number; contactados: number; entrevistados: number; viables: number; descartados: number; descartadosPorMotivo: { motivo: string; total: number }[] };
+  pendientes: { evaluaciones: number; evaluacionesPorTipo: Record<string, number>; documentos: number };
+  seguimiento: { detenidos: number; candidatos: { id: string; nombre: string; vacante: string; paso: string; ultimoSeguimiento: string; diasSinSeguimiento: number; detenido: boolean; reclutador: string }[] };
+  reclutadores: { reclutador: string; postulados: number; citas: number; entrevistasIA: number; entrevistasHumanas: number; contratados: number; aceptadosFranquicia: number; efectividad: number | null }[];
+  fuentes: { fuente: string; postulados: number; viables: number; contratados: number; aceptadosFranquicia: number; efectividad: number | null }[];
+  tiendasPropias: { ingresos: number; proximosIngresos: number; listaIngresos: { id: string; nombre: string; puesto: string; sucursal: string; fecha: string; listoSap: boolean }[]; listaProximos: { id: string; nombre: string; puesto: string; sucursal: string; fecha: string; paso: string }[] };
+  franquicias: { presentados: number; aceptados: number; noAceptados: number; porFranquicia: { franquicia: string; presentados: number; aceptados: number; noAceptados: number }[] };
+  futuros: { bajas: null; permanencia: null; nota: string };
+  opciones: { reclutadores: [number, string][]; zonas: string[]; sucursales: string[]; fuentes: { clave: string; nombre: string }[] };
+}
+export function fetchTableroReclutamiento(filtros: { destino?: string; reclutadorId?: number | null; zona?: string; sucursal?: string; clienteId?: number | null; vacante?: string; fuente?: string } = {}) {
+  const p = new URLSearchParams();
+  if (filtros.destino) p.set("destino", filtros.destino);
+  if (filtros.reclutadorId) p.set("reclutador_id", String(filtros.reclutadorId));
+  if (filtros.zona) p.set("zona", filtros.zona);
+  if (filtros.sucursal) p.set("sucursal", filtros.sucursal);
+  if (filtros.clienteId) p.set("cliente_id", String(filtros.clienteId));
+  if (filtros.vacante) p.set("vacante", filtros.vacante);
+  if (filtros.fuente) p.set("fuente", filtros.fuente);
+  const q = p.toString();
+  return get<TableroReclutamiento>(`/metricas/reclutamiento${q ? `?${q}` : ""}`);
 }
 
 /** «Programar IPV → Red Human»: continúa en la sesión inicial pendiente (misma_sesion) o crea una sesión solo IPV. */
