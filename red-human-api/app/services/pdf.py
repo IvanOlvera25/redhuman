@@ -318,3 +318,138 @@ def pdf_contrato(d: dict, con_zonas: bool = False):
     zonas = bloque_firmas(pdf, ("empresa", f"{d['empresa']} - Representante"), ("candidato", d["nombre"]))
     salida = bytes(pdf.output())
     return (salida, zonas) if con_zonas else salida
+
+
+# ============================================================
+# Demo Fraiche (spec §13, 2026-09-29) · Ficha para presentar al encargado / franquiciatario
+# ============================================================
+
+
+class _Ficha(FPDF):
+    def footer(self) -> None:
+        self.set_y(-15)
+        self.set_font(_FUENTE, "", 8)
+        self.set_text_color(120, 120, 120)
+        self.cell(0, 8, _latin(f"Red Human AI - Ficha para presentar - página {self.page_no()} - Sin información médica ni socioeconómica"), align="C")
+
+
+def _ficha_titulo(pdf: FPDF, texto: str) -> None:
+    if pdf.get_y() > pdf.h - pdf.b_margin - 30:
+        pdf.add_page()
+    pdf.ln(3)
+    pdf.set_font(_FUENTE, "B", 12)
+    pdf.set_text_color(0xEE, 0x44, 0x44)
+    pdf.cell(0, 7, _latin(texto.upper()), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_draw_color(221, 221, 221)
+    pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
+    pdf.ln(2)
+    pdf.set_text_color(26, 26, 26)
+
+
+def _ficha_par(pdf: FPDF, etiqueta: str, valor: str) -> None:
+    if not valor:
+        return
+    pdf.set_font(_FUENTE, "B", 10)
+    pdf.cell(42, 6, _latin(etiqueta))
+    pdf.set_font(_FUENTE, "", 10)
+    pdf.multi_cell(0, 6, _latin(valor), new_x="LMARGIN", new_y="NEXT")
+
+
+def _ficha_lista(pdf: FPDF, etiqueta: str, items: list) -> None:
+    if not items:
+        return
+    pdf.set_font(_FUENTE, "B", 10)
+    pdf.cell(0, 6, _latin(etiqueta), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font(_FUENTE, "", 10)
+    for x in items:
+        pdf.multi_cell(0, 5.5, _latin(f"- {x}"), new_x="LMARGIN", new_y="NEXT")
+
+
+def pdf_ficha_presentacion(d: dict) -> bytes:
+    """Vacante, sucursal o cliente, experiencia, CV, resumen de entrevista inicial, IPV, psicometría disponible,
+    observaciones y siguiente acción — solo los apartados que el reclutador incluyó. NUNCA lleva detalle médico
+    ni socioeconómico (esas evaluaciones ni siquiera entran a `d`)."""
+    pdf = _Ficha(format="letter")
+    pdf.set_margins(20, 18, 20)
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.add_page()
+    wordmark_red_human(pdf, 20, 12, 16)
+    pdf.set_xy(20, 26)
+    pdf.set_font(_FUENTE, "B", 15)
+    pdf.set_text_color(26, 26, 26)
+    pdf.cell(0, 9, _latin(f"Ficha de candidato - {d['candidato']['nombre']}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font(_FUENTE, "", 10)
+    pdf.set_text_color(85, 85, 85)
+    pdf.cell(0, 6, _latin(f"{d['vacante']['titulo']} - generada el {d['generada']} - {d['candidato']['codigo']}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(26, 26, 26)
+    secciones = set(d.get("secciones") or [])
+
+    if "vacante" in secciones:
+        _ficha_titulo(pdf, "Vacante")
+        v = d["vacante"]
+        _ficha_par(pdf, "Puesto", v["titulo"])
+        _ficha_par(pdf, "Destino", v["destino"])
+        _ficha_par(pdf, "Sucursal", v["sucursal"])
+        _ficha_par(pdf, "Cliente", v["cliente"])
+        _ficha_par(pdf, "Zona", v["zona"])
+    if "candidato" in secciones:
+        _ficha_titulo(pdf, "Candidato")
+        c = d["candidato"]
+        _ficha_par(pdf, "Nombre", c["nombre"])
+        _ficha_par(pdf, "Ubicación", c["ubicacion"])
+        _ficha_par(pdf, "Fuente", c["fuente"])
+    if "experiencia" in secciones:
+        _ficha_titulo(pdf, "Experiencia")
+        _ficha_par(pdf, "Resumen", d["experiencia"]["resumen"] or "Sin resumen de experiencia.")
+        _ficha_lista(pdf, "Trayectoria", d["experiencia"]["detalle"])
+    if "cv" in secciones:
+        _ficha_titulo(pdf, "CV")
+        cv = d["cv"]
+        _ficha_par(pdf, "Perfil", cv["resumen"] or ("CV adjunto disponible en la plataforma." if cv["adjunto"] else "Sin CV."))
+        _ficha_lista(pdf, "Habilidades", cv["habilidades"])
+        _ficha_lista(pdf, "Estudios", cv["estudios"])
+    if "entrevista_inicial" in secciones:
+        _ficha_titulo(pdf, "Resumen de la entrevista inicial (Red Human)")
+        e = d.get("entrevista_inicial")
+        if e:
+            _ficha_par(pdf, "Resumen", e["resumen"])
+            _ficha_lista(pdf, "Fortalezas", e["fortalezas"])
+            _ficha_lista(pdf, "Alertas / puntos por validar", e["alertas"])
+            _ficha_par(pdf, "Recomendación", {"avanzar": "Avanzar", "revision": "Revisión", "no_avanzar": "No avanzar"}.get(e["recomendacion"], e["recomendacion"]))
+        else:
+            _ficha_par(pdf, "Estado", "Sin entrevista inicial evaluada.")
+    if "ipv" in secciones:
+        _ficha_titulo(pdf, "Entrevista IPV")
+        i = d.get("ipv")
+        if i:
+            _ficha_par(pdf, "Resultado", f"{i['puntaje']} / 100 - {i['conclusion']}" if i["puntaje"] is not None else i["conclusion"])
+            _ficha_par(pdf, "Evaluó", i["evaluador"])
+            _ficha_lista(pdf, "Competencias", [f"{x['nombre']} ({x['peso']}%): {x['nivel']}" for x in i["detalle"]])
+        else:
+            _ficha_par(pdf, "Estado", "Sin Entrevista IPV registrada.")
+    if "psicometria" in secciones:
+        _ficha_titulo(pdf, "Psicometría disponible")
+        if d["psicometria"]:
+            for ps in d["psicometria"]:
+                _ficha_par(pdf, ps["nombre"], f"{ps['estado']}" + (f" - {ps['dictamen']}" if ps["dictamen"] else ""))
+                ev = ps.get("evaluatest") or {}
+                if ev:
+                    _ficha_lista(pdf, "Evaluatest", [x for x in [
+                        f"Índice de Afinidad: {ev.get('indice_afinidad')}%" if ev.get("indice_afinidad") is not None else "",
+                        f"Etegrity / IGI: {ev.get('igi')}%" if ev.get("igi") is not None else "",
+                        ("Competencias: " + ", ".join(ev.get("competencias") or [])) if ev.get("competencias") else "",
+                        ("Fortalezas: " + ", ".join(ev.get("fortalezas") or [])) if ev.get("fortalezas") else "",
+                        ("Áreas de oportunidad: " + ", ".join(ev.get("areas_oportunidad") or [])) if ev.get("areas_oportunidad") else "",
+                        f"Riesgo: {ev.get('riesgo')}" if ev.get("riesgo") else "",
+                    ] if x])
+        else:
+            _ficha_par(pdf, "Estado", "Sin psicometría registrada.")
+    if "observaciones" in secciones and d.get("observaciones"):
+        _ficha_titulo(pdf, "Observaciones")
+        pdf.set_font(_FUENTE, "", 10)
+        pdf.multi_cell(0, 6, _latin(d["observaciones"]), new_x="LMARGIN", new_y="NEXT")
+    if "siguiente_accion" in secciones and d.get("siguiente_accion"):
+        _ficha_titulo(pdf, "Siguiente acción")
+        pdf.set_font(_FUENTE, "", 10)
+        pdf.multi_cell(0, 6, _latin(d["siguiente_accion"]), new_x="LMARGIN", new_y="NEXT")
+    return bytes(pdf.output())

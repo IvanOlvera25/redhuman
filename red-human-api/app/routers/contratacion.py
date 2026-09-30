@@ -24,6 +24,7 @@ from ..models import NIVELES_RECORDATORIO, Candidato, Colaborador, Cuenta, Docum
 from ..services.recordatorios import registrar_recordatorio_enviado
 from ..serial import colaborador_dict, expediente_dict, nombre_empresa_candidato
 from ..services import archivos as fs
+from ..services import fraiche
 from ..services import ia
 from ..services import notificaciones
 from ..services.pdf import pdf_carta_intencion, pdf_contrato
@@ -641,6 +642,91 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
     return col
 
 
+# ------------------------------------------------------------
+# Fraiche (spec §11) · «Preparar alta de colaborador» → «Datos para alta en SAP SuccessFactors»
+# ------------------------------------------------------------
+
+
+@router.get("/expedientes/{exp_id}/datos-alta")
+def datos_alta_sap(exp_id: int, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Vista previa por bloques (datos personales; CURP/RFC/NSS; contacto y domicilio; empresa, sucursal, puesto,
+    jefe y fecha de ingreso; condiciones y compensación). Cada campo muestra su ORIGEN y marca los faltantes.
+    Excluye información médica y socioeconómica. No envía nada a SAP."""
+    e = _expediente(db, exp_id, cuenta.id)
+    p = e.postulacion
+    if not p:
+        raise HTTPException(409, "El expediente no está ligado a una postulación.")
+    return fraiche.datos_alta_sap(p, e, cuenta)
+
+
+class DatosAltaIn(BaseModel):
+    personales: dict = {}  # {curp, rfc, nss, domicilio, fecha_nacimiento, genero}
+    campos: dict = {}      # sobreescrituras de los campos derivados (empresa, sucursal, puesto, jefe, fecha_ingreso, tipo_contratacion, sueldo, horario, periodicidad)
+
+
+@router.patch("/expedientes/{exp_id}/datos-alta")
+def capturar_datos_alta(exp_id: int, datos: DatosAltaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """RH captura/corrige los datos faltantes; cada valor queda con origen «Capturado por RH». Los personales viven
+    en la PERSONA (Candidato.datos_personales) — nunca médicos ni socioeconómicos."""
+    e = _expediente(db, exp_id, cuenta.id)
+    p = e.postulacion
+    c = e.candidato
+    if not (p and c):
+        raise HTTPException(409, "El expediente no está ligado a una postulación.")
+    if e.estado_sap == fraiche.ESTADO_LISTO_SAP:
+        e.estado_sap = ""  # una corrección vuelve a exigir confirmación
+    dp = dict(c.datos_personales or {})
+    origen = dict(dp.get("origen") or {})
+    for k in fraiche.CAMPOS_PERSONALES_SAP:
+        if k in datos.personales:
+            val = str(datos.personales.get(k) or "").strip()
+            if k in ("curp", "rfc"):
+                val = val.upper()
+            dp[k] = val[:200]
+            origen[k] = fraiche.ORIGEN_RH if val else ""
+    dp["origen"] = origen
+    c.datos_personales = dp
+    da = dict(e.datos_alta or {})
+    da_origen = dict(da.get("origen") or {})
+    for k in fraiche.CAMPOS_ALTA_EDITABLES:
+        if k in datos.campos:
+            val = str(datos.campos.get(k) or "").strip()[:300]
+            if val:
+                da[k] = val
+                da_origen[k] = fraiche.ORIGEN_RH
+            else:
+                da.pop(k, None)
+                da_origen.pop(k, None)
+    da["origen"] = da_origen
+    e.datos_alta = da
+    registrar(db, u.nombre, "datos_alta_capturados", "expediente", str(e.id), {"personales": [k for k in fraiche.CAMPOS_PERSONALES_SAP if k in datos.personales], "campos": list(datos.campos.keys()), "correo_rh": u.correo})
+    db.commit()
+    return fraiche.datos_alta_sap(p, e, cuenta)
+
+
+@router.post("/expedientes/{exp_id}/confirmar-datos-alta")
+def confirmar_datos_alta(exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Confirmar datos para alta» → estado «Listo para enviar a SAP» y mensaje «Conexión con SAP pendiente de
+    configurar». NO envía información, NO asigna número de empleado ni afirma que el alta en SAP ocurrió."""
+    e = _expediente(db, exp_id, cuenta.id)
+    p = e.postulacion
+    if not p:
+        raise HTTPException(409, "El expediente no está ligado a una postulación.")
+    vista = fraiche.datos_alta_sap(p, e, cuenta)
+    if vista["faltantes"]:
+        raise HTTPException(409, "Faltan datos para el alta: " + ", ".join(vista["faltantes"]) + ".")
+    e.estado_sap = fraiche.ESTADO_LISTO_SAP
+    e.sap_confirmado_por, e.sap_confirmado_en = u.nombre, datetime.now(timezone.utc)
+    fraiche.avanzar_paso(p, "listo_sap")
+    p.historial = list(p.historial or []) + [{
+        "evento": "listo_para_sap", "texto": "Datos para alta confirmados — Listo para enviar a SAP (conexión pendiente de configurar)",
+        "usuario": u.nombre, "fecha": e.sap_confirmado_en.isoformat(),
+    }]
+    registrar(db, u.nombre, "datos_alta_confirmados", "expediente", str(e.id), {"postulacion": p.codigo, "estado_sap": e.estado_sap, "correo_rh": u.correo})
+    db.commit()
+    return {**fraiche.datos_alta_sap(p, e, cuenta), "expediente": expediente_dict(e)}
+
+
 class AltaIn(BaseModel):
     fecha_ingreso: Optional[str] = None
     notificar: Optional[NotificarIn] = None  # Punto 12
@@ -696,6 +782,8 @@ async def alta(
     e.estado = "alta"
     e.alta_autorizada_por = u.nombre
     e.alta_fecha = datetime.now(timezone.utc)
+    if e.postulacion:
+        fraiche.avanzar_paso(e.postulacion, "listo_alta")  # Fraiche (spec §11)
     registrar(
         db, u.nombre, "alta_autorizada", "expediente", str(e.id),
         {"candidato": e.candidato.codigo if e.candidato else "", "puesto": e.puesto, "correo_rh": u.correo},

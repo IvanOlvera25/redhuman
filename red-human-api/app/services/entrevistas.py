@@ -93,5 +93,6 @@ def crear_entrevista_para_candidato(
     e.codigo = f"ENT-{300 + e.id}"
     if p.etapa == "Prefiltro":
         p.etapa = "Entrevista IA"  # ver ETAPAS_CANDIDATO — la entrevista con avatar también es "IA"
+    fraiche.avanzar_paso(p, "ipv" if e.fase == "ipv" else "entrevista_inicial")  # Fraiche (spec §11)
     registrar(db, actor, "entrevista_agendada", "entrevista", e.codigo, {"candidato": p.candidato.codigo, "postulacion": p.codigo, "ia": con_ia, "fase": e.fase})
     return e, con_ia

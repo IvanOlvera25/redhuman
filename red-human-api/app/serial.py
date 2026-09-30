@@ -427,6 +427,13 @@ def postulacion_dict(p: Postulacion, detalle: bool = False, n_mensajes: Optional
         "referidoPor": p.referido_por or "",
         "estado": p.estado,
         "etapa": p.etapa,
+        # Fraiche (spec §11-12): paso visible de la ruta por destino y estado de franquicia
+        "paso": fraiche.paso_visible(p),
+        "pasoNombre": fraiche.PASOS[fraiche.paso_visible(p)]["nombre"],
+        "destino": fraiche.destino_de(p),
+        "ruta": fraiche.ruta_visible(p),
+        "franquiciaEstado": p.franquicia_estado or "",
+        "franquiciaEstadoTexto": fraiche.ESTADOS_FRANQUICIA.get(p.franquicia_estado or "", ""),
         "score": p.score,
         "experiencia": c.experiencia or "",
         "ubicacion": c.ubicacion or "",
@@ -799,6 +806,11 @@ def expediente_dict(e: Expediente) -> dict:
         "recordatoriosAgotados": e.recordatorios_agotados,
         "ultimoRecordatorioEn": e.ultimo_recordatorio_en.isoformat() if e.ultimo_recordatorio_en else None,
         "listoParaAlta": estado == "completo" and not sin_confirmar,
+        # Fraiche (spec §11): «Listo para enviar a SAP» (nunca se envía nada)
+        "estadoSap": e.estado_sap or "",
+        "estadoSapTexto": "Listo para enviar a SAP" if e.estado_sap == fraiche.ESTADO_LISTO_SAP else "",
+        "sapConfirmadoPor": e.sap_confirmado_por or "",
+        "sapConfirmadoEn": e.sap_confirmado_en.isoformat() if e.sap_confirmado_en else None,
         # --- puentes hacia el módulo 1 (candidatoId = Postulación: es lo que /candidatos/{codigo} espera) ---
         "candidatoId": p.codigo if p else (c.codigo if c else ""),
         "candidatoCodigo": c.codigo if c else "",

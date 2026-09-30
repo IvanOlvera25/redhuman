@@ -3456,8 +3456,89 @@ export interface EvaluacionCandidato {
   tieneInforme: boolean; resultadoCargadoPor: string;
   /** Psicométricas.mx (2026-09-29): clave del candidato en el proveedor y su liga (solo si se configuró). */
   claveProveedor?: string | null; urlCandidato?: string | null; conectadaProveedor?: boolean; resultadoCargadoEn: string | null; informeRestringido: boolean;
-  asignadaPor: string; creada: string | null; historial: { fecha: string; usuario: string; de: string; a: string; detalle: string }[];
+  asignadaPor: string; creada: string | null; historial: { fecha: string; usuario: string; de: string; a: string; detalle: string; resultado_anterior?: Record<string, unknown> }[];
   resultadoResumen?: string; nombreArchivo?: string; notas?: string; comentarioRevision?: string;
+  /* --- Fraiche (spec §9-10): responsable, cita, liga externa, adjuntos, estado del spec, decisión y origen --- */
+  estadoFraiche: EstadoEvaluacionFraiche; estadoFraicheTexto: string;
+  responsable: string; responsableCorreo: string; responsableWhatsapp: string; responsableUsuarioId: number | null; responsableContactoId: number | null;
+  citaEn: string | null; citaLugar: string;
+  ligaExterna: string | null; ligaEnviadaEn: string | null; realizadaEn: string | null; noRealizada: boolean;
+  adjuntos: { indice: number; nombre: string; mime: string; subido_por: string; subido_en: string }[];
+  /** Tal como la eligió quien evaluó (médico: apto|apto_condicionado|no_recomendable; franquiciatario: continuar|no_continuar). */
+  decision: string | null;
+  origenResultado: "" | "manual" | "liga_externa" | "webhook" | "liga_proveedor_reporte_anonimizado";
+  esFranquiciatario: boolean; esEncargado: boolean; esEvaluatest: boolean;
+  evaluatest: EvaluatestResultado | null;
+  referencias: ReferenciaLaboral[] | null;
+  cifrado: boolean;
+  /** Socioeconómico: propuesta de Red Human (solo con permiso en lo médico). */
+  resumenIa?: string;
+}
+export type EstadoEvaluacionFraiche = "pendiente" | "realizada_pendiente" | "con_resultado" | "no_realizada" | "cancelada";
+export const ESTADOS_EVALUACION_FRAICHE: Record<EstadoEvaluacionFraiche, string> = {
+  pendiente: "Pendiente", realizada_pendiente: "Realizada con resultado pendiente", con_resultado: "Con resultado", no_realizada: "No realizada", cancelada: "Cancelada",
+};
+export interface EvaluatestResultado {
+  indice_afinidad: number | null; igi: number | null; competencias: string[]; fortalezas: string[]; areas_oportunidad: string[]; riesgo: string;
+}
+export interface ReferenciaLaboral {
+  contacto: string; empresa: string; telefono: string; puesto: string; fecha_verificacion: string;
+  resultado: "favorable" | "con_observaciones" | "desfavorable" | "sin_respuesta" | ""; comentarios: string; responsable: string;
+}
+export interface ResponsableEvaluacion { usuario_id?: number | null; contacto_id?: number | null; nombre?: string; correo?: string; whatsapp?: string }
+/** Nombres FIJOS de las evaluaciones tipo «Otra» del proceso Fraiche (spec §10, §12). */
+export const NOMBRE_EVALUACION_FRANQUICIATARIO = "Entrevista con franquiciatario";
+export const NOMBRE_EVALUACION_ENCARGADO = "Entrevista con encargado de tienda";
+export const CAMPOS_EVALUATEST: { clave: keyof EvaluatestResultado; nombre: string; tipo: "porcentaje" | "lista" | "texto" }[] = [
+  { clave: "indice_afinidad", nombre: "Índice Evaluatest de Afinidad", tipo: "porcentaje" },
+  { clave: "igi", nombre: "Etegrity / Índice General de Integridad", tipo: "porcentaje" },
+  { clave: "competencias", nombre: "Competencias", tipo: "lista" },
+  { clave: "fortalezas", nombre: "Fortalezas", tipo: "lista" },
+  { clave: "areas_oportunidad", nombre: "Áreas de oportunidad", tipo: "lista" },
+  { clave: "riesgo", nombre: "Riesgo", tipo: "texto" },
+];
+
+export function editarEvaluacion(codigo: string, datos: { responsable?: ResponsableEvaluacion; cita?: string; cita_lugar?: string; notas?: string }) {
+  return patch<EvaluacionCandidato>(`/evaluaciones/${codigo}`, datos);
+}
+/** Liga limitada para la persona externa (/evaluacion/{token}); `enviar` la manda al responsable por correo/WhatsApp. */
+export function ligaExternaEvaluacion(codigo: string, opts: { enviar?: boolean; regenerar?: boolean } = {}) {
+  return post<{ liga: string; resultados: ResultadoNotificacion[]; evaluacion: EvaluacionCandidato }>(`/evaluaciones/${codigo}/liga`, { enviar: opts.enviar ?? true, regenerar: opts.regenerar ?? false });
+}
+export function marcarEvaluacionRealizada(codigo: string, nota = "") {
+  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/realizada`, { nota });
+}
+export function guardarReferenciasEvaluacion(codigo: string, referencias: ReferenciaLaboral[]) {
+  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/referencias`, { referencias });
+}
+/** Dictamen médico completo (cifrado en la base): solo con permiso; cada consulta queda en bitácora. */
+export function fetchDetalleMedico(codigo: string) {
+  return get<{ id: string; decision: string | null; dictamenTexto: string; resultadoResumen: string; comentarioRevision: string; notas: string; adjuntos: { indice: number; nombre: string; mime: string; subido_por: string; subido_en: string }[]; tieneInforme: boolean; cifrado: boolean; revisadaPor: string; revisadaEn: string | null }>(`/evaluaciones/${codigo}/detalle-medico`);
+}
+export function urlAdjuntoEvaluacion(codigo: string, indice: number) {
+  return urlArchivo(`/evaluaciones/${codigo}/adjuntos/${indice}`);
+}
+/* Liga pública de la persona externa (sin sesión) */
+export interface EvaluacionExternaPublica {
+  evaluacion: string; tipo: TipoEvaluacion; rol: "encargado" | "socioeconomico" | "medico" | "franquiciatario" | "externo";
+  candidato: string; vacante: string; sucursal: string; empresa: string; responsable: string; citaEn: string | null; citaLugar: string;
+  estado: EstadoEvaluacionFraiche; estadoTexto: string; yaRegistrada: boolean; cerrada: boolean; consentimientoPendiente: boolean;
+  opciones: { valor: string; texto: string }[]; pideArchivo: boolean; instrucciones: string;
+  resumenCandidato: { experiencia: string; ubicacion: string } | null;
+}
+export function fetchEvaluacionExternaPublica(token: string) {
+  return get<EvaluacionExternaPublica>(`/evaluaciones-externas/publica/${token}`);
+}
+export function registrarResultadoEvaluacionExterna(token: string, datos: { decision?: string; comentarios?: string; resumen?: string; archivo?: File | null }) {
+  const form = new FormData();
+  form.append("decision", datos.decision ?? "");
+  form.append("comentarios", datos.comentarios ?? "");
+  form.append("resumen", datos.resumen ?? "");
+  if (datos.archivo) form.append("archivo", datos.archivo);
+  return subir<{ ok: boolean; estado: EstadoEvaluacionFraiche; estadoTexto: string; avisos: string[]; decisionTexto: string }>(`/evaluaciones-externas/publica/${token}/resultado`, form);
+}
+export function marcarEvaluacionExternaNoRealizada(token: string, motivo: string) {
+  return post<{ ok: boolean; estado: string; estadoTexto: string }>(`/evaluaciones-externas/publica/${token}/no-realizada`, { motivo });
 }
 export interface EvaluacionSugerida { tipo: TipoEvaluacion; prueba_id: number | null; nombre: string }
 export function fetchPruebasPsicometricas(incluirInactivas = false, puesto = "") {
@@ -3478,7 +3559,11 @@ export function inactivarPruebaPsicometrica(id: number) {
 export function fetchEvaluacionesCandidato(codigo: string) {
   return get<EvaluacionCandidato[]>(`/evaluaciones/postulaciones/${codigo}`);
 }
-export function agregarEvaluacionCandidato(codigo: string, datos: { tipo: TipoEvaluacion; nombre?: string; prueba_id?: number | null; modo?: string; proveedor?: string; url?: string; notas?: string }) {
+export function agregarEvaluacionCandidato(codigo: string, datos: {
+  tipo: TipoEvaluacion; nombre?: string; prueba_id?: number | null; modo?: string; proveedor?: string; url?: string; notas?: string;
+  /** Fraiche (spec §10): responsable (usuario / contacto del Cliente / captura), cita y liga de acceso para la persona externa. */
+  responsable?: ResponsableEvaluacion; cita?: string; cita_lugar?: string; generar_liga?: boolean;
+}) {
   return post<EvaluacionCandidato>(`/evaluaciones/postulaciones/${codigo}`, datos);
 }
 export function enviarEvaluacion(codigo: string) {
@@ -3487,17 +3572,23 @@ export function enviarEvaluacion(codigo: string) {
 export function avanzarEvaluacionIntegrada(codigo: string) {
   return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/integracion/avanzar`, {});
 }
-export function cargarResultadoEvaluacion(codigo: string, resumen: string, archivo?: File | null) {
+export function cargarResultadoEvaluacion(
+  codigo: string, resumen: string, archivo?: File | null,
+  extra: { decision?: string; evaluatest?: Partial<EvaluatestResultado> | null; comentarios?: string } = {},
+) {
   const form = new FormData();
   form.append("resumen", resumen);
   if (archivo) form.append("archivo", archivo);
-  return subir<EvaluacionCandidato>(`/evaluaciones/${codigo}/resultado`, form);
+  if (extra.decision) form.append("decision", extra.decision);
+  if (extra.evaluatest) form.append("evaluatest", JSON.stringify(extra.evaluatest));
+  if (extra.comentarios) form.append("comentarios", extra.comentarios);
+  return subir<EvaluacionCandidato & { avisos?: string[] }>(`/evaluaciones/${codigo}/resultado`, form);
 }
 export function revisarEvaluacion(codigo: string, dictamen: string, comentario = "") {
   return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/revisar`, { dictamen, comentario });
 }
-export function cancelarEvaluacion(codigo: string, motivo: string) {
-  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/cancelar`, { motivo });
+export function cancelarEvaluacion(codigo: string, motivo: string, noRealizada = false) {
+  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/cancelar`, { motivo, no_realizada: noRealizada });
 }
 export function enviarLigaConsentimientoMedico(codigo: string) {
   return post<{ liga: string; resultados: ResultadoNotificacion[] }>(`/evaluaciones/${codigo}/consentimiento/enviar`, {});

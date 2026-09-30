@@ -304,6 +304,8 @@ def agregar_evaluacion(codigo: str, datos: AgregarEvaluacionIn, db: Session = De
     ev.codigo = f"EVA-{7000 + ev.id}"
     sev.mover(ev, "en_espera_consentimiento", u.nombre, "Asignada" + (f" · responsable: {ev.responsable}" if ev.responsable else ""))
     sev.refrescar_consentimiento(ev, p, u.nombre)
+    # Fraiche (spec §11): la ruta visible registra el paso alcanzado (RH lo confirma en el Kanban)
+    fraiche.avanzar_paso(p, "presentacion" if sev.es_franquiciatario(ev) else "psicometria" if ev.tipo == "psicometrica" else "referencias" if ev.tipo == "referencias" else "evaluaciones_adicionales")
     registrar(db, u.nombre, "evaluacion_asignada", "postulacion", p.codigo,
               {"evaluacion": ev.codigo, "tipo": ev.tipo, "nombre": ev.nombre, "modo": ev.modo, "estado": ev.estado, "responsable": ev.responsable, "correo_rh": u.correo})
     db.commit()

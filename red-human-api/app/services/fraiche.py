@@ -579,6 +579,121 @@ def paso_default(etapa: str, destino: str = "tienda_propia") -> str:
     return ruta_de(destino)[0]
 
 
+def destino_de(p) -> str:
+    v = getattr(p, "vacante", None)
+    return (getattr(v, "destino", "") or "tienda_propia") if v else "tienda_propia"
+
+
+def paso_visible(p) -> str:
+    """Paso de la ruta que muestra el Kanban: el guardado si sigue siendo válido para la ruta, si no el que
+    corresponde a la etapa interna."""
+    ruta = ruta_de(destino_de(p))
+    paso = getattr(p, "paso", "") or ""
+    if paso in ruta and PASOS[paso]["etapa"] == p.etapa:
+        return paso
+    if paso in ruta and p.etapa == "Onboarding" and paso in ("listo_alta", "listo_sap"):
+        return paso
+    return paso_default(p.etapa, destino_de(p))
+
+
+def ruta_visible(p) -> List[dict]:
+    return [{"clave": k, "nombre": PASOS[k]["nombre"], "etapa": PASOS[k]["etapa"]} for k in ruta_de(destino_de(p))]
+
+
+def avanzar_paso(p, paso: str) -> bool:
+    """Los EVENTOS del proceso registran el paso alcanzado sin retroceder nunca (el retroceso lo decide RH con
+    PATCH /paso). Regresa True si cambió. No toca `etapa`."""
+    ruta = ruta_de(destino_de(p))
+    if paso not in ruta:
+        return False
+    actual = paso_visible(p)
+    if ruta.index(paso) <= ruta.index(actual) and (p.paso or "") == actual:
+        return False
+    if ruta.index(paso) < ruta.index(actual):
+        return False
+    p.paso = paso
+    return True
+
+
+# ============================================================
+# §11 · Datos para alta en SAP SuccessFactors — vista previa con origen por campo
+# ============================================================
+
+ORIGEN_RH = "Capturado por RH"
+
+
+def datos_alta_sap(p, e, cuenta=None) -> dict:
+    """Arma los bloques del spec §11 con valor y ORIGEN por campo. Excluye SIEMPRE lo médico y lo socioeconómico.
+    Nada se envía a SAP; no se asigna número de empleado."""
+    c = p.candidato
+    v = p.vacante
+    dp = dict((c.datos_personales or {}) if c else {})
+    origenes = dict(dp.get("origen") or {})
+    da = dict((e.datos_alta or {}) if e else {})
+
+    def campo(clave, valor, origen):
+        if clave in da and str(da[clave]).strip():
+            return {"clave": clave, "valor": str(da[clave]), "origen": (da.get("origen") or {}).get(clave) or ORIGEN_RH, "faltante": False}
+        val = "" if valor is None else str(valor)
+        return {"clave": clave, "valor": val, "origen": origen if val else "Pendiente de capturar", "faltante": not val}
+
+    def personal(clave):
+        return campo(clave, dp.get(clave, ""), origenes.get(clave) or (ORIGEN_RH if dp.get(clave) else ""))
+
+    fecha_ingreso = (e.fecha_ingreso_real or e.fecha_ingreso) if e else None
+    sueldo = (e.sueldo if e else "") or ""
+    bloques = []
+    for b in BLOQUES_SAP:
+        campos = []
+        for clave, nombre in b["campos"]:
+            if clave == "nombre":
+                x = campo("nombre", c.nombre if c else "", "Ficha del candidato")
+            elif clave in ("fecha_nacimiento", "genero", "curp", "rfc", "nss", "domicilio"):
+                x = personal(clave)
+            elif clave == "correo":
+                x = campo("correo", c.correo if c else "", "Ficha del candidato")
+            elif clave == "telefono":
+                x = campo("telefono", c.telefono if c else "", "Ficha del candidato")
+            elif clave == "empresa":
+                x = campo("empresa", (e.empresa if e else "") or "", "Condiciones de contratación")
+            elif clave == "sucursal":
+                x = campo("sucursal", (v.sucursal if v else "") or "", "Vacante")
+            elif clave == "puesto":
+                x = campo("puesto", (e.puesto if e else "") or (v.titulo if v else ""), "Condiciones de contratación" if e and e.puesto else "Vacante")
+            elif clave == "jefe":
+                x = campo("jefe", (e.jefe_directo if e else "") or "", "Condiciones de contratación")
+            elif clave == "fecha_ingreso":
+                x = campo("fecha_ingreso", fecha_ingreso.date().isoformat() if fecha_ingreso else "", "Ingreso confirmado" if e and e.fecha_ingreso_real else "Condiciones de contratación")
+            elif clave == "tipo_contratacion":
+                x = campo("tipo_contratacion", (e.tipo_contratacion if e else "") or "", "Condiciones de contratación")
+            elif clave == "sueldo":
+                x = campo("sueldo", sueldo, "Condiciones de contratación")
+            elif clave == "horario":
+                x = campo("horario", (v.horario if v else "") or "", "Vacante")
+            elif clave == "periodicidad":
+                x = campo("periodicidad", (v.sueldo_periodicidad if v else "") or "", "Vacante")
+            else:
+                x = campo(clave, "", "")
+            x["nombre"] = nombre
+            campos.append(x)
+        bloques.append({"clave": b["clave"], "nombre": b["nombre"], "campos": campos})
+    faltantes = [x["nombre"] for b in bloques for x in b["campos"] if x["faltante"] and x["clave"] not in ("genero", "horario", "periodicidad", "jefe", "domicilio", "correo")]
+    return {
+        "bloques": bloques,
+        "faltantes": faltantes,
+        "excluye": ["Información médica", "Información socioeconómica"],
+        "estadoSap": (e.estado_sap if e else "") or "",
+        "estadoSapTexto": "Listo para enviar a SAP" if e and e.estado_sap == ESTADO_LISTO_SAP else "Por preparar",
+        "mensaje": MENSAJE_SAP_PENDIENTE,
+        "confirmadoPor": (e.sap_confirmado_por if e else "") or "",
+        "confirmadoEn": e.sap_confirmado_en.isoformat() if e and e.sap_confirmado_en else None,
+    }
+
+
+CAMPOS_PERSONALES_SAP = ("curp", "rfc", "nss", "domicilio", "fecha_nacimiento", "genero")
+CAMPOS_ALTA_EDITABLES = ("nombre", "correo", "telefono", "empresa", "sucursal", "puesto", "jefe", "fecha_ingreso", "tipo_contratacion", "sueldo", "horario", "periodicidad")
+
+
 # ============================================================
 # §11 · Alta en SAP SuccessFactors — bloques de la vista previa
 # ============================================================

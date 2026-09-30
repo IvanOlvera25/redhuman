@@ -185,6 +185,10 @@ class Candidato(Base):
     experiencia: Mapped[str] = mapped_column(String(250), default="")
     fuente: Mapped[str] = mapped_column(String(30), default="Formulario")  # Formulario|WhatsApp|OCC|LinkedIn|Indeed|RH
     cv_datos: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Fraiche (spec §11): datos personales para el alta en SAP — {curp, rfc, nss, domicilio, fecha_nacimiento, genero}
+    # + `origen` por campo ({campo: "Capturado por RH" | "Documento" | ...}). Nunca incluye datos médicos ni
+    # socioeconómicos. Los captura RH en «Preparar alta de colaborador».
+    datos_personales: Mapped[dict] = mapped_column(JSON, default=dict)
     wa_nombre: Mapped[str] = mapped_column(String(200), default="")  # nombre del perfil de WhatsApp
     wa_id: Mapped[str] = mapped_column(String(30), default="", index=True)  # ID de WhatsApp (tel tal como lo envía Meta)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
@@ -276,7 +280,9 @@ NIVELES_RECORDATORIO = {1: "ligero", 2: "intermedio", 3: "definitivo"}
 # Cómo nació la postulación — alimenta "por fuente" en /metricas.
 ORIGENES_POSTULACION = ["formulario", "whatsapp", "rh_directo", "cv_masivo", "reinicio_prueba", "migracion"]
 # Por qué se cerró (activa=False). "" mientras sigue en curso.
-MOTIVOS_CIERRE = ["descartado", "contratado", "reinicio_prueba", "prueba_expirada", "sin_interes", "vacante_eliminada", "eliminado"]
+# Fraiche (spec §12): «aceptado_franquicia» = el franquiciatario aceptó al candidato presentado; la contratación la
+# hace él y NO cuenta como ingreso de Fraiche. «no_ingreso» ya se usaba (Onboarding v2) y faltaba en la lista.
+MOTIVOS_CIERRE = ["descartado", "contratado", "reinicio_prueba", "prueba_expirada", "sin_interes", "vacante_eliminada", "eliminado", "no_ingreso", "aceptado_franquicia"]
 
 
 class Postulacion(Base):
@@ -328,6 +334,14 @@ class Postulacion(Base):
     # Fase C: resultado vigente ("el más reciente gana"), ver candidatos._recalcular_resultado_apto.
     resultado_apto: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     ultima_actividad_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Fraiche (spec §11-12): PASO visible de la ruta (services.fraiche.PASOS / RUTA_TIENDA_PROPIA / RUTA_FRANQUICIA)
+    # mapeado a la etapa interna `etapa` (que NO cambia). Lo avanzan los eventos del proceso y lo confirma RH
+    # (PATCH /candidatos/{codigo}/paso). "" = se deriva de la etapa (postulaciones previas).
+    paso: Mapped[str] = mapped_column(String(40), default="")
+    # Franquicia: "" | presentado | aceptado | no_aceptado (lo actualiza el reclutador).
+    franquicia_estado: Mapped[str] = mapped_column(String(20), default="")
+    franquicia_presentado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    franquicia_decidido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # --- Consentimiento LFPDPPP: por proceso de selección ---
     consentimiento: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -824,6 +838,13 @@ class Expediente(Base):
     no_ingreso_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     no_ingreso_por: Mapped[str] = mapped_column(String(150), default="")
     no_ingreso_motivo: Mapped[str] = mapped_column(Text, default="")
+    # Fraiche (spec §11): «Datos para alta en SAP SuccessFactors» — sobreescrituras/capturas de RH por campo y el
+    # estado «Listo para enviar a SAP». NUNCA se envía nada ni se asigna número de empleado: la conexión con
+    # SAP está pendiente de configurar.
+    datos_alta: Mapped[dict] = mapped_column(JSON, default=dict)
+    estado_sap: Mapped[str] = mapped_column(String(30), default="")  # "" | listo_para_enviar_sap
+    sap_confirmado_por: Mapped[str] = mapped_column(String(150), default="")
+    sap_confirmado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     candidato: Mapped[Optional[Candidato]] = relationship(foreign_keys=[candidato_id])
     postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="expediente")

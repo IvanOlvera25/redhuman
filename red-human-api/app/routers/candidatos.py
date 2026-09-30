@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -29,7 +29,7 @@ from ..database import get_db
 from ..deps import cuenta_actual, usuario_actual, usuario_admin, usuario_decisor
 from ..models import (
     TIPO_CONTRATACION_DETERMINADO, UNIDADES_DURACION, calcular_fecha_termino,
-    DOCUMENTOS_BASE,
+    DOCUMENTOS_BASE, NOMBRE_DESTINO,
     ETAPAS_CANDIDATO,
     Archivo,
     Candidato,
@@ -329,6 +329,8 @@ def listar(
     candidato: Optional[str] = None,       # Todas las postulaciones de una persona (C-####)
     activa: Optional[bool] = None,         # filtro explícito: True = en curso, False = cerradas
     mostrar_cerradas: bool = False,        # B4: por defecto el Kanban solo muestra activas
+    paso: Optional[str] = None,            # Fraiche: paso visible de la ruta (se filtra en Python: depende del destino)
+    destino: Optional[str] = None,         # Fraiche: tienda_propia | franquicia (destino de la vacante)
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
     cuenta: Cuenta = Depends(cuenta_actual),
@@ -375,6 +377,8 @@ def listar(
         q = q.join(Vacante, Postulacion.vacante_id == Vacante.id).filter(Vacante.cliente_id == cliente_id)
     if responsable_id is not None:
         q = q.join(Vacante, Postulacion.vacante_id == Vacante.id, isouter=True).filter(Vacante.responsable_id == responsable_id)
+    if destino in fraiche.RUTA_TIENDA_PROPIA or destino in ("tienda_propia", "franquicia"):
+        q = q.join(Vacante, Postulacion.vacante_id == Vacante.id, isouter=True).filter(Vacante.destino == destino)
     if duplicados:
         # PERSONAS cuyo teléfono normalizado o correo en minúsculas aparece más de una vez en la
         # misma Cuenta — misma lógica que _duplicado(), pero para MOSTRAR, no para bloquear.
@@ -807,6 +811,7 @@ async def postular(
 
     # Reaplicar (decisión 2026-09-11): activa para esta vacante → se reutiliza; cerrada → nueva.
     p, nueva_postulacion = postulacion_para_vacante(db, c, vac, vac.cuenta_id, "formulario", consentimiento=True)
+    fraiche.avanzar_paso(p, "prefiltro_web")  # Fraiche (spec §11): contestó el prefiltro web
     # Fraiche (spec §4): toda postulación registra su fuente; un referido guarda quién lo refirió. Si la
     # postulación ya existía con fuente, se conserva la primera (la que la originó).
     fuente_norm = fraiche.normalizar_fuente(fuente) or ("referido" if ref.strip() else "portal")
@@ -1517,6 +1522,7 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
         # 2026-09-13: el prefiltro NO genera score ni pisa la evidencia del CV — su único resultado
         # es cumple/no_cumple (filtro básico de entrada); p.score sigue siendo SOLO el del CV.
         p.prefiltro_completo = True
+        fraiche.avanzar_paso(p, "filtro_whatsapp")  # Fraiche (spec §11): segundo filtro terminado
         analisis_actual.update({
             "origen": analisis_actual.get("origen") or "prefiltro", "ia": con_ia,
             "prefiltro_resultado": turno.estado, "prefiltro_evidencia": turno.evidencia or "",
@@ -1783,6 +1789,7 @@ def _abrir_expediente(db: Session, p: Postulacion, u: Usuario) -> Expediente:
     db.flush()
     for tipo in DOCUMENTOS_BASE:
         db.add(Documento(expediente_id=exp.id, tipo=tipo, obligatorio=True))
+    fraiche.avanzar_paso(p, "documentacion")  # Fraiche (spec §11): documentación y onboarding
     registrar(db, u.nombre, "expediente_abierto", "postulacion", p.codigo, {"candidato": p.candidato.codigo, "expediente": exp.id, "puesto": exp.puesto})
     return exp
 
@@ -2133,6 +2140,8 @@ async def programar_entrevista_humana(
     )
     p.entrevistas_humanas.append(eh)
     db.flush()
+    if eh.es_ipv:
+        fraiche.avanzar_paso(p, "ipv")  # Fraiche (spec §11)
 
     override = override_de(datos.notificar)
     resultados = await notificaciones.disparar(db, "entrevista_agendada", p, u.nombre, eh=eh, override=override)
@@ -2345,6 +2354,227 @@ async def registrar_resultado_entrevista_humana(
 
 
 # ------------------------------------------------------------
+# Fraiche (spec §11-12) · Ruta visible por destino, franquicia y ficha para presentar
+# ------------------------------------------------------------
+
+
+class PasoIn(BaseModel):
+    paso: str
+    comentario: str = ""
+
+
+@router.patch("/{codigo}/paso")
+async def mover_paso(
+    codigo: str, datos: PasoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """El reclutador confirma el movimiento en la ruta visible (spec §11). El paso se mapea a la etapa interna:
+    si cambia, se mueve con las mismas reglas de `aplicar_movimiento` (manual). «Listo para alta» y «Listo para
+    enviar a SAP» exigen que la postulación ya esté en Onboarding (se llega con «Iniciar Onboarding»)."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    ruta = fraiche.ruta_de(fraiche.destino_de(p))
+    if datos.paso not in ruta:
+        raise HTTPException(400, f"Paso inválido para esta ruta. Usa uno de: {', '.join(ruta)}")
+    etapa_destino = fraiche.etapa_de_paso(datos.paso)
+    anterior = fraiche.paso_visible(p)
+    if etapa_destino == "Onboarding" and p.etapa != "Onboarding":
+        if not modo_prueba_activo(db):
+            raise HTTPException(409, "«Listo para alta» y «Listo para enviar a SAP» se alcanzan desde Onboarding: usa «Iniciar Onboarding» en la ficha.")
+    if etapa_destino != p.etapa:
+        await aplicar_movimiento(db, p, EtapaIn(etapa=etapa_destino, comentario=datos.comentario or f"Paso: {fraiche.PASOS[datos.paso]['nombre']}", manual=True), u)
+    p.paso = datos.paso
+    p.historial = list(p.historial or []) + [{
+        "evento": "paso_confirmado", "texto": f"{fraiche.PASOS[anterior]['nombre']} → {fraiche.PASOS[datos.paso]['nombre']}",
+        "usuario": u.nombre, "fecha": datetime.now(timezone.utc).isoformat(), "desde": anterior, "hacia": datos.paso, "motivo": datos.comentario.strip()[:300],
+    }]
+    registrar(db, u.nombre, "paso_confirmado", "postulacion", p.codigo, {"de": anterior, "a": datos.paso, "etapa": p.etapa, "correo_rh": u.correo})
+    _actualizar_ultima_actividad(p)
+    db.commit()
+    return postulacion_dict(p, detalle=True)
+
+
+class PresentarFranquiciatarioIn(BaseModel):
+    contacto_id: Optional[int] = None  # contacto de la franquicia (Cliente de la vacante)
+    nombre: str = ""
+    correo: str = ""
+    whatsapp: str = ""
+    enviar_liga: bool = True
+    con_ficha: bool = False  # spec §13: en franquicia la ficha PDF es opcional
+
+
+@router.post("/{codigo}/presentar-franquiciatario", status_code=201)
+async def presentar_franquiciatario(
+    codigo: str, datos: PresentarFranquiciatarioIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """«Presentar al franquiciatario» (spec §12): crea la evaluación tipo Otra con nombre fijo «Entrevista con
+    franquiciatario», asignada al contacto de la franquicia, y manda su liga (solo ve al candidato presentado).
+    Deja la postulación «Presentado»; el franquiciatario registra Continuar / No continuar por liga (o RH lo captura).
+    Nada de esto mueve al candidato automáticamente."""
+    from ..models import EvaluacionCandidato
+    from ..services import evaluaciones as sev
+    from .evaluaciones import ResponsableIn, _resolver_responsable, liga_externa, LigaIn
+
+    p = _por_codigo(db, codigo, cuenta.id)
+    v = p.vacante
+    if not v or v.destino != "franquicia":
+        raise HTTPException(409, "Solo las vacantes con destino «Franquicia cliente» presentan candidatos al franquiciatario.")
+    if not p.consentimiento:
+        raise HTTPException(409, "El candidato no ha otorgado su consentimiento (LFPDPPP).")
+    responsable = _resolver_responsable(db, cuenta.id, p, ResponsableIn(contacto_id=datos.contacto_id, nombre=datos.nombre, correo=datos.correo, whatsapp=datos.whatsapp)) if (datos.contacto_id or datos.nombre.strip()) else {}
+    if not responsable:
+        raise HTTPException(400, "Elige el contacto de la franquicia o captura a quién se presenta el candidato.")
+    ev = EvaluacionCandidato(
+        codigo="TMP", cuenta_id=cuenta.id, postulacion_id=p.id, tipo="otra", nombre=fraiche.NOMBRE_EVALUACION_FRANQUICIATARIO, modo="manual",
+        asignada_por=u.nombre, estado="en_espera_consentimiento", historial=[], token_externo=secrets.token_urlsafe(24),
+        responsable=responsable["nombre"], responsable_correo=responsable["correo"], responsable_whatsapp=responsable["whatsapp"],
+        responsable_usuario_id=responsable["usuario_id"], responsable_contacto_id=responsable["contacto_id"],
+    )
+    db.add(ev)
+    db.flush()
+    ev.codigo = f"EVA-{7000 + ev.id}"
+    sev.mover(ev, "en_espera_consentimiento", u.nombre, f"Presentado al franquiciatario: {ev.responsable}")
+    sev.refrescar_consentimiento(ev, p, u.nombre)
+    p.franquicia_estado = "presentado"
+    p.franquicia_presentado_en = datetime.now(timezone.utc)
+    fraiche.avanzar_paso(p, "presentacion")
+    if p.etapa != "Entrevista Humana":
+        # la presentación al franquiciatario es la «entrevista humana» de la ruta de franquicia
+        await aplicar_movimiento(db, p, EtapaIn(etapa="Entrevista Humana", comentario="Presentado al franquiciatario", manual=True), u)
+    p.historial = list(p.historial or []) + [{
+        "evento": "presentado_franquiciatario", "texto": f"Presentado a {ev.responsable} ({v.cliente.nombre_visible if v.cliente else 'franquicia'})",
+        "usuario": u.nombre, "fecha": datetime.now(timezone.utc).isoformat(),
+    }]
+    registrar(db, u.nombre, "presentado_franquiciatario", "postulacion", p.codigo, {"evaluacion": ev.codigo, "responsable": ev.responsable, "correo_rh": u.correo})
+    db.commit()
+    envios = {"liga": f"{settings.app_url}/evaluacion/{ev.token_externo}", "resultados": []}
+    if datos.enviar_liga:
+        envios = await liga_externa(ev.codigo, LigaIn(enviar=True), db, u, cuenta)
+    return {"evaluacion": envios.get("evaluacion") or ev.codigo, "liga": envios["liga"], "resultados": envios["resultados"], "candidato": postulacion_dict(p, detalle=True)}
+
+
+class FranquiciaIn(BaseModel):
+    estado: str  # presentado | aceptado | no_aceptado
+    comentario: str = ""
+
+
+@router.patch("/{codigo}/franquicia")
+async def actualizar_franquicia(
+    codigo: str, datos: FranquiciaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """El reclutador actualiza Presentado / Aceptado por franquiciatario / No aceptado (spec §12). «Aceptado»
+    cierra la postulación con motivo `aceptado_franquicia`: la contratación la hace el franquiciatario y NO
+    cuenta como ingreso de Fraiche. «No aceptado» deja la postulación activa para que RH decida."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    if datos.estado not in fraiche.ESTADOS_FRANQUICIA:
+        raise HTTPException(400, f"Estado inválido. Usa uno de: {', '.join(fraiche.ESTADOS_FRANQUICIA)}")
+    if not (p.vacante and p.vacante.destino == "franquicia"):
+        raise HTTPException(409, "Esta postulación no es de una vacante de franquicia.")
+    anterior = p.franquicia_estado
+    p.franquicia_estado = datos.estado
+    if datos.estado in ("aceptado", "no_aceptado"):
+        p.franquicia_decidido_en = datetime.now(timezone.utc)
+    if datos.estado == "aceptado" and p.activa:
+        p.cerrar("aceptado_franquicia")
+    p.historial = list(p.historial or []) + [{
+        "evento": "franquicia_estado", "texto": f"Franquicia: {fraiche.ESTADOS_FRANQUICIA[datos.estado]}",
+        "usuario": u.nombre, "fecha": datetime.now(timezone.utc).isoformat(), "desde": anterior, "hacia": datos.estado, "motivo": datos.comentario.strip()[:300],
+    }]
+    registrar(db, u.nombre, "franquicia_estado_actualizado", "postulacion", p.codigo, {"de": anterior, "a": datos.estado, "comentario": datos.comentario[:300], "correo_rh": u.correo})
+    _actualizar_ultima_actividad(p)
+    db.commit()
+    return postulacion_dict(p, detalle=True)
+
+
+SECCIONES_FICHA = ["vacante", "candidato", "experiencia", "cv", "entrevista_inicial", "ipv", "psicometria", "observaciones", "siguiente_accion"]
+
+
+def _datos_ficha_presentacion(db: Session, p: Postulacion, secciones: List[str], observaciones: str, siguiente_accion: str) -> dict:
+    """Spec §13: vacante, sucursal o cliente, experiencia, CV, resumen de entrevista inicial, IPV, psicometría
+    disponible, observaciones y siguiente acción. NUNCA detalle médico ni socioeconómico."""
+    from ..models import EvaluacionCandidato
+    from ..services import evaluaciones as sev
+
+    c, v = p.candidato, p.vacante
+    cv = dict(c.cv_datos or {})
+    ent = next((e for e in reversed(p.entrevistas) if e.estado == "evaluada" and e.evaluacion and e.fase != "ipv"), None)
+    ev_ini = dict(ent.evaluacion or {}) if ent else {}
+    ipv = next((e.evaluacion_ipv for e in reversed(p.entrevistas) if e.evaluacion_ipv), None)
+    ipv_h = next((eh.resultado_ipv for eh in reversed(p.entrevistas_humanas) if eh.es_ipv and eh.resultado_ipv), None)
+    calc = (ipv_h or (ipv or {}).get("calculo")) if (ipv_h or ipv) else None
+    psico = [e for e in db.query(EvaluacionCandidato).filter(EvaluacionCandidato.postulacion_id == p.id, EvaluacionCandidato.tipo == "psicometrica").all()]
+    experiencia_cv = cv.get("experiencia") or cv.get("experiencia_laboral") or []
+    experiencia_txt = [x if isinstance(x, str) else " · ".join(str(y) for y in [x.get("puesto"), x.get("empresa"), x.get("periodo")] if y) for x in experiencia_cv]
+    return {
+        "secciones": [s for s in SECCIONES_FICHA if s in secciones],
+        "vacante": {"titulo": v.titulo if v else "", "destino": NOMBRE_DESTINO.get(v.destino, "") if v else "",
+                    "sucursal": (v.sucursal if v else "") or "", "cliente": (v.cliente.nombre_visible if v and v.cliente else ""), "zona": (v.zona if v else "") or ""},
+        "candidato": {"nombre": c.nombre, "ubicacion": c.ubicacion or "", "fuente": fraiche.nombre_fuente(p.fuente_postulacion) if p.fuente_postulacion else (c.fuente or ""), "codigo": p.codigo},
+        "experiencia": {"resumen": c.experiencia or "", "detalle": experiencia_txt[:8]},
+        "cv": {"resumen": cv.get("resumen_profesional") or "", "habilidades": list(cv.get("habilidades") or [])[:12], "estudios": list(cv.get("estudios") or [])[:6], "adjunto": any(a.tipo == "cv" for a in c.archivos)},
+        "entrevista_inicial": {"resumen": ev_ini.get("resumen") or "", "fortalezas": list(ev_ini.get("fortalezas") or []), "alertas": list(ev_ini.get("riesgos") or []), "recomendacion": ev_ini.get("recomendacion") or ""} if ev_ini else None,
+        "ipv": ({"puntaje": calc.get("puntaje"), "conclusion": fraiche.CONCLUSIONES_IPV.get(calc.get("conclusion") or "", "Requiere revisión"),
+                 "detalle": [{"nombre": d["nombre"], "peso": d["peso"], "nivel": fraiche.NOMBRE_NIVEL_IPV.get(d["nivel"], d["nivel"])} for d in calc.get("detalle") or []],
+                 "evaluador": (ipv_h or ipv or {}).get("evaluador") or ("Red Human" if ipv and not ipv_h else "")} if calc else None),
+        "psicometria": [{"nombre": e.nombre, "estado": sev.etiqueta_estado_fraiche(e), "dictamen": sev.texto_dictamen(e),
+                         "evaluatest": (e.resultado_json or {}).get("evaluatest") if sev.es_evaluatest(e) else None} for e in psico],
+        "observaciones": (observaciones or "").strip()[:2000],
+        "siguiente_accion": (siguiente_accion or "").strip()[:300],
+        "generada": datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC"),
+    }
+
+
+@router.get("/{codigo}/ficha-presentacion")
+def ficha_presentacion_vista_previa(
+    codigo: str, secciones: str = "", observaciones: str = "", siguiente_accion: str = "",
+    db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Vista previa de la ficha PDF (spec §13): el reclutador revisa los apartados antes de compartir. No registra nada."""
+    from ..services.pdf import pdf_ficha_presentacion
+
+    p = _por_codigo(db, codigo, cuenta.id)
+    lista = [s for s in secciones.split(",") if s.strip()] or SECCIONES_FICHA
+    datos = _datos_ficha_presentacion(db, p, lista, observaciones, siguiente_accion)
+    pdf = pdf_ficha_presentacion(datos)
+    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="ficha-{p.codigo}.pdf"'})
+
+
+class CompartirFichaIn(BaseModel):
+    destinatario: str
+    secciones: List[str] = []
+    observaciones: str = ""
+    siguiente_accion: str = ""
+
+
+@router.post("/{codigo}/ficha-presentacion")
+def ficha_presentacion_compartir(
+    codigo: str, datos: CompartirFichaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """«Generar ficha para presentar» (spec §13): registra destinatario, fecha y apartados incluidos, y regresa
+    el PDF. Funciona en tienda propia y franquicia; nunca incluye detalle médico ni socioeconómico."""
+    from ..services.pdf import pdf_ficha_presentacion
+
+    p = _por_codigo(db, codigo, cuenta.id)
+    destinatario = datos.destinatario.strip()
+    if not destinatario:
+        raise HTTPException(400, "Indica a quién se presenta la ficha (destinatario).")
+    lista = [s for s in datos.secciones if s in SECCIONES_FICHA] or SECCIONES_FICHA
+    d = _datos_ficha_presentacion(db, p, lista, datos.observaciones, datos.siguiente_accion)
+    pdf = pdf_ficha_presentacion(d)
+    ahora = datetime.now(timezone.utc)
+    p.historial = list(p.historial or []) + [{
+        "evento": "ficha_presentada", "texto": f"Ficha para presentar generada para {destinatario[:120]} ({', '.join(lista)})",
+        "usuario": u.nombre, "fecha": ahora.isoformat(),
+    }]
+    registrar(db, u.nombre, "ficha_presentacion_generada", "postulacion", p.codigo, {"destinatario": destinatario[:200], "secciones": lista, "correo_rh": u.correo})
+    _actualizar_ultima_actividad(p)
+    db.commit()
+    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="ficha-{p.codigo}.pdf"', "X-Ficha-Destinatario": destinatario[:80].encode("ascii", "ignore").decode()})
+
+
+# ------------------------------------------------------------
 # Fraiche (spec §8) · Programar la Entrevista IPV con Red Human
 # ------------------------------------------------------------
 
@@ -2367,6 +2597,7 @@ async def programar_ipv_red_human(
     if datos.modo != "red_human":
         raise HTTPException(400, "Para un entrevistador humano usa POST /entrevista-humana con es_ipv=true.")
     pendiente = next((e for e in reversed(p.entrevistas) if e.fase == "inicial" and e.estado in ("programada", "en_curso")), None)
+    fraiche.avanzar_paso(p, "ipv")  # Fraiche (spec §11): IPV programada
     if pendiente is not None:
         pendiente.fase = "inicial_ipv"
         registrar(db, u.nombre, "ipv_incluida_en_entrevista_inicial", "entrevista", pendiente.codigo, {"postulacion": p.codigo, "correo_rh": u.correo})
