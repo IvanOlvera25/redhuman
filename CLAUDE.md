@@ -389,4 +389,7 @@ explícita. Toda constante/regla del cliente está en `services/fraiche.py` (nun
   se mezclan; bajas y permanencia sin cifras. Página `/dashboard/reclutamiento`.
 - **Datos demo** (spec §15): `scripts/cargar_demo_fraiche.py --ejecutar` (idempotente, cero comunicaciones, nombres
   ficticios, usuarios reclutador@/coordinacion@/medico.autorizado@fraiche.demo). Regresión: `scripts/verificar_fraiche_f1.py`
-  … `verificar_fraiche_f6.py`.
+  … `verificar_fraiche_f6.py`. Complemento (2026-09-30) `scripts/cargar_demo_fraiche_completo.py --ejecutar` (corre DESPUÉS):
+  roster de colaboradores, entrevistas humanas y chats, Onboarding v2 (plantilla, tareas, «No ingresó»), Capacitación,
+  Desempeño v2, Clima v2, Base de Conocimiento (indexa en modo léxico: reindexar con `rag.indexar_documento` y la clave real
+  para embeddings) y catálogo; deja la Cuenta Fraiche como `cuenta_predeterminada` de todos los usuarios que la ven.
