@@ -255,8 +255,13 @@ with TestClient(app) as client:
     check(r.json().get("accion") == "prefiltro_iniciado", "'Sí, acepto' → consentimiento registrado y prefiltro iniciado")
     db.expire_all()
     check(pw.consentimiento and pw.consentimiento_fecha is not None, "consentimiento quedó en la postulación con fecha")
-    for txt in ("Sí", "Sí, 3 años", "Sí vivo en Guadalajara"):
+    # Demo Fraiche (2026-09-29, spec §6): el segundo filtro es un guion fijo de 7 preguntas (+ las propias de la
+    # vacante); en modo demo se contesta una por turno hasta agotarlo.
+    for txt in ("2 años", "Cajero", "Cobrar en caja", "3 años", "Sí vivo en Guadalajara", "La próxima semana", "No", "Sí", "Sí", "Sí"):
         r = client.post("/webhooks/whatsapp", json=meta_texto(WA2, txt, nombre="Otra Persona"))
+        db.refresh(pw)
+        if pw.prefiltro_completo:
+            break
     db.refresh(pw)
     check(pw.prefiltro_completo and pw.estado == "cumple" and pw.etapa == "Entrevista IA" and pw.etapa in [t["etapa"] for t in client.get("/candidatos").json()],
           "prefiltro demo completo → Zero-Touch clasificó y la tarjeta está en una columna real del Kanban")

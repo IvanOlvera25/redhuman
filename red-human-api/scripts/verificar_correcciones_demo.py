@@ -27,6 +27,7 @@ for k in ("OPENAI_API_KEY", "WHATSAPP_PROVIDER", "META_WHATSAPP_TOKEN", "META_PH
     os.environ[k] = ""
 os.environ["ADMIN_PASSWORD"] = "prueba-demo"
 os.environ["SEMBRAR_DEMO"] = "true"  # los scripts de verificación sí usan los datos de ejemplo
+os.environ["FRAICHE_PUBLICACION_ESTRICTA"] = "false"  # scripts previos a la demo Fraiche: publican sin la ficha completa
 
 from fastapi.testclient import TestClient  # noqa: E402
 

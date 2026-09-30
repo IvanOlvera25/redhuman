@@ -103,11 +103,13 @@ with TestClient(app) as client:
     P = r.json()["id"]
     PREGUNTAS_USADAS.clear()
     r = client.post(f"/candidatos/{P}/prefiltro", json={"texto": "Hola, me interesa"})
-    check(r.status_code == 200 and PREGUNTAS_USADAS and PREGUNTAS_USADAS[-1] == ["¿Vives en Zapopan o cerca?"], f"el turno de prefiltro recibe las preguntas de WhatsApp: {PREGUNTAS_USADAS[-1]}")
+    # Demo Fraiche (2026-09-29, spec §6): el guion fijo de WhatsApp va primero; las preguntas propias de la
+    # vacante se conservan (antes de la informativa de BBVA, que cierra el guion).
+    check(r.status_code == 200 and PREGUNTAS_USADAS and "¿Vives en Zapopan o cerca?" in PREGUNTAS_USADAS[-1] and PREGUNTAS_USADAS[-1][-1].startswith("¿Tienes algún adeudo con BBVA?"), f"el turno de prefiltro recibe las preguntas de WhatsApp de la vacante dentro del guion: {PREGUNTAS_USADAS[-1]}")
     client.patch(f"/vacantes/{VAC}", json={"preguntas_filtro_whatsapp": []})
     PREGUNTAS_USADAS.clear()
     r = client.post(f"/candidatos/{P}/prefiltro", json={"texto": "Sí tengo experiencia"})
-    check(PREGUNTAS_USADAS and PREGUNTAS_USADAS[-1] == ["¿Tienes experiencia en caja?", "¿Años de experiencia?"], "sin preguntas de WhatsApp → usa las de la web (fallback)")
+    check(PREGUNTAS_USADAS and "¿Tienes experiencia en caja?" not in PREGUNTAS_USADAS[-1] and PREGUNTAS_USADAS[-1][0] == "¿Cuánto tiempo trabajaste en tu empleo más reciente?", "sin preguntas propias de WhatsApp → solo el guion fijo (ya no se repiten las de la web)")
 
     print("\n--- Plantillas ---")
     r = client.post("/plantillas", json={"nombre": "P F4", "titulo": "Cajero", "ubicacion_estado": "Nuevo León", "ubicacion_municipio": "Monterrey", "preguntas_filtro_whatsapp": wa})

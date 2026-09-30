@@ -44,6 +44,12 @@ ETAPAS_CANDIDATO = ["Prefiltro", "Entrevista IA", "Evaluación", "Entrevista Hum
 ETAPAS_CONTEXTO_LARGO = ("Entrevista IA", "Evaluación", "Entrevista Humana", "Contratación", "Onboarding")
 CONTEXTO_WHATSAPP_HORAS = 120
 
+# Demo Fraiche (2026-09-29): toda vacante tiene un DESTINO obligatorio que decide la ruta del candidato,
+# quién puede verlo y cómo se cuenta en el Tablero de control. Una vacante de tienda propia lleva
+# `sucursal`; una de servicio a franquicia lleva `cliente_id` (la franquicia) y su `sucursal`.
+DESTINOS_VACANTE = ["tienda_propia", "franquicia"]
+NOMBRE_DESTINO = {"tienda_propia": "Tienda propia", "franquicia": "Franquicia cliente"}
+
 
 class Vacante(Base):
     __tablename__ = "vacantes"
@@ -91,6 +97,21 @@ class Vacante(Base):
     # Fase 4 (Punto 6): qué cubre la Entrevista IA — ver ENFOQUES_ENTREVISTA. Solo 2 niveles.
     enfoque_entrevista: Mapped[str] = mapped_column(String(30), default="profesional")
 
+    # --- Demo Fraiche (2026-09-29): destino, sucursal, zona, dimensión y fecha objetivo ---
+    # `destino` ∈ DESTINOS_VACANTE (obligatorio para publicar). Tienda propia → `sucursal`; franquicia →
+    # `cliente_id` + `sucursal`. `zona` alimenta el filtro de la bolsa y del Tablero de control.
+    destino: Mapped[str] = mapped_column(String(20), default="tienda_propia")
+    sucursal: Mapped[str] = mapped_column(String(150), default="")
+    zona: Mapped[str] = mapped_column(String(80), default="")
+    # Jornada/horario real capturado por RH (la IA nunca lo inventa). Viaja con la plantilla.
+    horario: Mapped[str] = mapped_column(String(150), default="")
+    # Posiciones requeridas y fecha objetivo de cobertura → «en riesgo» del Tablero de control.
+    posiciones: Mapped[int] = mapped_column(Integer, default=1)
+    fecha_objetivo: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    # Imagen para la publicación (opcional): ruta en disco + nombre original; se descarga desde la ficha.
+    imagen: Mapped[str] = mapped_column(String(300), default="")
+    imagen_nombre: Mapped[str] = mapped_column(String(200), default="")
+
     # --- contenido enriquecido del generador (módulo 3.5) ---
     resumen: Mapped[str] = mapped_column(Text, default="")
     perfil_ideal: Mapped[str] = mapped_column(Text, default="")
@@ -100,7 +121,8 @@ class Vacante(Base):
     palabras_clave: Mapped[list] = mapped_column(JSON, default=list)
     seniority: Mapped[str] = mapped_column(String(40), default="")
     avisos_cumplimiento: Mapped[list] = mapped_column(JSON, default=list)
-    # {"occ": {titulo, copy, page, etiquetas}, "linkedin": {...}, "portal": {...}, "whatsapp": {...}}
+    # {"occ": {titulo, copy, page, etiquetas}, "linkedin": {...}, "portal": {...}, "whatsapp": {...},
+    #  "indeed": {...}, "computrabajo": {...}, "talenteca": {...}}  (Fraiche 2026-09-29: tres portales más)
     publicaciones: Mapped[dict] = mapped_column(JSON, default=dict)
 
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
@@ -278,6 +300,12 @@ class Postulacion(Base):
     motivo_cierre: Mapped[str] = mapped_column(String(30), default="")  # ver MOTIVOS_CIERRE
     cerrada_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     origen: Mapped[str] = mapped_column(String(30), default="formulario")  # ver ORIGENES_POSTULACION
+    # Fraiche (2026-09-29): FUENTE de ESTA postulación (portal, red social, referido, campo, contacto
+    # directo… ver services.fraiche.FUENTES_POSTULACION) y quién refirió (liga/QR de referidos `?ref=`).
+    # `Candidato.fuente` (y la propiedad `Postulacion.fuente`) siguen siendo el canal de la PERSONA; aquí
+    # se mide la efectividad por vacante. Se llama `fuente_postulacion` para no chocar con esa propiedad.
+    fuente_postulacion: Mapped[str] = mapped_column(String(40), default="")
+    referido_por: Mapped[str] = mapped_column(String(150), default="")
     # Copia de Candidato.es_prueba al crear (para filtrar métricas sin JOIN).
     es_prueba: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -1072,6 +1100,7 @@ class Plantilla(Base):
     texto_whatsapp: Mapped[str] = mapped_column(Text, default="")
     texto_bolsa: Mapped[str] = mapped_column(Text, default="")
     enfoque_entrevista: Mapped[str] = mapped_column(String(30), default="profesional")  # Fase 4
+    horario: Mapped[str] = mapped_column(String(150), default="")  # Fraiche: jornada precargada
 
     creado_por: Mapped[str] = mapped_column(String(150), default="")
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
@@ -1091,6 +1120,7 @@ CAMPOS_PLANTILLA = [
     "enfoque_entrevista",
     "sueldo_desde", "sueldo_hasta", "sueldo_moneda", "sueldo_periodicidad",  # Parte 3
     "preguntas_filtro_whatsapp", "ubicacion_estado", "ubicacion_municipio",  # Fase 4
+    "horario",  # Fraiche 2026-09-29: jornada capturada (la IA nunca la inventa)
 ]
 
 

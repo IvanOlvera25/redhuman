@@ -49,6 +49,7 @@ from ..models import (
 )
 from ..serial import archivo_dict, expediente_dict, nombre_empresa_candidato, postulacion_dict
 from ..services import archivos as fs
+from ..services import fraiche
 from ..services import ia
 from ..services import notificaciones
 from ..services.configuracion import modo_prueba_activo, permite_duplicados, puede_forzar_prueba
@@ -539,8 +540,10 @@ def _aplicar_cv(c: Candidato, p: Postulacion, datos: ia.CVExtraido, vac: Optiona
     if ajuste and vac:
         p.score = ajuste.score
         p.evidencia = ajuste.evidencia
-        # un CV subido después no reclasifica a quien RH ya avanzó: solo actualiza score y evidencia
-        if p.etapa == "Prefiltro":
+        # un CV subido después no reclasifica a quien RH ya avanzó: solo actualiza score y evidencia.
+        # Fraiche (spec §5): si el prefiltro web ya clasificó la postulación, ese es el filtro de entrada; el
+        # CV solo aporta score/evidencia (el prefiltro no participa en la afinidad y viceversa).
+        if p.etapa == "Prefiltro" and not analisis_actual.get("prefiltro_web"):
             p.estado = ajuste.estado
         analisis_actual.update({
             "origen": "cv",
@@ -758,6 +761,9 @@ async def postular(
     consentimiento: bool = Form(default=False),
     respuestas: str = Form(default="", description="JSON: [{pregunta, respuesta}]"),
     cv: Optional[UploadFile] = File(default=None, description="CV en PDF o imagen"),
+    # Fraiche (spec §4): fuente de ESTA postulación y quién refirió (liga/QR de referidos)
+    fuente: str = Form(default="", description="portal | indeed | referido | campo | contacto_directo… (?fuente= / ?utm_source=)"),
+    ref: str = Form(default="", description="Quién refirió al candidato (QR/liga individual de referidos)"),
     db: Session = Depends(get_db),
 ):
     """Postulación desde la página pública `/aplicar/[slug]` — un solo paso para el candidato.
@@ -801,12 +807,28 @@ async def postular(
 
     # Reaplicar (decisión 2026-09-11): activa para esta vacante → se reutiliza; cerrada → nueva.
     p, nueva_postulacion = postulacion_para_vacante(db, c, vac, vac.cuenta_id, "formulario", consentimiento=True)
+    # Fraiche (spec §4): toda postulación registra su fuente; un referido guarda quién lo refirió. Si la
+    # postulación ya existía con fuente, se conserva la primera (la que la originó).
+    fuente_norm = fraiche.normalizar_fuente(fuente) or ("referido" if ref.strip() else "portal")
+    if not p.fuente_postulacion:
+        p.fuente_postulacion = fuente_norm
+    if ref.strip() and not p.referido_por:
+        p.referido_por = ref.strip()[:150]
     # 2026-09-16 (prefiltro dual): las respuestas del formulario web se guardan para compararlas después
     # con lo que la persona diga por WhatsApp (antes se recibían y se tiraban).
     respuestas_web = _parsear_respuestas_web(respuestas)
     if respuestas_web:
         analisis_p = dict(p.analisis or {})
         analisis_p["respuestas_web"] = respuestas_web
+        # Fraiche (spec §5): clasificación del prefiltro web contra los indispensables de la vacante, con
+        # motivo visible. Escribe `Postulacion.estado` solo mientras la postulación está en Prefiltro.
+        criterios = [x for x in (vac.preguntas_filtro or []) if isinstance(x, dict)]
+        if criterios:
+            web = fraiche.evaluar_prefiltro_web(criterios, respuestas_web, sucursal=vac.sucursal or "", sueldo=vac.sueldo or "")
+            analisis_p["prefiltro_web"] = web
+            if p.etapa == "Prefiltro":
+                p.estado = web["resultado"]
+            registrar(db, "sistema", "prefiltro_web_evaluado", "postulacion", p.codigo, {"resultado": web["resultado"], "motivo": web["motivo"][:300]})
         p.analisis = analisis_p
     registrar(
         db, c.codigo, "consentimiento_otorgado", "postulacion", p.codigo,
@@ -1292,7 +1314,10 @@ def _parsear_respuestas_web(crudo: str) -> List[dict]:
     salida = []
     for x in datos if isinstance(datos, list) else []:
         if isinstance(x, dict) and str(x.get("pregunta", "")).strip():
-            salida.append({"pregunta": str(x.get("pregunta", "")).strip()[:300], "respuesta": str(x.get("respuesta", "")).strip()[:300]})
+            fila = {"pregunta": str(x.get("pregunta", "")).strip()[:300], "respuesta": str(x.get("respuesta", "")).strip()[:300]}
+            if str(x.get("clave", "")).strip():  # Fraiche: preguntas comunes se identifican por clave
+                fila["clave"] = str(x.get("clave", "")).strip()[:40]
+            salida.append(fila)
     return salida[:30]
 
 
@@ -1408,12 +1433,17 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
     if p.prefiltro_completo:
         return await _procesar_turno_post_completo(db, p, texto, canal)
 
-    # Fase 4 (2026-09-15): las preguntas del prefiltro por WhatsApp son independientes de las de la
-    # postulación web; si RH no capturó ninguna, se usan las de la web (vacantes previas).
-    preguntas_wa = ((v.preguntas_filtro_whatsapp or None) or (v.preguntas_filtro or [])) if v else []
+    # Fraiche (spec §6): el segundo filtro por WhatsApp es un GUION FIJO (una pregunta por criterio, en
+    # orden, sin repetir lo contestado en la web, BBVA informativa al final). Las preguntas propias de la
+    # vacante (`preguntas_filtro_whatsapp`, si RH capturó alguna) se agregan antes de BBVA.
+    analisis_previo = dict(p.analisis or {})
+    preguntas_wa = fraiche.guion_whatsapp(
+        titulo_vacante=v.titulo if v else "", analisis=analisis_previo,
+        sucursal=(v.sucursal or "") if v else "", sueldo=(v.sueldo or "") if v else "",
+        extras=[x for x in ((v.preguntas_filtro_whatsapp or []) if v else []) if isinstance(x, dict)],
+    )
     # 2026-09-16 (prefiltro dual): si el turno anterior pidió aclarar una contradicción Web vs WhatsApp,
     # el modelo registra la aclaración y sigue; la contradicción queda documentada para RH.
-    analisis_previo = dict(p.analisis or {})
     pendiente = next((i for i in (analisis_previo.get("inconsistencias") or []) if not i.get("aclarada")), None)
     nota_aclaracion = ""
     if pendiente and analisis_previo.get("aclaracion_pendiente"):
@@ -1435,11 +1465,21 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
         perfil_ideal=v.perfil_ideal if v else "",
         nombre_candidato=nombre_ficha(p),
         nota=nota_aclaracion,
+        respuestas_web=fraiche.respuestas_web_resumen(analisis_previo),
+        guion_fijo=True,
     )
 
     analisis_actual = dict(p.analisis or {})
     if turno.respuestas_extraidas:
-        analisis_actual["respuestas_prefiltro"] = [r.model_dump() for r in turno.respuestas_extraidas]
+        extraidas = [r.model_dump() for r in turno.respuestas_extraidas]
+        # Fraiche (spec §6): la respuesta sobre el adeudo con BBVA se guarda y se muestra en la ficha, pero
+        # NUNCA participa en el resultado (ni descarta, ni cambia etapa, ni genera revisión).
+        bbva = fraiche.extraer_bbva(extraidas)
+        if bbva:
+            analisis_actual["adeudo_bbva"] = bbva
+        analisis_actual["respuestas_prefiltro"] = [{**r, "cumple": None} if "bbva" in f"{r.get('criterio', '')} {r.get('pregunta', '')}".lower() else r for r in extraidas]
+        if bbva and turno.estado == "no_cumple" and not any(r.get("cumple") is False for r in fraiche.sin_bbva(extraidas)):
+            turno.estado = "cumple"  # type: ignore[assignment]  # el único «no» era el informativo
     if pendiente and analisis_actual.get("aclaracion_pendiente"):
         # el candidato ya respondió a la pregunta de aclaración: se cierra esa contradicción con su texto
         for inc in analisis_actual.get("inconsistencias") or []:
@@ -1480,6 +1520,12 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
         analisis_actual.update({
             "origen": analisis_actual.get("origen") or "prefiltro", "ia": con_ia,
             "prefiltro_resultado": turno.estado, "prefiltro_evidencia": turno.evidencia or "",
+            # Fraiche (spec §6): resultado con la etiqueta que ve RH y la siguiente acción
+            "prefiltro_whatsapp": {
+                "resultado": turno.estado, "etiqueta": fraiche.siguiente_accion_whatsapp(turno.estado or "revision"),
+                "siguiente_accion": fraiche.siguiente_accion_whatsapp(turno.estado or "revision"),
+                "evidencia": turno.evidencia or "", "adeudo_bbva": analisis_actual.get("adeudo_bbva"),
+            },
         })
         if not p.evidencia:
             p.evidencia = turno.evidencia or ""

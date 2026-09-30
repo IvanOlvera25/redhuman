@@ -102,6 +102,9 @@ export interface Candidato {
   candidatoCodigo?: string;
   vacanteTitulo?: string;
   origen?: string;
+  /** Fraiche (2026-09-29): fuente de ESTA postulación (portal, indeed, referido, campo…) y quién refirió. */
+  fuentePostulacion?: string;
+  referidoPor?: string;
   totalPostulaciones?: number;
   yaAplicoAntes?: boolean;
   activa?: boolean;
@@ -193,7 +196,20 @@ export interface Candidato {
   /** Prefiltro = SOLO status de entrada (cumple / no_cumple); no participa en la evaluación integral. */
   prefiltroResumen?: { cumple: number; total: number; incumplidos: string[]; resultado?: "cumple" | "no_cumple" | null } | null;
   /** 2026-09-16: prefiltro dual y control manual */
-  respuestasWeb?: { pregunta: string; respuesta: string }[];
+  respuestasWeb?: { pregunta: string; respuesta: string; clave?: string }[];
+  /** Fraiche (spec §5): clasificación del prefiltro web con motivo visible (Cumple / Requiere revisión / No cumple). */
+  prefiltroWeb?: {
+    resultado: "cumple" | "revision" | "no_cumple";
+    etiqueta: string;
+    motivo: string;
+    detalle: { clave?: string; pregunta: string; respuesta: string; cumple: boolean | null; descarta: boolean; valida: string; comun: boolean; tipo?: string }[];
+    cumplidos: number;
+    evaluadas: number;
+  } | null;
+  /** Fraiche (spec §6): resultado del segundo filtro por WhatsApp con su etiqueta/siguiente acción. */
+  prefiltroWhatsapp?: { resultado: "cumple" | "revision" | "no_cumple"; etiqueta: string; siguiente_accion: string; evidencia: string; adeudo_bbva?: string | null } | null;
+  /** Fraiche (spec §6): captura informativa; nunca afecta el resultado. */
+  adeudoBbva?: string | null;
   inconsistencias?: { criterio: string; pregunta: string; web: string; whatsapp: string; detectada_en: string; aclarada: boolean; aclaracion: string }[];
   actividadesOmitidas?: { actividad: string; etapa: string; usuario: string; fecha: string; motivo: string; hacia: string }[];
   /** 2026-09-22: notas del historial del expediente (decisiones humanas). Solo se agregan, nunca se borran. */
@@ -333,6 +349,20 @@ export interface Vacante {
   /** Fase 4 (Punto 6): enfoque de la Entrevista IA. */
   enfoqueEntrevista?: "profesional" | "profesional_personal";
   responsable?: string | null;
+  responsableId?: number | null;
+  /* --- Fraiche (2026-09-29): destino, sucursal, zona, horario, dimensión, fecha objetivo e imagen --- */
+  destino?: "tienda_propia" | "franquicia";
+  destinoNombre?: string;
+  sucursal?: string;
+  zona?: string;
+  horario?: string;
+  posiciones?: number;
+  /** AAAA-MM-DD o null */
+  fechaObjetivo?: string | null;
+  imagenNombre?: string;
+  /** Ruta autenticada (usar con urlArchivo) y ruta pública por slug; vacías si no hay imagen. */
+  imagenPath?: string;
+  imagenPublica?: string;
   colaboradores?: string[];
   mostrarClienteCandidato?: boolean;
   /** nombre que ve el candidato — ya resuelto por el backend (Cliente si aplica y está visible,

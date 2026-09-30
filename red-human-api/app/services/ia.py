@@ -97,6 +97,10 @@ class VacanteGenerada(BaseModel):
     occ: BloquePlataforma = Field(description="Publicación para OCC Mundial.")
     linkedin: BloquePlataforma = Field(description="Publicación para LinkedIn.")
     portal: BloquePlataforma = Field(description="Publicación para el portal propio de Red Human.")
+    # Fraiche (2026-09-29): texto editable para Indeed, Computrabajo y Talenteca. Solo se copia; nunca se publica solo.
+    indeed: BloquePlataforma = Field(description="Publicación para Indeed México.")
+    computrabajo: BloquePlataforma = Field(description="Publicación para Computrabajo México.")
+    talenteca: BloquePlataforma = Field(description="Publicación para Talenteca.")
     preguntas_filtro: List[PreguntaFiltro] = Field(
         description=(
             "4 a 6 preguntas de prefiltro WEB ligadas a los requisitos indispensables. TODAS cerradas: se responden "
@@ -135,7 +139,24 @@ _PLANTILLAS = (
     "· titulo: título comercial y claro.\n"
     "· copy: meta descripción SEO de máx. 160 caracteres.\n"
     "· page: texto de la landing con markdown, cálido y en segunda persona («tú»), cerrando con la invitación a postularse.\n"
-    "· etiquetas: palabras clave para SEO."
+    "· etiquetas: palabras clave para SEO.\n\n"
+    "Indeed (mx.indeed.com):\n"
+    "· titulo: máx. 80 caracteres, sin emojis ni mayúsculas sostenidas, formato «Puesto - Ciudad».\n"
+    "· copy: resumen de 2-3 renglones para la tarjeta del anuncio (sueldo y horario SOLO si vienen en la ficha).\n"
+    "· page: TEXTO PLANO con secciones cortas: Descripción del puesto / Responsabilidades / Requisitos / "
+    "Horario y ubicación / Ofrecemos, viñetas con «- ». Sin markdown.\n"
+    "· etiquetas: 5-8 palabras clave de búsqueda en Indeed México.\n\n"
+    "Computrabajo (mx.computrabajo.com):\n"
+    "· titulo: máx. 70 caracteres, directo, con la ciudad o zona.\n"
+    "· copy: 1 párrafo de máx. 250 caracteres para el listado.\n"
+    "· page: TEXTO PLANO; empieza con una línea «Empresa: …» y «Ubicación: …», luego secciones Funciones / "
+    "Requisitos / Horario / Ofrecemos con viñetas «• ». Tono operativo, claro para perfiles de tienda.\n"
+    "· etiquetas: 5-8 términos con los que se busca este puesto en Computrabajo.\n\n"
+    "Talenteca (talenteca.com):\n"
+    "· titulo: máx. 80 caracteres, formato «Puesto | Empresa | Ciudad».\n"
+    "· copy: 2 renglones de gancho para la vista de lista.\n"
+    "· page: TEXTO PLANO con secciones Sobre el puesto / Qué harás / Qué necesitas / Qué ofrecemos, viñetas «- ».\n"
+    "· etiquetas: 5-8 palabras clave."
 )
 
 _REGLAS = (
@@ -192,6 +213,9 @@ class FichaVacante(BaseModel):
     requisitos_indispensables: List[str] = Field(default_factory=list)
     requisitos_deseables: List[str] = Field(default_factory=list)
     beneficios: List[str] = Field(default_factory=list)
+    # Fraiche (2026-09-29): jornada/horario y sucursal capturados por RH — condiciones reales, nunca inventadas.
+    horario: str = ""
+    sucursal: str = ""
 
 
 def _clave_texto(t: str) -> str:
@@ -233,6 +257,8 @@ def _asegurar_capturado(salida: VacanteGenerada, ficha: FichaVacante) -> Vacante
         avisos.append("Sueldo no capturado («A convenir»): RH debe confirmarlo antes de publicar (no se inventó).")
     if not ficha.ubicacion:
         avisos.append("Ubicación no capturada: RH debe confirmarla antes de publicar.")
+    if not ficha.horario:
+        avisos.append("Horario no capturado: RH debe confirmarlo antes de publicar (no se inventó).")
     salida.avisos_cumplimiento = avisos
     if not salida.preguntas_filtro_whatsapp:
         salida.preguntas_filtro_whatsapp = puntos_criticos_whatsapp(salida.preguntas_filtro)
@@ -347,6 +373,10 @@ def _demo_vacante(f: FichaVacante) -> VacanteGenerada:
     lista_ben = "\n".join(f"• {b}" for b in ofrecemos) or "• Condiciones a confirmar con RH"
     base_desc = (f.descripcion_breve.strip() + "\n\n") if f.descripcion_breve.strip() else ""
     modalidad = f" Modalidad {f.modalidad.lower()}." if f.modalidad else ""
+    horario = f"Horario: {f.horario}" if f.horario else "Horario: a confirmar con RH"
+    lista_guion = "\n".join(f"- {a}" for a in actividades)
+    reqs_guion = "\n".join(f"- {r}" for r in reqs)
+    ofrec_guion = "\n".join(f"- {b}" for b in ofrecemos) or "- Condiciones a confirmar con RH"
 
     return VacanteGenerada(
         resumen=f"Buscamos {titulo} para {empresa}{en_lugar}.{linea_sueldo}",
@@ -408,6 +438,35 @@ def _demo_vacante(f: FichaVacante) -> VacanteGenerada:
             ),
             etiquetas=[x for x in [titulo.lower(), f"empleo {lugar.lower()}" if lugar else "", "vacante"] if x],
         ),
+        indeed=BloquePlataforma(
+            titulo=f"{titulo}{(' - ' + lugar) if lugar else ''}"[:80],
+            copy=f"{empresa} busca {titulo}{en_lugar}.{linea_sueldo} {horario}."[:300],
+            page=(
+                f"Descripción del puesto\n{empresa} busca {titulo} para su equipo{en_lugar}.\n\n"
+                f"Responsabilidades\n{lista_guion}\n\nRequisitos\n{reqs_guion}\n\n"
+                f"Horario y ubicación\n- {horario}\n- {lugar or 'Ubicación a confirmar'}\n\nOfrecemos\n{ofrec_guion}"
+            ),
+            etiquetas=[x for x in [titulo.lower(), (area or "empleo").lower(), lugar.lower(), "tienda", "vacante"] if x],
+        ),
+        computrabajo=BloquePlataforma(
+            titulo=f"{titulo}{(' ' + lugar) if lugar else ''}"[:70],
+            copy=f"{titulo}{en_lugar}.{linea_sueldo} Postúlate y te contactamos por WhatsApp."[:250],
+            page=(
+                f"Empresa: {empresa}\nUbicación: {lugar or 'A confirmar'}\n\n"
+                f"Funciones\n" + "\n".join(f"• {a}" for a in actividades) + "\n\n"
+                f"Requisitos\n{viñetas}\n\nHorario\n• {horario}\n\nOfrecemos\n{lista_ben}"
+            ),
+            etiquetas=[x for x in [titulo.lower(), (area or "empleo").lower(), lugar.lower(), "empleo"] if x],
+        ),
+        talenteca=BloquePlataforma(
+            titulo=f"{titulo} | {empresa}{(' | ' + lugar) if lugar else ''}"[:80],
+            copy=f"{empresa} está contratando {titulo}{en_lugar}.{linea_sueldo}"[:200],
+            page=(
+                f"Sobre el puesto\n{titulo}{en_lugar} para el equipo de {area or 'operación'} de {empresa}.\n\n"
+                f"Qué harás\n{lista_guion}\n\nQué necesitas\n{reqs_guion}\n\nQué ofrecemos\n{ofrec_guion}\n- {horario}"
+            ),
+            etiquetas=[x for x in [titulo.lower(), (area or "empleo").lower(), "vacante"] if x],
+        ),
         preguntas_filtro=[
             PreguntaFiltro(
                 pregunta=f"¿Cumples con: {r}?" if len(r) < 70 else f"¿Cumples con el requisito «{r[:60]}…»?",
@@ -443,6 +502,7 @@ def generar_vacante(ficha: FichaVacante) -> Tuple[VacanteGenerada, bool]:
             f"- Puesto: {ficha.titulo}\n- Área: {ficha.area or '(sin dato)'}\n- Seniority: {ficha.seniority or '(sin dato)'}\n"
             f"- Empresa: {ficha.empresa or '(sin dato)'}\n- Ubicación: {ficha.ubicacion or '(sin dato — no inventes)'}\n"
             f"- Modalidad: {ficha.modalidad or '(sin dato — no inventes)'}\n- Sueldo: {ficha.sueldo_texto or '(sin dato — no inventes cifras)'}\n"
+            f"- Horario/jornada: {ficha.horario or '(sin dato — no inventes)'}\n- Sucursal: {ficha.sucursal or '(sin dato)'}\n"
             f"- Descripción breve (guía obligatoria a expandir): {ficha.descripcion_breve or '(sin dato)'}\n"
             f"- Requisitos indispensables capturados (conservar literal, como indispensables):{lista(ficha.requisitos_indispensables)}\n"
             f"- Requisitos deseables capturados (conservar literal, como deseables):{lista(ficha.requisitos_deseables)}\n"
@@ -470,8 +530,13 @@ def criterios_prefiltro(preguntas: Optional[list]) -> str:
     lineas = []
     for p in preguntas or []:
         if isinstance(p, dict) and p.get("pregunta"):
-            marca = "DESCARTA si no cumple" if p.get("descarta") else "suma pero no descarta"
-            lineas.append(f"- {p['pregunta']} → esperado: {p.get('respuesta_esperada', 'n/d')} ({marca})")
+            if p.get("informativa"):  # Fraiche (spec §6): se registra, nunca influye
+                marca = "INFORMATIVA: registra la respuesta tal cual; NUNCA descarta, cambia el estado ni genera revisión"
+            else:
+                marca = "DESCARTA si no cumple" if p.get("descarta") else "suma pero no descarta"
+            if p.get("solo_si"):
+                marca += f"; solo si {p['solo_si']}"
+            lineas.append(f"- {p['pregunta']} → esperado: {p.get('respuesta_esperada') or 'n/d'} ({marca})")
         elif isinstance(p, str):
             lineas.append(f"- {p}")
     return "\n".join(lineas) or "- (sin criterios definidos)"
@@ -656,7 +721,8 @@ class TurnoPrefiltro(BaseModel):
     clasificacion_lista: bool = Field(description="true solo cuando ya hay información suficiente para clasificar.")
     # 2026-09-13: el prefiltro es SOLO un filtro básico de entrada — su único resultado es cumple o
     # no_cumple. No genera score ni participa en la evaluación integral (CV + Entrevista Red Human).
-    estado: Optional[Literal["cumple", "no_cumple"]] = Field(default=None)
+    # Fraiche (spec §6): «revision» = Revisar por reclutador (duda que no descarta).
+    estado: Optional[Literal["cumple", "no_cumple", "revision"]] = Field(default=None)
     evidencia: Optional[str] = Field(default=None, description="Evidencia objetiva que sustenta la clasificación.")
     respuestas_extraidas: List[RespuestaCriterio] = Field(
         default_factory=list,
@@ -685,15 +751,29 @@ def prefiltro_turno(
     perfil_ideal: str = "",
     nombre_candidato: str = "",
     nota: str = "",
+    respuestas_web: Optional[List[str]] = None,
+    guion_fijo: bool = False,
 ) -> Tuple[TurnoPrefiltro, bool]:
     """historial: [{"rol": "user"|"assistant", "texto": str}, ...] — el último es del candidato.
-    `nota` (2026-09-16): contexto extra, p. ej. una inconsistencia Web vs WhatsApp que hay que aclarar."""
+    `nota` (2026-09-16): contexto extra, p. ej. una inconsistencia Web vs WhatsApp que hay que aclarar.
+    Fraiche (spec §6): `respuestas_web` = lo que el candidato YA contestó en el formulario (no se repite);
+    `guion_fijo` = las preguntas se hacen TODAS, en orden, una por criterio, y nunca se cierra antes."""
     client = _client()
     if client is None:
-        n_agente = sum(1 for m in historial if m["rol"] == "assistant")
         qs = texto_preguntas(preguntas) or ["¿Cuentas con disponibilidad de horario?", "¿Tienes experiencia en un puesto similar?"]
-        if n_agente < len(qs):
-            return TurnoPrefiltro(respuesta=qs[n_agente], clasificacion_lista=False), False
+        # Modo demo: se cuentan SOLO las preguntas del guion ya hechas (otros mensajes del agente —
+        # plantilla inicial, avisos— no desplazan el guion) y cada respuesta es el mensaje del candidato
+        # que sigue a su pregunta.
+        hechas = set()
+        del_candidato: dict = {}
+        for i, m in enumerate(historial):
+            if m["rol"] == "assistant" and m["texto"] in qs:
+                hechas.add(m["texto"])
+                siguiente = next((x["texto"] for x in historial[i + 1:] if x["rol"] == "user"), "")
+                del_candidato[m["texto"]] = siguiente
+        pendientes = [q for q in qs if q not in hechas]
+        if pendientes:
+            return TurnoPrefiltro(respuesta=pendientes[0], clasificacion_lista=False), False
         return (
             TurnoPrefiltro(
                 respuesta=(
@@ -704,8 +784,13 @@ def prefiltro_turno(
                 estado="cumple",
                 evidencia="Modo demo: clasificación simulada. Agrega OPENAI_API_KEY para el prefiltro real.",
                 respuestas_extraidas=[
-                    RespuestaCriterio(criterio=q, pregunta=q, respuesta="Respuesta registrada en modo demo", cumple=True)
-                    for q in qs
+                    RespuestaCriterio(
+                        criterio=(preguntas[i].get("valida") if i < len(preguntas) and isinstance(preguntas[i], dict) else q) or q,
+                        pregunta=q,
+                        respuesta=del_candidato.get(q) or "Respuesta registrada en modo demo",
+                        cumple=True,
+                    )
+                    for i, q in enumerate(qs)
                 ],
             ),
             False,
@@ -729,6 +814,30 @@ def prefiltro_turno(
         lineas_contexto.append(f"Beneficios: {', '.join(beneficios)}.")
 
     saludo = f" Te diriges al candidato como «{nombre_candidato}»." if nombre_candidato else ""
+    if respuestas_web:
+        lineas_contexto.append("Lo que el candidato YA contestó en el formulario web (NO lo vuelvas a preguntar; úsalo como contexto):\n  - " + "\n  - ".join(respuestas_web))
+
+    regla_orden = (
+        # Fraiche (spec §6): guion fijo — todas las preguntas, en orden, una por criterio; nunca cerrar antes.
+        " (2) haz TODAS las preguntas del guion, en el orden dado, una por mensaje, sin saltarte ninguna "
+        "(si el candidato ya contestó algo en el formulario web o en este chat, no la repitas y pasa a la "
+        "siguiente); una pregunta marcada «solo si…» se hace únicamente cuando aplique; una marcada "
+        "INFORMATIVA se pregunta tal cual, se registra la respuesta en respuestas_extraidas con cumple=null y "
+        "NUNCA influye en el estado ni en la evidencia; solo cuando el guion esté completo marca "
+        "clasificacion_lista=true (ver regla 5); "
+        if guion_fijo else
+        " (2) recorre los criterios en orden "
+        "y no repitas los que ya quedaron contestados — no es necesario agotarlos todos: en cuanto "
+        "puedas clasificar con confianza, cierra antes (ver regla 5); "
+    )
+    regla_estado = (
+        "(6) el estado es 'no_cumple' SOLO si el candidato no cubre un requisito INDISPENSABLE de la vacante "
+        "(o falla un criterio marcado DESCARTA); si quedó una duda que RH debería revisar (respuesta ambigua, "
+        "expectativa salarial fuera de rango, disponibilidad parcial), usa 'revision'; con todo cubierto, 'cumple'; "
+        if guion_fijo else
+        "(6) si falla un criterio marcado como DESCARTA, el estado es 'no_cumple'; con dudas menores, "
+        "'cumple' (RH lo valida después con el CV y la Entrevista Red Human); "
+    )
 
     mensajes = [{"role": ("user" if m["rol"] == "user" else "assistant"), "content": m["texto"]} for m in historial]
     resp = client.responses.parse(
@@ -738,17 +847,14 @@ def prefiltro_turno(
             + "\n".join(lineas_contexto) + "\n"
             f"Criterios de prefiltro:\n{criterios_prefiltro(preguntas)}\n\n"
             "Reglas: (1) una sola pregunta por mensaje y UN solo criterio por pregunta (nunca compuestas: «¿cuántos años tienes y has usado SAP?» son dos mensajes), tono cálido y breve — hablas como un reclutador "
-            "humano, NO como un cuestionario robótico;" + saludo + " (2) recorre los criterios en orden "
-            "y no repitas los que ya quedaron contestados — no es necesario agotarlos todos: en cuanto "
-            "puedas clasificar con confianza, cierra antes (ver regla 5); (3) si el candidato pregunta "
+            "humano, NO como un cuestionario robótico;" + saludo + regla_orden + "(3) si el candidato pregunta "
             "sobre sueldo, ubicación, beneficios o el puesto, contesta con los datos de la vacante que "
             "tienes arriba; (4) en `respuestas_extraidas` mantén una lista estructurada y acumulada de "
             "los criterios evaluados, la pregunta, la respuesta del candidato y si cumple (true/false/"
             "null); (5) cuando tengas suficiente información marca clasificacion_lista=true con estado y "
             "evidencia OBJETIVA citando lo que dijo la persona — el prefiltro es SOLO un filtro básico de "
-            "entrada: su único resultado es 'cumple' o 'no_cumple', sin calificaciones ni puntajes; "
-            "(6) si falla un criterio marcado como DESCARTA, el estado es 'no_cumple'; con dudas menores, "
-            "'cumple' (RH lo valida después con el CV y la Entrevista Red Human); (7) NUNCA le "
+            "entrada: su único resultado es 'cumple', 'no_cumple' o 'revision', sin calificaciones ni puntajes; "
+            + regla_estado + "(7) NUNCA le "
             "comuniques un rechazo al candidato: si no cumple, agradece y di que RH revisará su caso — "
             "la decisión final siempre la toma una persona de RH; (8) no pidas datos sensibles (salud, "
             "embarazo, religión, estado civil, edad); (9) si el candidato dice que ya no le interesa, "

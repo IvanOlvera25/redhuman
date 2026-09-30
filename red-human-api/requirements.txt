@@ -13,3 +13,4 @@ fpdf2>=2.8
 openpyxl>=3.1
 cryptography>=43  # Fase 7B: tokens de Microsoft 365 cifrados en la base
 dropbox-sign==1.13.0  # 2026-09-29: SDK oficial de firma electrónica incrustada
+segno>=1.6  # Fraiche 2026-09-29: QR de referidos (puro Python)

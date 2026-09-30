@@ -2212,8 +2212,61 @@ function PestanaResumen({
       <div>
         <Eyebrow>Prefiltro de entrada</Eyebrow>
         <Card className="mt-2 p-4">
+          {/* Fraiche (spec §5): clasificación del formulario web con motivo visible + respuestas */}
+          {c.prefiltroWeb && (
+            <div className="mb-3 rounded-xl border border-border-soft bg-surface-2/60 p-3">
+              <p
+                className={cn(
+                  "text-sm font-semibold",
+                  c.prefiltroWeb.resultado === "cumple" ? "text-good" : c.prefiltroWeb.resultado === "revision" ? "text-warn" : "text-bad",
+                )}
+              >
+                Prefiltro web: {c.prefiltroWeb.etiqueta}
+                {c.prefiltroWeb.evaluadas ? ` (${c.prefiltroWeb.cumplidos} de ${c.prefiltroWeb.evaluadas} criterios)` : ""}
+              </p>
+              <p className="mt-1 text-xs leading-relaxed text-ink-2">{c.prefiltroWeb.motivo}</p>
+              {c.prefiltroWeb.detalle.length > 0 && (
+                <ul className="mt-2 space-y-1">
+                  {c.prefiltroWeb.detalle.map((d, i) => (
+                    <li key={i} className="flex items-start gap-2 text-xs leading-relaxed text-ink-2">
+                      <span className={cn("mt-0.5 shrink-0 font-mono text-[10px]", d.cumple === true ? "text-good" : d.cumple === false ? (d.descarta ? "text-bad" : "text-warn") : "text-ink-3")}>
+                        {d.cumple === true ? "✓" : d.cumple === false ? "✗" : "·"}
+                      </span>
+                      <span className="break-words">
+                        {d.pregunta} <b>«{d.respuesta || "sin respuesta"}»</b>
+                        {d.descarta && <span className="text-ink-3"> · eliminatoria</span>}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {!c.prefiltroWeb && (c.respuestasWeb?.length ?? 0) > 0 && (
+            <ul className="mb-3 space-y-1">
+              {c.respuestasWeb!.map((r, i) => (
+                <li key={i} className="text-xs leading-relaxed text-ink-2">• {r.pregunta} <b>«{r.respuesta || "sin respuesta"}»</b></li>
+              ))}
+            </ul>
+          )}
+          {/* Fraiche (spec §6): resultado del filtro por WhatsApp con su siguiente acción + captura BBVA */}
+          {c.prefiltroWhatsapp && (
+            <p
+              className={cn(
+                "mb-1 text-sm font-semibold",
+                c.prefiltroWhatsapp.resultado === "cumple" ? "text-good" : c.prefiltroWhatsapp.resultado === "revision" ? "text-warn" : "text-bad",
+              )}
+            >
+              Filtro WhatsApp: {c.prefiltroWhatsapp.etiqueta}
+            </p>
+          )}
+          {c.adeudoBbva && (
+            <p className="mb-2 text-xs text-ink-2">
+              Adeudo con BBVA: <b>{c.adeudoBbva}</b> <span className="text-ink-3">· captura informativa, no afecta el resultado</span>
+            </p>
+          )}
           {!c.prefiltroResumen ? (
-            <p className="text-sm text-ink-3">Prefiltro en curso — todavía no hay criterios evaluados.</p>
+            <p className="text-sm text-ink-3">{c.prefiltroWeb ? "Filtro por WhatsApp en curso." : "Prefiltro en curso — todavía no hay criterios evaluados."}</p>
           ) : c.prefiltroResumen.resultado === "no_cumple" || c.prefiltroResumen.incumplidos.length > 0 ? (
             <div>
               <p className="text-sm font-semibold text-warn">

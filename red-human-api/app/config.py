@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     # tiene: `scripts/limpiar_datos_demo.py --forzar` (baja lógica, conserva historial).
     sembrar_demo: bool = False
 
+    # Demo Fraiche (2026-09-29, spec §3): publicar exige la ficha completa (destino, cliente o sucursal, zona,
+    # horario, sueldo, posiciones, responsable y fecha objetivo). El frontend lo valida SIEMPRE; aquí se puede
+    # relajar (FRAICHE_PUBLICACION_ESTRICTA=false) para los scripts de verificación previos a la demo.
+    fraiche_publicacion_estricta: bool = True
+
     # IA (OpenAI)
     openai_api_key: str = ""
     openai_model: str = "gpt-5.6-luna"

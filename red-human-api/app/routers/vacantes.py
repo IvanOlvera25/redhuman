@@ -5,20 +5,21 @@ publicación adaptada a cada plataforma (WhatsApp, OCC, LinkedIn y portal propio
 cada una con su `copy` (difusión) y su `page` (cuerpo listo para pegar).
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
 from ..config import settings
 from ..database import get_db
-from ..services import bolsas, conteos, notificaciones
+from ..services import archivos, bolsas, conteos, fraiche, notificaciones
 from ..deps import cuenta_actual, usuario_actual, usuario_decisor
 from ..models import (
-    ENFOQUES_ENTREVISTA, MONEDAS_SUELDO, PERIODICIDADES_SUELDO, PLATAFORMAS, Cliente, Cuenta, Curso, Plantilla, Postulacion,
+    DESTINOS_VACANTE, ENFOQUES_ENTREVISTA, MONEDAS_SUELDO, PERIODICIDADES_SUELDO, PLATAFORMAS, Cliente, Cuenta, Curso, Plantilla, Postulacion,
     Usuario, UsuarioCuenta, Vacante, registrar, slugificar, texto_sueldo, texto_ubicacion,
 )
 from ..serial import nombre_empresa, nombre_empresa_candidato, vacante_dict
@@ -139,6 +140,10 @@ def listar(
     responsable_id: Optional[int] = None,
     area: Optional[str] = None,              # LIKE sobre area
     ubicacion: Optional[str] = None,         # LIKE sobre ubicacion
+    # --- Fraiche (2026-09-29): destino, zona y sucursal ---
+    destino: Optional[str] = None,
+    zona: Optional[str] = None,
+    sucursal: Optional[str] = None,
     db: Session = Depends(get_db),
     _: Usuario = Depends(usuario_actual),
     cuenta: Cuenta = Depends(cuenta_actual),
@@ -158,6 +163,12 @@ def listar(
         q = q.filter(Vacante.area.ilike(f"%{area.strip()}%"))
     if ubicacion:
         q = q.filter(Vacante.ubicacion.ilike(f"%{ubicacion.strip()}%"))
+    if destino:
+        q = q.filter(Vacante.destino == destino)
+    if zona:
+        q = q.filter(Vacante.zona.ilike(f"%{zona.strip()}%"))
+    if sucursal:
+        q = q.filter(Vacante.sucursal.ilike(f"%{sucursal.strip()}%"))
     # Hotfix concurrencia 2026-09-24 (N+1): relaciones precargadas, contadores de todas las vacantes en
     # tres consultas agrupadas y nombres de colaboradores en una sola — antes ~7 consultas por vacante.
     vacantes = q.options(
@@ -222,6 +233,11 @@ class GenerarIn(BaseModel):
     empresa: str = ""
     cliente_id: Optional[int] = None
     mostrar_cliente_candidato: bool = True
+    # --- Fraiche (2026-09-29): condiciones reales adicionales (la IA nunca las inventa) ---
+    destino: str = "tienda_propia"  # ver DESTINOS_VACANTE
+    sucursal: str = ""
+    zona: str = ""
+    horario: str = ""
 
     def ubicacion_texto(self) -> str:
         return texto_ubicacion(self.ubicacion_estado, self.ubicacion_municipio, self.ubicacion)
@@ -257,6 +273,43 @@ def _validar_sueldo(datos: GenerarIn) -> None:
         raise HTTPException(400, "El sueldo «hasta» no puede ser menor que el «desde».")
     if datos.seniority and datos.seniority not in ia.SENIORITY.__args__:
         raise HTTPException(400, f"Seniority inválido. Usa uno de: {', '.join(ia.SENIORITY.__args__)}")
+    if datos.destino and datos.destino not in DESTINOS_VACANTE:
+        raise HTTPException(400, f"Destino inválido. Usa uno de: {', '.join(DESTINOS_VACANTE)}")
+
+
+def _parsear_fecha(valor: Optional[str], campo: str = "fecha_objetivo") -> Optional[date]:
+    """«2026-10-15» → date; vacío → None. Cualquier otra forma es 400 (nunca se adivina)."""
+    if valor is None or not str(valor).strip():
+        return None
+    try:
+        return date.fromisoformat(str(valor).strip()[:10])
+    except ValueError:
+        raise HTTPException(400, f"La {campo.replace('_', ' ')} debe venir como AAAA-MM-DD.")
+
+
+def faltantes_para_publicar(v: Vacante) -> List[str]:
+    """Fraiche (spec §3): antes de publicar, RH completa destino, cliente o sucursal, zona, horario, sueldo,
+    posiciones requeridas, responsable y fecha objetivo de cobertura. Regresa lo que falta (vacío = ok)."""
+    faltan: List[str] = []
+    if v.destino not in DESTINOS_VACANTE:
+        faltan.append("destino (Tienda propia / Franquicia cliente)")
+    if v.destino == "franquicia" and not v.cliente_id:
+        faltan.append("cliente (franquicia)")
+    if not (v.sucursal or "").strip():
+        faltan.append("sucursal")
+    if not (v.zona or "").strip():
+        faltan.append("zona")
+    if not (v.horario or "").strip():
+        faltan.append("horario")
+    if not v.sueldo_periodicidad or (v.sueldo_periodicidad != "a_convenir" and not (v.sueldo_desde or v.sueldo_hasta)):
+        faltan.append("sueldo")
+    if not v.posiciones or v.posiciones < 1:
+        faltan.append("posiciones requeridas")
+    if not v.responsable_id:
+        faltan.append("responsable")
+    if not v.fecha_objetivo:
+        faltan.append("fecha objetivo de cobertura")
+    return faltan
 
 
 def _empresa_resuelta(db: Session, cuenta: Cuenta, cliente_id: Optional[int], mostrar_cliente: bool) -> str:
@@ -275,6 +328,7 @@ def _ficha(datos: GenerarIn, empresa: str) -> ia.FichaVacante:
         descripcion_breve=datos.descripcion, requisitos_indispensables=datos.indispensables(),
         requisitos_deseables=[x for x in datos.requisitos_deseables if x.strip()],
         beneficios=[x for x in datos.beneficios if x.strip()],
+        horario=(datos.horario or "").strip(), sucursal=(datos.sucursal or "").strip(),
     )
 
 
@@ -320,6 +374,10 @@ def _aplicar_generado(v: Vacante, g: ia.VacanteGenerada) -> None:
         "occ": g.occ.bloque(),
         "linkedin": g.linkedin.bloque(),
         "portal": g.portal.bloque(),
+        # Fraiche (2026-09-29): texto editable para cada portal; se copia a mano, nunca se publica solo.
+        "indeed": g.indeed.bloque(),
+        "computrabajo": g.computrabajo.bloque(),
+        "talenteca": g.talenteca.bloque(),
     }
 
 
@@ -353,6 +411,9 @@ class CrearIn(GenerarIn):
     mostrar_cliente_candidato: bool = True
     plantilla_id: Optional[int] = None  # solo trazabilidad de qué plantilla se usó, si alguna
     enfoque_entrevista: str = "profesional"  # Fase 4 (Punto 6): profesional | profesional_personal
+    # --- Fraiche (2026-09-29): dimensión y fecha objetivo (se exigen al PUBLICAR, no al guardar borrador) ---
+    posiciones: int = 1
+    fecha_objetivo: Optional[str] = None  # AAAA-MM-DD
 
 
 @router.post("", status_code=201)
@@ -376,6 +437,9 @@ def crear(
     if datos.enfoque_entrevista not in ENFOQUES_ENTREVISTA:
         raise HTTPException(400, f"Enfoque de entrevista inválido. Usa uno de: {', '.join(ENFOQUES_ENTREVISTA)}")
     _validar_sueldo(datos)
+    fecha_objetivo = _parsear_fecha(datos.fecha_objetivo)
+    if datos.posiciones < 1:
+        raise HTTPException(400, "Las posiciones requeridas deben ser al menos 1.")
 
     v = Vacante(
         codigo="TMP",
@@ -389,6 +453,13 @@ def crear(
         area=datos.area,
         empresa="",  # se fija abajo con la regla (Punto 1): nunca texto libre
         enfoque_entrevista=datos.enfoque_entrevista,
+        # Fraiche: destino/sucursal/zona/horario/posiciones/fecha objetivo (condiciones reales)
+        destino=datos.destino or "tienda_propia",
+        sucursal=datos.sucursal.strip(),
+        zona=datos.zona.strip(),
+        horario=datos.horario.strip(),
+        posiciones=datos.posiciones,
+        fecha_objetivo=fecha_objetivo,
         ubicacion=datos.ubicacion_texto(),
         ubicacion_estado=datos.ubicacion_estado.strip(),
         ubicacion_municipio=datos.ubicacion_municipio.strip(),
@@ -429,6 +500,12 @@ def crear(
         entrada_generador = GenerarIn(**datos.model_dump(include=set(GenerarIn.model_fields)))
         generado, con_ia = _generar(entrada_generador, v.empresa)
         _aplicar_generado(v, generado)
+
+    # Fraiche (spec §3): publicar exige la ficha completa; un borrador puede quedar incompleto.
+    if datos.publicar and settings.fraiche_publicacion_estricta:
+        faltan = faltantes_para_publicar(v)
+        if faltan:
+            raise HTTPException(409, "Para publicar completa: " + ", ".join(faltan) + ".")
 
     db.add(v)
     db.flush()
@@ -476,7 +553,7 @@ def _cuenta_publica(db: Session, cuenta: str) -> Optional[Cuenta]:
 
 
 @router.get("/publicas")
-def listar_publicas(cuenta: str = "", db: Session = Depends(get_db)):
+def listar_publicas(cuenta: str = "", zona: str = "", destino: str = "", db: Session = Depends(get_db)):
     """Bolsa de trabajo pública (/portal) — solo vacantes Publicadas, sin sesión.
 
     2026-09-17: `?cuenta=<slug|id>` aísla el portal a UNA Cuenta (bolsa propia de cada cliente de
@@ -499,7 +576,28 @@ def listar_publicas(cuenta: str = "", db: Session = Depends(get_db)):
         if not cu:
             raise HTTPException(404, "Portal no encontrado.")
         q = q.filter(Vacante.cuenta_id == cu.id)
+    # Fraiche (spec §4): la bolsa filtra por zona (y opcionalmente por destino)
+    if zona.strip():
+        q = q.filter(Vacante.zona.ilike(f"%{zona.strip()}%"))
+    if destino.strip() in DESTINOS_VACANTE:
+        q = q.filter(Vacante.destino == destino.strip())
     return [_con_logo(db, _salida(db, v), v) for v in q.all()]
+
+
+@router.get("/publicas/zonas")
+def zonas_publicas(cuenta: str = "", db: Session = Depends(get_db)):
+    """Zonas con vacantes publicadas (para el filtro por zona de la bolsa de trabajo), sin sesión."""
+    q = (
+        db.query(Vacante.zona)
+        .join(Cuenta, Cuenta.id == Vacante.cuenta_id)
+        .filter(Vacante.estado == "Publicada", Cuenta.estado == "Activa", Vacante.zona != "")
+    )
+    if cuenta:
+        cu = _cuenta_publica(db, cuenta)
+        if not cu:
+            raise HTTPException(404, "Portal no encontrado.")
+        q = q.filter(Vacante.cuenta_id == cu.id)
+    return sorted({z.strip() for (z,) in q.all() if z and z.strip()})
 
 
 @router.get("/publicas/cuenta")
@@ -587,6 +685,13 @@ class ActualizarIn(BaseModel):
     # Evaluaciones (2026-09-28): sugerencias [{tipo, prueba_id?, nombre?}] + aviso antes de Onboarding
     evaluaciones_sugeridas: Optional[List[dict]] = None
     avisar_evaluaciones_antes_onboarding: Optional[bool] = None
+    # --- Fraiche (2026-09-29) ---
+    destino: Optional[str] = None
+    sucursal: Optional[str] = None
+    zona: Optional[str] = None
+    horario: Optional[str] = None
+    posiciones: Optional[int] = None
+    fecha_objetivo: Optional[str] = None  # AAAA-MM-DD; "" = quitar
 
 
 @router.patch("/{codigo}")
@@ -630,6 +735,16 @@ def actualizar(
         raise HTTPException(400, f"Periodicidad de sueldo inválida. Usa una de: {', '.join(PERIODICIDADES_SUELDO)}")
     if datos.seniority is not None and datos.seniority and datos.seniority not in ia.SENIORITY.__args__:
         raise HTTPException(400, f"Seniority inválido. Usa uno de: {', '.join(ia.SENIORITY.__args__)}")
+    # Fraiche: destino válido, posiciones ≥ 1, fecha objetivo ISO (o "" para quitarla)
+    if datos.destino is not None and datos.destino not in DESTINOS_VACANTE:
+        raise HTTPException(400, f"Destino inválido. Usa uno de: {', '.join(DESTINOS_VACANTE)}")
+    if datos.posiciones is not None and datos.posiciones < 1:
+        raise HTTPException(400, "Las posiciones requeridas deben ser al menos 1.")
+    if "fecha_objetivo" in cambios:
+        cambios["fecha_objetivo"] = _parsear_fecha(cambios["fecha_objetivo"])
+    for k in ("sucursal", "zona", "horario"):
+        if k in cambios and isinstance(cambios[k], str):
+            cambios[k] = cambios[k].strip()
 
     for campo, valor in cambios.items():
         setattr(v, campo, valor)
@@ -710,6 +825,10 @@ async def publicar(
         raise HTTPException(400, f"Elige al menos una plataforma válida: {', '.join(PLATAFORMAS)}")
     if not (v.publicaciones or v.descripcion):
         raise HTTPException(409, "La vacante no tiene contenido. Genera la publicación antes de distribuirla.")
+    # Fraiche (spec §3): destino, cliente/sucursal, zona, horario, sueldo, posiciones, responsable y fecha objetivo
+    faltan = faltantes_para_publicar(v) if settings.fraiche_publicacion_estricta else []
+    if faltan:
+        raise HTTPException(409, "Para publicar completa: " + ", ".join(faltan) + ".")
 
     v.estado = "Publicada"
     v.plataformas = _unir_plataformas(v.plataformas, datos.plataformas)
@@ -797,7 +916,9 @@ def publicacion(
     bloque = (v.publicaciones or {}).get(clave)
     if not bloque:
         raise HTTPException(404, f"La vacante no tiene publicación generada para '{plataforma}'. Usa /regenerar.")
-    liga = f"{settings.app_url}/aplicar/{v.slug or slugificar(v.titulo)}"
+    # Fraiche (spec §4): la liga de cada portal lleva su fuente, así la postulación registra de dónde llegó.
+    fuente = fraiche.normalizar_fuente(clave)
+    liga = _liga_postulacion(v, fuente if fuente in fraiche.FUENTES_POSTULACION else "")
     return {
         "plataforma": clave,
         "vacante": v.codigo,
@@ -809,3 +930,107 @@ def publicacion(
         # el copy con la liga ya incrustada, que es lo que RH pega en la plataforma
         "copyConLiga": f"{bloque.get('copy', '')}\n\n👉 Postúlate aquí: {liga}".strip(),
     }
+
+
+# ------------------------------------------------------------
+# Fraiche (2026-09-29) · Liga de postulación por fuente, QR de referidos e imagen de la publicación
+# ------------------------------------------------------------
+
+
+def _liga_postulacion(v: Vacante, fuente: str = "", ref: str = "") -> str:
+    """`{app_url}/aplicar/{slug}?fuente=…&ref=…` — la fuente y quién refirió quedan en la postulación."""
+    base = f"{settings.app_url.rstrip('/')}/aplicar/{v.slug or slugificar(v.titulo)}"
+    partes = []
+    if fuente:
+        partes.append(f"fuente={fuente}")
+    if ref.strip():
+        from urllib.parse import quote
+
+        partes.append(f"ref={quote(ref.strip()[:150])}")
+    return base + ("?" + "&".join(partes) if partes else "")
+
+
+@router.get("/{codigo}/liga")
+def liga_postulacion(
+    codigo: str, fuente: str = "", ref: str = "", db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Liga de postulación con fuente (`portal`, `referido`, `campo`, `red_social`…) y, para referidos, quién
+    refiere (`ref`, nombre o número de empleado). `qrUrl` es la misma liga en QR (PNG descargable)."""
+    v = _por_codigo(db, codigo, cuenta.id)
+    fte = fraiche.normalizar_fuente(fuente) or ("referido" if ref.strip() else "")
+    liga = _liga_postulacion(v, fte, ref)
+    q = "&".join(x for x in [f"fuente={fte}" if fte else "", f"ref={ref.strip()}" if ref.strip() else ""] if x)
+    return {
+        "vacante": v.codigo, "liga": liga, "fuente": fte, "fuenteNombre": fraiche.nombre_fuente(fte) if fte else "",
+        "ref": ref.strip(), "qrPath": f"/vacantes/{v.codigo}/qr" + (f"?{q}" if q else ""),
+        "fuentes": [{"clave": k, "nombre": n} for k, n in fraiche.FUENTES_POSTULACION.items()],
+    }
+
+
+@router.get("/{codigo}/qr")
+def qr_postulacion(
+    codigo: str, fuente: str = "", ref: str = "", db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """QR (PNG) de la liga de postulación — para referidos (`ref=` identifica quién refirió) o para material de
+    campo. Se genera al vuelo con `segno`; nada se guarda."""
+    import io
+
+    import segno
+
+    v = _por_codigo(db, codigo, cuenta.id)
+    fte = fraiche.normalizar_fuente(fuente) or ("referido" if ref.strip() else "")
+    liga = _liga_postulacion(v, fte, ref)
+    buf = io.BytesIO()
+    segno.make(liga, error="m").save(buf, kind="png", scale=8, border=2)
+    nombre = f"qr-{v.codigo}" + (f"-{slugificar(ref)}" if ref.strip() else "") + ".png"
+    return Response(buf.getvalue(), media_type="image/png", headers={"Content-Disposition": f'inline; filename="{nombre}"'})
+
+
+@router.post("/{codigo}/imagen")
+async def subir_imagen(
+    codigo: str, archivo: UploadFile = File(...), db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """Imagen para la publicación (spec §4): se guarda en uploads/vacantes y queda descargable desde la ficha.
+    Solo imágenes; sustituye a la anterior."""
+    v = _no_eliminada(_por_codigo(db, codigo, cuenta.id))
+    validado = await archivos.validar(archivo, "imagen")
+    if not validado.es_imagen:
+        raise HTTPException(415, "La imagen de la publicación debe ser PNG, JPG o WEBP.")
+    v.imagen = archivos.guardar(validado, "vacantes", f"{v.codigo}-imagen")
+    v.imagen_nombre = validado.nombre
+    registrar(db, u.nombre, "vacante_imagen_cargada", "vacante", v.codigo, {"archivo": validado.nombre, "bytes": validado.tamano})
+    db.commit()
+    return _salida(db, v)
+
+
+@router.delete("/{codigo}/imagen")
+def quitar_imagen(
+    codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    v = _no_eliminada(_por_codigo(db, codigo, cuenta.id))
+    v.imagen, v.imagen_nombre = "", ""
+    registrar(db, u.nombre, "vacante_imagen_quitada", "vacante", v.codigo, {})
+    db.commit()
+    return _salida(db, v)
+
+
+@router.get("/{codigo}/imagen")
+def descargar_imagen(
+    codigo: str, db: Session = Depends(get_db), _: Usuario = Depends(usuario_actual), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    v = _por_codigo(db, codigo, cuenta.id)
+    if not archivos.existe(v.imagen):
+        raise HTTPException(404, "Esta vacante no tiene imagen cargada.")
+    return FileResponse(v.imagen, filename=v.imagen_nombre or f"{v.codigo}-imagen")
+
+
+@router.get("/slug/{slug}/imagen")
+def imagen_publica(slug: str, db: Session = Depends(get_db)):
+    """Imagen de la vacante para la página pública de postulación (solo vacantes Publicadas)."""
+    v = db.query(Vacante).filter(Vacante.slug == slug, Vacante.estado == "Publicada").first()
+    if not v or not archivos.existe(v.imagen):
+        raise HTTPException(404, "Sin imagen.")
+    return FileResponse(v.imagen)

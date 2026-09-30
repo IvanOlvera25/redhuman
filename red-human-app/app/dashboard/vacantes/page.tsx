@@ -29,6 +29,8 @@ import {
   ChevronDown,
   ChevronRight,
   MoreHorizontal,
+  QrCode,
+  Download,
 } from "lucide-react";
 import { Button, Card, Badge, Eyebrow } from "@/components/ui";
 import { Area, Selector, ToggleSiNo } from "@/components/dashboard/campos";
@@ -69,6 +71,15 @@ import {
   guardarVacanteComoPlantilla,
   ENFOQUES_ENTREVISTA,
   nombreEtapa,
+  DESTINOS_VACANTE,
+  FUENTES_POSTULACION,
+  fetchLigaPostulacion,
+  urlQrVacante,
+  subirImagenVacante,
+  quitarImagenVacante,
+  urlImagenVacante,
+  urlArchivo,
+  type DestinoVacante,
   type BloquePlataforma,
   type CriterioFiltro,
   type VacanteGenerada,
@@ -105,10 +116,19 @@ const PLATAFORMAS = [
  * de los canales de arriba — OCC y LinkedIn ya no son canal, pero su texto se sigue generando. */
 const BLOQUES_TEXTO = [
   { clave: "whatsapp", nombre: "WhatsApp" },
+  { clave: "indeed", nombre: "Indeed" },
+  { clave: "computrabajo", nombre: "Computrabajo" },
+  { clave: "talenteca", nombre: "Talenteca" },
   { clave: "occ", nombre: "OCC" },
   { clave: "linkedin", nombre: "LinkedIn" },
   { clave: "portal", nombre: "Portal" },
 ] as const;
+
+/** Fraiche: portales cuya liga viaja con `?fuente=` para atribuir la postulación; portal y WhatsApp usan la liga limpia. */
+const PORTALES_CON_FUENTE = new Set(["indeed", "computrabajo", "talenteca", "occ", "linkedin"]);
+
+/** Destino → tono del Badge (tienda propia = marca, franquicia = human). */
+const destinoTone: Record<DestinoVacante, "brand" | "human"> = { tienda_propia: "brand", franquicia: "human" };
 
 export default function Vacantes() {
   const puedeDecidir = usePuedeDecidir();
@@ -134,6 +154,9 @@ export default function Vacantes() {
   const [fResponsable, setFResponsable] = useState<number | "">("" );
   const [fArea, setFArea] = useState("");
   const [fUbicacion, setFUbicacion] = useState("");
+  // Fraiche: destino (tienda propia / franquicia) y zona
+  const [fDestino, setFDestino] = useState<DestinoVacante | "">("");
+  const [fZona, setFZona] = useState("");
   const [clientes, setClientes] = useState<import("@/lib/api").Cliente[]>([]);
   const [usuarios, setUsuarios] = useState<{ id: number; nombre: string }[]>([]);
   // Menú de acciones flotante por tarjeta/fila
@@ -203,10 +226,12 @@ export default function Vacantes() {
     setFResponsable("");
     setFArea("");
     setFUbicacion("");
+    setFDestino("");
+    setFZona("");
     setBuscador("");
   }
 
-  const filtrosActivosCount = [fCliente, fResponsable, fArea, fUbicacion].filter(Boolean).length;
+  const filtrosActivosCount = [fCliente, fResponsable, fArea, fUbicacion, fDestino, fZona].filter(Boolean).length;
 
   // Formatear fecha corta
   function fechaCorta(iso: string | null | undefined): string | null {
@@ -225,6 +250,8 @@ export default function Vacantes() {
       r = r.filter((v) => v.titulo.toLowerCase().includes(buscador.toLowerCase().trim()));
     if (fArea.trim()) r = r.filter((v) => v.area?.toLowerCase().includes(fArea.toLowerCase().trim()));
     if (fUbicacion.trim()) r = r.filter((v) => v.ubicacion?.toLowerCase().includes(fUbicacion.toLowerCase().trim()));
+    if (fDestino) r = r.filter((v) => v.destino === fDestino);
+    if (fZona.trim()) r = r.filter((v) => v.zona?.toLowerCase().includes(fZona.toLowerCase().trim()));
     if (fCliente) r = r.filter((v) => {
       // cliente es un string de nombre — buscamos las vacantes que tengan algún candidato del cliente seleccionado
       // como no tenemos cliente_id en el frontend, filtramos por nombre de cliente
@@ -236,7 +263,7 @@ export default function Vacantes() {
       return nombreResp ? v.responsable === nombreResp : true;
     });
     return r;
-  }, [datos, filtro, buscador, fArea, fUbicacion, fCliente, fResponsable, clientes, usuarios]);
+  }, [datos, filtro, buscador, fArea, fUbicacion, fDestino, fZona, fCliente, fResponsable, clientes, usuarios]);
 
   // Columna Cliente: solo si alguna vacante del listado actual tiene cliente != null
   const mostrarCliente = useMemo(() => lista.some((v) => v.cliente), [lista]);
@@ -397,6 +424,30 @@ export default function Vacantes() {
               className="rounded-lg border border-border-soft bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-3 focus:border-brand focus:outline-none"
             />
           </label>
+          {/* Fraiche: destino y zona */}
+          <label className="flex flex-col gap-1.5 text-xs text-ink-2">
+            Destino
+            <select
+              value={fDestino}
+              onChange={(e) => setFDestino(e.target.value as DestinoVacante | "")}
+              className="rounded-lg border border-border-soft bg-surface px-3 py-2 text-sm text-ink focus:border-brand focus:outline-none"
+            >
+              <option value="">Todas</option>
+              {DESTINOS_VACANTE.map((d) => (
+                <option key={d.valor} value={d.valor}>{d.texto}</option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1.5 text-xs text-ink-2">
+            Zona
+            <input
+              type="text"
+              value={fZona}
+              onChange={(e) => setFZona(e.target.value)}
+              placeholder="Ej: Sur"
+              className="rounded-lg border border-border-soft bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-3 focus:border-brand focus:outline-none"
+            />
+          </label>
           <button
             onClick={limpiarFiltros}
             className="rounded-lg border border-border-soft px-3 py-2 text-sm text-ink-2 hover:border-bad/40 hover:bg-bad-soft hover:text-bad"
@@ -462,8 +513,9 @@ export default function Vacantes() {
               </div>
 
               <h3 className="font-display mt-4 text-lg font-bold leading-snug">{v.titulo}</h3>
-              <p className="mt-1 text-sm text-ink-3">
-                {v.area} · {v.cliente ?? v.empresa}
+              <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-ink-3">
+                <span>{v.area} · {v.cliente ?? v.empresa}</span>
+                {v.destinoNombre && <Badge tone="neutral">{v.destinoNombre}</Badge>}
               </p>
 
               <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-sm text-ink-2">
@@ -610,7 +662,10 @@ export default function Vacantes() {
                     )}
                   </td>
                   <td className="px-4 py-3 text-ink-2">{v.responsable ?? "—"}</td>
-                  <td className="px-4 py-3 text-ink-2">{v.ubicacion || "—"}</td>
+                  <td className="px-4 py-3 text-ink-2">
+                    {v.ubicacion || "—"}
+                    {v.destinoNombre && <div className="mt-1"><Badge tone="neutral">{v.destinoNombre}</Badge></div>}
+                  </td>
                   <td className="px-4 py-3 text-[12px] text-ink-3">
                     {fechaCorta(v.creada) ?? "—"}
                     {fechaCorta(v.publicadaEn) && (
@@ -677,10 +732,137 @@ export default function Vacantes() {
 }
 
 /* ============================================================
+   Fraiche (2026-09-29): destino, sucursal, zona, posiciones y fecha objetivo — condiciones reales que RH
+   captura (la IA nunca las inventa). Se inyectan en «Datos principales» del formulario compartido, tanto
+   en Nueva vacante como en Editar; el Cliente/franquicia se pasa en `slotCliente` (solo el alta lo captura aquí).
+   ============================================================ */
+const INPUT_PRINCIPAL =
+  "h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20";
+
+interface DatosFraiche {
+  destino: DestinoVacante;
+  sucursal: string;
+  zona: string;
+  posiciones: number | "";
+  fechaObjetivo: string;
+}
+
+function datosFraicheDe(v?: Vacante): DatosFraiche {
+  return {
+    destino: v?.destino ?? "tienda_propia",
+    sucursal: v?.sucursal ?? "",
+    zona: v?.zona ?? "",
+    posiciones: v?.posiciones ?? 1,
+    fechaObjetivo: v?.fechaObjetivo ?? "",
+  };
+}
+
+/** Cuerpo snake_case que viaja a POST/PATCH /vacantes junto con `contenidoComoPayload`. */
+function payloadFraiche(f: DatosFraiche) {
+  return {
+    destino: f.destino,
+    sucursal: f.sucursal.trim(),
+    zona: f.zona.trim(),
+    posiciones: Number(f.posiciones) || 1,
+  };
+}
+
+/** Lo que falta para publicar (el backend lo exige con 409; aquí se avisa antes de mandar). */
+function faltantesFraiche(f: DatosFraiche, horario: string): string[] {
+  const faltan: string[] = [];
+  if (!f.sucursal.trim()) faltan.push("Sucursal");
+  if (!f.zona.trim()) faltan.push("Zona");
+  if (!horario.trim()) faltan.push("Horario");
+  if (!(Number(f.posiciones) >= 1)) faltan.push("Posiciones requeridas");
+  if (!f.fechaObjetivo) faltan.push("Fecha objetivo de cobertura");
+  return faltan;
+}
+
+function CamposFraiche({
+  value,
+  onChange,
+  slotCliente,
+}: {
+  value: DatosFraiche;
+  onChange: (v: DatosFraiche) => void;
+  slotCliente?: React.ReactNode;
+}) {
+  const detalle = DESTINOS_VACANTE.find((d) => d.valor === value.destino)?.detalle;
+  return (
+    <>
+      <label className="flex flex-col gap-1.5">
+        <span className="text-sm font-medium text-ink-2">Destino *</span>
+        <select
+          value={value.destino}
+          onChange={(e) => onChange({ ...value, destino: e.target.value as DestinoVacante })}
+          className={INPUT_PRINCIPAL}
+        >
+          {DESTINOS_VACANTE.map((d) => (
+            <option key={d.valor} value={d.valor}>
+              {d.texto}
+            </option>
+          ))}
+        </select>
+        {detalle && <span className="text-[11px] leading-relaxed text-ink-3">{detalle}</span>}
+      </label>
+      {slotCliente}
+      <label className="flex flex-col gap-1.5">
+        <span className="text-sm font-medium text-ink-2">Sucursal *</span>
+        <input
+          value={value.sucursal}
+          onChange={(e) => onChange({ ...value, sucursal: e.target.value })}
+          placeholder="Ej. Fraiche Coyoacán"
+          className={INPUT_PRINCIPAL}
+        />
+      </label>
+      <label className="flex flex-col gap-1.5">
+        <span className="text-sm font-medium text-ink-2">Zona *</span>
+        <input
+          value={value.zona}
+          onChange={(e) => onChange({ ...value, zona: e.target.value })}
+          placeholder="Ej. Sur, Norte, Centro"
+          className={INPUT_PRINCIPAL}
+        />
+      </label>
+      <label className="flex flex-col gap-1.5">
+        <span className="text-sm font-medium text-ink-2">Posiciones requeridas *</span>
+        <input
+          type="number"
+          min={1}
+          step={1}
+          value={value.posiciones}
+          onChange={(e) => onChange({ ...value, posiciones: e.target.value === "" ? "" : Number(e.target.value) })}
+          className={INPUT_PRINCIPAL}
+        />
+      </label>
+      <label className="flex flex-col gap-1.5">
+        <span className="text-sm font-medium text-ink-2">Fecha objetivo de cobertura *</span>
+        <input
+          type="date"
+          value={value.fechaObjetivo}
+          onChange={(e) => onChange({ ...value, fechaObjetivo: e.target.value })}
+          className={INPUT_PRINCIPAL}
+        />
+      </label>
+    </>
+  );
+}
+
+/** «AAAA-MM-DD» → fecha corta en es-MX (se parsea como fecha local para no correrse un día). */
+function fechaObjetivoCorta(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const [a, m, d] = iso.split("-").map(Number);
+  if (!a || !m || !d) return iso;
+  return new Date(a, m - 1, d).toLocaleDateString("es-MX", { day: "numeric", month: "short", year: "numeric" });
+}
+
+/* ============================================================
    CRUD (2026-09-15): editar vacante — el MISMO formulario de «Nueva vacante» en modo edición
    ============================================================ */
 function EditarVacante({ v, onClose, onGuardada }: { v: Vacante; onClose: () => void; onGuardada: () => void }) {
   const [contenido, setContenido] = useState<ContenidoVacante>(() => contenidoDesdeVacante(v));
+  // Fraiche: destino/sucursal/zona/posiciones/fecha objetivo (el Cliente-franquicia se edita en Gestión)
+  const [fraiche, setFraiche] = useState<DatosFraiche>(() => datosFraicheDe(v));
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState("");
 
@@ -690,7 +872,11 @@ function EditarVacante({ v, onClose, onGuardada }: { v: Vacante; onClose: () => 
     setGuardando(true);
     setError("");
     // PATCH /vacantes/{codigo}: mismo payload que el alta; el servidor deriva sueldo/ubicación y respeta el resto.
-    const r = await actualizarVacante(v.id, contenidoComoPayload(contenido));
+    const r = await actualizarVacante(v.id, {
+      ...contenidoComoPayload(contenido),
+      ...payloadFraiche(fraiche),
+      fecha_objetivo: fraiche.fechaObjetivo || "",
+    });
     setGuardando(false);
     if (!r.ok) return setError(r.error);
     onGuardada();
@@ -708,6 +894,7 @@ function EditarVacante({ v, onClose, onGuardada }: { v: Vacante; onClose: () => 
           onChange={setContenido}
           clienteId={v.clienteId ?? null}
           mostrarCliente={v.mostrarClienteCandidato ?? true}
+          slotDatosPrincipales={<CamposFraiche value={fraiche} onChange={setFraiche} />}
         />
         {error && <Aviso tono="error" onCerrar={() => setError("")}>{error}</Aviso>}
         <div className="flex items-center gap-3 border-t border-border-faint pt-5">
@@ -807,6 +994,14 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
   const [responsableId, setResponsableId] = useState<number | "">("");
   const [colaboradoresIds, setColaboradoresIds] = useState<number[]>([]);
   const [mostrarCliente, setMostrarCliente] = useState(true);
+  // Fraiche: destino (tienda propia / franquicia), sucursal, zona, posiciones y fecha objetivo
+  const [fraiche, setFraiche] = useState<DatosFraiche>(() => datosFraicheDe());
+  const esFranquicia = fraiche.destino === "franquicia";
+  function cambiarFraiche(f: DatosFraiche) {
+    // «recluta directo» (0) solo aplica a tienda propia: en franquicia el Cliente es obligatorio
+    if (f.destino === "franquicia" && clienteId === 0) setClienteId("");
+    setFraiche(f);
+  }
 
   // Bloques de publicación por plataforma (occ/linkedin/portal) que solo produce el generador:
   // se conservan aparte del contenido editable para mandarlos en `publicaciones`.
@@ -815,7 +1010,8 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
   const [error, setError] = useState("");
   const [destinos, setDestinos] = useState<string[]>(["WhatsApp", "Portal"]);
 
-  const faltaCliente = clientes.length > 0 && clienteId === "";
+  // Franquicia: el Cliente (franquiciatario) es obligatorio; tienda propia: elegir Cliente o «recluta directo»
+  const faltaCliente = esFranquicia ? !clienteId : clientes.length > 0 && clienteId === "";
 
   async function guardar(publicar: boolean) {
     if (!contenido.titulo.trim()) {
@@ -825,7 +1021,8 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
     // Publicar exige los datos principales completos; un borrador puede quedar incompleto.
     if (publicar) {
       const faltan = faltantesDatosPrincipales(contenido);
-      if (faltaCliente) faltan.splice(3, 0, "Cliente (o «La Cuenta recluta directo»)");
+      if (faltaCliente) faltan.splice(3, 0, esFranquicia ? "Franquicia cliente" : "Cliente (o «La Cuenta recluta directo»)");
+      faltan.push(...faltantesFraiche(fraiche, contenido.horario));
       if (faltan.length) {
         setError(`Para publicar, completa los datos principales: ${faltan.join(", ")}.`);
         return;
@@ -842,6 +1039,10 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
             occ: gen.occ,
             linkedin: gen.linkedin,
             portal: gen.portal,
+            // Fraiche: textos por portal (se copian a mano) solo si el generador los produjo
+            ...(gen.indeed ? { indeed: gen.indeed } : {}),
+            ...(gen.computrabajo ? { computrabajo: gen.computrabajo } : {}),
+            ...(gen.talenteca ? { talenteca: gen.talenteca } : {}),
           }
         : {},
       publicar,
@@ -853,6 +1054,9 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
       colaboradores_ids: colaboradoresIds,
       mostrar_cliente_candidato: mostrarCliente,
       plantilla_id: plantillaBase?.id ?? null,
+      // Fraiche (horario ya viaja en contenidoComoPayload)
+      ...payloadFraiche(fraiche),
+      fecha_objetivo: fraiche.fechaObjetivo || null,
     });
     setGuardando(false);
     if (!r.ok) {
@@ -972,34 +1176,70 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
           mostrarCliente={mostrarCliente}
           faltaCliente={faltaCliente}
           slotDatosPrincipales={
-            clientes.length > 0 ? (
-              <>
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-sm font-medium text-ink-2">Cliente *</span>
-                  <select
-                    value={clienteId}
-                    onChange={(e) => setClienteId(e.target.value === "" ? "" : Number(e.target.value))}
-                    className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
-                  >
-                    <option value="">Elige…</option>
-                    <option value="0">La Cuenta recluta directo (sin Cliente)</option>
-                    {clientes.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.nombre}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {clienteId !== "" && clienteId !== 0 && (
-                  <ToggleSiNo
-                    label="Mostrar cliente al candidato"
-                    ayuda="Si está en 'No', el candidato ve el nombre de tu Cuenta en vez del Cliente — internamente el equipo siempre ve la relación real."
-                    valor={mostrarCliente}
-                    onChange={setMostrarCliente}
-                  />
-                )}
-              </>
-            ) : null
+            <CamposFraiche
+              value={fraiche}
+              onChange={cambiarFraiche}
+              slotCliente={
+                esFranquicia ? (
+                  <>
+                    {/* Franquicia: el Cliente es el franquiciatario y es obligatorio (sin «recluta directo») */}
+                    <label className="flex flex-col gap-1.5">
+                      <span className="text-sm font-medium text-ink-2">Franquicia cliente *</span>
+                      <select
+                        value={clienteId === 0 ? "" : clienteId}
+                        onChange={(e) => setClienteId(e.target.value === "" ? "" : Number(e.target.value))}
+                        className={INPUT_PRINCIPAL}
+                      >
+                        <option value="">Elige…</option>
+                        {clientes.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.nombre}
+                          </option>
+                        ))}
+                      </select>
+                      {clientes.length === 0 && (
+                        <span className="text-[11px] text-ink-3">Registra al franquiciatario en Configuración → Clientes.</span>
+                      )}
+                    </label>
+                    {clienteId !== "" && clienteId !== 0 && (
+                      <ToggleSiNo
+                        label="Mostrar cliente al candidato"
+                        ayuda="Si está en 'No', el candidato ve el nombre de tu Cuenta en vez del Cliente — internamente el equipo siempre ve la relación real."
+                        valor={mostrarCliente}
+                        onChange={setMostrarCliente}
+                      />
+                    )}
+                  </>
+                ) : clientes.length > 0 ? (
+                  <>
+                    <label className="flex flex-col gap-1.5">
+                      <span className="text-sm font-medium text-ink-2">Cliente *</span>
+                      <select
+                        value={clienteId}
+                        onChange={(e) => setClienteId(e.target.value === "" ? "" : Number(e.target.value))}
+                        className={INPUT_PRINCIPAL}
+                      >
+                        <option value="">Elige…</option>
+                        <option value="0">La Cuenta recluta directo (sin Cliente)</option>
+                        {clientes.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.nombre}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {clienteId !== "" && clienteId !== 0 && (
+                      <ToggleSiNo
+                        label="Mostrar cliente al candidato"
+                        ayuda="Si está en 'No', el candidato ve el nombre de tu Cuenta en vez del Cliente — internamente el equipo siempre ve la relación real."
+                        valor={mostrarCliente}
+                        onChange={setMostrarCliente}
+                      />
+                    )}
+                  </>
+                ) : null
+              }
+            />
           }
         />
 
@@ -1108,6 +1348,10 @@ function ResultadoGeneracion({ gen }: { gen: VacanteGenerada }) {
       occ: gen.occ,
       linkedin: gen.linkedin,
       portal: gen.portal,
+      // Fraiche: portales opcionales del generador
+      ...(gen.indeed ? { indeed: gen.indeed } : {}),
+      ...(gen.computrabajo ? { computrabajo: gen.computrabajo } : {}),
+      ...(gen.talenteca ? { talenteca: gen.talenteca } : {}),
     }),
     [gen],
   );
@@ -1181,6 +1425,8 @@ function PestanasPlataforma({ bloques, liga }: { bloques: Record<string, BloqueP
   const disponibles = BLOQUES_TEXTO.filter((p) => bloques[p.clave]?.page || bloques[p.clave]?.copy);
   const [activa, setActiva] = useState(disponibles[0]?.clave ?? "occ");
   const bloque = bloques[activa];
+  // Fraiche: los portales llevan `?fuente=<portal>` para atribuir la postulación; portal y WhatsApp la liga limpia
+  const ligaActiva = liga ? (PORTALES_CON_FUENTE.has(activa) ? `${liga}?fuente=${activa}` : liga) : "";
 
   if (!disponibles.length) return null;
 
@@ -1218,7 +1464,7 @@ function PestanasPlataforma({ bloques, liga }: { bloques: Record<string, BloqueP
               <span className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
                 Copy · difusión ({bloque.copy.length} car.)
               </span>
-              <BotonCopiar texto={liga ? `${bloque.copy}\n\n👉 Postúlate aquí: ${liga}` : bloque.copy} />
+              <BotonCopiar texto={ligaActiva ? `${bloque.copy}\n\n👉 Postúlate aquí: ${ligaActiva}` : bloque.copy} />
             </div>
             <pre className="mt-1.5 whitespace-pre-wrap break-words rounded-xl bg-surface-2 p-3 font-sans text-[13px] leading-relaxed text-ink-2">
               {bloque.copy}
@@ -1226,12 +1472,16 @@ function PestanasPlataforma({ bloques, liga }: { bloques: Record<string, BloqueP
           </div>
 
           <div>
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
                 Page · publicación completa
               </span>
-              <BotonCopiar texto={bloque.page} />
+              <span className="flex items-center gap-2">
+                <BotonCopiar texto={bloque.page} etiqueta="Copiar texto" />
+                {ligaActiva && <BotonCopiar texto={ligaActiva} etiqueta="Copiar liga" />}
+              </span>
             </div>
+            {ligaActiva && <p className="mt-1 truncate font-mono text-[11px] text-ink-3">{ligaActiva}</p>}
             <pre className="mt-1.5 max-h-72 overflow-y-auto whitespace-pre-wrap break-words rounded-xl bg-surface-2 p-3 font-sans text-[13px] leading-relaxed text-ink-2">
               {bloque.page}
             </pre>
@@ -1516,6 +1766,178 @@ function EvaluacionesVacante({ v, editable, onCambio }: { v: Vacante; editable: 
   );
 }
 
+/* ============================================================
+   Fraiche (spec §4): imagen de la publicación, liga por fuente y QR de referidos.
+   Las ligas/QR las arma el backend (`/vacantes/{codigo}/liga` y `/qr`); aquí solo se eligen fuente y referido.
+   ============================================================ */
+function AtraccionReferidos({ v, onCambio }: { v: Vacante; onCambio: () => void }) {
+  const puedeDecidir = usePuedeDecidir();
+  const [error, setError] = useState("");
+  const [ocupado, setOcupado] = useState("");
+  // (b) liga por fuente
+  const [fuente, setFuente] = useState("portal");
+  const [ligaFuente, setLigaFuente] = useState("");
+  // (c) QR de referidos: `refQr` es el referido con el que se generó la liga/QR visibles
+  const [ref, setRef] = useState("");
+  const [refQr, setRefQr] = useState("");
+  const [ligaRef, setLigaRef] = useState("");
+
+  useEffect(() => {
+    let vivo = true;
+    fetchLigaPostulacion(v.id, { fuente }).then((r) => {
+      if (vivo) setLigaFuente(r?.liga ?? "");
+    });
+    return () => {
+      vivo = false;
+    };
+  }, [v.id, fuente]);
+
+  async function subirImagen(archivo: File) {
+    setOcupado("imagen");
+    setError("");
+    const r = await subirImagenVacante(v.id, archivo);
+    setOcupado("");
+    if (!r.ok) return setError(r.error);
+    onCambio();
+  }
+
+  async function quitarImagen() {
+    setOcupado("imagen");
+    setError("");
+    const r = await quitarImagenVacante(v.id);
+    setOcupado("");
+    if (!r.ok) return setError(r.error);
+    onCambio();
+  }
+
+  async function generarQr() {
+    const quien = ref.trim();
+    if (!quien) return;
+    setOcupado("qr");
+    setError("");
+    const r = await fetchLigaPostulacion(v.id, { ref: quien });
+    setOcupado("");
+    if (!r) return setError("No se pudo generar la liga de referidos. Verifica la conexión con la API.");
+    setLigaRef(r.liga);
+    setRefQr(r.ref || quien);
+  }
+
+  const claseLiga = "flex items-center gap-2 rounded-xl border border-border-soft bg-surface-2 px-3.5 py-2.5";
+  const claseLink = "inline-flex items-center gap-1.5 text-xs font-medium text-brand hover:underline";
+
+  return (
+    <>
+      {error && <Aviso tono="error" onCerrar={() => setError("")}>{error}</Aviso>}
+
+      {/* (a) Imagen de la publicación */}
+      <div className="flex flex-col gap-2">
+        <p className="text-[11px] uppercase tracking-wide text-ink-3">Imagen de la publicación</p>
+        {v.imagenPath ? (
+          <div className="flex flex-wrap items-start gap-4">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={urlArchivo(v.imagenPath)} alt={v.imagenNombre ?? "Imagen de la vacante"} className="max-h-40 rounded-xl border border-border-soft object-contain" />
+            <div className="flex min-w-0 flex-col gap-2">
+              <p className="truncate text-sm text-ink-2">{v.imagenNombre}</p>
+              <a href={urlImagenVacante(v.id)} download className={claseLink}>
+                <Download className="h-3.5 w-3.5" /> Descargar imagen
+              </a>
+              {puedeDecidir && (
+                <Button size="sm" variant="outline" onClick={quitarImagen} disabled={ocupado === "imagen"}>
+                  <Trash2 className="h-4 w-4" /> {ocupado === "imagen" ? "Quitando…" : "Quitar"}
+                </Button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <>
+            <input
+              type="file"
+              accept="image/*"
+              disabled={!puedeDecidir || ocupado === "imagen"}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) subirImagen(f);
+                e.target.value = "";
+              }}
+              className="text-sm text-ink-2 file:mr-3 file:rounded-lg file:border-0 file:bg-brand-soft file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-brand disabled:opacity-50"
+            />
+            <p className="text-[11px] text-ink-3">{ocupado === "imagen" ? "Subiendo…" : "Se muestra en la página de postulación y acompaña las publicaciones en redes."}</p>
+          </>
+        )}
+      </div>
+
+      {/* (b) Liga por fuente */}
+      <div className="flex flex-col gap-2 border-t border-border-faint pt-4">
+        <p className="text-[11px] uppercase tracking-wide text-ink-3">Liga por fuente</p>
+        <select
+          value={fuente}
+          onChange={(e) => setFuente(e.target.value)}
+          className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand sm:max-w-xs"
+        >
+          {FUENTES_POSTULACION.map((f) => (
+            <option key={f.clave} value={f.clave}>
+              {f.nombre}
+            </option>
+          ))}
+        </select>
+        {ligaFuente && (
+          <div className={claseLiga}>
+            <Link2 className="h-4 w-4 shrink-0 text-ink-3" />
+            <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink-2">{ligaFuente}</span>
+            <BotonCopiar texto={ligaFuente} etiqueta="Copiar liga" />
+          </div>
+        )}
+        <p className="text-[11px] text-ink-3">Cada postulación que entre por esta liga queda atribuida a la fuente elegida.</p>
+      </div>
+
+      {/* (c) QR de referidos + QR general de la vacante */}
+      <div className="flex flex-col gap-3 border-t border-border-faint pt-4">
+        <p className="text-[11px] uppercase tracking-wide text-ink-3">QR de referidos</p>
+        <div className="flex flex-wrap gap-2">
+          <input
+            value={ref}
+            onChange={(e) => setRef(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && generarQr()}
+            placeholder="Quién refiere (nombre o número de empleado)"
+            className="h-10 min-w-[220px] flex-1 rounded-xl border border-border-soft bg-surface px-3.5 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+          />
+          <Button size="sm" onClick={generarQr} disabled={ocupado === "qr" || !ref.trim()}>
+            <QrCode className="h-4 w-4" /> {ocupado === "qr" ? "Generando…" : "Generar QR"}
+          </Button>
+        </div>
+        {ligaRef && refQr && (
+          <div className="flex flex-col gap-3">
+            <div className={claseLiga}>
+              <Link2 className="h-4 w-4 shrink-0 text-ink-3" />
+              <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink-2">{ligaRef}</span>
+              <BotonCopiar texto={ligaRef} etiqueta="Copiar liga" />
+            </div>
+            <div className="flex flex-wrap items-end gap-4">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={urlQrVacante(v.id, { ref: refQr })} alt={`QR de referidos de ${refQr}`} className="w-40 rounded-xl border border-border-soft bg-white p-2" />
+              <a href={urlQrVacante(v.id, { ref: refQr })} download className={claseLink}>
+                <Download className="h-3.5 w-3.5" /> Descargar QR
+              </a>
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-col gap-2 pt-2">
+          <p className="text-[11px] uppercase tracking-wide text-ink-3">QR de la vacante</p>
+          <div className="flex flex-wrap items-end gap-4">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={urlQrVacante(v.id, { fuente: "campo" })} alt={`QR de la vacante ${v.id}`} className="w-40 rounded-xl border border-border-soft bg-white p-2" />
+            <a href={urlQrVacante(v.id, { fuente: "campo" })} download className={claseLink}>
+              <Download className="h-3.5 w-3.5" /> Descargar QR
+            </a>
+          </div>
+          <p className="text-[11px] text-ink-3">Para volantes y sucursal: las postulaciones entran con fuente «Campo».</p>
+        </div>
+      </div>
+    </>
+  );
+}
+
 /* Sección plegable CERRADA por defecto (regla de UI 2026-09-16: nada de "efecto libro"). */
 function Plegable({ titulo, resumen, children }: { titulo: string; resumen?: string; children: React.ReactNode }) {
   const [abierto, setAbierto] = useState(false);
@@ -1663,6 +2085,13 @@ function DetalleVacante({
     ...(puedeActuar ? [{ etiqueta: "Eliminar vacante", icono: <Trash2 />, peligrosa: true, onClick: () => setConfirmarEliminar(true), disabled: Boolean(ocupado) }] : []),
   ];
   const nPrefiltro = (v.criterios?.length ?? 0) + (v.criteriosWhatsapp?.length ?? 0);
+  const datosFraiche = [
+    v.cliente && v.destino === "franquicia" ? `Franquicia: ${v.cliente}` : "",
+    v.sucursal ? `Sucursal: ${v.sucursal}` : "",
+    v.zona ? `Zona: ${v.zona}` : "",
+    v.horario ? `Horario: ${v.horario}` : "",
+    v.fechaObjetivo ? `Objetivo: ${fechaObjetivoCorta(v.fechaObjetivo)}` : "",
+  ].filter(Boolean);
 
   return (
     <Panel titulo={v.titulo} eyebrow={v.id} onClose={onClose} ancho="max-w-3xl">
@@ -1674,10 +2103,14 @@ function DetalleVacante({
           </Badge>
           {v.seniority && <Badge tone="brand">{v.seniority}</Badge>}
           <Badge tone="neutral">{v.modalidad}</Badge>
+          {v.destino && v.destinoNombre && <Badge tone={destinoTone[v.destino]}>{v.destinoNombre}</Badge>}
+          {v.posiciones ? <Badge tone="neutral">{v.posiciones} posición{v.posiciones === 1 ? "" : "es"}</Badge> : null}
           <span className="text-sm text-ink-2">
             {v.area} · {v.ubicacion} · <span className="font-mono text-brand">{v.sueldo}</span>
           </span>
           <MenuAcciones className="ml-auto" etiqueta="Más acciones de la vacante" acciones={accionesMenu} />
+          {/* Fraiche: condiciones reales capturadas por RH */}
+          {datosFraiche.length > 0 && <p className="w-full text-xs text-ink-3">{datosFraiche.join(" · ")}</p>}
         </div>
 
         {v.estado === "Eliminada" && (
@@ -1840,6 +2273,16 @@ function DetalleVacante({
             <p className="text-sm text-ink-3">Esta vacante todavía no tiene publicación por plataforma. Genérala con «Regenerar con IA».</p>
           )}
         </Plegable>
+
+        {/* Fraiche (spec §4): imagen, liga por fuente y QR de referidos — solo con liga pública */}
+        {live && v.slug && (
+          <Plegable
+            titulo="Atracción y referidos"
+            resumen={`${v.imagenNombre ? `Imagen: ${v.imagenNombre}` : "Sin imagen"} · liga por fuente · QR de referidos`}
+          >
+            <AtraccionReferidos v={v} onCambio={() => onCambio(v.id)} />
+          </Plegable>
+        )}
 
         {live && (
           <Plegable titulo="Gestión" resumen={[v.cliente ? `Cliente: ${v.cliente}` : "Recluta directo", v.responsable ? `Responsable: ${v.responsable}` : ""].filter(Boolean).join(" · ")}>

@@ -51,6 +51,7 @@ def _plantilla_dict(p: Plantilla) -> dict:
         "textoWhatsapp": p.texto_whatsapp,
         "textoBolsa": p.texto_bolsa,
         "enfoqueEntrevista": p.enfoque_entrevista or "profesional",
+        "horario": p.horario or "",  # Fraiche
         "creadoPor": p.creado_por,
         "creada": p.creada_en.isoformat(),
         "actualizada": (p.actualizada_en or p.creada_en).isoformat(),
@@ -126,6 +127,7 @@ class PlantillaIn(BaseModel):
     texto_whatsapp: str = ""
     texto_bolsa: str = ""
     enfoque_entrevista: str = "profesional"
+    horario: str = ""  # Fraiche: jornada precargada
 
 
 def _crear_plantilla(db: Session, cuenta: Cuenta, u: Usuario, datos: PlantillaIn) -> Plantilla:
@@ -192,7 +194,7 @@ async def crear_masivo(
                 cliente_id = clientes.get(nombre_cliente.lower())
                 if cliente_id is None:
                     raise HTTPException(400, f"El Cliente «{nombre_cliente}» no existe en esta Cuenta.")
-            campos = {k: fila.get(k, "") for k in ("titulo", "area", "ubicacion", "requisitos", "descripcion", "resumen", "perfil_ideal", "seniority", "texto_whatsapp", "texto_bolsa")}
+            campos = {k: fila.get(k, "") for k in ("titulo", "area", "ubicacion", "requisitos", "descripcion", "resumen", "perfil_ideal", "seniority", "texto_whatsapp", "texto_bolsa", "horario")}
             campos = {k: v for k, v in campos.items() if v}
             for k in _COLUMNAS_LISTA:
                 if fila.get(k):
@@ -263,6 +265,7 @@ class ActualizarIn(BaseModel):
     texto_whatsapp: Optional[str] = None
     texto_bolsa: Optional[str] = None
     enfoque_entrevista: Optional[str] = None
+    horario: Optional[str] = None  # Fraiche
 
 
 @router.patch("/{plantilla_id}")

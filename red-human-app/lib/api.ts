@@ -526,10 +526,45 @@ export interface BloquePlataforma {
 
 export interface CriterioFiltro {
   pregunta: string;
-  tipo: "si_no" | "numero" | "opcion" | "texto_corto";
+  /** Fraiche (2026-09-29): `municipio` = selector Estado/Municipio del catálogo INEGI. */
+  tipo: "si_no" | "numero" | "opcion" | "texto_corto" | "municipio";
   valida: string;
   respuesta_esperada: string;
   descarta: boolean;
+  opciones?: string[];
+  /** Fraiche: pregunta común a toda vacante (viene de la plantilla, no de la IA). */
+  comun?: boolean;
+  clave?: string;
+}
+
+/** Fraiche (2026-09-29): destino de la vacante — decide la ruta del candidato y el Tablero de control. */
+export type DestinoVacante = "tienda_propia" | "franquicia";
+export const DESTINOS_VACANTE: { valor: DestinoVacante; texto: string; detalle: string }[] = [
+  { valor: "tienda_propia", texto: "Tienda propia", detalle: "Recluta para una sucursal de Fraiche y prepara la contratación." },
+  { valor: "franquicia", texto: "Franquicia cliente", detalle: "Presenta candidatos evaluados al franquiciatario, quien decide y contrata." },
+];
+
+/** Fraiche (spec §4): fuentes de postulación (lo que viaja en `?fuente=`). */
+export const FUENTES_POSTULACION: { clave: string; nombre: string }[] = [
+  { clave: "portal", nombre: "Portal" },
+  { clave: "indeed", nombre: "Indeed" },
+  { clave: "computrabajo", nombre: "Computrabajo" },
+  { clave: "talenteca", nombre: "Talenteca" },
+  { clave: "occ", nombre: "OCC" },
+  { clave: "linkedin", nombre: "LinkedIn" },
+  { clave: "red_social", nombre: "Red social" },
+  { clave: "facebook", nombre: "Facebook" },
+  { clave: "instagram", nombre: "Instagram" },
+  { clave: "tiktok", nombre: "TikTok" },
+  { clave: "referido", nombre: "Referido" },
+  { clave: "campo", nombre: "Campo" },
+  { clave: "contacto_directo", nombre: "Contacto directo" },
+  { clave: "whatsapp", nombre: "WhatsApp" },
+  { clave: "rh", nombre: "RH" },
+];
+export function nombreFuente(clave: string | undefined | null): string {
+  if (!clave) return "";
+  return FUENTES_POSTULACION.find((f) => f.clave === clave)?.nombre ?? clave.replace(/_/g, " ");
 }
 
 /** Salida cruda del generador (aún no persistida). */
@@ -554,6 +589,10 @@ export interface VacanteGenerada {
   occ: BloquePlataforma;
   linkedin: BloquePlataforma;
   portal: BloquePlataforma;
+  /** Fraiche (2026-09-29): texto editable por portal; se copia a mano, nunca se publica solo. */
+  indeed?: BloquePlataforma;
+  computrabajo?: BloquePlataforma;
+  talenteca?: BloquePlataforma;
   preguntas_filtro: CriterioFiltro[];
   /** 2026-09-16 (prefiltro dual): 2-3 puntos críticos que la IA confirma por WhatsApp. */
   preguntas_filtro_whatsapp?: CriterioFiltro[];
@@ -605,6 +644,11 @@ export interface DatosVacante extends SueldoEstructurado {
   /** Fase 4: la empresa visible se resuelve en el servidor a partir del Cliente y de "mostrar cliente". */
   cliente_id?: number | null;
   mostrar_cliente_candidato?: boolean;
+  /* --- Fraiche (2026-09-29): condiciones reales adicionales (la IA nunca las inventa) --- */
+  destino?: DestinoVacante;
+  sucursal?: string;
+  zona?: string;
+  horario?: string;
 }
 
 export function fetchVacantes(filtros?: {
@@ -615,6 +659,10 @@ export function fetchVacantes(filtros?: {
   responsable_id?: number;
   area?: string;
   ubicacion?: string;
+  // --- Fraiche ---
+  destino?: string;
+  zona?: string;
+  sucursal?: string;
 }) {
   const q = new URLSearchParams(
     Object.entries(filtros ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== "") as [string, string][],
@@ -624,8 +672,17 @@ export function fetchVacantes(filtros?: {
 
 /** Bolsa de trabajo pública (/portal): solo vacantes en estado "Publicada", sin sesión. */
 /** 2026-09-17: `cuenta` (slug o id) aísla el portal a una Cuenta; sin él es la bolsa global. */
-export function fetchVacantesPublicas(cuenta = "") {
-  return get<Vacante[]>(`/vacantes/publicas${cuenta ? `?cuenta=${encodeURIComponent(cuenta)}` : ""}`);
+export function fetchVacantesPublicas(cuenta = "", zona = "") {
+  const p = new URLSearchParams();
+  if (cuenta) p.set("cuenta", cuenta);
+  if (zona) p.set("zona", zona);
+  const q = p.toString();
+  return get<Vacante[]>(`/vacantes/publicas${q ? `?${q}` : ""}`);
+}
+
+/** Fraiche (spec §4): zonas con vacantes publicadas — filtro por zona de la bolsa de trabajo. */
+export function fetchZonasPublicas(cuenta = "") {
+  return get<string[]>(`/vacantes/publicas/zonas${cuenta ? `?cuenta=${encodeURIComponent(cuenta)}` : ""}`);
 }
 
 /** Vistas previas de los correos corporativos de Entrevista Humana (sin enviar). Con `datos` se renderiza el
@@ -707,9 +764,63 @@ export function crearVacante(
     plantilla_id?: number | null;
     enfoque_entrevista?: EnfoqueEntrevista;
     texto_bolsa?: string;
+    /* --- Fraiche (2026-09-29) --- */
+    posiciones?: number;
+    fecha_objetivo?: string | null;
   },
 ) {
   return post<Vacante>("/vacantes", datos);
+}
+
+/* ============================================================
+   Fraiche (2026-09-29) · Liga por fuente, QR de referidos e imagen de la publicación
+   ============================================================ */
+
+export interface LigaPostulacion {
+  vacante: string;
+  liga: string;
+  fuente: string;
+  fuenteNombre: string;
+  ref: string;
+  /** Ruta autenticada del PNG del QR (usar con urlArchivo). */
+  qrPath: string;
+  fuentes: { clave: string; nombre: string }[];
+}
+
+/** Liga de postulación con fuente (`portal`, `campo`, `red_social`…) o de referidos (`ref` = quién refiere). */
+export function fetchLigaPostulacion(codigo: string, opts: { fuente?: string; ref?: string } = {}) {
+  const p = new URLSearchParams();
+  if (opts.fuente) p.set("fuente", opts.fuente);
+  if (opts.ref) p.set("ref", opts.ref);
+  const q = p.toString();
+  return get<LigaPostulacion>(`/vacantes/${codigo}/liga${q ? `?${q}` : ""}`);
+}
+
+export function urlQrVacante(codigo: string, opts: { fuente?: string; ref?: string } = {}) {
+  const p = new URLSearchParams();
+  if (opts.fuente) p.set("fuente", opts.fuente);
+  if (opts.ref) p.set("ref", opts.ref);
+  const q = p.toString();
+  return urlArchivo(`/vacantes/${codigo}/qr${q ? `?${q}` : ""}`);
+}
+
+export function subirImagenVacante(codigo: string, archivo: File) {
+  const form = new FormData();
+  form.append("archivo", archivo);
+  return subir<Vacante>(`/vacantes/${codigo}/imagen`, form);
+}
+
+export function quitarImagenVacante(codigo: string) {
+  return eliminar<Vacante>(`/vacantes/${codigo}/imagen`);
+}
+
+export function urlImagenVacante(codigo: string) {
+  return urlArchivo(`/vacantes/${codigo}/imagen`);
+}
+
+/** Imagen pública (página /aplicar): solo vacantes publicadas. */
+export function urlImagenPublicaVacante(slug: string) {
+  return `${API}/vacantes/slug/${slug}/imagen`;
 }
 
 /** "Entrevista IA" es el valor interno/base de la etapa; en la interfaz se muestra como
@@ -874,6 +985,8 @@ export interface Plantilla {
   textoWhatsapp: string;
   textoBolsa: string;
   enfoqueEntrevista?: EnfoqueEntrevista;
+  /** Fraiche (2026-09-29): jornada precargada (p. ej. «8 horas de trabajo más 1 hora de comida»). */
+  horario?: string;
   creadoPor: string;
   /** Última actualización (Punto 11); igual a `creada` si nunca se editó. */
   actualizada: string;
@@ -906,6 +1019,10 @@ export interface DatosPlantilla {
   sueldo_hasta?: number | null;
   sueldo_moneda?: string;
   sueldo_periodicidad?: PeriodicidadSueldo | "";
+  preguntas_filtro_whatsapp?: CriterioFiltro[];
+  ubicacion_estado?: string;
+  ubicacion_municipio?: string;
+  horario?: string;
 }
 
 /** Sin `clienteId`: todas las plantillas activas de la Cuenta. Con `clienteId`: las de ese
@@ -1322,6 +1439,9 @@ export function postular(datos: {
   consentimiento: boolean;
   respuestas?: { pregunta: string; respuesta: string }[];
   cv?: File | null;
+  /** Fraiche (spec §4): fuente de la postulación (`?fuente=` / `?utm_source=`) y quién refirió (`?ref=`). */
+  fuente?: string;
+  ref?: string;
 }) {
   const form = new FormData();
   form.append("vacante", datos.slug);
@@ -1330,6 +1450,8 @@ export function postular(datos: {
   form.append("correo", datos.correo ?? "");
   form.append("consentimiento", String(datos.consentimiento));
   form.append("respuestas", JSON.stringify(datos.respuestas ?? []));
+  if (datos.fuente) form.append("fuente", datos.fuente);
+  if (datos.ref) form.append("ref", datos.ref);
   if (datos.cv) form.append("cv", datos.cv);
   return subir<{
     ok: boolean;

@@ -17,15 +17,69 @@ import {
   Mail,
   Phone,
   AlertTriangle,
+  Clock,
+  Store,
+  Users,
 } from "lucide-react";
 import { Logo, Button, Card, Badge } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Dropzone, pesoLegible } from "@/components/dashboard/subida";
-import { fetchVacantePorSlug, postular } from "@/lib/api";
+import { fetchVacantePorSlug, postular, urlImagenPublicaVacante } from "@/lib/api";
 import type { Vacante } from "@/lib/data";
+import { ESTADOS_MX, municipiosDe } from "@/lib/ubicacion";
 import { cn } from "@/lib/utils";
 
 const pasos = ["Tus datos", "Currículum", "Unas preguntas"];
+
+/** Fraiche (spec §5): cada pregunta del prefiltro web se pinta según su tipo — todas CERRADAS, sin texto
+ * libre: `municipio` = selector Estado → Municipio/Alcaldía; `opcion`/`numero` = sus opciones; `si_no` = Sí/No
+ * (o Sí/No/Parcial en vacantes previas sin opciones). Nombre y teléfono ya viajan en la postulación. */
+type PreguntaWeb = { pregunta: string; tipo: string; opciones: string[]; clave?: string };
+
+function preguntasDe(v: Vacante | null, base: string[]): PreguntaWeb[] {
+  if (v?.criterios?.length) {
+    return v.criterios.map((c) => ({
+      pregunta: c.pregunta,
+      tipo: c.tipo,
+      opciones: c.opciones?.length ? c.opciones : c.tipo === "municipio" ? [] : ["Sí", "No", "Parcial"],
+      clave: (c as { clave?: string }).clave,
+    }));
+  }
+  const textos = v?.preguntas_filtro?.length ? v.preguntas_filtro : base;
+  return textos.map((pregunta) => ({ pregunta, tipo: "si_no", opciones: ["Sí", "No", "Parcial"] }));
+}
+
+const claseSelect = "h-11 w-full rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20";
+
+function SelectorMunicipio({ valor, onChange }: { valor: string; onChange: (v: string) => void }) {
+  const [estado, municipio] = (() => {
+    const i = valor.lastIndexOf(", ");
+    return i > 0 ? [valor.slice(i + 2), valor.slice(0, i)] : [ESTADOS_MX.includes(valor) ? valor : "", ""];
+  })();
+  const municipios = municipiosDe(estado);
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      <select value={estado} onChange={(e) => onChange(e.target.value)} className={claseSelect} aria-label="Estado">
+        <option value="">Estado…</option>
+        {ESTADOS_MX.map((e) => (
+          <option key={e} value={e}>{e}</option>
+        ))}
+      </select>
+      <select
+        value={municipio}
+        onChange={(e) => onChange(e.target.value ? `${e.target.value}, ${estado}` : estado)}
+        disabled={!estado}
+        className={claseSelect}
+        aria-label={estado === "Ciudad de México" ? "Alcaldía" : "Municipio"}
+      >
+        <option value="">{estado ? (estado === "Ciudad de México" ? "Alcaldía…" : "Municipio…") : "Primero el estado"}</option>
+        {municipios.map((m) => (
+          <option key={m} value={m}>{m}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
 
 /** Preguntas de respaldo cuando la vacante no trae criterios de prefiltro. */
 const PREGUNTAS_BASE = [
@@ -48,6 +102,8 @@ export default function FormularioAplicar() {
   const [respuestas, setRespuestas] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [enviando, setEnviando] = useState(false);
+  // Fraiche (spec §4): de dónde llegó (?fuente= / ?utm_source=) y quién recomendó (?ref=); viajan a `postular`.
+  const [origen, setOrigen] = useState<{ fuente: string; ref: string }>({ fuente: "", ref: "" });
 
   useEffect(() => {
     fetchVacantePorSlug(slug).then((v) => {
@@ -56,30 +112,31 @@ export default function FormularioAplicar() {
     });
   }, [slug]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const p = new URLSearchParams(window.location.search);
+    setOrigen({
+      fuente: (p.get("fuente") ?? p.get("utm_source") ?? "").trim(),
+      ref: (p.get("ref") ?? "").trim(),
+    });
+  }, []);
+
   /* Título de respaldo a partir del slug si la API no responde (modo demo). */
   const titulo = useMemo(() => {
     if (vacante) return vacante.titulo;
     return slug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   }, [vacante, slug]);
 
-  const preguntas = useMemo(
-    () => (vacante?.criterios?.length ? vacante.criterios.map((c) => c.pregunta) : vacante?.preguntas_filtro?.length ? vacante.preguntas_filtro : PREGUNTAS_BASE),
-    [vacante],
-  );
+  const preguntas = useMemo(() => preguntasDe(vacante, PREGUNTAS_BASE), [vacante]);
 
-  /** Rangos por pregunta cuando el criterio es numérico (ej. años de experiencia); todo lo
-   * demás (si_no, o preguntas sin criterio asociado como las de PREGUNTAS_BASE) sigue usando
-   * los botones fijos Sí/No/Parcial. */
-  const opcionesPorPregunta = useMemo(() => {
-    const m: Record<string, string[]> = {};
-    for (const c of vacante?.criterios ?? []) {
-      if (c.tipo === "numero" && c.opciones?.length) m[c.pregunta] = c.opciones;
-    }
-    return m;
-  }, [vacante]);
-
+  // Fraiche (spec §5): todas las preguntas son obligatorias (cerradas; el municipio solo pide el estado como mínimo)
+  const faltanRespuestas = preguntas.some((p) => !(respuestas[p.pregunta] ?? "").trim());
   const puedeAvanzar =
-    step === 0 ? datos.nombre.trim().length > 2 && (datos.telefono.trim() || datos.correo.trim()) : step === 1 ? consent && cv !== null : true;
+    step === 0
+      ? datos.nombre.trim().length > 2 && (datos.telefono.trim() || datos.correo.trim())
+      : step === 1
+        ? consent && cv !== null
+        : !faltanRespuestas;
 
   async function siguiente() {
     setError("");
@@ -107,8 +164,10 @@ export default function FormularioAplicar() {
         telefono: datos.telefono,
         correo: datos.correo,
         consentimiento: consent,
-        respuestas: preguntas.map((p) => ({ pregunta: p, respuesta: respuestas[p] ?? "" })),
+        respuestas: preguntas.map((p) => ({ pregunta: p.pregunta, respuesta: respuestas[p.pregunta] ?? "", ...(p.clave ? { clave: p.clave } : {}) })),
         cv,
+        fuente: origen.fuente || undefined,
+        ref: origen.ref || undefined,
       });
       setEnviando(false);
       if (!r.ok) {
@@ -158,13 +217,37 @@ export default function FormularioAplicar() {
               </span>
               {vacante?.sueldo && <span className="font-mono text-brand">{vacante.sueldo}</span>}
               {vacante?.modalidad && <span className="text-ink-3">{vacante.modalidad}</span>}
+              {/* Zona / sucursal y horario (Fraiche, spec §4): solo si la vacante los trae */}
+              {(vacante?.zona || vacante?.sucursal) && (
+                <span className="flex items-center gap-1.5">
+                  <Store className="h-4 w-4 text-ink-3" /> {[vacante?.zona, vacante?.sucursal].filter(Boolean).join(" · ")}
+                </span>
+              )}
+              {vacante?.horario && (
+                <span className="flex items-center gap-1.5">
+                  <Clock className="h-4 w-4 text-ink-3" /> {vacante.horario}
+                </span>
+              )}
             </div>
           </div>
         </div>
 
+        {/* Recomendación (?ref=): solo el nombre que viene en la liga, nada más */}
+        {origen.ref && !done && (
+          <p className="mt-5 flex items-center gap-2 rounded-xl border border-brand/25 bg-brand-soft/60 px-4 py-2.5 text-sm text-ink">
+            <Users className="h-4 w-4 shrink-0 text-brand" />
+            <span>Llegaste por recomendación de <b>{origen.ref}</b>.</span>
+          </p>
+        )}
+
         {/* Descripción real de la vacante */}
         {vacante && !done && (
-          <Card className="mt-6 p-5">
+          <Card className="mt-6 overflow-hidden p-5">
+            {/* Imagen pública de la vacante (Fraiche, spec §4): solo cuando existe */}
+            {vacante.imagenPublica && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={urlImagenPublicaVacante(slug)} alt="" className="mb-4 max-h-64 w-full rounded-2xl object-cover" />
+            )}
             {vacante.resumen && <p className="text-[15px] font-medium leading-relaxed">{vacante.resumen}</p>}
             {vacante.descripcion && (
               <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-ink-2">{vacante.descripcion}</p>
@@ -294,33 +377,39 @@ export default function FormularioAplicar() {
 
                   {step === 2 && (
                     <div className="flex flex-col gap-4">
-                      {preguntas.map((q, i) => {
-                        const opciones = opcionesPorPregunta[q] ?? ["Sí", "No", "Parcial"];
+                      {preguntas.map((p, i) => {
+                        const q = p.pregunta;
                         return (
                           <div key={i}>
                             <p className="mb-2 text-sm font-medium">{q}</p>
-                            <div className="flex flex-wrap gap-2">
-                              {opciones.map((op) => {
-                                const activa = respuestas[q] === op;
-                                return (
-                                  <button
-                                    key={op}
-                                    onClick={() => setRespuestas((r) => ({ ...r, [q]: op }))}
-                                    className={cn(
-                                      "flex-1 rounded-xl border py-2.5 text-sm transition",
-                                      activa
-                                        ? "border-brand bg-brand-soft font-medium text-brand"
-                                        : "border-border-soft bg-surface hover:border-brand hover:bg-brand-soft",
-                                    )}
-                                  >
-                                    {op}
-                                  </button>
-                                );
-                              })}
-                            </div>
+                            {p.tipo === "municipio" ? (
+                              <SelectorMunicipio valor={respuestas[q] ?? ""} onChange={(v) => setRespuestas((r) => ({ ...r, [q]: v }))} />
+                            ) : (
+                              <div className="flex flex-wrap gap-2">
+                                {p.opciones.map((op) => {
+                                  const activa = respuestas[q] === op;
+                                  return (
+                                    <button
+                                      key={op}
+                                      type="button"
+                                      onClick={() => setRespuestas((r) => ({ ...r, [q]: op }))}
+                                      className={cn(
+                                        "min-w-[7rem] flex-1 rounded-xl border px-3 py-2.5 text-sm transition",
+                                        activa
+                                          ? "border-brand bg-brand-soft font-medium text-brand"
+                                          : "border-border-soft bg-surface hover:border-brand hover:bg-brand-soft",
+                                      )}
+                                    >
+                                      {op}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
+                      {faltanRespuestas && <p className="text-xs text-ink-3">Responde todas las preguntas para enviar tu postulación.</p>}
                     </div>
                   )}
                 </motion.div>

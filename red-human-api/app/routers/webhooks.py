@@ -577,11 +577,14 @@ def _texto_aviso_privacidad(nombre: str, vacante: Optional[Vacante]) -> str:
     """Mensaje de bienvenida + aviso de privacidad LFPDPPP."""
     saludo = f"¡Hola{' ' + nombre if nombre else ''}! 👋"
     puesto = f" para *{vacante.titulo}*" if vacante else ""
+    from ..services.fraiche import AVISO_CAPTURA_BBVA  # Fraiche (spec §6): la captura del adeudo va en el aviso
+
     return (
         f"{saludo} Gracias por tu interés{puesto}. Soy Red Human.\n\n"
         "Antes de comenzar, necesito tu autorización: tus datos personales serán tratados conforme "
         "a nuestro Aviso de Privacidad, exclusivamente para este proceso de selección. "
-        "Puedes consultar el aviso completo en redhuman.mx/privacidad.\n\n"
+        "Puedes consultar el aviso completo en redhuman.mx/privacidad.\n"
+        f"{AVISO_CAPTURA_BBVA}\n\n"
         "¿Autorizas el uso de tus datos para continuar? (Responde *Sí* o *Acepto*)"
     )
 

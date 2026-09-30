@@ -28,10 +28,12 @@ import {
   Bot,
   Link2,
   Check,
+  Navigation,
+  Store,
 } from "lucide-react";
 import { Logo, Card, Badge, Button, Eyebrow } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { fetchCuentaPublica, fetchVacantesPublicas, urlArchivo } from "@/lib/api";
+import { fetchCuentaPublica, fetchVacantesPublicas, fetchZonasPublicas, urlArchivo } from "@/lib/api";
 import type { Vacante } from "@/lib/data";
 import { cn } from "@/lib/utils";
 
@@ -84,6 +86,8 @@ interface Filtros {
   q: string;
   estado: string;
   municipio: string;
+  /** Fraiche (spec §4): zona operativa de la vacante (independiente de Estado/Municipio). */
+  zona: string;
   area: string;
   empresa: string;
   seniority: string;
@@ -95,7 +99,7 @@ interface Filtros {
 }
 
 const FILTROS_VACIOS: Filtros = {
-  q: "", estado: "", municipio: "", area: "", empresa: "", seniority: "", modalidades: [], sueldoMin: 0, nuevas: false, conSueldo: false, orden: "recientes",
+  q: "", estado: "", municipio: "", zona: "", area: "", empresa: "", seniority: "", modalidades: [], sueldoMin: 0, nuevas: false, conSueldo: false, orden: "recientes",
 };
 
 function filtrosDesdeUrl(params: URLSearchParams): Filtros {
@@ -104,6 +108,7 @@ function filtrosDesdeUrl(params: URLSearchParams): Filtros {
     q: params.get("q") ?? "",
     estado: params.get("estado") ?? "",
     municipio: params.get("municipio") ?? "",
+    zona: params.get("zona") ?? "",
     area: params.get("area") ?? "",
     empresa: params.get("empresa") ?? "",
     seniority: params.get("seniority") ?? "",
@@ -121,6 +126,7 @@ function filtrosAUrl(f: Filtros, cuenta: string) {
   if (f.q) p.set("q", f.q);
   if (f.estado) p.set("estado", f.estado);
   if (f.municipio) p.set("municipio", f.municipio);
+  if (f.zona) p.set("zona", f.zona);
   if (f.area) p.set("area", f.area);
   if (f.empresa) p.set("empresa", f.empresa);
   if (f.seniority) p.set("seniority", f.seniority);
@@ -135,6 +141,8 @@ function filtrosAUrl(f: Filtros, cuenta: string) {
 
 export default function Portal() {
   const [vacantes, setVacantes] = useState<Vacante[]>([]);
+  // Zonas con vacantes publicadas (Fraiche, spec §4); vienen de la API para el filtro por zona.
+  const [zonas, setZonas] = useState<string[]>([]);
   const [cargando, setCargando] = useState(true);
   // Portal por Cuenta (/portal?cuenta=<slug>) — sin parámetro, bolsa global.
   const [cuentaParam, setCuentaParam] = useState("");
@@ -159,8 +167,9 @@ export default function Portal() {
         }
         setCuentaPortal({ nombre: cu.nombre, logoUrl: cu.logoUrl });
       }
-      const v = await fetchVacantesPublicas(cuenta);
+      const [v, z] = await Promise.all([fetchVacantesPublicas(cuenta), fetchZonasPublicas(cuenta)]);
       setVacantes(v ?? []);
+      setZonas(Array.isArray(z) ? z.filter(Boolean) : []);
       setCargando(false);
     })();
   }, []);
@@ -201,6 +210,8 @@ export default function Portal() {
   const areas = useMemo(() => dedupe(vacantes.map((v) => v.area)), [vacantes]);
   const empresas = useMemo(() => dedupe(vacantes.map((v) => v.nombreEmpresa ?? v.empresa)), [vacantes]);
   const seniorities = useMemo(() => SENIORITIES.filter((s) => vacantes.some((v) => norm(v.seniority) === norm(s))), [vacantes]);
+  /** Zonas del filtro: las que reporta la API; si no contestó, las que traen las vacantes cargadas. */
+  const zonasDisponibles = useMemo(() => (zonas.length ? zonas : dedupe(vacantes.map((v) => v.zona))), [zonas, vacantes]);
 
   const sueldoTope = useMemo(() => {
     const valores = vacantes.map(sueldoMaximo).filter((n): n is number => n !== null);
@@ -220,6 +231,7 @@ export default function Portal() {
         if (f.estado && u.estado !== f.estado) return false;
         if (f.municipio && u.municipio !== f.municipio) return false;
       }
+      if (f.zona && (v.zona ?? "") !== f.zona) return false;
       if (f.area && norm(v.area) !== norm(f.area)) return false;
       if (f.empresa && norm(v.nombreEmpresa ?? v.empresa) !== norm(f.empresa)) return false;
       if (f.seniority && norm(v.seniority) !== norm(f.seniority)) return false;
@@ -239,7 +251,7 @@ export default function Portal() {
   }, [vacantes, f, ubicacionDe]);
 
   const nActivos =
-    (f.estado ? 1 : 0) + (f.municipio ? 1 : 0) + (f.area ? 1 : 0) + (f.empresa ? 1 : 0) + (f.seniority ? 1 : 0) +
+    (f.estado ? 1 : 0) + (f.municipio ? 1 : 0) + (f.zona ? 1 : 0) + (f.area ? 1 : 0) + (f.empresa ? 1 : 0) + (f.seniority ? 1 : 0) +
     f.modalidades.length + (f.sueldoMin > 0 ? 1 : 0) + (f.nuevas ? 1 : 0) + (f.conSueldo ? 1 : 0) + (f.q ? 1 : 0);
   const limpiar = () => setF({ ...FILTROS_VACIOS, orden: f.orden });
   const toggleModalidad = (m: string) => set("modalidades", f.modalidades.includes(m) ? f.modalidades.filter((x) => x !== m) : [...f.modalidades, m]);
@@ -332,6 +344,21 @@ export default function Portal() {
             </Chip>
           </div>
 
+          {/* Zonas (Fraiche, spec §4): un chip por zona con vacantes + «Todas» */}
+          {zonasDisponibles.length > 0 && (
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-2" role="group" aria-label="Filtrar por zona">
+              <span className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-ink-3">
+                <Navigation className="h-3 w-3 text-brand" /> Zona
+              </span>
+              <Chip activo={!f.zona} onClick={() => set("zona", "")} compacto>Todas</Chip>
+              {zonasDisponibles.map((z) => (
+                <Chip key={z} activo={f.zona === z} onClick={() => set("zona", f.zona === z ? "" : z)} compacto>
+                  {z}
+                </Chip>
+              ))}
+            </div>
+          )}
+
           <div className="mt-7 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs sm:text-sm">
             <span className="inline-flex items-center gap-1.5 text-ink-2">
               <Briefcase className="h-4 w-4 text-brand" />
@@ -415,6 +442,14 @@ export default function Portal() {
                   <select value={f.municipio} onChange={(e) => set("municipio", e.target.value)} className={claseSelect}>
                     <option value="">Todos</option>
                     {municipios.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </Campo>
+              )}
+              {zonasDisponibles.length > 0 && (
+                <Campo etiqueta="Zona">
+                  <select value={f.zona} onChange={(e) => set("zona", e.target.value)} className={claseSelect}>
+                    <option value="">Todas las zonas</option>
+                    {zonasDisponibles.map((z) => <option key={z} value={z}>{z}</option>)}
                   </select>
                 </Campo>
               )}
@@ -602,6 +637,17 @@ function VacanteCard({ v }: { v: Vacante }) {
         <Badge tone="neutral">
           <MapPin className="h-3 w-3" /> {v.ubicacion || "México"}
         </Badge>
+        {/* Zona / sucursal y horario (Fraiche, spec §4): solo si la vacante los trae */}
+        {(v.zona || v.sucursal) && (
+          <Badge tone="neutral" className="text-ink-3">
+            <Store className="h-3 w-3" /> {[v.zona, v.sucursal].filter(Boolean).join(" · ")}
+          </Badge>
+        )}
+        {v.horario && (
+          <Badge tone="neutral" className="text-ink-3">
+            <Clock className="h-3 w-3" /> {v.horario}
+          </Badge>
+        )}
         <Badge tone="brand">
           <Briefcase className="h-3 w-3" /> {v.modalidad}
         </Badge>

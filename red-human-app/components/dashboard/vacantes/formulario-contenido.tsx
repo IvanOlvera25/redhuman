@@ -54,6 +54,8 @@ export interface ContenidoVacante {
   ubicacion_estado: string;
   ubicacion_municipio: string;
   modalidad: string;
+  /** Fraiche (2026-09-29): jornada/horario real capturado por RH (la IA nunca lo inventa). Viaja con la plantilla. */
+  horario: string;
   sueldo_desde: string; // texto numérico del input; vacío = sin dato
   sueldo_hasta: string;
   sueldo_moneda: string;
@@ -88,6 +90,7 @@ export const CONTENIDO_VACIO: ContenidoVacante = {
   ubicacion_estado: "",
   ubicacion_municipio: "",
   modalidad: "Presencial",
+  horario: "",
   sueldo_desde: "",
   sueldo_hasta: "",
   sueldo_moneda: "MXN",
@@ -114,6 +117,7 @@ export const TIPOS_CRITERIO: { valor: CriterioFiltro["tipo"]; texto: string }[] 
   { valor: "numero", texto: "Número" },
   { valor: "opcion", texto: "Opción" },
   { valor: "texto_corto", texto: "Texto corto" },
+  { valor: "municipio", texto: "Municipio (selector)" },
 ];
 
 const SEPARADOR_REQUISITOS = " · ";
@@ -163,6 +167,7 @@ export function contenidoDesdePlantilla(p: Plantilla): ContenidoVacante {
     ubicacion: p.ubicacion ?? "",
     ...ubicacionEstructurada(p.ubicacionEstado, p.ubicacionMunicipio, p.ubicacion),
     modalidad: p.modalidad || "Presencial",
+    horario: p.horario ?? "",
     sueldo_desde: p.sueldoDesde ? String(p.sueldoDesde) : "",
     sueldo_hasta: p.sueldoHasta ? String(p.sueldoHasta) : "",
     sueldo_moneda: p.sueldoMoneda || "MXN",
@@ -194,6 +199,7 @@ export function contenidoDesdeVacante(v: Vacante): ContenidoVacante {
     ubicacion: v.ubicacion ?? "",
     ...ubicacionEstructurada(v.ubicacionEstado, v.ubicacionMunicipio, v.ubicacion),
     modalidad: v.modalidad || "Presencial",
+    horario: v.horario ?? "",
     sueldo_desde: v.sueldoDesde ? String(v.sueldoDesde) : "",
     sueldo_hasta: v.sueldoHasta ? String(v.sueldoHasta) : "",
     sueldo_moneda: v.sueldoMoneda || "MXN",
@@ -267,6 +273,7 @@ export function contenidoComoPayload(c: ContenidoVacante) {
     ubicacion_estado: c.ubicacion_estado,
     ubicacion_municipio: c.ubicacion_municipio,
     modalidad: c.modalidad,
+    horario: c.horario.trim(),
     sueldo_desde: c.sueldo_periodicidad === "a_convenir" ? null : desde,
     sueldo_hasta: c.sueldo_periodicidad === "a_convenir" ? null : hasta,
     sueldo_moneda: c.sueldo_moneda || "MXN",
@@ -382,7 +389,15 @@ function CriteriosEditor({ items, onChange }: { items: CriterioFiltro[]; onChang
               Eliminatoria (descarta si no cumple)
             </label>
           </div>
-          {c.valida && <p className="mt-1.5 text-[11px] text-ink-3">Valida: {c.valida}</p>}
+          {c.tipo === "opcion" && (
+            <input
+              value={(c.opciones ?? []).join(" | ")}
+              onChange={(e) => set(i, { opciones: e.target.value.split("|").map((x) => x.trim()).filter(Boolean) })}
+              placeholder="Opciones separadas por | (ej. Hasta 30 min | 31–60 | Más de 90)"
+              className="mt-2 h-10 w-full rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand"
+            />
+          )}
+          {c.valida && <p className="mt-1.5 text-[11px] text-ink-3">Valida: {c.valida}{c.comun ? " · pregunta común de Fraiche" : ""}</p>}
         </div>
       ))}
       <Button
@@ -390,7 +405,7 @@ function CriteriosEditor({ items, onChange }: { items: CriterioFiltro[]; onChang
         variant="outline"
         size="sm"
         className="self-start"
-        onClick={() => onChange([...items, { pregunta: "", tipo: "si_no", valida: "", respuesta_esperada: "Sí", descarta: false }])}
+        onClick={() => onChange([...items, { pregunta: "", tipo: "si_no", valida: "", respuesta_esperada: "Sí", descarta: false, opciones: ["Sí", "No"] }])}
       >
         + Agregar pregunta
       </Button>
@@ -498,6 +513,8 @@ export function FormularioContenidoVacante({
             }
           />
           <Selector label="Modalidad *" value={value.modalidad} onChange={set("modalidad")} opciones={MODALIDADES} />
+          {/* Fraiche: horario/jornada real — condición que la IA nunca inventa; se exige para publicar */}
+          <Field label="Horario / jornada *" value={value.horario} onChange={set("horario")} placeholder="Ej. 8 horas de trabajo más 1 hora de comida" />
           <CampoSueldo
             value={sueldo}
             onChange={(v) =>

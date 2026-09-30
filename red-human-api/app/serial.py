@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from .config import settings
-from .models import NIVELES_RECORDATORIO, estado_documento_onboarding, AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
+from .models import NIVELES_RECORDATORIO, NOMBRE_DESTINO, estado_documento_onboarding, AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
+from .services import fraiche
 from .services.avatar import avatar_activo
 from .services.ia import texto_preguntas, texto_util_candidato
 
@@ -81,7 +82,19 @@ def vacante_dict(
         "cliente": v.cliente.nombre if v.cliente else None,
         "clienteId": v.cliente_id,
         "responsable": v.responsable.nombre if v.responsable else None,
+        "responsableId": v.responsable_id,
         "colaboradores": colaboradores or [],
+        # --- Fraiche (2026-09-29): destino, sucursal, zona, horario, dimensión, fecha objetivo e imagen ---
+        "destino": v.destino or "tienda_propia",
+        "destinoNombre": NOMBRE_DESTINO.get(v.destino or "tienda_propia", v.destino or ""),
+        "sucursal": v.sucursal or "",
+        "zona": v.zona or "",
+        "horario": v.horario or "",
+        "posiciones": v.posiciones or 1,
+        "fechaObjetivo": v.fecha_objetivo.isoformat() if v.fecha_objetivo else None,
+        "imagenNombre": v.imagen_nombre or "",
+        "imagenPath": f"/vacantes/{v.codigo}/imagen" if v.imagen else "",
+        "imagenPublica": f"/vacantes/slug/{v.slug}/imagen" if (v.imagen and v.slug) else "",
         "mostrarClienteCandidato": v.mostrar_cliente_candidato,
         # nombre que ve el candidato — RH siempre ve la relación real arriba, sin importar el flag
         "nombreEmpresa": nombre_empresa_candidato(v),
@@ -114,9 +127,9 @@ def vacante_dict(
         "publicaciones": v.publicaciones or {},
         "textoWhatsapp": v.texto_whatsapp or "",
         "textoBolsa": v.texto_bolsa or "",
-        # prefiltro
-        "preguntas_filtro": texto_preguntas(v.preguntas_filtro),
-        "criterios": [p for p in (v.preguntas_filtro or []) if isinstance(p, dict)],
+        # prefiltro — Fraiche (spec §5): [sucursal] y [monto mensual] se sustituyen con lo capturado
+        "preguntas_filtro": texto_preguntas(fraiche.preguntas_para_vacante(v.preguntas_filtro or [], sucursal=v.sucursal or "", sueldo=v.sueldo or "") or v.preguntas_filtro),
+        "criterios": fraiche.preguntas_para_vacante(v.preguntas_filtro or [], sucursal=v.sucursal or "", sueldo=v.sueldo or ""),
         # Fase 4: prefiltro por WhatsApp independiente + ubicación estructurada
         "criteriosWhatsapp": [p for p in (v.preguntas_filtro_whatsapp or []) if isinstance(p, dict)],
         "ubicacionEstado": v.ubicacion_estado or "",
@@ -316,6 +329,11 @@ def _sintesis_global(p: Postulacion) -> dict:
         "prefiltroResumen": prefiltro_resumen,
         # 2026-09-16: prefiltro dual — respuestas del formulario web y contradicciones Web vs WhatsApp
         "respuestasWeb": a.get("respuestas_web") or [],
+        # Fraiche (spec §5/§6): clasificación del prefiltro web con motivo visible, resultado del filtro por
+        # WhatsApp con su etiqueta/siguiente acción, y la captura informativa del adeudo con BBVA
+        "prefiltroWeb": a.get("prefiltro_web"),
+        "prefiltroWhatsapp": a.get("prefiltro_whatsapp"),
+        "adeudoBbva": a.get("adeudo_bbva"),
         "inconsistencias": a.get("inconsistencias") or [],
         "actividadesOmitidas": p.actividades_omitidas or [],
         "historial": list(p.historial or []),  # 2026-09-22: notas de decisiones humanas (nunca se borran)
@@ -397,6 +415,9 @@ def postulacion_dict(p: Postulacion, detalle: bool = False, n_mensajes: Optional
         "vacanteTitulo": v.titulo if v else "",
         "fuente": c.fuente,
         "origen": p.origen,
+        # Fraiche (2026-09-29): fuente de ESTA postulación y quién refirió (liga/QR de referidos)
+        "fuentePostulacion": p.fuente_postulacion or "",
+        "referidoPor": p.referido_por or "",
         "estado": p.estado,
         "etapa": p.etapa,
         "score": p.score,
