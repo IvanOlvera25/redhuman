@@ -858,6 +858,9 @@ export const ETAPAS_VISIBLES = ["Prefiltro", "Entrevista IA", "Entrevista Humana
 export function columnaDe(etapa: string): string {
   return etapa === "Evaluación" ? "Entrevista Humana" : etapa;
 }
+export function actualizarDomicilio(codigo: string, domicilio: string) {
+  return patch<Candidato>(`/candidatos/${codigo}/domicilio`, { domicilio });
+}
 export function confirmarContratacionFranquicia(codigo: string, comentario = "") {
   return post<Candidato>(`/candidatos/${codigo}/franquicia/contratacion`, { comentario });
 }

@@ -443,3 +443,22 @@ Reemplaza en la rama `demo-fraiche` la vista «Ruta Fraiche / Etapas», la colum
 - Telegram: «Continuar en Telegram» trae la postulación EXACTA (`postulacion_codigo` en el mensaje → sin menú de empresa ni
   postulación nueva); si la liga no corresponde se ofrece reintentar. Regresión: `scripts/verificar_fraiche_v2.py` (dos
   rutas de punta a punta) y `scripts/verificar_telegram.py`.
+
+## Fraiche — ficha y resumen del candidato (2026-10-01)
+
+- Ficha: las etapas son las cinco columnas estándar (`postulacion_dict["ruta"]`, `pasoNombre` = columna); Telegram, Entrevista
+  Red Human y presentación al franquiciatario son ACTIVIDADES dentro de su columna. La ventana de entrevista humana se titula
+  «Agregar evaluación · Entrevista humana» y solo al guardar mueve a Filtro humano.
+- Resumen en orden fijo: encabezado (nombre · puesto · sucursal/franquicia + contacto + «CV no recibido» como dato) →
+  Recomendación → Resultados (prefiltro y «Afinidad de Entrevista Red Human», una vez, con liga a su evaluación) → Siguiente
+  acción (UN botón; fuera del Resumen no se repite) → Avance (`avance["lista"]`: Completado / En curso / Pendiente; en
+  franquicia exactamente Prefiltro, Entrevista Red Human, Entrevista de Reclutamiento, Presentación al franquiciatario,
+  Entrevista y decisión del franquiciatario, Confirmación de contratación, Confirmación de ingreso) → Fortalezas (≤3) → Por
+  validar (≤3) → «Ver detalle» cerrado (`DetalleResumen`). Sin contador «N de M validaciones»; «Pendiente de presentar» solo
+  cuando ya toca presentar.
+- Resumen IA: `ia.REGLAS_RESUMEN_IA` en el prompt + garantía en código (`ia.frase_resumen` ≤12 palabras en
+  `resumenFicha`, `ia.es_no_evaluado` → «No evaluado», nunca incumplimiento). Pestaña «Evaluaciones» (antes «Evaluación
+  integral») con el detalle del prefiltro (`SeccionPrefiltroDetalle`, ancla `eval-prefiltro`).
+- `prefiltroResumen` excluye datos informativos (BBVA) y trae `detalle` con el estado de CADA criterio (cumple / no_cumple /
+  por_validar + motivo). Domicilio vigente ÚNICO (`fraiche.cambiar_domicilio`, `PATCH /candidatos/{c}/domicilio` y el
+  formulario de alta SAP) con `datos_personales.historial_domicilio`.

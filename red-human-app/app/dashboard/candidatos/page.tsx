@@ -127,6 +127,7 @@ import {
   columnaDe,
   confirmarContratacionFranquicia,
   confirmarIngresoFranquicia,
+  actualizarDomicilio,
   fetchCliente,
   fetchIntegracionTeams,
   lineasResultados,
@@ -1615,6 +1616,11 @@ function ModalCandidato({
         return;
     }
   }
+  /** 2026-10-01: desde un resultado resumido se abre SU evaluación dentro de la ficha. */
+  function verEvaluacion(ancla: string) {
+    setTab("evaluaciones");
+    setTimeout(() => document.getElementById(ancla)?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
+  }
   const ACCIONES_SIN_BOTON = new Set(["esperar", "esperar_entrevista", "ninguna", "alta", "invitar_entrevista_red_human", "reabrir_entrevista", "registrar_entrevista", "revisar_prefiltro"]);
   const accionSiguiente = c.avance?.siguienteAccion;
   const botonSiguiente = puedeDecidir && c.activa !== false && accionSiguiente && !ACCIONES_SIN_BOTON.has(accionSiguiente.tipo) ? accionSiguiente : null;
@@ -1760,7 +1766,6 @@ function ModalCandidato({
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
-            <EstadoBadge estado={c.estado} prefijo="Prefiltro: " />
             {live && puedeDecidir && (
               <Button
                 size="sm"
@@ -1783,17 +1788,11 @@ function ModalCandidato({
         </div>
 
         {/* Fraiche (spec §11): ruta visible por destino — una línea, se desliza en móvil */}
-        {(c.ruta?.length ?? 0) > 0 && (
-          <div className="flex items-center gap-2 border-b border-border-soft bg-surface px-4 py-1.5 sm:px-6">
-            {c.destino && (
-              <Badge tone={esFranquicia ? "human" : "good"} className="shrink-0">
-                {esFranquicia ? <Handshake className="h-3 w-3" /> : <Store className="h-3 w-3" />} {DESTINO_NOMBRE[c.destino] ?? c.destino}
-              </Badge>
-            )}
-            {esFranquicia && c.franquiciaEstadoTexto && <Badge tone="human" className="shrink-0">{c.franquiciaEstadoTexto}</Badge>}
-            <RutaStepper ruta={c.ruta ?? []} paso={c.paso} />
-          </div>
-        )}
+        {/* 2026-10-01: etapas alineadas al pipeline estándar (cinco columnas); Telegram, Entrevista Red Human y la
+            presentación al franquiciatario son actividades dentro de su columna (ver «Avance» en el Resumen). */}
+        <div className="flex items-center gap-2 border-b border-border-soft bg-surface px-4 py-1.5 sm:px-6">
+          <RutaStepper ruta={etapas.map((e) => ({ clave: e, nombre: nombreEtapa(e) }))} paso={columnaDe(c.etapa)} />
+        </div>
 
         {confirmarEliminar && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !eliminando && setConfirmarEliminar(false)}>
@@ -1831,7 +1830,7 @@ function ModalCandidato({
             {(
               [
                 { id: "resumen", label: "Resumen", icon: User, tone: "brand" },
-                { id: "evaluaciones", label: "Evaluación integral", icon: Sparkles, tone: "human" },
+                { id: "evaluaciones", label: "Evaluaciones", icon: Sparkles, tone: "human" },
                 { id: "documentos", label: "CV y documentos", icon: FileText, tone: "brand" },
                 { id: "whatsapp", label: CANAL, icon: MessageCircle, tone: "good", badge: c.mensajes },
                 // 2026-09-17: la pestaña del expediente (checklist de documentos) vive en Contratación Y
@@ -1894,7 +1893,7 @@ function ModalCandidato({
           )}
 
           {/* Fraiche (spec §12): ruta de franquicia — presentar, estado y ficha; sin documentación ni alta */}
-          {esFranquicia && (
+          {false && esFranquicia && (
             <PanelFranquicia
               c={c}
               live={live}
@@ -1908,10 +1907,10 @@ function ModalCandidato({
 
           {c.etapa === "Entrevista Humana" && <PanelEntrevistaHumana c={c} live={live} onCambio={onCambio} onNuevaIpv={abrirAgendaIpvHumana} />}
 
-          {tab === "resumen" && c.avance?.actividades && (
-            <PanelAvance c={c} boton={botonSiguiente} ocupado={Boolean(ocupado)} onAccion={ejecutarSiguiente} />
+          {tab === "resumen" && (
+            <PestanaResumen c={c} live={live} onCambio={onCambio} setTab={setTab} boton={botonSiguiente} ocupado={Boolean(ocupado)}
+              onAccion={ejecutarSiguiente} onVerEvaluacion={verEvaluacion} puedeDecidir={puedeDecidir} />
           )}
-          {tab === "resumen" && <PestanaResumen c={c} live={live} onCambio={onCambio} setTab={setTab} />}
           {tab === "evaluaciones" && (
             <PestanaEvaluaciones
               c={c}
@@ -1980,11 +1979,6 @@ function ModalCandidato({
                   { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
                 ]}
               />
-              {botonSiguiente && (
-                <Button size="sm" className="ml-auto" onClick={() => ejecutarSiguiente(botonSiguiente)} disabled={Boolean(ocupado)}>
-                  <ThumbsUp className="h-4 w-4" /> {botonSiguiente.texto}
-                </Button>
-              )}
             </div>
           </div>
         )}
@@ -2006,16 +2000,10 @@ function ModalCandidato({
               {/* Regla de UI (2026-09-16): UNA acción principal = la siguiente esperada; todo lo demás en «…»
                   («Mover a otra etapa» abre un selector simple sin bloqueos de secuencia). */}
               <div className="flex items-center gap-2">
-                {botonSiguiente && (
-                  <Button
-                    size="sm"
-                    className="flex-1"
-                    onClick={() => ejecutarSiguiente(botonSiguiente)}
-                    disabled={Boolean(ocupado)}
-                    variant={botonSiguiente.tipo === "no_cumple" ? "outline" : undefined}
-                  >
-                    <ThumbsUp className="h-4 w-4" /> {botonSiguiente.texto}
-                  </Button>
+                {tab !== "resumen" && botonSiguiente && (
+                  <button type="button" onClick={() => setTab("resumen")} className="flex-1 text-left text-xs font-semibold text-brand hover:underline">
+                    Siguiente acción en Resumen: {botonSiguiente.texto} →
+                  </button>
                 )}
                 {c.expedienteId != null && c.etapa !== "Onboarding" && (
                   <a
@@ -2398,7 +2386,214 @@ function textoEntrevistaStatus(s: NonNullable<Candidato["entrevistaStatus"]>): {
   }
 }
 
+/* ============================================================
+   RESUMEN (2026-10-01 «Fraiche: ficha y resumen del candidato»): encabezado con contacto → Recomendación →
+   Resultados (una sola vez) → Siguiente acción (un botón) → Avance (actividades) → Fortalezas (≤3) → Por validar (≤3)
+   → «Ver detalle» cerrado con la explicación completa.
+   ============================================================ */
+const ESTADO_LISTA_TONO: Record<string, string> = { hecha: "text-good", en_curso: "text-warn", pendiente: "text-ink-3", no_aplica: "text-ink-3" };
+
 function PestanaResumen({
+  c, live, onCambio, setTab, boton, ocupado, onAccion, onVerEvaluacion, puedeDecidir,
+}: {
+  c: Candidato; live: boolean; onCambio: (c: Candidato) => void; setTab: (t: TabCandidato) => void;
+  boton: AccionSiguiente | null; ocupado: boolean; onAccion: (a: AccionSiguiente) => void; onVerEvaluacion: (ancla: string) => void; puedeDecidir: boolean;
+}) {
+  const av = c.avance;
+  const rf = c.resumenFicha;
+  const sinCv = !(c.listaArchivos ?? []).some((a) => a.tipo === "cv");
+  const [editDom, setEditDom] = useState<string | null>(null);
+  const [guardandoDom, setGuardandoDom] = useState(false);
+  async function guardarDomicilio() {
+    if (editDom === null) return;
+    setGuardandoDom(true);
+    const r = await actualizarDomicilio(c.id, editDom.trim());
+    setGuardandoDom(false);
+    if (r.ok) {
+      setEditDom(null);
+      onCambio(r.data);
+    }
+  }
+  const lugar = c.sucursalVacante || c.clienteVacante || "";
+
+  // Recomendación: un requisito obligatorio No cumple prevalece; si no, la de Red Human; si no, el estado integral
+  const integral = av?.integral;
+  const noApto = integral?.conclusion === "no_apto";
+  const tituloRec = noApto ? "No cumple un requisito obligatorio" : c.recomendacionRedHuman || (integral?.conclusion === "apto" ? "Apto para avanzar" : "En proceso");
+  const tono = noApto ? TONOS_RECOMENDACION["No avanzar"] : (c.recomendacionRedHuman && TONOS_RECOMENDACION[c.recomendacionRedHuman]) || (integral?.conclusion === "apto"
+    ? TONOS_RECOMENDACION["Avanzar a contratación"] : { card: "border-border-soft bg-surface-2/40", texto: "text-ink", icon: Clock });
+  const conclusion = noApto ? integral!.texto : (rf?.recomendacionBreve || (integral?.conclusion === "apto" ? integral.texto : ""));
+
+  // Resultados (una sola vez): prefiltro y afinidad de Entrevista Red Human
+  const pr = c.prefiltroResumen;
+  const pw = c.prefiltroWeb;
+  const resultadoPrefiltro = pr?.resultado ?? pw?.resultado ?? null;
+  const textoPrefiltro = resultadoPrefiltro === "cumple" ? "Cumple" : resultadoPrefiltro === "no_cumple" ? "No cumple" : resultadoPrefiltro === "revision" ? "Por validar" : "En curso";
+  const criterios = pr?.total ? ` · ${pr.cumple} de ${pr.total} criterios${(pr.porValidar?.length ?? 0) ? `, ${pr.porValidar!.length} por validar` : ""}` : pw?.evaluadas ? ` · ${pw.cumplidos} de ${pw.evaluadas} criterios` : "";
+  const afinidad = rf?.afinidadEntrevista;
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* Encabezado + contacto */}
+      <div>
+        <p className="text-base font-semibold text-ink">
+          {c.nombre} <span className="font-normal text-ink-2">· {c.puesto || "Sin vacante"}{lugar ? ` · ${lugar}` : ""}</span>
+          {av?.ruta ? <span className="ml-2 align-middle"><Badge tone={av.destino === "franquicia" ? "human" : "good"}>{av.ruta}</Badge></span> : null}
+        </p>
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[12px] text-ink-2">
+          {c.telefono && <span className="inline-flex items-center gap-1"><Phone className="h-3.5 w-3.5 text-ink-3" />{c.telefono}</span>}
+          {c.correo && <span className="inline-flex items-center gap-1"><Mail className="h-3.5 w-3.5 text-ink-3" />{c.correo}</span>}
+          {editDom === null ? (
+            <span className="inline-flex items-center gap-1">
+              <MapPin className="h-3.5 w-3.5 text-ink-3" />{c.domicilio || c.ubicacion || "Sin domicilio"}
+              {live && puedeDecidir && <button type="button" onClick={() => setEditDom(c.domicilio || c.ubicacion || "")} className="ml-0.5 text-brand hover:underline">editar</button>}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1">
+              <input autoFocus value={editDom} onChange={(e) => setEditDom(e.target.value)} className="h-7 w-64 rounded-lg border border-border-soft bg-surface px-2 text-[12px]" />
+              <button type="button" onClick={guardarDomicilio} disabled={guardandoDom} className="font-semibold text-brand">{guardandoDom ? "…" : "Guardar"}</button>
+              <button type="button" onClick={() => setEditDom(null)} className="text-ink-3">Cancelar</button>
+            </span>
+          )}
+          {sinCv && <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[11px] text-ink-3">CV no recibido</span>}
+        </div>
+      </div>
+
+      {/* Recomendación */}
+      <Card className={cn("p-4", tono.card)}>
+        <p className="font-mono text-[10px] font-bold uppercase tracking-wider text-ink-3">Recomendación</p>
+        <p className={cn("font-display text-lg font-bold", tono.texto)}>{tituloRec}</p>
+        {conclusion && <p className="mt-0.5 text-sm text-ink-2">{conclusion}</p>}
+      </Card>
+
+      {/* Resultados */}
+      <div className="flex flex-col gap-1.5">
+        <Eyebrow>Resultados</Eyebrow>
+        <button type="button" onClick={() => onVerEvaluacion("eval-prefiltro")} className="flex items-center justify-between rounded-xl border border-border-soft px-3 py-2 text-left text-sm hover:border-brand/50">
+          <span>Prefiltro: <b className={resultadoPrefiltro === "cumple" ? "text-good" : resultadoPrefiltro === "no_cumple" ? "text-bad" : "text-warn"}>{textoPrefiltro}</b><span className="text-ink-3">{criterios}</span></span>
+          <span className="text-[11px] text-brand">Ver evaluación →</span>
+        </button>
+        <button type="button" onClick={() => onVerEvaluacion(afinidad != null ? "eval-afinidad" : "eval-entrevista")} className="flex items-center justify-between rounded-xl border border-border-soft px-3 py-2 text-left text-sm hover:border-brand/50">
+          <span>Afinidad de Entrevista Red Human: <b>{afinidad != null ? `${afinidad}/100` : "No evaluado"}</b></span>
+          <span className="text-[11px] text-brand">Ver evaluación →</span>
+        </button>
+      </div>
+
+      {/* Siguiente acción — un único botón principal */}
+      {av?.siguienteAccion?.texto && (
+        <div className="rounded-xl border border-brand/30 bg-brand-soft/30 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">Siguiente acción</p>
+          <div className="mt-1.5">
+            {boton ? (
+              <Button size="sm" onClick={() => onAccion(boton)} disabled={ocupado} variant={boton.tipo === "no_cumple" ? "outline" : undefined}>
+                <ThumbsUp className="h-4 w-4" /> {boton.tipo === "no_cumple" ? "Descartar candidato…" : boton.texto}
+              </Button>
+            ) : (
+              <p className="text-sm font-semibold text-ink">{av.siguienteAccion.texto}</p>
+            )}
+            {boton?.tipo === "no_cumple" && <p className="mt-1 text-[12px] text-ink-2">{av.siguienteAccion.texto}</p>}
+          </div>
+          {(av.faltaParaAvanzar?.length ?? 0) > 0 && av.siguienteColumna && boton?.tipo === "mover" && (
+            <p className="mt-1.5 text-[12px] text-warn">Falta: {av.faltaParaAvanzar!.join("; ")}</p>
+          )}
+        </div>
+      )}
+
+      {/* Avance — actividades de la ruta con su estado real */}
+      {(av?.lista?.length ?? 0) > 0 && (
+        <div>
+          <Eyebrow>Avance</Eyebrow>
+          <ul className="mt-1.5 divide-y divide-border-faint rounded-xl border border-border-soft">
+            {av!.lista!.map((a) => (
+              <li key={a.clave} className="flex items-center justify-between gap-3 px-3 py-1.5 text-[13px]">
+                <span className="min-w-0 truncate"><b className="text-ink">{a.nombre}</b>{a.estado !== "pendiente" && a.resultado ? <span className={cn("ml-1.5", a.tono === "bad" ? "text-bad" : "text-ink-3")}>· {a.resultado}</span> : null}</span>
+                <span className={cn("shrink-0 text-[11px] font-semibold", a.noCumple ? "text-bad" : ESTADO_LISTA_TONO[a.estado])}>{a.estadoTexto}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Fortalezas / Por validar (máx. 3, una línea) */}
+      {(rf?.fortalezas?.length ?? 0) > 0 && (
+        <div>
+          <Eyebrow>Fortalezas</Eyebrow>
+          <ul className="mt-1 space-y-0.5">{rf!.fortalezas.map((f, i) => <li key={i} className="truncate text-sm text-ink-2"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5 text-good" />{f}</li>)}</ul>
+        </div>
+      )}
+      {((rf?.porValidar?.length ?? 0) > 0 || (rf?.noEvaluados?.length ?? 0) > 0) && (
+        <div>
+          <Eyebrow>Por validar</Eyebrow>
+          <ul className="mt-1 space-y-0.5">
+            {rf!.porValidar.map((f, i) => <li key={i} className="truncate text-sm text-ink-2"><AlertTriangle className="mr-1 inline h-3.5 w-3.5 text-warn" />{f}</li>)}
+            {rf!.noEvaluados.slice(0, Math.max(0, 3 - rf!.porValidar.length)).map((f, i) => <li key={`ne${i}`} className="truncate text-sm text-ink-3">No evaluado: {f}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {/* Ver detalle — cerrado al inicio */}
+      <details className="rounded-xl border border-border-soft">
+        <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold text-brand">Ver detalle</summary>
+        <div className="border-t border-border-soft p-3">
+          <DetalleResumen c={c} live={live} onCambio={onCambio} setTab={setTab} />
+          {(c.historialDomicilio?.length ?? 0) > 0 && (
+            <div className="mt-4">
+              <Eyebrow>Historial de domicilio</Eyebrow>
+              <ul className="mt-1 space-y-0.5 text-[12px] text-ink-2">
+                {c.historialDomicilio!.map((h, i) => <li key={i}>{fechaCorta(h.fecha)} · {h.por} ({h.origen}): «{h.anterior || "—"}» → «{h.nuevo}»</li>)}
+              </ul>
+            </div>
+          )}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+/** Evaluaciones · Prefiltro: preguntas, respuestas y estado de CADA criterio (web y por mensaje). Los datos informativos
+ * (adeudo con BBVA) se muestran aparte y no cuentan como criterio. */
+function SeccionPrefiltroDetalle({ c }: { c: Candidato }) {
+  const pw = c.prefiltroWeb;
+  const pr = c.prefiltroResumen;
+  if (!pw && !pr && !(c.respuestasWeb?.length)) return null;
+  const marca = (e: string) => (e === "cumple" ? "✓" : e === "no_cumple" ? "✗" : "?");
+  const color = (e: string) => (e === "cumple" ? "text-good" : e === "no_cumple" ? "text-bad" : "text-warn");
+  return (
+    <Card id="eval-prefiltro" className="p-5">
+      <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-brand">Prefiltro</span>
+      {pw && (
+        <div className="mt-2">
+          <p className="text-sm font-semibold">Formulario: {pw.etiqueta}{pw.evaluadas ? ` (${pw.cumplidos} de ${pw.evaluadas} criterios)` : ""}</p>
+          {pw.motivo && <p className="text-xs text-ink-2">{pw.motivo}</p>}
+          <ul className="mt-1.5 space-y-1">
+            {pw.detalle.map((d, i) => (
+              <li key={i} className="text-xs text-ink-2">
+                <span className={cn("mr-1 font-mono", d.cumple === true ? "text-good" : d.cumple === false ? "text-bad" : "text-warn")}>{d.cumple === true ? "✓" : d.cumple === false ? "✗" : "?"}</span>
+                {d.pregunta} <b>«{d.respuesta || "sin respuesta"}»</b>{d.cumple == null ? <span className="text-ink-3"> · Por validar</span> : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {pr && (pr.detalle?.length ?? 0) > 0 && (
+        <div className="mt-3">
+          <p className="text-sm font-semibold">Por mensaje: {pr.cumple} de {pr.total} criterios cumplidos{(pr.porValidar?.length ?? 0) ? ` · ${pr.porValidar!.length} por validar` : ""}{(pr.incumplidos?.length ?? 0) ? ` · ${pr.incumplidos.length} no cumple` : ""}</p>
+          <ul className="mt-1.5 space-y-1">
+            {pr.detalle!.map((d, i) => (
+              <li key={i} className="text-xs text-ink-2">
+                <span className={cn("mr-1 font-mono", color(d.estado))}>{marca(d.estado)}</span>
+                <b>{d.criterio}</b>: «{d.respuesta || "sin respuesta"}»{d.estado === "por_validar" ? <span className="text-warn"> · Por validar: {d.motivo}</span> : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {c.adeudoBbva && <p className="mt-2 text-xs text-ink-3">Adeudo con BBVA: <b>{c.adeudoBbva}</b> · dato informativo: no es criterio de aprobación ni provoca descarte o revisión.</p>}
+    </Card>
+  );
+}
+
+function DetalleResumen({
   c,
   live,
   onCambio,
@@ -2449,11 +2644,10 @@ function PestanaResumen({
         ))}
       </div>
 
-      {/* B. Perfil extraído del CV */}
-      <div>
+      {/* B. Perfil extraído del CV — sin tarjeta vacía cuando no hay CV (2026-10-01) */}
+      {estadoCv !== "sin_cv" && <div>
         <Eyebrow>Perfil extraído del CV</Eyebrow>
         <Card className="mt-2 p-5">
-          {estadoCv === "sin_cv" && <p className="text-sm text-ink-3">Currículum no recibido.</p>}
 
           {estadoCv === "analizando" && (
             <p className="flex items-center gap-2 text-sm text-ink-3">
@@ -2528,7 +2722,7 @@ function PestanaResumen({
             </div>
           )}
         </Card>
-      </div>
+      </div>}
 
       {/* C. Prefiltro — SOLO filtro de entrada (Cumple / No cumple), sin score (2026-09-13) */}
       <div>
@@ -2836,8 +3030,11 @@ function PestanaEvaluaciones({
 
   return (
     <div className="flex flex-col gap-5">
+      {/* ===== 0) PREFILTRO — preguntas, respuestas y criterios (2026-10-01: el detalle vive en Evaluaciones) ===== */}
+      <SeccionPrefiltroDetalle c={c} />
+
       {/* ===== 1) ANÁLISIS DE CV — disponible desde el inicio (independiente del prefiltro) ===== */}
-      <Card className="border-brand/30 bg-brand-soft/20 p-5">
+      <Card id="eval-cv" className="border-brand/30 bg-brand-soft/20 p-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
             <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-brand">1 · Análisis de CV</span>
@@ -2892,7 +3089,7 @@ function PestanaEvaluaciones({
       </Card>
 
       {/* ===== 2) STATUS DE LA ENTREVISTA RED HUMAN ===== */}
-      <Card className="p-5">
+      <Card id="eval-entrevista" className="p-5">
         <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-human">2 · Entrevista Red Human</span>
         {c.entrevistaStatus ? (
           (() => {
@@ -2951,14 +3148,14 @@ function PestanaEvaluaciones({
           el número de afinidad es de Luna (arriba); esto es lo que se habló en la entrevista. */}
       {/* ===== 3) EVALUACIÓN INTEGRAL (Análisis de CV + Entrevista Red Human) — solo con entrevista válida ===== */}
       {evalAvatar?.resumen && (
-        <Card className="border-human/30 bg-human-soft/20 p-5">
+        <Card id="eval-afinidad" className="border-human/30 bg-human-soft/20 p-5">
           <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-human">
-            3 · Evaluación integral (CV + Entrevista Red Human)
+            3 · Afinidad de Entrevista Red Human
           </span>
           <div className="mt-2 flex flex-wrap items-center gap-4">
             {evalAvatar.match_perfil != null && <ScoreRing score={evalAvatar.match_perfil} />}
             <div>
-              {evalAvatar.match_perfil != null && <p className="font-display text-lg font-bold text-ink">Afinidad {evalAvatar.match_perfil}/100</p>}
+              {evalAvatar.match_perfil != null && <p className="font-display text-lg font-bold text-ink">Afinidad de Entrevista Red Human: {evalAvatar.match_perfil}/100</p>}
               {evalAvatar.recomendacion && (
                 <p className="text-xs text-ink-2">
                   Recomendación preliminar: <b className="text-ink">{evalAvatar.recomendacion === "avanzar" ? "avanzar" : evalAvatar.recomendacion === "no_avanzar" ? "no avanzar" : "revisión humana"}</b> — la decisión final es de RH.
@@ -3207,7 +3404,7 @@ function PestanaEvaluaciones({
       )}
 
       {/* ===== Evaluaciones y verificaciones (2026-09-28): no mueven la columna del pipeline ===== */}
-      <PanelEvaluaciones codigo={c.id} puesto={c.puesto} live={Boolean(live) && puedeDecidir} version={versionEval} />
+      <div id="eval-validaciones"><PanelEvaluaciones codigo={c.id} puesto={c.puesto} live={Boolean(live) && puedeDecidir} version={versionEval} /></div>
     </div>
   );
 }
@@ -4744,9 +4941,9 @@ function ModalProgramarEntrevista({
       {/* 2026-09-18: más ancho, cuerpo con scroll propio y footer fijo — los botones nunca se pierden (web y móvil) */}
       <Card className="flex h-[100dvh] w-full flex-col overflow-hidden rounded-none p-0 sm:h-auto sm:max-h-[85vh] sm:max-w-2xl sm:rounded-2xl">
         <div className="shrink-0 border-b border-border-faint px-5 pt-5 pb-3">
-          <h3 className="font-display text-lg font-bold">{esIpv ? "Programar Entrevista IPV (entrevistador humano)" : "Programar entrevista humana"}</h3>
+          <h3 className="font-display text-lg font-bold">{esIpv ? "Agregar evaluación · Entrevista IPV" : "Agregar evaluación · Entrevista humana"}</h3>
           <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-            Con {c.nombre.split(" ")[0]}. Al guardar, la tarjeta se mueve a Entrevista Humana y se confirma por correo y {CANAL}.
+            Al guardar, la tarjeta se mueve a Filtro humano.
           </p>
           {esIpv && (
             <p className="mt-1.5 flex items-center gap-1.5 text-[12px] text-human">

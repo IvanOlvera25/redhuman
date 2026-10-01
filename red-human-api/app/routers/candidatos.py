@@ -2582,6 +2582,27 @@ def confirmar_ingreso_franquicia(codigo: str, datos: ConfirmacionFranquiciaIn, d
     return postulacion_dict(p, detalle=True)
 
 
+class DomicilioIn(BaseModel):
+    domicilio: str
+
+
+@router.patch("/{codigo}/domicilio")
+def actualizar_domicilio(codigo: str, datos: DomicilioIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+                         cuenta: Cuenta = Depends(cuenta_actual)):
+    """2026-10-01: el domicilio vigente es UNO para la ficha y el formulario de alta; el anterior queda en el historial."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    c = p.candidato
+    dp = dict(c.datos_personales or {})
+    if fraiche.cambiar_domicilio(dp, c, datos.domicilio[:200], u.nombre, "Ficha del candidato"):
+        origen = dict(dp.get("origen") or {})
+        origen["domicilio"] = fraiche.ORIGEN_RH
+        dp["origen"] = origen
+        c.datos_personales = dp
+        registrar(db, u.nombre, "domicilio_actualizado", "candidato", c.codigo, {"nuevo": datos.domicilio[:200], "correo_rh": u.correo})
+        db.commit()
+    return postulacion_dict(p, detalle=True)
+
+
 SECCIONES_FICHA = ["vacante", "candidato", "experiencia", "cv", "entrevista_inicial", "ipv", "psicometria", "observaciones", "siguiente_accion"]
 
 

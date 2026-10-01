@@ -79,7 +79,8 @@ with TestClient(app) as client:
     r = client.post("/candidatos/postular", data={"vacante": SLUG, "nombre": "Ruta Propia", "telefono": "5566001122", "consentimiento": "true", "respuestas": "[]", "fuente": "portal"})
     P = r.json()["postulacion"]
     ficha = client.get(f"/candidatos/{P}").json()
-    check(ficha["paso"] == "prefiltro_web" and ficha["pasoNombre"] == "Prefiltro web" and ficha["destino"] == "tienda_propia" and len(ficha["ruta"]) == 11, "al postularse el paso es Prefiltro web y la ficha trae la ruta de 11 pasos")
+    check(ficha["paso"] == "prefiltro_web" and ficha["pasoNombre"] == "Prefiltro" and ficha["destino"] == "tienda_propia" and [x["nombre"] for x in ficha["ruta"]] == ["Prefiltro", "Filtro Red Human", "Filtro humano", "Contratación", "Onboarding"],
+          "2026-10-01: la ficha muestra las cinco etapas estándar (la ruta vive en las actividades)")
     r = client.get("/candidatos", params={"paso": "prefiltro_web"})
     check(any(x["id"] == P for x in r.json()), "GET /candidatos?paso= filtra por paso visible")
     r = client.get("/candidatos", params={"destino": "tienda_propia"})
@@ -149,7 +150,7 @@ with TestClient(app) as client:
     r = client.post("/candidatos/postular", data={"vacante": SLUGF, "nombre": "Ruta Franquicia", "telefono": "5566003344", "consentimiento": "true", "respuestas": "[]"})
     PF = r.json()["postulacion"]
     ficha = client.get(f"/candidatos/{PF}").json()
-    check(ficha["destino"] == "franquicia" and [x["clave"] for x in ficha["ruta"]] == fraiche.RUTA_FRANQUICIA, "la ruta de franquicia tiene 7 pasos y termina en Presentación al franquiciatario")
+    check(ficha["destino"] == "franquicia" and len(ficha["ruta"]) == 5 and "ipv" not in [a["clave"] for a in ficha["avance"]["actividades"]], "franquicia: mismas cinco etapas, sin IPV en sus actividades")
     check(client.patch(f"/candidatos/{PF}/paso", json={"paso": "documentacion"}).status_code == 400, "franquicia no tiene documentación ni alta SAP")
     r = client.post(f"/candidatos/{PF}/presentar-franquiciatario", json={"contacto_id": contacto.id, "enviar_liga": True})
     check(r.status_code == 201 and r.json()["liga"].startswith("http") and "/evaluacion/" in r.json()["liga"], f"Presentar al franquiciatario crea la evaluación y su liga ({r.status_code} {r.text[:120]})")

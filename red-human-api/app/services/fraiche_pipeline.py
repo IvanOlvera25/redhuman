@@ -154,19 +154,19 @@ def _prefiltro(p) -> dict:
     if web:
         r = web.get("resultado")
         if r == "no_cumple":
-            return _act("formulario", "Formulario y requisitos indispensables", "Prefiltro", "hecha", resultado=web.get("etiqueta") or "No cumple",
+            return _act("formulario", "Prefiltro", "Prefiltro", "hecha", resultado=web.get("etiqueta") or "No cumple",
                         tono="bad", revisado_por="Red Human (automático)", detalle=web.get("motivo", ""), no_cumple=True)
         if r == "revision":
-            return _act("formulario", "Formulario y requisitos indispensables", "Prefiltro", "en_curso", resultado=web.get("etiqueta") or "Requiere revisión",
+            return _act("formulario", "Prefiltro", "Prefiltro", "en_curso", resultado=web.get("etiqueta") or "Requiere revisión",
                         tono="warn", revisado_por="Red Human (automático)", detalle=web.get("motivo", ""), accion={"tipo": "revisar_prefiltro"})
-        return _act("formulario", "Formulario y requisitos indispensables", "Prefiltro", "hecha", resultado=web.get("etiqueta") or "Cumple",
+        return _act("formulario", "Prefiltro", "Prefiltro", "hecha", resultado=web.get("etiqueta") or "Cumple",
                     tono="good", revisado_por="Red Human (automático)", detalle=web.get("motivo", ""))
     if p.estado == "no_cumple":
-        return _act("formulario", "Formulario y requisitos indispensables", "Prefiltro", "hecha", resultado="No cumple", tono="bad",
+        return _act("formulario", "Prefiltro", "Prefiltro", "hecha", resultado="No cumple", tono="bad",
                     revisado_por="Red Human (automático)", detalle=p.evidencia or "", no_cumple=True)
     if p.prefiltro_completo or p.etapa != "Prefiltro":
-        return _act("formulario", "Formulario y requisitos indispensables", "Prefiltro", "hecha", resultado="Cumple", tono="good", revisado_por="Red Human (automático)")
-    return _act("formulario", "Formulario y requisitos indispensables", "Prefiltro", "pendiente", resultado="Sin respuestas todavía")
+        return _act("formulario", "Prefiltro", "Prefiltro", "hecha", resultado="Cumple", tono="good", revisado_por="Red Human (automático)")
+    return _act("formulario", "Prefiltro", "Prefiltro", "pendiente", resultado="Sin respuestas todavía")
 
 
 def _filtro_mensaje(p) -> dict:
@@ -202,7 +202,7 @@ def _entrevista_agente(p) -> dict:
 
 
 def _entrevista_inicial(p) -> dict:
-    nombre = "Entrevista inicial de Reclutamiento" if es_franquicia(p) else "Entrevista inicial"
+    nombre = "Entrevista de Reclutamiento" if es_franquicia(p) else "Entrevista inicial"
     ehs = [eh for eh in p.entrevistas_humanas if not eh.es_ipv and not eh.cancelada]
     if not ehs:
         return _act("entrevista_inicial", nombre, "Entrevista Humana", "pendiente", resultado="Sin agendar",
@@ -345,12 +345,12 @@ def actividades(p, evs=None) -> List[dict]:
         return acts
     if es_franquicia(p):
         acts += _franquicia(p, evs)
-        acts.append(_act("contratacion_franquicia", "Confirmación de contratación del franquiciatario", "Contratación",
+        acts.append(_act("contratacion_franquicia", "Confirmación de contratación", "Contratación",
                          "hecha" if p.franquicia_contratado_en else "pendiente",
                          resultado="Confirmada" if p.franquicia_contratado_en else "Pendiente de registrar", tono="good" if p.franquicia_contratado_en else "neutral",
                          revisado_por=p.franquicia_contratado_por or "", fecha=p.franquicia_contratado_en,
                          accion=None if p.franquicia_contratado_en else {"tipo": "confirmar_contratacion_franquicia"}))
-        acts.append(_act("ingreso_franquicia", "Ingreso confirmado por el franquiciatario", "Onboarding",
+        acts.append(_act("ingreso_franquicia", "Confirmación de ingreso", "Onboarding",
                          "hecha" if p.franquicia_ingreso_en else "pendiente",
                          resultado="Ingreso confirmado" if p.franquicia_ingreso_en else "Pendiente de registrar", tono="good" if p.franquicia_ingreso_en else "neutral",
                          revisado_por=p.franquicia_ingreso_por or "", fecha=p.franquicia_ingreso_en,
@@ -400,9 +400,10 @@ def integral(p, acts: List[dict]) -> dict:
     if no_cumplidos:
         conclusion, texto = "no_apto", "No apto: " + ", ".join(no_cumplidos) + (f" (prevalece sobre el score {score})" if score else "")
     elif pendientes:
-        conclusion, texto = "en_proceso", f"En proceso: {len(cumplidos)} de {len(aplicables)} validaciones completas"
+        # 2026-10-01: sin contador «N de M validaciones» — el avance se ve en la lista de actividades
+        conclusion, texto = "en_proceso", "En proceso"
     else:
-        conclusion, texto = "apto", "Apto: todas las validaciones aplicables están completas"
+        conclusion, texto = "apto", "Apto: actividades aplicables completas"
     return {"conclusion": conclusion, "texto": texto, "score": score, "cumplidos": cumplidos, "pendientes": pendientes, "noCumplidos": no_cumplidos,
             "resultados": [{"nombre": a["nombre"], "resultado": a["resultado"], "tono": a["tono"], "revisadoPor": a["revisadoPor"]} for a in aplicables if a["estado"] in ("hecha", "en_curso")]}
 
@@ -451,6 +452,30 @@ def siguiente_accion(p, acts: List[dict], integ: dict) -> dict:
     return {"tipo": "ninguna", "texto": ""}
 
 
+ESTADO_LISTA = {"hecha": "Completado", "en_curso": "En curso", "pendiente": "Pendiente", "no_aplica": "No aplica"}
+
+
+def lista_compacta(p, acts: List[dict]) -> List[dict]:
+    """2026-10-01 (ficha y resumen §5): actividades de la ruta con estado Completado / En curso / Pendiente según los
+    registros reales. El formulario y el filtro por mensaje se muestran juntos como «Prefiltro». Solo lo aplicable."""
+    por = {a["clave"]: a for a in acts}
+    salida = []
+    pre = [por[k] for k in ("formulario", "filtro_mensaje") if k in por]
+    if pre:
+        hechas = [a for a in pre if a["estado"] == "hecha"]
+        estado = "hecha" if len(hechas) == len(pre) else ("en_curso" if hechas or any(a["estado"] == "en_curso" for a in pre) else "pendiente")
+        ultimo = next((a for a in reversed(pre) if a["estado"] != "pendiente"), pre[0])
+        no_cumple = any(a["noCumple"] for a in pre)
+        salida.append({"clave": "prefiltro", "nombre": "Prefiltro", "estado": estado, "estadoTexto": ESTADO_LISTA[estado], "resultado": ultimo["resultado"],
+                       "tono": "bad" if no_cumple else ultimo["tono"], "noCumple": no_cumple, "columna": "Prefiltro", "revisadoPor": ultimo["revisadoPor"]})
+    for a in acts:
+        if a["clave"] in ("formulario", "filtro_mensaje") or a["estado"] == "no_aplica":
+            continue
+        salida.append({"clave": a["clave"], "nombre": a["nombre"], "estado": a["estado"], "estadoTexto": ESTADO_LISTA[a["estado"]], "resultado": a["resultado"],
+                       "tono": a["tono"], "noCumple": a["noCumple"], "columna": a["columna"], "revisadoPor": a["revisadoPor"]})
+    return salida
+
+
 def avance(p) -> dict:
     evs = evaluaciones_de(p)
     acts = actividades(p, evs)
@@ -459,6 +484,12 @@ def avance(p) -> dict:
     idx = _orden(col)
     siguiente_col = ETAPAS_VISIBLES[idx + 1] if idx + 1 < len(ETAPAS_VISIBLES) else None
     faltan = faltantes_para(p, siguiente_col, acts) if siguiente_col else []
+    # «Pendiente de presentar» SOLO cuando ya corresponde presentar (Filtro humano con la entrevista de Reclutamiento hecha)
+    est_f = estado_franquicia(p, evs) if (es_franquicia(p) and es_ruta_fraiche(p)) else None
+    if est_f == "pendiente_presentar":
+        ent = next((a for a in acts if a["clave"] == "entrevista_inicial"), None)
+        if not (col == "Entrevista Humana" and ent and ent["estado"] == "hecha" and not ent["noCumple"]):
+            est_f = None
     return {
         "destino": destino_de(p) if es_ruta_fraiche(p) else "",
         "ruta": NOMBRE_DESTINO.get(destino_de(p), "Tienda propia") if es_ruta_fraiche(p) else "",
@@ -468,8 +499,9 @@ def avance(p) -> dict:
         "realizadas": [a["nombre"] for a in acts if a["estado"] == "hecha"],
         "pendientes": [a["nombre"] for a in acts if a["estado"] != "hecha" and a["columna"] == col],
         "integral": integ,
-        "franquiciaEstado": estado_franquicia(p, evs) if es_franquicia(p) else None,
-        "franquiciaEstadoTexto": ESTADOS_FRANQUICIA_V2.get(estado_franquicia(p, evs)) if es_franquicia(p) else None,
+        "franquiciaEstado": est_f,
+        "franquiciaEstadoTexto": ESTADOS_FRANQUICIA_V2.get(est_f) if est_f else None,
+        "lista": lista_compacta(p, acts),
         "siguienteAccion": siguiente_accion(p, acts, integ),
         "siguienteColumna": siguiente_col,
         "puedeAvanzar": bool(siguiente_col) and not faltan,

@@ -241,7 +241,17 @@ export interface Candidato {
   /* --- Puntos 3/5: síntesis global (CV + Prefiltro + Entrevista IA + Entrevista Humana),
    * calculada al vuelo en cada lectura del detalle — nunca se persiste, siempre está al día. --- */
   /** Prefiltro = SOLO status de entrada (cumple / no_cumple); no participa en la evaluación integral. */
-  prefiltroResumen?: { cumple: number; total: number; incumplidos: string[]; resultado?: "cumple" | "no_cumple" | null } | null;
+  prefiltroResumen?: {
+    cumple: number; total: number; incumplidos: string[]; resultado?: "cumple" | "no_cumple" | "revision" | null;
+    porValidar?: string[];
+    detalle?: { criterio: string; pregunta: string; respuesta: string; estado: "cumple" | "no_cumple" | "por_validar"; motivo: string }[];
+  } | null;
+  /** 2026-10-01 (ficha y resumen): versión corta para el Resumen (máx. 3 por lista, 12 palabras por frase). */
+  resumenFicha?: { fortalezas: string[]; porValidar: string[]; noEvaluados: string[]; recomendacionBreve: string; afinidadEntrevista: number | null };
+  noEvaluados?: string[];
+  domicilio?: string;
+  historialDomicilio?: { anterior: string; nuevo: string; por: string; origen: string; fecha: string }[];
+  sucursalVacante?: string;
   /** 2026-09-16: prefiltro dual y control manual */
   respuestasWeb?: { pregunta: string; respuesta: string; clave?: string }[];
   /** Fraiche (spec §5): clasificación del prefiltro web con motivo visible (Cumple / Requiere revisión / No cumple). */
@@ -597,6 +607,7 @@ export interface AvancePostulacion {
   actividades?: ActividadRuta[];
   realizadas?: string[];
   pendientes: string[];
+  lista?: { clave: string; nombre: string; estado: string; estadoTexto: string; resultado: string; tono: string; noCumple: boolean; columna: string; revisadoPor: string }[];
   integral: { conclusion: "apto" | "no_apto" | "en_proceso"; texto: string; score: number | null; cumplidos?: string[]; pendientes?: string[]; noCumplidos?: string[];
               resultados?: { nombre: string; resultado: string; tono: string; revisadoPor: string }[] };
   franquiciaEstado: string | null;

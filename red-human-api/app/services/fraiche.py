@@ -660,6 +660,9 @@ def datos_alta_sap(p, e, cuenta=None) -> dict:
         return {"clave": clave, "valor": val, "origen": origen if val else "Pendiente de capturar", "faltante": not val}
 
     def personal(clave):
+        if clave == "domicilio" and not dp.get("domicilio") and c is not None and (c.ubicacion or "").strip():
+            # 2026-10-01: domicilio vigente ÚNICO — sin captura propia se usa el de la ficha
+            return campo("domicilio", c.ubicacion, "Ficha del candidato")
         return campo(clave, dp.get(clave, ""), origenes.get(clave) or (ORIGEN_RH if dp.get(clave) else ""))
 
     fecha_ingreso = (e.fecha_ingreso_real or e.fecha_ingreso) if e else None
@@ -815,3 +818,20 @@ def sueldo_candidato(v) -> str:
     else:
         palabras = f"{numero_a_palabras(monto)} {nombre_moneda}"
     return f"{base} ({palabras}{(' ' + periodo) if periodo else ''})"
+
+
+
+def cambiar_domicilio(dp: dict, c, nuevo: str, por: str, origen: str) -> bool:
+    """2026-10-01: domicilio vigente ÚNICO (ficha y formulario de alta). Escribe `dp["domicilio"]` y deja el valor
+    anterior en `dp["historial_domicilio"]` (quién, cuándo, desde dónde). Regresa True si cambió."""
+    from datetime import datetime, timezone
+
+    anterior = str(dp.get("domicilio") or (c.ubicacion if c is not None else "") or "").strip()
+    nuevo = (nuevo or "").strip()
+    if nuevo == anterior:
+        return False
+    dp["domicilio"] = nuevo
+    dp["historial_domicilio"] = list(dp.get("historial_domicilio") or []) + [
+        {"anterior": anterior, "nuevo": nuevo, "por": por, "origen": origen, "fecha": datetime.now(timezone.utc).isoformat()}
+    ]
+    return True

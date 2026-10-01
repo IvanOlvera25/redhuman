@@ -683,6 +683,10 @@ def capturar_datos_alta(exp_id: int, datos: DatosAltaIn, db: Session = Depends(g
             val = str(datos.personales.get(k) or "").strip()
             if k in ("curp", "rfc"):
                 val = val.upper()
+            if k == "domicilio":
+                fraiche.cambiar_domicilio(dp, c, val[:200], u.nombre, "Formulario de alta")
+                origen[k] = fraiche.ORIGEN_RH if val else ""
+                continue
             dp[k] = val[:200]
             origen[k] = fraiche.ORIGEN_RH if val else ""
     dp["origen"] = origen

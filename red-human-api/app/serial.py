@@ -252,11 +252,27 @@ def _sintesis_global(p: Postulacion) -> dict:
     # evaluación integral ni aporta afinidad, fortalezas ni puntos por validar (2026-09-13). ---
     prefiltro_resumen = None
     if respuestas or a.get("prefiltro_resultado"):
-        cumple_n = sum(1 for r in respuestas if r.get("cumple") is True)
-        incumplidos = [r.get("criterio") or r.get("pregunta") for r in respuestas if r.get("cumple") is False]
+        # 2026-10-01: los datos INFORMATIVOS (adeudo con BBVA) no son criterios de aprobación: no cuentan, no
+        # descartan ni mandan a revisión. El detalle explica el estado de CADA criterio (también el que no cumple
+        # ni falla: «Por validar» con su motivo) para que «Cumple N de M» siempre cuadre.
+        from .services import fraiche as _fr
+
+        criterios = [r for r in _fr.sin_bbva(respuestas) if not r.get("informativa")]
+        detalle = []
+        for r in criterios:
+            estado = "cumple" if r.get("cumple") is True else "no_cumple" if r.get("cumple") is False else "por_validar"
+            detalle.append({"criterio": r.get("criterio") or r.get("pregunta") or "", "pregunta": r.get("pregunta") or "", "respuesta": r.get("respuesta") or "",
+                            "estado": estado, "motivo": "" if estado != "por_validar" else ("sin respuesta" if not (r.get("respuesta") or "").strip() else "respuesta insuficiente o ambigua")})
+        cumple_n = sum(1 for d in detalle if d["estado"] == "cumple")
+        incumplidos = [d["criterio"] for d in detalle if d["estado"] == "no_cumple"]
+        por_validar = [d["criterio"] for d in detalle if d["estado"] == "por_validar"]
+        resultado = a.get("prefiltro_resultado") or ("no_cumple" if p.estado == "no_cumple" else "cumple" if p.prefiltro_completo else None)
+        fw = a.get("prefiltro_whatsapp") or {}
+        if fw.get("resultado"):
+            resultado = fw["resultado"]  # la clasificación con las reglas configuradas (indispensables / revisión)
         prefiltro_resumen = {
-            "cumple": cumple_n, "total": len(respuestas), "incumplidos": incumplidos,
-            "resultado": a.get("prefiltro_resultado") or ("no_cumple" if p.estado == "no_cumple" else "cumple" if p.prefiltro_completo else None),
+            "cumple": cumple_n, "total": len(detalle), "incumplidos": incumplidos, "porValidar": por_validar, "detalle": detalle,
+            "resultado": resultado,
         }
 
     # --- Status de la Entrevista Red Human (bloque propio en la ficha) ---
@@ -300,9 +316,12 @@ def _sintesis_global(p: Postulacion) -> dict:
          *(a.get("requisitos_cumplidos") or [])],
         4,
     )
+    # 2026-10-01: un tema que no se preguntó es «No evaluado», nunca un punto por validar ni un incumplimiento
+    from .services import ia as _ia
+
+    no_evaluados = _dedupe_cap([*(eval_ia.get("faltante") or []), *[r for r in (eval_ia.get("riesgos") or []) if _ia.es_no_evaluado(r)]], 6)
     puntos_por_validar = _dedupe_cap(
-        [*(eval_ia.get("riesgos") or []),
-         *[f"No se cubrió en la entrevista: {t}" for t in (eval_ia.get("faltante") or [])],
+        [*[r for r in (eval_ia.get("riesgos") or []) if not _ia.es_no_evaluado(r)],
          *(a.get("brechas") or []),
          *([f"Segunda entrevista sugerida" + (f": {ultima_eh.comentario}" if ultima_eh.comentario else "")]
            if ultima_eh and ultima_eh.recomendacion == "segunda_entrevista" else [])],
@@ -363,6 +382,16 @@ def _sintesis_global(p: Postulacion) -> dict:
         "puntosPorValidar": puntos_por_validar,
         "recomendacionRedHuman": recomendacion,
         "recomendacionMotivo": motivo,
+        "noEvaluados": no_evaluados,
+        # 2026-10-01 (ficha y resumen): versión CORTA para el Resumen — máx. 3 por lista y 12 palabras por frase; el
+        # detalle («Ver detalle» / Evaluaciones) conserva los textos completos.
+        "resumenFicha": {
+            "fortalezas": [_ia.frase_resumen(x) for x in fortalezas[:3]],
+            "porValidar": [_ia.frase_resumen(x) for x in puntos_por_validar[:3]],
+            "noEvaluados": [_ia.frase_resumen(x) for x in no_evaluados[:3]],
+            "recomendacionBreve": _ia.frase_resumen(motivo) if motivo else "",
+            "afinidadEntrevista": match_ia,
+        },
     }
 
 
@@ -402,6 +431,16 @@ def _postulacion_resumen_dict(p: Postulacion) -> dict:
         "creadoEn": iso(p.creado_en),
         "cerradaEn": iso(p.cerrada_en),
     }
+
+
+def _columna_visible(etapa: str) -> str:
+    return {"Entrevista IA": "Filtro Red Human", "Entrevista Humana": "Filtro humano", "Evaluación": "Filtro humano"}.get(etapa, etapa)
+
+
+def _domicilio_vigente(c: Candidato) -> str:
+    """2026-10-01: UN domicilio vigente para ficha y formulario de alta — el capturado en datos personales manda; si
+    no hay, la ubicación de la persona. Los cambios quedan en `datos_personales.historial_domicilio`."""
+    return str(((c.datos_personales or {}).get("domicilio") or "")).strip() or (c.ubicacion or "")
 
 
 def _telegram_postulacion(p: Postulacion) -> dict:
@@ -449,9 +488,12 @@ def postulacion_dict(p: Postulacion, detalle: bool = False, n_mensajes: Optional
         "etapa": p.etapa,
         # Fraiche (spec §11-12): paso visible de la ruta por destino y estado de franquicia
         "paso": fraiche.paso_visible(p),
-        "pasoNombre": fraiche.PASOS[fraiche.paso_visible(p)]["nombre"],
+        # 2026-10-01 (ficha alineada al pipeline estándar): la etapa visible es la COLUMNA; Telegram, Entrevista Red Human y
+        # presentación al franquiciatario son actividades dentro de su columna (ver `avance`), no etapas.
+        "pasoNombre": _columna_visible(p.etapa),
         "destino": fraiche.destino_de(p),
-        "ruta": fraiche.ruta_visible(p),
+        "ruta": [{"clave": e, "nombre": n, "etapa": e} for e, n in (("Prefiltro", "Prefiltro"), ("Entrevista IA", "Filtro Red Human"),
+                                                                     ("Entrevista Humana", "Filtro humano"), ("Contratación", "Contratación"), ("Onboarding", "Onboarding"))],
         "franquiciaEstado": p.franquicia_estado or "",
         "franquiciaEstadoTexto": fraiche.ESTADOS_FRANQUICIA.get(p.franquicia_estado or "", ""),
         "score": p.score,
@@ -536,6 +578,9 @@ def postulacion_dict(p: Postulacion, detalle: bool = False, n_mensajes: Optional
         **base,
         **_sintesis_global(p),
         **_telegram_postulacion(p),
+        "domicilio": _domicilio_vigente(c),
+        "historialDomicilio": list((c.datos_personales or {}).get("historial_domicilio") or []),
+        "sucursalVacante": (v.sucursal or "") if v else "",
         "cvDatos": c.cv_datos or {},
         "analisis": p.analisis or {},
         "listaArchivos": [archivo_dict(a) for a in c.archivos],

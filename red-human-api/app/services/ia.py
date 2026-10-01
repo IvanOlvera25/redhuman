@@ -1466,6 +1466,30 @@ class PerfilProfundo(BaseModel):
     relacion_jefatura: DimensionPerfil = Field(description="Cómo se relaciona con jefes y autoridad.")
 
 
+# Cambios Fraiche 2026-10-01 («ficha y resumen del candidato» §6): reglas del resumen generado por IA. Se piden en el
+# prompt y se GARANTIZAN en código al armar el resumen (`frase_resumen`, `es_no_evaluado` en serial._sintesis_global).
+REGLAS_RESUMEN_IA = (
+    "REGLAS DEL RESUMEN: cada fortaleza, punto por validar y frase del resumen tiene MÁXIMO 12 palabras, directa y sin "
+    "repetir información de otra frase. Un tema que NO se preguntó NO es una debilidad: no lo pongas en riesgos ni lo "
+    "penalices; ponlo en `faltante` (se mostrará como «No evaluado»). Si una respuesta fue insuficiente o ambigua, el punto "
+    "por validar empieza con «Por validar:» y dice brevemente el motivo (p. ej. «Por validar: no precisó tiempo en caja»)."
+)
+_PATRON_NO_EVALUADO = re.compile(r"\b(no se (cubri|abord|pregunt|evalu|tocó|toco|explor)|no (fue|fue) (preguntad|evaluad)|no se mencion|sin informaci[oó]n sobre|no se hablo|no se habló)", re.I)
+
+
+def es_no_evaluado(texto: str) -> bool:
+    """Un «riesgo» que en realidad es un tema que nadie preguntó → «No evaluado» (nunca un incumplimiento)."""
+    return bool(_PATRON_NO_EVALUADO.search(texto or ""))
+
+
+def frase_resumen(texto: str, maximo: int = 12) -> str:
+    """Frase del RESUMEN con máximo `maximo` palabras (el detalle conserva el texto completo)."""
+    palabras = (texto or "").replace("\n", " ").split()
+    if len(palabras) <= maximo:
+        return " ".join(palabras)
+    return " ".join(palabras[:maximo]).rstrip(",;:.–- ") + "…"
+
+
 class EvaluacionEntrevista(BaseModel):
     resumen: str = Field(description="Resumen ejecutivo de la evaluación integral (CV + entrevista) en 2-3 frases para RH.")
     fortalezas: List[str] = Field(description="2 a 4 fortalezas, con evidencia del CV o de lo que dijo la persona.")
@@ -1744,7 +1768,8 @@ def evaluar_entrevista(
             f"Enfoque de la entrevista: {enfoque_entrevista} ({ENFOQUE_ENTREVISTA_TEMAS[enfoque_entrevista]}); "
             "no evalúes dimensiones personales si el enfoque es solo profesional. "
             f"CUMPLIMIENTO (NO NEGOCIABLE): nunca registres, cites ni uses datos sobre {DATOS_SENSIBLES_PROHIBIDOS}, "
-            "aunque el candidato los haya mencionado; omítelos por completo."
+            "aunque el candidato los haya mencionado; omítelos por completo. "
+            + REGLAS_RESUMEN_IA
         ),
         input=(
             f"Puesto: {titulo}\nRequisitos indispensables: {requisitos}\nPerfil ideal: {perfil_ideal or 'no especificado'}\n"

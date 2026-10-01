@@ -244,6 +244,35 @@ with TestClient(app) as client:
     check(r.status_code == 200 and r.json()["etapa"] == "Onboarding" and r.json()["avance"]["siguienteAccion"]["tipo"] == "confirmar_ingreso_franquicia", "Onboarding: falta registrar el ingreso confirmado")
     r = client.post(f"/candidatos/{PF}/franquicia/ingreso", json={})
     check(r.status_code == 200 and r.json()["activa"] is False and r.json()["motivoCierre"] == "ingreso_franquicia", "ingreso confirmado por el franquiciatario → cierre")
+    lista = r.json()["avance"]["lista"]
+    check([x["nombre"] for x in lista] == ["Prefiltro", "Entrevista Red Human", "Entrevista de Reclutamiento", "Presentación al franquiciatario",
+                                          "Entrevista y decisión del franquiciatario", "Confirmación de contratación", "Confirmación de ingreso"],
+          "ficha · franquicia: exactamente las 7 actividades del spec, sin IPV/psicometría/médico/socioeconómico/kit/SAP")
+    check(all(x["estadoTexto"] in ("Completado", "En curso", "Pendiente") for x in lista) and lista[-1]["estadoTexto"] == "Completado", "cada actividad: Completado / En curso / Pendiente según registros")
+
+    print("\n--- Ficha y resumen (2026-10-01) ---")
+    ft = client.get(f"/candidatos/{PT}").json()
+    check([x["nombre"] for x in ft["ruta"]] == ["Prefiltro", "Filtro Red Human", "Filtro humano", "Contratación", "Onboarding"] and ft["pasoNombre"] in ("Onboarding",),
+          "etapas de la ficha = pipeline estándar (sin «Nuevo», «Prefiltro web», «Filtro Telegram» ni «Presentación»)")
+    check("validaciones" not in json.dumps(ft["avance"]["integral"], ensure_ascii=False), "sin el contador «N de M validaciones»")
+    pre = ft["prefiltroResumen"]
+    check(pre and pre["total"] == len(pre["detalle"]) and not any("BBVA" in d["criterio"] for d in pre["detalle"]) and pre["cumple"] + len(pre["incumplidos"]) + len(pre["porValidar"]) == pre["total"],
+          f"«Cumple N de M»: el adeudo BBVA no cuenta y cada criterio tiene su estado ({pre['cumple']} de {pre['total']})")
+    rf = ft["resumenFicha"]
+    check(len(rf["fortalezas"]) <= 3 and len(rf["porValidar"]) <= 3 and all(len(x.rstrip("…").split()) <= 12 for x in rf["fortalezas"] + rf["porValidar"] + [rf["recomendacionBreve"]]),
+          "resumen: máximo 3 por lista y 12 palabras por frase")
+    from app.services import ia as _ia
+    check(_ia.es_no_evaluado("No se cubrió en la entrevista: disponibilidad") and not _ia.es_no_evaluado("Poca experiencia en caja"), "un tema no preguntado es «No evaluado», no un incumplimiento")
+    r = client.patch(f"/candidatos/{PT}/domicilio", json={"domicilio": "Calle Ficticia 12, Coyoacán, CDMX"})
+    db.expire_all()
+    pt = db.query(Postulacion).filter(Postulacion.codigo == PT).first()
+    alta = client.get(f"/contratacion/expedientes/{pt.expediente.id}/datos-alta").json()
+    dom_alta = next(x for b in alta["bloques"] for x in b["campos"] if x["clave"] == "domicilio")
+    check(r.json()["domicilio"] == "Calle Ficticia 12, Coyoacán, CDMX" and dom_alta["valor"] == "Calle Ficticia 12, Coyoacán, CDMX", "domicilio vigente único entre ficha y formulario de alta")
+    client.patch(f"/contratacion/expedientes/{pt.expediente.id}/datos-alta", json={"personales": {"domicilio": "Av. Demo 45, Tlalpan, CDMX"}, "campos": {}})
+    f2 = client.get(f"/candidatos/{PT}").json()
+    check(f2["domicilio"] == "Av. Demo 45, Tlalpan, CDMX" and len(f2["historialDomicilio"]) == 2 and f2["historialDomicilio"][-1]["anterior"] == "Calle Ficticia 12, Coyoacán, CDMX",
+          "el cambio desde el formulario de alta se ve en la ficha y queda en el historial")
     t = client.get("/metricas/reclutamiento", params={"destino": "franquicia"}).json() if recl.rol in ("Administrador", "Coordinación") else None
 
     print("\n--- Corregir el Tipo de tienda conserva resultados y ajusta pendientes ---")
