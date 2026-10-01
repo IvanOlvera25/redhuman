@@ -150,7 +150,7 @@ export default function Entrevistas() {
           <div className="relative aspect-[723/295] overflow-hidden bg-[#151517]">
             {metricas?.avatar_activo !== false ? (
               /* eslint-disable-next-line @next/next/no-img-element */
-              <img src="/avatar-entrevista.webp" alt="Red Human, entrevistadora en video" className="h-full w-full object-cover object-[center_30%]" />
+              <img src="/avatar-alma.png" alt="Red Human, entrevistadora en video" className="h-full w-full object-cover" />
             ) : (
               <div className="grid h-full place-items-center">
                 <div className="grid h-24 w-24 place-items-center rounded-full bg-gradient-to-br from-brand to-brand-2">
