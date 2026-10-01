@@ -773,7 +773,12 @@ async def procesar_mensaje_entrante(db: Session, msg: dict) -> dict:
         otra = next((x for x in c.postulaciones_activas if x.vacante_id == vacante_detectada.id and x.id != p.id), None)
         if otra:
             if not p.vacante_id and not p.mensajes:
-                db.delete(p)
+                # 2026-10-01: si era la ÚNICA postulación de esa fila de persona, se cierra en vez de borrarse — una
+                # persona sin postulaciones impide arrancar la API (guardia de Fase 2).
+                if len(p.candidato.postulaciones) > 1 if p.candidato else True:
+                    db.delete(p)
+                else:
+                    p.cerrar("sin_interes")
             p = otra
             fijar_conversacion(p)
             db.flush()
