@@ -15,6 +15,7 @@ import { fetchTablero, nombreEtapa, type TableroControl } from "@/lib/api";
 import type { EstadoPrefiltro } from "@/lib/data";
 import { usePolling } from "@/lib/use-polling";
 
+import { CANAL } from "@/lib/canal";
 const COLORES_FUENTE = ["var(--brand)", "var(--human)", "var(--brand-2)", "#8b8c90", "#c9cacd", "#a5a6aa"];
 
 function Vacio({ texto }: { texto: string }) {
@@ -73,7 +74,7 @@ export default function Tablero() {
               detalle={`${t.kpis.candidatosNuevos7d} nuevos en 7 días`} spark={serieNuevos} tone="brand" />
             <KpiCard label="Colaboradores activos" value={t.kpis.colaboradoresActivos.toLocaleString("es-MX")}
               detalle={`${t.kpis.altas30d} alta${t.kpis.altas30d === 1 ? "" : "s"} en los últimos 30 días`} tone="good" />
-            <KpiCard label="Vacantes publicadas" value={String(t.kpis.vacantesPublicadas)} detalle="Visibles en portal y WhatsApp" tone="human" />
+            <KpiCard label="Vacantes publicadas" value={String(t.kpis.vacantesPublicadas)} detalle={`Visibles en portal y ${CANAL}`} tone="human" />
             <KpiCard label="Entrevistas (7 días)" value={String(serieEntrevistas.reduce((a, b) => a + b, 0))}
               detalle="Red Human finalizadas + humanas" spark={serieEntrevistas} tone="human" />
           </>

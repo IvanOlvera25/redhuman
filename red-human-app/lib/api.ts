@@ -20,6 +20,7 @@ import type {
 } from "@/lib/data";
 import type { NuevoIngreso, ResumenTableroOnboarding } from "@/lib/phase2";
 
+import { CANAL } from "@/lib/canal";
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export type Resultado<T> = { ok: true; data: T } | { ok: false; error: string };
@@ -583,7 +584,7 @@ export const FUENTES_POSTULACION: { clave: string; nombre: string }[] = [
   { clave: "referido", nombre: "Referido" },
   { clave: "campo", nombre: "Campo" },
   { clave: "contacto_directo", nombre: "Contacto directo" },
-  { clave: "whatsapp", nombre: "WhatsApp" },
+  { clave: "whatsapp", nombre: CANAL },
   { clave: "rh", nombre: "RH" },
 ];
 export function nombreFuente(clave: string | undefined | null): string {
@@ -1222,7 +1223,7 @@ const NOMBRE_DESTINATARIO: Record<string, string> = { candidato: "Candidato", en
  * «✗ WhatsApp al entrevistador — RESEND_API_KEY sin configurar»). Vacío si no hubo destinatarios. */
 export function lineasResultados(resultados: ResultadoNotificacion[] | undefined): { ok: boolean; texto: string }[] {
   return (resultados ?? []).map((r) => {
-    const canal = r.canal === "correo" ? "Correo" : r.canal === "whatsapp" ? "WhatsApp" : "Aviso";
+    const canal = r.canal === "correo" ? "Correo" : r.canal === "whatsapp" ? CANAL : "Aviso";
     const a = r.destinatario ? ` al ${NOMBRE_DESTINATARIO[r.destinatario]?.toLowerCase() ?? r.destinatario}` : "";
     const destino = r.destino ? ` (${r.destino})` : "";
     return r.enviado
@@ -1685,7 +1686,32 @@ export function postular(datos: {
     nuevo: boolean;
     cv: { procesado: boolean; avisos: string[] };
     clasificacion: { estado: string; score: number; evidencia: string } | null;
+    /** Telegram (2026-10-01): liga t.me firmada que vincula el chat y sigue el proceso ("" si el canal es WhatsApp). */
+    ligaTelegram?: string;
   }>("/candidatos/postular", form);
+}
+
+/* ---------- Telegram (2026-10-01, demo Fraiche) ---------- */
+export interface EstadoTelegram {
+  canalActivo: boolean;
+  configurado: boolean;
+  bot: string;
+  liga: string;
+  webhook: { url: string; pendientes: number; ultimoError: string } | null;
+  vinculados: { nombre: string; usuario: string; telefono: string; quien: string; vinculadoEn: string | null }[];
+  sinVincular: number;
+}
+export function fetchEstadoTelegram() {
+  return get<EstadoTelegram>("/telegram/estado");
+}
+export function ligaTelegramPara(telefono: string, ref = "") {
+  return get<{ liga: string; vinculado: boolean }>(`/telegram/liga?telefono=${encodeURIComponent(telefono)}&ref=${encodeURIComponent(ref)}`);
+}
+export function registrarWebhookTelegram() {
+  return post<{ url: string; ok: boolean; description?: string }>("/telegram/webhook/registrar", {});
+}
+export function probarTelegram(telefono: string) {
+  return post<{ enviado: boolean; detalle: string }>("/telegram/prueba", { telefono });
 }
 
 export interface MensajePrefiltro {

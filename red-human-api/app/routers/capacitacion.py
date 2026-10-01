@@ -34,6 +34,7 @@ from ..services.avatar import crear_sesion_avatar
 from ..services.pdf import pdf_curso
 from ..services.correo import enviar_correo
 from ..services.whatsapp import enviar_mensaje, enviar_texto_sin_plantilla
+from ..services import canal as _canal
 
 router = APIRouter(prefix="/capacitacion", tags=["capacitacion"])
 
@@ -545,7 +546,7 @@ def registro_externo(token: str, datos: RegistroExternoIn, db: Session = Depends
     if not datos.nombre.strip():
         raise HTTPException(400, "Escribe tu nombre.")
     if not (datos.correo.strip() or datos.telefono.strip()):
-        raise HTTPException(400, "Deja tu correo o tu WhatsApp para enviarte tu resultado.")
+        raise HTTPException(400, f"Deja tu correo o tu {'teléfono' if _canal.es_telegram() else 'WhatsApp'} para enviarte tu resultado.")
     a.externo_nombre = datos.nombre.strip()[:200]
     a.externo_correo = datos.correo.strip().lower()[:200]
     a.externo_telefono = datos.telefono.strip()[:30]

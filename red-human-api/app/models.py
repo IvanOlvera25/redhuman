@@ -583,6 +583,24 @@ class Entrevista(Base):
     postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="entrevistas")
 
 
+class VinculoTelegram(Base):
+    """Telegram (2026-10-01): un bot no puede escribirle a un número de teléfono, solo a un `chat_id` que ya
+    le habló. Esta tabla une el chat con el teléfono (10 dígitos, misma clave que `Candidato.telefono`,
+    `Usuario.telefono`, `Colaborador.telefono`, contactos de Cliente) para que TODO el código que envía «al
+    teléfono» siga igual. Se llena cuando la persona comparte su número con el botón del bot (Telegram
+    garantiza que es SU número) o abre una liga firmada `?start=` que ya trae el teléfono."""
+    __tablename__ = "vinculos_telegram"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    telefono: Mapped[str] = mapped_column(String(20), default="", index=True)  # 10 dígitos; "" = aún sin vincular
+    nombre: Mapped[str] = mapped_column(String(200), default="")
+    usuario: Mapped[str] = mapped_column(String(120), default="")  # @username de Telegram (opcional)
+    inicio_pendiente: Mapped[str] = mapped_column(String(80), default="")  # payload de /start a procesar al vincular
+    vinculado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, onupdate=ahora)
+
+
 class Mensaje(Base):
     __tablename__ = "mensajes"
 

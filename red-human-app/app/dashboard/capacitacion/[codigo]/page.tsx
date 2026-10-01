@@ -34,6 +34,7 @@ import {
 import type { Candidato } from "@/lib/data";
 import { cn } from "@/lib/utils";
 
+import { CANAL } from "@/lib/canal";
 const ETIQUETA_TIPO = { colaborador: "Colaborador", candidato: "Candidato", externo: "Externo" } as const;
 
 function Plegable({ titulo, resumen, children, abiertoInicial = false }: { titulo: string; resumen?: string; children: React.ReactNode; abiertoInicial?: boolean }) {
@@ -137,7 +138,7 @@ export default function FichaCurso() {
             variant="secondary"
             onClick={() => generarLigaDemo(false)}
             disabled={Boolean(ocupado)}
-            title="Crea una liga pública de demostración (no asigna a nadie ni manda WhatsApp)"
+            title={`Crea una liga pública de demostración (no asigna a nadie ni manda ${CANAL})`}
           >
             {ocupado === "demo" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
             Generar Liga Directa (Modo Expo)
@@ -310,14 +311,14 @@ function AsignarCurso({ curso, onClose, onAsignado }: { curso: Curso; onClose: (
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="font-display text-lg font-bold">Asignar «{curso.titulo}»</h2>
-            <p className="mt-1 text-sm text-ink-2">El mismo curso para colaboradores, candidatos o externos. Se manda la liga por WhatsApp/correo.</p>
+            <p className="mt-1 text-sm text-ink-2">El mismo curso para colaboradores, candidatos o externos. Se manda la liga por {CANAL}/correo.</p>
           </div>
           <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-ink-3 hover:bg-surface-2" aria-label="Cerrar"><X className="h-4 w-4" /></button>
         </div>
 
         {ligas.length > 0 ? (
           <div className="mt-4 flex flex-col gap-3">
-            <Aviso tono="ok">Liga generada. Compártela con la persona externa: al abrirla solo se le pide nombre y correo o WhatsApp.</Aviso>
+            <Aviso tono="ok">Liga generada. Compártela con la persona externa: al abrirla solo se le pide nombre y correo o {CANAL}.</Aviso>
             {ligas.map((l) => (
               <div key={l.liga} className="flex items-center gap-2 rounded-xl border border-border-soft bg-surface-2 px-3 py-2">
                 <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink-2">{l.liga}</span>
@@ -362,7 +363,7 @@ function AsignarCurso({ curso, onClose, onAsignado }: { curso: Curso; onClose: (
                 <div className="flex flex-col gap-3">
                   <label className="flex items-center gap-2 rounded-xl border border-border-soft p-3 text-sm">
                     <input type="checkbox" checked={ligaAbierta} onChange={(e) => setLigaAbierta(e.target.checked)} className="h-4 w-4 rounded border-border-soft text-brand" />
-                    <span>Generar una <b>liga abierta</b>: la persona se registra al abrirla (solo nombre y correo o WhatsApp).</span>
+                    <span>Generar una <b>liga abierta</b>: la persona se registra al abrirla (solo nombre y correo o {CANAL}).</span>
                   </label>
                   {!ligaAbierta && (
                     <>
@@ -370,7 +371,7 @@ function AsignarCurso({ curso, onClose, onAsignado }: { curso: Curso; onClose: (
                         <div key={i} className="grid gap-2 sm:grid-cols-4">
                           <input value={e.nombre} onChange={(ev) => setExternos(externos.map((x, k) => (k === i ? { ...x, nombre: ev.target.value } : x)))} placeholder="Nombre" className={inputCls} />
                           <input value={e.correo} onChange={(ev) => setExternos(externos.map((x, k) => (k === i ? { ...x, correo: ev.target.value } : x)))} placeholder="Correo" className={inputCls} />
-                          <input value={e.telefono} onChange={(ev) => setExternos(externos.map((x, k) => (k === i ? { ...x, telefono: ev.target.value } : x)))} placeholder="WhatsApp (10 dígitos)" className={inputCls} />
+                          <input value={e.telefono} onChange={(ev) => setExternos(externos.map((x, k) => (k === i ? { ...x, telefono: ev.target.value } : x)))} placeholder={`${CANAL} (10 dígitos)`} className={inputCls} />
                           <input value={e.organizacion} onChange={(ev) => setExternos(externos.map((x, k) => (k === i ? { ...x, organizacion: ev.target.value } : x)))} placeholder="Proveedor / cliente" className={inputCls} />
                         </div>
                       ))}
@@ -528,7 +529,7 @@ function ModalLigaDemo({ datos, curso, onOtra, regenerando, onClose }: {
           <div>
             <h2 className="font-display text-lg font-bold">Liga directa · Modo Expo</h2>
             <p className="mt-1 text-sm text-ink-2">
-              «{curso.titulo}» listo para demostrarse. No se asignó a ninguna persona y no salió ningún WhatsApp ni correo.
+              «{curso.titulo}» listo para demostrarse. No se asignó a ninguna persona y no salió ningún {CANAL} ni correo.
             </p>
           </div>
           <button onClick={onClose} className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-ink-3 transition hover:bg-surface-2" aria-label="Cerrar">

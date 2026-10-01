@@ -36,6 +36,7 @@ import {
   type PreguntaClima, type PropuestaClima, type ResultadosClima,
 } from "@/lib/api";
 
+import { CANAL } from "@/lib/canal";
 const ESTADO_TONO: Record<string, "neutral" | "good" | "brand"> = { borrador: "neutral", abierta: "good", cerrada: "brand" };
 const ESTADO_LABEL: Record<string, string> = { borrador: "Borrador", abierta: "Abierta", cerrada: "Cerrada" };
 
@@ -59,7 +60,7 @@ function resumenEnvios(envios: EnvioClima[]) {
   const fallidos = nuevos.filter((e) => !(e.correo?.enviado || e.whatsapp?.enviado));
   return {
     texto: `Liga personal enviada a ${nuevos.length - fallidos.length} de ${nuevos.length} colaborador(es).` +
-      (fallidos.length ? ` No salió para: ${fallidos.map((f) => f.nombre).join(", ")} (revisa su correo o WhatsApp en el roster).` : ""),
+      (fallidos.length ? ` No salió para: ${fallidos.map((f) => f.nombre).join(", ")} (revisa su correo o ${CANAL} en el roster).` : ""),
     tono: (fallidos.length ? "warn" : "ok") as "warn" | "ok",
   };
 }
@@ -544,7 +545,7 @@ function ModalEnvio({ medicion, onClose, onEnviada }: {
   }
 
   return (
-    <ModalMarco titulo="Enviar encuesta" subtitulo="Cada destinatario recibe su liga personal por correo y/o WhatsApp. Al enviar, la encuesta queda Abierta." onClose={onClose} ancho="max-w-3xl">
+    <ModalMarco titulo="Enviar encuesta" subtitulo={`Cada destinatario recibe su liga personal por correo y/o ${CANAL}. Al enviar, la encuesta queda Abierta.`} onClose={onClose} ancho="max-w-3xl">
       {opciones === null ? <Cargando /> : (
         <>
           <p className="text-xs font-medium text-ink-2">Destinatarios</p>

@@ -28,6 +28,7 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+import { CANAL } from "@/lib/canal";
 const PASOS: Record<string, string> = { asignada: "Asignada", enviada: "Enviada", iniciada: "Iniciada", completada: "Completada", resultado_recibido: "Resultado recibido" };
 const ORIGEN_TEXTO: Record<string, string> = {
   liga_externa: "Por liga externa",
@@ -153,7 +154,7 @@ function BloqueResponsable({ f, onChange, contactos, clienteNombre }: {
         <>
           <CampoRH label="Nombre"><input value={f.nombre} onChange={(x) => set({ nombre: x.target.value })} className={inputRH} /></CampoRH>
           <CampoRH label="Correo"><input type="email" value={f.correo} onChange={(x) => set({ correo: x.target.value })} className={inputRH} /></CampoRH>
-          <CampoRH label="WhatsApp"><input value={f.whatsapp} onChange={(x) => set({ whatsapp: x.target.value })} className={inputRH} placeholder="10 dígitos" /></CampoRH>
+          <CampoRH label={CANAL}><input value={f.whatsapp} onChange={(x) => set({ whatsapp: x.target.value })} className={inputRH} placeholder="10 dígitos" /></CampoRH>
         </>
       )}
       <CampoRH label="Cita (fecha y hora)"><input type="datetime-local" value={f.cita} onChange={(x) => set({ cita: x.target.value })} className={inputRH} /></CampoRH>

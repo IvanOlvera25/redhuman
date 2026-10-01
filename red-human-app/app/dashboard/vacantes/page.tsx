@@ -91,6 +91,7 @@ import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveed
 import { cn } from "@/lib/utils";
 import { usePolling } from "@/lib/use-polling";
 
+import { CANAL } from "@/lib/canal";
 const estadoTone: Record<Vacante["estado"], "good" | "neutral" | "warn" | "bad"> = {
   Publicada: "good",
   Borrador: "neutral",
@@ -106,7 +107,7 @@ const filtros = ["Todas", "Publicada", "Borrador", "En revisión"] as const;
  * solo se registran; su integración está en docs/arquitectura_bolsas_empleo.md. */
 const PLATAFORMAS = [
   { clave: "portal", nombre: "Portal", api: "Portal", nota: "Landing pública /aplicar" },
-  { clave: "whatsapp", nombre: "WhatsApp", api: "WhatsApp", nota: "Menú del agente y estados" },
+  { clave: "whatsapp", nombre: CANAL, api: "WhatsApp", nota: "Menú del agente y estados" },
   { clave: "google", nombre: "Google Empleos", api: "Google Empleos", nota: "Etiqueta estructurada JobPosting" },
   { clave: "jooble", nombre: "Jooble", api: "Jooble", nota: "Feed XML automático" },
   { clave: "talent", nombre: "Talent.com", api: "Talent.com", nota: "Feed XML automático" },
@@ -115,7 +116,7 @@ const PLATAFORMAS = [
 /** Textos generados por plataforma (`Vacante.publicaciones`): lo que RH copia y pega. Independiente
  * de los canales de arriba — OCC y LinkedIn ya no son canal, pero su texto se sigue generando. */
 const BLOQUES_TEXTO = [
-  { clave: "whatsapp", nombre: "WhatsApp" },
+  { clave: "whatsapp", nombre: CANAL },
   { clave: "indeed", nombre: "Indeed" },
   { clave: "computrabajo", nombre: "Computrabajo" },
   { clave: "talenteca", nombre: "Talenteca" },
@@ -887,7 +888,7 @@ function EditarVacante({ v, onClose, onGuardada }: { v: Vacante; onClose: () => 
       <div className="flex flex-col gap-6 p-6">
         <Aviso tono="info">
           Corrige cualquier campo (puesto, sueldo, ubicación, preguntas de prefiltro, entrevista…). Los cambios aplican de inmediato en
-          portal, WhatsApp y la IA; lo ya publicado por plataforma se conserva hasta que regeneres.
+          portal, {CANAL} y la IA; lo ya publicado por plataforma se conserva hasta que regeneres.
         </Aviso>
         <FormularioContenidoVacante
           value={contenido}
@@ -933,7 +934,7 @@ function ConfirmarEliminarVacante({
           <div>
             <h2 className="font-display text-lg font-bold">¿Eliminar la vacante «{v.titulo}»?</h2>
             <p className="mt-2 text-sm leading-relaxed text-ink-2">
-              Dejará de aparecer en los tableros, en el portal público y en el menú de WhatsApp.
+              Dejará de aparecer en los tableros, en el portal público y en el menú de {CANAL}.
               {activas > 0 && (
                 <>
                   {" "}
@@ -1344,7 +1345,7 @@ function CrearVacante({ onClose, onGuardado }: { onClose: () => void; onGuardado
 function ResultadoGeneracion({ gen }: { gen: VacanteGenerada }) {
   const bloques: Record<string, BloquePlataforma> = useMemo(
     () => ({
-      whatsapp: { titulo: "WhatsApp", copy: gen.texto_whatsapp, page: gen.texto_whatsapp, etiquetas: [] },
+      whatsapp: { titulo: CANAL, copy: gen.texto_whatsapp, page: gen.texto_whatsapp, etiquetas: [] },
       occ: gen.occ,
       linkedin: gen.linkedin,
       portal: gen.portal,
@@ -2116,7 +2117,7 @@ function DetalleVacante({
         {v.estado === "Eliminada" && (
           <Aviso tono="warn">
             Esta vacante fue eliminada{v.eliminadaPor ? ` por ${v.eliminadaPor}` : ""}{v.eliminadaEn ? ` el ${new Date(v.eliminadaEn).toLocaleDateString("es-MX")}` : ""}.
-            No aparece en tableros, portal ni WhatsApp; su historial se conserva.
+            No aparece en tableros, portal ni {CANAL}; su historial se conserva.
           </Aviso>
         )}
         {Boolean(v.homonimasOtrasCuentas?.length) && (
@@ -2239,13 +2240,13 @@ function DetalleVacante({
           <ListaResumen titulo="Prestaciones" items={v.beneficios ?? []} />
         </Plegable>
 
-        <Plegable titulo="Prefiltros" resumen={`${nPrefiltro ? `${v.criterios?.length ?? 0} web · ${v.criteriosWhatsapp?.length ?? 0} WhatsApp` : "Sin preguntas todavía"}${v.cursoFiltroTitulo ? ` · curso: ${v.cursoFiltroTitulo}` : ""}`}>
+        <Plegable titulo="Prefiltros" resumen={`${nPrefiltro ? `${v.criterios?.length ?? 0} web · ${v.criteriosWhatsapp?.length ?? 0} ${CANAL}` : "Sin preguntas todavía"}${v.cursoFiltroTitulo ? ` · curso: ${v.cursoFiltroTitulo}` : ""}`}>
           {live && puedeDecidir && <CursoFiltro v={v} onCambio={() => onCambio(v.id)} />}
           {(v.criterios?.length ?? 0) > 0 && <Criterios criterios={v.criterios as CriterioFiltro[]} />}
           {(v.criteriosWhatsapp?.length ?? 0) > 0 ? (
-            <Criterios criterios={v.criteriosWhatsapp as CriterioFiltro[]} titulo="Criterios de prefiltro · WhatsApp (puntos críticos)" />
+            <Criterios criterios={v.criteriosWhatsapp as CriterioFiltro[]} titulo={`Criterios de prefiltro · ${CANAL} (puntos críticos)`} />
           ) : (v.criterios?.length ?? 0) > 0 ? (
-            <p className="text-[12px] text-ink-3">WhatsApp: el agente confirma con las mismas preguntas de la web (no hay puntos críticos propios).</p>
+            <p className="text-[12px] text-ink-3">{CANAL}: el agente confirma con las mismas preguntas de la web (no hay puntos críticos propios).</p>
           ) : null}
         </Plegable>
 

@@ -23,6 +23,7 @@ from .correo import enviar_correo
 from .whatsapp import enviar_mensaje, enviar_plantilla_documentos, enviar_plantilla_entrevista
 from . import plantillas_correo
 from ..serial import nombre_empresa_candidato
+from . import canal as _canal
 
 # RH/entrevistador capturan fecha/hora pensando en hora de México — nunca vienen con offset.
 # SQLite descarta el offset de un DateTime(timezone=True) y se queda con los números de reloj
@@ -485,7 +486,7 @@ def advertencias_de(resultados: List[dict]) -> List[str]:
         if r.get("canal") == "correo" and r.get("destino"):
             avisos.append(f"Entrevista asignada, pero el correo falló. Verifica la API Key o el Dominio ({r.get('destinatario')}: {detalle[:120]})")
         elif r.get("canal") == "whatsapp" and r.get("destino"):
-            avisos.append(f"El WhatsApp a {r.get('destinatario')} no salió: {detalle[:120]}")
+            avisos.append(f"El {_canal.nombre()} a {r.get('destinatario')} no salió: {detalle[:120]}")
     return avisos
 
 

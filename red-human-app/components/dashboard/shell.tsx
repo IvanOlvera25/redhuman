@@ -37,6 +37,7 @@ import { usePolling } from "@/lib/use-polling";
 import { BarraAgente } from "@/components/dashboard/agente/barra";
 import { PanelAgente } from "@/components/dashboard/agente/panel";
 
+import { CANAL } from "@/lib/canal";
 type NavItem = {
   href: string;
   label: string;
@@ -218,13 +219,13 @@ function ContadorAgente() {
     cargar();
   }, [cargar, cuentaActualId]);
   usePolling(cargar, 30000);
-  if (!act) return <>Conectando con el agente de WhatsApp…</>;
+  if (!act) return <>Conectando con el agente de {CANAL}…</>;
   if (act.prefiltrando === 0) {
     return act.enPrefiltro > 0
-      ? <>{act.enPrefiltro} candidato{act.enPrefiltro !== 1 ? "s" : ""} en Prefiltro, sin conversación activa por WhatsApp ahora mismo.</>
-      : <>Sin conversaciones de prefiltro activas por WhatsApp en este momento.</>;
+      ? <>{act.enPrefiltro} candidato{act.enPrefiltro !== 1 ? "s" : ""} en Prefiltro, sin conversación activa por {CANAL} ahora mismo.</>
+      : <>Sin conversaciones de prefiltro activas por {CANAL} en este momento.</>;
   }
-  return <>Prefiltrando {act.prefiltrando} candidato{act.prefiltrando !== 1 ? "s" : ""} en este momento por WhatsApp.</>;
+  return <>Prefiltrando {act.prefiltrando} candidato{act.prefiltrando !== 1 ? "s" : ""} en este momento por {CANAL}.</>;
 }
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {

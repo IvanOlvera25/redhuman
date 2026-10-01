@@ -50,6 +50,7 @@ import { MenuAcciones } from "@/components/dashboard/menu-acciones";
 import { BotonCerrarOnboarding, GestionOnboarding, MiniAvanceOnboarding, ModalNoIngreso } from "@/components/dashboard/onboarding/gestion-onboarding";
 import { UserX } from "lucide-react";
 
+import { CANAL } from "@/lib/canal";
 const docConfig: Record<
   EstadoDoc,
   { tone: "good" | "warn" | "neutral" | "bad"; label: string; icon: React.ComponentType<{ className?: string }> }
@@ -843,7 +844,7 @@ function HistorialCandidato({ candidatoId }: { candidatoId?: string }) {
 
       {/* Chat de WhatsApp */}
       <div>
-        <Eyebrow>Chat de WhatsApp ({mensajes.length})</Eyebrow>
+        <Eyebrow>Chat de {CANAL} ({mensajes.length})</Eyebrow>
         {mensajes.length === 0 ? (
           <p className="mt-2 text-xs text-ink-3">Sin mensajes registrados.</p>
         ) : (

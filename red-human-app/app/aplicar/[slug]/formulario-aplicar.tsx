@@ -20,6 +20,7 @@ import {
   Clock,
   Store,
   Users,
+  Send,
 } from "lucide-react";
 import { Logo, Button, Card, Badge } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -29,6 +30,7 @@ import type { Vacante } from "@/lib/data";
 import { ESTADOS_MX, municipiosDe } from "@/lib/ubicacion";
 import { cn } from "@/lib/utils";
 
+import { CANAL, ES_TELEGRAM } from "@/lib/canal";
 const pasos = ["Tus datos", "Currículum", "Unas preguntas"];
 
 /** Fraiche (spec §5): cada pregunta del prefiltro web se pinta según su tipo — todas CERRADAS, sin texto
@@ -96,6 +98,7 @@ export default function FormularioAplicar() {
 
   const [step, setStep] = useState(0);
   const [done, setDone] = useState(false);
+  const [ligaTelegram, setLigaTelegram] = useState("");
   const [consent, setConsent] = useState(false);
   const [cv, setCv] = useState<File | null>(null);
   const [datos, setDatos] = useState({ nombre: "", correo: "", telefono: "" });
@@ -174,6 +177,7 @@ export default function FormularioAplicar() {
         setError(r.error);
         return;
       }
+      setLigaTelegram(r.data.ligaTelegram ?? "");
       setDone(true);
     } catch (err) {
       setEnviando(false);
@@ -229,6 +233,12 @@ export default function FormularioAplicar() {
                 </span>
               )}
             </div>
+            {vacante?.ligaTelegram && (
+              <a href={vacante.ligaTelegram} target="_blank" rel="noopener noreferrer"
+                className="mt-3 inline-flex items-center gap-1.5 text-sm font-semibold text-[#229ED9] hover:underline">
+                <Send className="h-4 w-4" /> ¿Prefieres postularte por chat? Hazlo en Telegram
+              </a>
+            )}
           </div>
         </div>
 
@@ -262,7 +272,7 @@ export default function FormularioAplicar() {
         )}
 
         {done ? (
-          <Exito titulo={titulo} conCv={Boolean(cv)} />
+          <Exito titulo={titulo} conCv={Boolean(cv)} ligaTelegram={ligaTelegram} />
         ) : (
           <Card className="mt-6 overflow-hidden">
             {/* Progreso */}
@@ -319,7 +329,7 @@ export default function FormularioAplicar() {
                         onChange={(v) => setDatos({ ...datos, correo: v })}
                       />
                       <Campo
-                        label="WhatsApp"
+                        label={ES_TELEGRAM ? "Celular (Telegram)" : "WhatsApp"}
                         icon={Phone}
                         placeholder="33 1234 5678"
                         type="tel"
@@ -327,7 +337,7 @@ export default function FormularioAplicar() {
                         onChange={(v) => setDatos({ ...datos, telefono: v })}
                       />
                       <p className="text-xs text-ink-3 sm:col-span-2">
-                        Con uno de los dos basta, pero por WhatsApp te contestamos más rápido.
+                        Con uno de los dos basta, pero por {CANAL} te contestamos más rápido.
                       </p>
                     </div>
                   )}
@@ -361,7 +371,7 @@ export default function FormularioAplicar() {
                           className="mt-0.5 h-5 w-5 rounded border-border-soft accent-[var(--brand)]"
                         />
                         <span className="text-[13px] leading-relaxed text-ink-2">
-                          Autorizo ser contactado(a) por WhatsApp, correo o llamada, y el tratamiento de mis datos
+                          Autorizo ser contactado(a) por {CANAL}, correo o llamada, y el tratamiento de mis datos
                           personales conforme al{" "}
                           <a href="#" className="text-brand underline">
                             Aviso de Privacidad
@@ -489,7 +499,7 @@ function Campo({
   );
 }
 
-function Exito({ titulo, conCv }: { titulo: string; conCv: boolean }) {
+function Exito({ titulo, conCv, ligaTelegram }: { titulo: string; conCv: boolean; ligaTelegram?: string }) {
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
       <Card className="mt-8 overflow-hidden text-center">
@@ -513,16 +523,30 @@ function Exito({ titulo, conCv }: { titulo: string; conCv: boolean }) {
           </div>
         </div>
 
-        {/* Zero-Touch: el siguiente contacto lo dispara el sistema por WhatsApp, no un clic del candidato */}
+        {/* Zero-Touch: el siguiente contacto lo dispara el sistema por WhatsApp, no un clic del candidato.
+            Telegram (2026-10-01): un bot no puede escribir primero → el candidato abre el chat con la liga firmada. */}
         <div className="p-6 sm:p-8 flex flex-col items-center gap-5">
+          {ligaTelegram ? (
+            <div className="flex w-full max-w-md flex-col items-center gap-3 rounded-2xl border border-[#229ED9]/30 bg-[#229ED9]/10 p-5 text-center">
+              <p className="text-sm leading-relaxed text-ink">
+                Tu proceso sigue en <b>Telegram</b>: toca el botón, se abre el chat con nuestro asistente de RH y te hace unas preguntas rápidas.
+              </p>
+              <a href={ligaTelegram} target="_blank" rel="noopener noreferrer"
+                className="inline-flex h-12 items-center gap-2 rounded-xl bg-[#229ED9] px-6 text-base font-semibold text-white shadow-sm hover:opacity-90">
+                <Send className="h-5 w-5" /> Continuar en Telegram
+              </a>
+              <p className="text-[11px] text-ink-3">¿No tienes Telegram? Descárgalo gratis y vuelve a tocar el botón.</p>
+            </div>
+          ) : (
           <div className="flex w-full max-w-md items-start gap-3 rounded-2xl border border-[#25D366]/30 bg-[#25D366]/10 p-5 text-left">
             <span className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[#25D366]/15 text-[#25D366]">
               <MessageCircle className="h-5 w-5" />
             </span>
             <p className="text-sm leading-relaxed text-ink">
-              Nuestro asistente virtual de RH te contactará por WhatsApp en breve para continuar tu proceso.
+              Nuestro asistente virtual de RH te contactará por {CANAL} en breve para continuar tu proceso.
             </p>
           </div>
+          )}
 
           <div className="flex items-center justify-center gap-6 text-xs text-ink-3">
             <span className="flex items-center gap-1.5">

@@ -4,7 +4,7 @@
    ============================================================ */
 
 export type EstadoPrefiltro = "cumple" | "revision" | "no_cumple" | "pendiente";
-export type FuenteCandidato = "Formulario" | "WhatsApp" | "OCC" | "LinkedIn" | "Indeed" | "RH";
+export type FuenteCandidato = "Formulario" | "WhatsApp" | "Telegram" | "OCC" | "LinkedIn" | "Indeed" | "RH";
 
 export type EtapaCandidato =
   | "Prefiltro"
@@ -152,6 +152,9 @@ export interface Candidato {
   activa?: boolean;
   motivoCierre?: string | null;
   cerradaEn?: string | null;
+  /** Telegram (2026-10-01): si la persona ya vinculó su chat y la liga firmada para que lo haga. */
+  telegramVinculado?: boolean;
+  ligaTelegram?: string;
   /** true si el WhatsApp de esta persona está conversando sobre ESTA postulación. */
   enConversacion?: boolean;
   candidato?: {
@@ -335,6 +338,8 @@ export interface BloquePublicacion {
 export interface Vacante {
   id: string;
   titulo: string;
+  /** Telegram (2026-10-01): liga pública t.me/<bot>?start=VAC-#### para postularse por chat ("" con WhatsApp). */
+  ligaTelegram?: string;
   area: string;
   empresa: string;
   ubicacion: string;

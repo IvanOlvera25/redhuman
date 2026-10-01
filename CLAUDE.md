@@ -393,3 +393,19 @@ explícita. Toda constante/regla del cliente está en `services/fraiche.py` (nun
   roster de colaboradores, entrevistas humanas y chats, Onboarding v2 (plantilla, tareas, «No ingresó»), Capacitación,
   Desempeño v2, Clima v2, Base de Conocimiento (indexa en modo léxico: reindexar con `rag.indexar_documento` y la clave real
   para embeddings) y catálogo; deja la Cuenta Fraiche como `cuenta_predeterminada` de todos los usuarios que la ven.
+
+## Telegram como canal (demo Fraiche, 2026-10-01)
+
+- `WHATSAPP_PROVIDER=telegram` manda TODA la mensajería por un bot (`services/telegram.py`): `whatsapp.enviar_mensaje`,
+  plantillas (sin plantillas ni ventana de 24 h: salen como texto, `TEXTO_PLANTILLAS`), listas (botones en línea con
+  `callback_data` = VAC-/P-/CTA-) y descarga de documentos (`getFile`). El resto del código sigue enviando «al teléfono».
+- Un bot NO puede escribirle primero a un número: `VinculoTelegram` une `chat_id` ↔ teléfono (10 dígitos). Se vincula con el
+  botón nativo «📱 Compartir mi número» (`request_contact`; solo vale si `contact.user_id == from.id`) o con una liga firmada
+  `t.me/<bot>?start=L-<tel>-<ref>-<hmac12>` (`telegram.liga_vinculo`, la regresan `/postular` y la ficha). `?start=VAC-####`
+  postula a esa vacante. Enviar a un teléfono sin vínculo NUNCA truena: `{enviado: False, sin_vinculo: True}` con el motivo.
+- Webhook `POST /webhooks/telegram`: valida `X-Telegram-Bot-Api-Secret-Token` (= `TELEGRAM_WEBHOOK_SECRET`), contesta 200 y
+  corre el turno en segundo plano, dedupe por `update_id`; el turno es `webhooks.procesar_mensaje_entrante` (el MISMO del
+  webhook de WhatsApp). Registro: Configuración → Telegram → «Registrar webhook» (`POST /telegram/webhook/registrar`).
+- Etiquetas: backend `services/canal.nombre()` (importar como `_canal`; `canal` choca con parámetros locales), frontend
+  `lib/canal.ts` (`CANAL`, `ES_TELEGRAM`, de `NEXT_PUBLIC_CANAL_MENSAJERIA` en build). Los valores internos (`canal="whatsapp"`,
+  plataformas, reglas de notificación, `filtro_whatsapp`) NO cambian. Regresión: `scripts/verificar_telegram.py`.

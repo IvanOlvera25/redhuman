@@ -41,6 +41,7 @@ import {
 import type { Candidato, Vacante } from "@/lib/data";
 import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
 
+import { CANAL } from "@/lib/canal";
 const proximasMock = [
   { nombre: "Luis Ángel Torres", puesto: "Desarrollador Full-Stack", tipo: "Video", hora: "Hoy · 12:30", estado: "Confirmada" },
   { nombre: "María Fernanda López", puesto: "Cajero(a) de sucursal", tipo: "Voz", hora: "Hoy · 13:15", estado: "Confirmada" },
@@ -212,7 +213,7 @@ export default function Entrevistas() {
               <span>
                 <span className="block text-sm font-semibold">Agendar candidato</span>
                 <span className="mt-0.5 block text-xs leading-relaxed text-ink-3">
-                  Elige a alguien del pipeline y mándale la liga por WhatsApp.
+                  Elige a alguien del pipeline y mándale la liga por {CANAL}.
                 </span>
               </span>
             </button>
@@ -546,7 +547,7 @@ function NuevaEntrevistaModal({ onClose, onCreada }: { onClose: () => void; onCr
                   </div>
                   <div className="grid gap-4 sm:grid-cols-2">
                     <div>
-                      <label className="text-sm font-semibold">WhatsApp (opcional)</label>
+                      <label className="text-sm font-semibold">{CANAL} (opcional)</label>
                       <input
                         value={telefono}
                         onChange={(e) => setTelefono(e.target.value)}
@@ -601,7 +602,7 @@ function NuevaEntrevistaModal({ onClose, onCreada }: { onClose: () => void; onCr
                   onChange={(e) => setAvisar(e.target.checked)}
                   className="h-4 w-4"
                 />
-                <span className="text-sm text-ink-2">Enviar la liga por WhatsApp</span>
+                <span className="text-sm text-ink-2">Enviar la liga por {CANAL}</span>
               </label>
 
               <p className="text-xs leading-relaxed text-ink-3">
@@ -643,7 +644,7 @@ function NuevaEntrevistaModal({ onClose, onCreada }: { onClose: () => void; onCr
                   </Button>
                 </div>
                 <p className="mt-1.5 text-xs text-ink-3">
-                  Compártela por WhatsApp, correo o QR. Cuando termine, la evaluación aparece sola en este tablero.
+                  Compártela por {CANAL}, correo o QR. Cuando termine, la evaluación aparece sola en este tablero.
                 </p>
               </div>
 

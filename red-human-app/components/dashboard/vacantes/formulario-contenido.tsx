@@ -43,6 +43,7 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+import { CANAL } from "@/lib/canal";
 export interface ContenidoVacante {
   /* --- 1. datos principales --- */
   titulo: string;
@@ -603,11 +604,11 @@ export function FormularioContenidoVacante({
           <Seccion titulo="Prefiltro · postulación web" ayuda="Preguntas del formulario público; Red Human las propone desde los requisitos indispensables.">
             <CriteriosEditor items={value.preguntas_filtro} onChange={set("preguntas_filtro")} />
           </Seccion>
-          <Seccion titulo="Prefiltro · WhatsApp" ayuda="Puntos críticos que Red Human confirma por chat (experiencia, ubicación…). Vacío = el agente usa las de la web.">
+          <Seccion titulo={`Prefiltro · ${CANAL}`} ayuda="Puntos críticos que Red Human confirma por chat (experiencia, ubicación…). Vacío = el agente usa las de la web.">
             <CriteriosEditor items={value.preguntas_filtro_whatsapp} onChange={set("preguntas_filtro_whatsapp")} />
           </Seccion>
           <Seccion titulo="Textos de publicación">
-            <Area label="Texto para WhatsApp" value={value.texto_whatsapp} onChange={set("texto_whatsapp")} rows={3} />
+            <Area label={`Texto para ${CANAL}`} value={value.texto_whatsapp} onChange={set("texto_whatsapp")} rows={3} />
             <Area label="Texto para bolsa de trabajo" value={value.texto_bolsa} onChange={set("texto_bolsa")} rows={4} />
             <ListaEditable label="Avisos de cumplimiento" items={value.avisos_cumplimiento} onChange={set("avisos_cumplimiento")} />
           </Seccion>

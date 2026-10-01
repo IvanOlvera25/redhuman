@@ -39,13 +39,13 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..database import get_db
+from ..database import SessionLocal, get_db
 from ..deps import cuenta_actual, usuario_actual
 from ..models import CONTEXTO_WHATSAPP_HORAS, ETAPAS_CONTEXTO_LARGO, Bitacora, Candidato, Cuenta, Postulacion, Usuario, Vacante, registrar
 from ..serial import nombre_empresa_candidato
@@ -61,6 +61,7 @@ from .candidatos import (
     procesar_prefiltro,
 )
 from .contratacion import adjuntar_documento_bytes, documento_para_adjunto
+from ..services import canal as _canal
 
 # Modo Prueba: una conversación con actividad más vieja que la ventana configurada
 # (ConfiguracionSistema.modo_prueba_ventana_min, Punto 13; 60 min por defecto) ya no se
@@ -239,10 +240,10 @@ def _buscar_o_crear_candidato(db: Session, wa_id: str, nombre: str, cuenta_id: i
         return existente
 
     c = _crear_candidato(
-        db, cuenta_id, nombre or "Candidato WhatsApp", "WhatsApp", prueba,
+        db, cuenta_id, nombre or f"Candidato {_canal.nombre()}", _canal.nombre(), prueba,
         telefono=tel, wa_id=wa_id, wa_nombre=nombre,
     )
-    registrar(db, "sistema", "candidato_ingresado", "candidato", c.codigo, {"fuente": "WhatsApp", "wa_id": wa_id, "es_prueba": prueba})
+    registrar(db, "sistema", "candidato_ingresado", "candidato", c.codigo, {"fuente": _canal.nombre(), "wa_id": wa_id, "es_prueba": prueba})
     return c
 
 
@@ -385,7 +386,7 @@ def _persona_para_cuenta(db: Session, c: Candidato, personas: List[Candidato], c
         db.flush()
         return c
     nueva = _crear_candidato(
-        db, cuenta_id, c.nombre, "WhatsApp", prueba,
+        db, cuenta_id, c.nombre, _canal.nombre(), prueba,
         telefono=c.telefono, wa_id=c.wa_id, wa_nombre=c.wa_nombre, correo=c.correo,
     )
     registrar(db, "sistema", "candidato_ingresado", "candidato", nueva.codigo, {"fuente": "WhatsApp", "wa_id": c.wa_id, "es_prueba": prueba, "desde": c.codigo, "numero_compartido": True})
@@ -426,11 +427,11 @@ async def _recibir_documento_whatsapp(db: Session, p: Postulacion, msg: dict, te
     adicional. Nunca truena: cualquier fallo se le explica al candidato por WhatsApp."""
     media = msg.get("media") or {}
     e = p.expediente
-    etiqueta = media.get("filename") or f"{msg.get('tipo')} de WhatsApp"
+    etiqueta = media.get("filename") or f"{msg.get('tipo')} de {_canal.nombre()}"
     guardar_mensaje(db, p, "user", f"[📎 {etiqueta}]" + (f" {msg.get('texto')}" if msg.get("texto") else ""), "whatsapp", wa_id=msg.get("wa_id", ""))
     db.flush()
 
-    descarga = await descargar_media(media.get("id", ""))
+    descarga = await (descargar_media(media.get("id", ""), media.get("mime_type", ""), media.get("filename", "")) if _canal.es_telegram() else descargar_media(media.get("id", "")))
     if not descarga.get("ok"):
         registrar(db, "sistema", "documento_whatsapp_error", "postulacion", p.codigo, {"media": media, "error": descarga.get("detalle", "")})
         aviso = "Recibí tu archivo pero no pude descargarlo 😕 ¿Me lo puedes reenviar? Si sigue fallando, súbelo desde la liga que te compartimos."
@@ -631,7 +632,12 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
     if not msg:
         print("[webhook-post] Webhook procesado sin mensaje de candidato (estado de entrega o evento ignorado).")
         return {"ok": True, "ignorado": True}
+    return await procesar_mensaje_entrante(db, msg)
 
+
+async def procesar_mensaje_entrante(db: Session, msg: dict) -> dict:
+    """Turno del agente para UN mensaje entrante ya normalizado ({telefono, texto, nombre, wa_id, tipo, media,
+    id_seleccionado, numero_receptor}). Lo usan el webhook de WhatsApp y el de Telegram (2026-10-01)."""
     telefono = msg["telefono"]
     texto = msg["texto"].strip()
     nombre_wa = msg.get("nombre", "")
@@ -828,6 +834,114 @@ async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
     resultado = await procesar_prefiltro(db, p, texto, "whatsapp")
     print(f"[agente] Turno completado para {p.codigo}: ia={resultado.get('ia')}, clasificacion={resultado.get('clasificacion')}")
     return {"ok": True, "accion": "turno_prefiltro", "candidato": c.codigo, "postulacion": p.codigo, **resultado}
+
+
+# ============================================================
+# Webhook de Telegram (2026-10-01, demo Fraiche) — mismo agente, otro canal
+# ============================================================
+
+_UPDATES_TELEGRAM: List[int] = []  # update_id ya procesados (Telegram reintenta si tardamos)
+
+
+def _msg_desde_inicio(payload: str) -> Tuple[str, str]:
+    """(texto, id_seleccionado) para el payload de /start: un código de vacante entra como selección explícita."""
+    m = _RE_VAC.search(payload or "")
+    if m:
+        codigo = f"VAC-{m.group(1)}"
+        return codigo, codigo
+    return "Hola", ""
+
+
+async def _turno_telegram(update: dict) -> None:
+    from ..models import VinculoTelegram
+    from ..services import telegram as tg
+
+    db = SessionLocal()
+    try:
+        u = tg.normalizar_update(update)
+        if not u:
+            return
+        chat = u["chat_id"]
+        v = db.query(VinculoTelegram).filter(VinculoTelegram.chat_id == chat).first()
+        texto, id_sel, tipo, media = "", "", "text", None
+
+        if u.get("callback"):
+            await tg.responder_callback(u["callback"]["id"])
+            if not (v and v.telefono):
+                await tg.pedir_numero(chat, u["nombre"])
+                return
+            texto = id_sel = u["callback"]["data"]
+            tipo = "interactive"
+        elif u.get("contacto"):
+            if not u["contacto"]["propio"]:
+                await tg.enviar_a_chat(chat, "Necesito *tu* número: toca el botón 📱 *Compartir mi número* (no el de otro contacto).", tg.TECLADO_COMPARTIR)
+                return
+            v = tg.vincular(db, chat, u["contacto"]["telefono"], u["nombre"], u["usuario"])
+            pendiente, v.inicio_pendiente = v.inicio_pendiente, ""
+            db.commit()
+            await tg.enviar_a_chat(chat, "¡Listo! ✅ Tu número quedó vinculado. Por aquí te escribiré durante tu proceso.", tg.QUITAR_TECLADO)
+            texto, id_sel = _msg_desde_inicio(pendiente)
+        elif "inicio" in u:
+            firmado = tg.leer_payload_vinculo(u["inicio"])
+            if firmado:
+                v = tg.vincular(db, chat, firmado["telefono"], u["nombre"], u["usuario"])
+                db.commit()
+                await tg.enviar_a_chat(chat, "¡Listo! ✅ Vinculé este chat con tu número. Por aquí seguimos con tu proceso.", tg.QUITAR_TECLADO)
+                texto, id_sel = _msg_desde_inicio(firmado["ref"])
+            elif v and v.telefono:
+                texto, id_sel = _msg_desde_inicio(u["inicio"])
+            else:
+                if v is None:
+                    v = VinculoTelegram(chat_id=chat, nombre=u["nombre"], usuario=u["usuario"])
+                    db.add(v)
+                v.inicio_pendiente = (u["inicio"] or "")[:80]
+                db.commit()
+                await tg.pedir_numero(chat, u["nombre"])
+                return
+        else:
+            if not (v and v.telefono):
+                if v is None:
+                    db.add(VinculoTelegram(chat_id=chat, nombre=u["nombre"], usuario=u["usuario"]))
+                    db.commit()
+                await tg.pedir_numero(chat, u["nombre"])
+                return
+            texto, tipo, media = u.get("texto", ""), u.get("tipo", "text"), u.get("media")
+            if tipo == "otro":
+                await tg.enviar_a_chat(chat, "Por ahora solo puedo leer texto, fotos y documentos PDF. 🙂")
+                return
+
+        msg = {"telefono": v.telefono, "texto": texto, "nombre": u["nombre"], "wa_id": f"tg-{u.get('update_id')}",
+               "tipo": tipo, "media": media, "id_seleccionado": id_sel, "numero_receptor": ""}
+        await procesar_mensaje_entrante(db, msg)
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        db.rollback()
+    finally:
+        db.close()
+
+
+@router.post("/webhooks/telegram")
+async def telegram_entrante(request: Request, tareas: BackgroundTasks):
+    """Updates del bot (setWebhook con secret_token). Contesta 200 de inmediato y el turno del agente corre en
+    segundo plano (Telegram reintenta si tardamos); se deduplica por update_id."""
+    from ..services import telegram as tg
+
+    if not tg.firma_valida(request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")):
+        raise HTTPException(403, "Secret token inválido")
+    try:
+        update = await request.json()
+    except Exception:
+        return {"ok": False}
+    uid = update.get("update_id")
+    if isinstance(uid, int):
+        if uid in _UPDATES_TELEGRAM:
+            return {"ok": True, "duplicado": True}
+        _UPDATES_TELEGRAM.append(uid)
+        del _UPDATES_TELEGRAM[:-500]
+    tareas.add_task(_turno_telegram, update)
+    return {"ok": True}
 
 
 # ============================================================

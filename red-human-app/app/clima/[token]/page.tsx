@@ -21,6 +21,7 @@ import { useTotem } from "@/lib/use-totem";
 import { cn } from "@/lib/utils";
 import { fetchMedicionPublica, responderClimaPublica, type MedicionClimaPublica } from "@/lib/api";
 
+import { CANAL } from "@/lib/canal";
 export default function SalaClima() {
   const params = useParams();
   const token = String(params?.token ?? "");
@@ -67,7 +68,7 @@ export default function SalaClima() {
       : !m.abierta
         ? "Esta encuesta no está recibiendo respuestas (todavía no abre o ya cerró)."
         : !m.aceptaRespuestas
-          ? "Esta encuesta es solo para colaboradores invitados: usa la liga personal que te llegó por correo o WhatsApp."
+          ? `Esta encuesta es solo para colaboradores invitados: usa la liga personal que te llegó por correo o ${CANAL}.`
           : "";
 
   return (

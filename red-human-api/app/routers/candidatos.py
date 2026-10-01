@@ -56,6 +56,7 @@ from ..services.configuracion import modo_prueba_activo, permite_duplicados, pue
 from ..services.notificaciones import RE_CORREO, TZ_MEXICO, NotificarIn, override_de
 from ..services.whatsapp import enviar_mensaje, enviar_plantilla
 from ..services import teams as teams_srv
+from ..services import canal as _canal
 
 router = APIRouter(prefix="/candidatos", tags=["candidatos"])
 
@@ -740,13 +741,13 @@ async def _disparar_plantilla_inicio(db: Session, p: Postulacion) -> dict:
     conversación sobre otra postulación, su respuesta sigue yendo a aquella; si esta es la
     única que espera respuesta, el webhook la elige; si hay varias, le pregunta (B1)."""
     if not p.telefono:
-        return {"enviado": False, "detalle": "El candidato no dejó WhatsApp."}
+        return {"enviado": False, "detalle": f"El candidato no dejó {_canal.nombre()}."}
     primer_nombre = (p.nombre or "").split(" ")[0] or "candidato(a)"
     envio = await enviar_plantilla(p.telefono, PLANTILLA_INICIO_ENTREVISTA, [primer_nombre])
     texto_mensaje = (
-        f"[Plantilla de WhatsApp «{PLANTILLA_INICIO_ENTREVISTA}»] Hola {primer_nombre}, ¡gracias por tu interés! Empecemos con tu proceso."
+        f"[Plantilla de {_canal.nombre()} «{PLANTILLA_INICIO_ENTREVISTA}»] Hola {primer_nombre}, ¡gracias por tu interés! Empecemos con tu proceso."
         if envio.get("enviado")
-        else f"[Fallo de envío Meta] La plantilla «{PLANTILLA_INICIO_ENTREVISTA}» no pudo entregarse a {p.telefono}: {envio.get('detalle', 'sin detalle')}."
+        else f"[Fallo de envío {_canal.nombre()}] La plantilla «{PLANTILLA_INICIO_ENTREVISTA}» no pudo entregarse a {p.telefono}: {envio.get('detalle', 'sin detalle')}."
     )
     guardar_mensaje(db, p, "assistant", texto_mensaje, "whatsapp", envio)
     registrar(
@@ -777,7 +778,7 @@ async def postular(
     if not consentimiento:
         raise HTTPException(400, "Necesitamos tu autorización para tratar tus datos (Aviso de Privacidad).")
     if not telefono.strip() and not correo.strip():
-        raise HTTPException(400, "Déjanos un WhatsApp o un correo para poder contactarte.")
+        raise HTTPException(400, f"Déjanos un {'teléfono' if _canal.es_telegram() else 'WhatsApp'} o un correo para poder contactarte.")
 
     vac = db.query(Vacante).filter(Vacante.slug == vacante).first()
     if not vac:
@@ -871,7 +872,19 @@ async def postular(
         "nuevo": nuevo_candidato,
         "postulacionNueva": nueva_postulacion,
         "cv": {"procesado": resultado_cv.get("ok", False), "avisos": resultado_cv.get("avisos", [])},
+        # Telegram (2026-10-01): liga firmada que vincula el chat con ESTE teléfono y arranca el filtro.
+        "ligaTelegram": liga_telegram_postulacion(p),
     }
+
+
+def liga_telegram_postulacion(p: Postulacion) -> str:
+    """Liga t.me firmada para continuar el proceso de ESTA postulación en Telegram ("" si el canal no es Telegram)."""
+    from ..services import telegram as tg
+    from ..services.whatsapp import proveedor
+
+    if proveedor() != "telegram" or not p.telefono:
+        return ""
+    return tg.liga_vinculo(p.telefono, p.codigo)
 
 
 @router.post("/{codigo}/archivos", status_code=201)
@@ -1453,7 +1466,7 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
     nota_aclaracion = ""
     if pendiente and analisis_previo.get("aclaracion_pendiente"):
         nota_aclaracion = (
-            f"El candidato contestó distinto en el formulario web («{pendiente.get('web')}») y por WhatsApp "
+            f"El candidato contestó distinto en el formulario web («{pendiente.get('web')}») y por {_canal.nombre()} "
             f"(«{pendiente.get('whatsapp')}») sobre {pendiente.get('criterio')}. Su último mensaje aclara ese punto: "
             "toma la aclaración como válida en respuestas_extraidas, agradece y continúa. NO lo descartes por la contradicción."
         )
@@ -1882,7 +1895,7 @@ async def aplicar_movimiento(
         if p.etapa != "Prefiltro" and not libre:
             raise HTTPException(409, "Solo se puede forzar Entrevista IA desde la etapa de Prefiltro.")
         if not p.telefono and not libre:
-            raise HTTPException(409, "El candidato no tiene WhatsApp registrado; no se puede iniciar el agendamiento.")
+            raise HTTPException(409, f"El candidato no tiene {_canal.nombre()} registrado; no se puede iniciar el agendamiento.")
         p.estado = "cumple"
         p.prefiltro_completo = True
         await _asignar_curso_filtro(db, p)

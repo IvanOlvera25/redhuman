@@ -72,9 +72,14 @@ def vacante_dict(
     embudo: Optional[dict] = None,
     colaboradores: Optional[List[str]] = None,
 ) -> dict:
+    from .services import telegram as tg
+    from .services.whatsapp import proveedor as _prov
+
     return {
         "id": v.codigo,
         "slug": v.slug or "",
+        # Telegram (2026-10-01): liga pública t.me/<bot>?start=VAC-#### para postularse por chat
+        "ligaTelegram": tg.liga_vacante(v.codigo) if _prov() == "telegram" else "",
         "titulo": v.titulo,
         "area": v.area,
         "empresa": v.empresa,
@@ -395,6 +400,17 @@ def _postulacion_resumen_dict(p: Postulacion) -> dict:
     }
 
 
+def _telegram_postulacion(p: Postulacion) -> dict:
+    """Telegram (2026-10-01): si el canal es Telegram, la ficha dice si la persona ya vinculó su chat y trae la
+    liga firmada para mandársela (correo, SMS, en persona) y que vincule sin compartir el número."""
+    from .services import telegram as tg
+    from .services.whatsapp import proveedor
+
+    if proveedor() != "telegram" or not p.telefono:
+        return {}
+    return {"telegramVinculado": bool(tg.chat_de_telefono(p.telefono)), "ligaTelegram": tg.liga_vinculo(p.telefono, p.codigo)}
+
+
 def postulacion_dict(p: Postulacion, detalle: bool = False, n_mensajes: Optional[int] = None) -> dict:
     """La tarjeta del Kanban (decisión P4: una por Postulación). `id` es el código P-####
     — es lo que el frontend manda a /candidatos/{codigo}/...; los datos de persona vienen
@@ -502,6 +518,7 @@ def postulacion_dict(p: Postulacion, detalle: bool = False, n_mensajes: Optional
     return {
         **base,
         **_sintesis_global(p),
+        **_telegram_postulacion(p),
         "cvDatos": c.cv_datos or {},
         "analisis": p.analisis or {},
         "listaArchivos": [archivo_dict(a) for a in c.archivos],

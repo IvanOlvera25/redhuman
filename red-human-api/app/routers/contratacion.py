@@ -33,6 +33,7 @@ from ..services.correo import enviar_correo
 from ..services.whatsapp import enviar_mensaje
 from ..services.notificaciones import TZ_MEXICO, NotificarIn, override_de
 from ..services.configuracion import modo_prueba_activo, puede_forzar_prueba
+from ..services import canal as _canal
 
 router = APIRouter(prefix="/contratacion", tags=["contratacion"])
 
@@ -1009,7 +1010,7 @@ async def enviar_carta_intencion(
     d = _datos_carta_intencion(e)
     if datos.canal == "whatsapp":
         if not c.telefono:
-            raise HTTPException(400, "El candidato no tiene WhatsApp registrado.")
+            raise HTTPException(400, f"El candidato no tiene {_canal.nombre()} registrado.")
         texto = (
             f"Hola {c.nombre.split(' ')[0]}, {d['empresa']} te comparte tu carta de intención para el puesto de {d['puesto']} "
             f"({d['sueldo']}, ingreso el {d['fecha_ingreso']}). La puedes descargar desde tu expediente: {liga}"

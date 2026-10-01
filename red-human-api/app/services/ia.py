@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import settings
+from . import canal as _canal
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -450,7 +451,7 @@ def _demo_vacante(f: FichaVacante) -> VacanteGenerada:
         ),
         computrabajo=BloquePlataforma(
             titulo=f"{titulo}{(' ' + lugar) if lugar else ''}"[:70],
-            copy=f"{titulo}{en_lugar}.{linea_sueldo} Postúlate y te contactamos por WhatsApp."[:250],
+            copy=f"{titulo}{en_lugar}.{linea_sueldo} Postúlate y te contactamos por {_canal.nombre()}."[:250],
             page=(
                 f"Empresa: {empresa}\nUbicación: {lugar or 'A confirmar'}\n\n"
                 f"Funciones\n" + "\n".join(f"• {a}" for a in actividades) + "\n\n"
@@ -843,7 +844,7 @@ def prefiltro_turno(
     resp = client.responses.parse(
         model=MODEL,
         instructions=(
-            "Eres el agente de prefiltro de Red Human AI, hablas por WhatsApp con candidatos en México.\n"
+            f"Eres el agente de prefiltro de Red Human AI, hablas por {_canal.nombre()} con candidatos en México.\n"
             + "\n".join(lineas_contexto) + "\n"
             f"Criterios de prefiltro:\n{criterios_prefiltro(preguntas)}\n\n"
             "Reglas: (1) una sola pregunta por mensaje y UN solo criterio por pregunta (nunca compuestas: «¿cuántos años tienes y has usado SAP?» son dos mensajes), tono cálido y breve — hablas como un reclutador "

@@ -20,6 +20,7 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+import { CANAL } from "@/lib/canal";
 /* --- caché en memoria de las reglas (una carga por sesión de página; se invalida al guardar) --- */
 let cacheReglas: ReglaNotificacion[] | null = null;
 let cargaEnCurso: Promise<ReglaNotificacion[] | null> | null = null;
@@ -171,7 +172,7 @@ export function LineaNotificar({
                   onChange={(e) => onChange({ ...value, [d.whatsapp]: e.target.checked })}
                   className="h-3.5 w-3.5 rounded border-border-soft text-brand focus:ring-brand"
                 />
-                WhatsApp
+                {CANAL}
               </label>
             </div>
           ))}

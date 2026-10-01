@@ -16,6 +16,7 @@ import {
   type AltaColaboradorDatos, type Colaborador, type ColaboradorDetalle, type FilaImportacionColaborador,
 } from "@/lib/api";
 
+import { CANAL } from "@/lib/canal";
 /** Selector de jefe: SIEMPRE otra persona del roster (su código COL-####). */
 function SelectorJefe({ valor, onCambio, excluir }: { valor: string; onCambio: (v: string) => void; excluir?: string }) {
   const [roster, setRoster] = useState<Colaborador[]>([]);
@@ -55,7 +56,7 @@ export function ModalAltaColaborador({ onClose, onCreado }: { onClose: () => voi
       <div className="grid gap-3 sm:grid-cols-2">
         <CampoRH label="Nombre completo"><input autoFocus {...campo("nombre")} className={inputRH} /></CampoRH>
         <CampoRH label="Correo"><input type="email" {...campo("correo")} className={inputRH} /></CampoRH>
-        <CampoRH label="Teléfono (WhatsApp)"><input {...campo("telefono")} className={inputRH} /></CampoRH>
+        <CampoRH label={`Teléfono (${CANAL})`}><input {...campo("telefono")} className={inputRH} /></CampoRH>
         <CampoRH label="Puesto"><input {...campo("puesto")} className={inputRH} /></CampoRH>
         <CampoRH label="Área"><input {...campo("area")} className={inputRH} /></CampoRH>
         <CampoRH label="Sede / ubicación"><input {...campo("ubicacion")} className={inputRH} /></CampoRH>

@@ -80,6 +80,14 @@ class Settings(BaseSettings):
     # {{6}} liga al expediente. Si Meta la rechaza (no aprobada, nombre distinto) sale texto libre.
     meta_plantilla_entrevista: str = "alerta_entrevista_asignada"
 
+    # --- Telegram (2026-10-01, demo Fraiche) ---
+    # WHATSAPP_PROVIDER=telegram manda TODA la mensajería (agente, avisos, recordatorios) por un bot de
+    # Telegram en lugar de WhatsApp. Un bot no puede escribirle a un número: cada persona vincula su chat
+    # una vez (botón «Compartir mi número» o liga t.me/<bot>?start=…) y se guarda en `vinculos_telegram`.
+    telegram_bot_token: str = ""      # token de @BotFather (solo servidor)
+    telegram_bot_username: str = ""   # sin @ (p. ej. FraicheEmpleosBot); se llena solo con getMe si falta
+    telegram_webhook_secret: str = ""  # cabecera X-Telegram-Bot-Api-Secret-Token (setWebhook secret_token)
+
     # --- Gateway propio (alternativa sin costo por mensaje) ---
     waha_url: str = "http://localhost:3001"
     waha_api_key: str = ""

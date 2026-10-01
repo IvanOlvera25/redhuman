@@ -159,6 +159,7 @@ import { Toast, type ToastMsg } from "@/components/dashboard/toast";
 import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
 import { cn, etiquetaRecordatorio } from "@/lib/utils";
 
+import { CANAL } from "@/lib/canal";
 const etapas: EtapaCandidato[] = [
   "Prefiltro",
   "Entrevista IA",
@@ -181,7 +182,7 @@ const etapaColor: Record<EtapaCandidato, string> = {
 const RUTA_TIENDA_PROPIA: PasoRuta[] = [
   { clave: "nuevo", nombre: "Nuevo", etapa: "Prefiltro" },
   { clave: "prefiltro_web", nombre: "Prefiltro web", etapa: "Prefiltro" },
-  { clave: "filtro_whatsapp", nombre: "Filtro por WhatsApp", etapa: "Prefiltro" },
+  { clave: "filtro_whatsapp", nombre: `Filtro por ${CANAL}`, etapa: "Prefiltro" },
   { clave: "entrevista_inicial", nombre: "Entrevista inicial", etapa: "Entrevista IA" },
   { clave: "ipv", nombre: "Entrevista IPV", etapa: "Entrevista IA" },
   { clave: "psicometria", nombre: "Psicometría", etapa: "Evaluación" },
@@ -248,7 +249,7 @@ function canalLegible(canal: string): string {
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean)
-    .map((x) => ({ whatsapp: "WhatsApp", correo: "Correo", liga: "Liga pública", rh: "RH (tablero)", fisico: "Entrega física" }[x] ?? x))
+    .map((x) => ({ whatsapp: CANAL, correo: "Correo", liga: "Liga pública", rh: "RH (tablero)", fisico: "Entrega física" }[x] ?? x))
     .join(" + ") || "—";
 }
 // 2026-09-20 (B2): «Tiempo determinado» pide duración + unidad; la fecha de término se calcula (aquí solo como
@@ -837,7 +838,7 @@ function CandidatosContenido() {
               className="w-full rounded-lg border border-border-soft bg-surface p-2 text-xs outline-none focus:border-brand"
             >
               <option value="">Todas las fuentes</option>
-              <option value="WhatsApp">WhatsApp</option>
+              <option value={CANAL}>{CANAL}</option>
               <option value="OCC">OCC</option>
               <option value="LinkedIn">LinkedIn</option>
               <option value="Portal">Portal</option>
@@ -1187,9 +1188,9 @@ function CandidatosContenido() {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-ink-2">
-                      {c.fuente === "WhatsApp" ? (
+                      {(c.fuente === "WhatsApp" || c.fuente === "Telegram") ? (
                         <span className="inline-flex items-center gap-1 font-semibold text-good">
-                          <MessageCircle className="h-3.5 w-3.5" /> WhatsApp
+                          <MessageCircle className="h-3.5 w-3.5" /> {CANAL}
                         </span>
                       ) : (
                         c.fuente || "—"
@@ -1402,9 +1403,9 @@ function TarjetaKanban({
           )}
         </div>
         <span className="flex items-center gap-1 font-mono text-[10px] text-ink-3">
-          {c.fuente === "WhatsApp" ? (
+          {(c.fuente === "WhatsApp" || c.fuente === "Telegram") ? (
             <span className="inline-flex items-center gap-1 font-semibold text-good">
-              <MessageCircle className="h-3 w-3" /> WhatsApp
+              <MessageCircle className="h-3 w-3" /> {CANAL}
             </span>
           ) : (
             c.fuente
@@ -1670,7 +1671,7 @@ function ModalCandidato({
 
   /** Onboarding · Zero-Touch fase 2 — RH detona, la IA da seguimiento por WhatsApp. */
   async function solicitarDocumentos(notificar?: NotificarAccion) {
-    if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para enviar mensajes por WhatsApp." });
+    if (!live) return setAviso({ tono: "warn", texto: `Levanta la API para enviar mensajes por ${CANAL}.` });
     setOcupado("solicitar-documentos");
     const r = await solicitarDocumentosCandidato(c.id, notificar);
     const data = resolver(r, resumenEnvio(r, "Solicitud de documentos enviada."));
@@ -1678,7 +1679,7 @@ function ModalCandidato({
   }
 
   async function enviarRecordatorioDocumentos(notificar?: NotificarAccion) {
-    if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para enviar mensajes por WhatsApp." });
+    if (!live) return setAviso({ tono: "warn", texto: `Levanta la API para enviar mensajes por ${CANAL}.` });
     setOcupado("recordatorio-documentos");
     const r = await recordatorioDocumentosCandidato(c.id, notificar);
     const data = resolver(r, resumenEnvio(r, "Recordatorio enviado."));
@@ -1770,7 +1771,7 @@ function ModalCandidato({
                 )}
                 {c.enConversacion && c.yaAplicoAntes && (
                   <span
-                    title="El WhatsApp de esta persona está conversando sobre ESTA postulación"
+                    title={`El ${CANAL} de esta persona está conversando sobre ESTA postulación`}
                     className="rounded bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-emerald-700"
                   >
                     💬 En chat
@@ -1857,7 +1858,7 @@ function ModalCandidato({
                 { id: "resumen", label: "Resumen", icon: User, tone: "brand" },
                 { id: "evaluaciones", label: "Evaluación integral", icon: Sparkles, tone: "human" },
                 { id: "documentos", label: "CV y documentos", icon: FileText, tone: "brand" },
-                { id: "whatsapp", label: "WhatsApp", icon: MessageCircle, tone: "good", badge: c.mensajes },
+                { id: "whatsapp", label: CANAL, icon: MessageCircle, tone: "good", badge: c.mensajes },
                 // 2026-09-17: la pestaña del expediente (checklist de documentos) vive en Contratación Y
                 // Onboarding — antes desaparecía al pasar a Onboarding y RH ya no veía qué faltaba.
                 ...(c.etapa === "Contratación" || c.etapa === "Onboarding"
@@ -1981,7 +1982,7 @@ function ModalCandidato({
         )}
 
         {/* Etapa Prefiltro: solo Descartar — el paso a Entrevista IA es zero-touch, lo dispara
-            la IA sola por WhatsApp al completar el prefiltro (no hay botón manual). */}
+            la IA sola por {CANAL} al completar el prefiltro (no hay botón manual). */}
         {puedeDecidir && c.etapa === "Prefiltro" && (
           <div className="border-t border-border-soft bg-surface px-4 py-3 sm:px-6 sm:py-4">
             <div className="flex flex-wrap items-center gap-2">
@@ -2197,7 +2198,7 @@ function ModalCandidato({
             <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
               <h3 className="font-display text-lg font-bold">Mover a otra etapa</h3>
               <p className="mt-1 text-sm text-ink-2">
-                RH decide: el candidato se mueve aunque WhatsApp o el correo fallen. Lo que se salte queda registrado como «Omitida manualmente».
+                RH decide: el candidato se mueve aunque {CANAL} o el correo fallen. Lo que se salte queda registrado como «Omitida manualmente».
               </p>
               <label className="mt-4 flex flex-col gap-1.5">
                 <span className="text-xs font-medium text-ink-2">Etapa destino</span>
@@ -2585,7 +2586,7 @@ function PestanaResumen({
                 c.prefiltroWhatsapp.resultado === "cumple" ? "text-good" : c.prefiltroWhatsapp.resultado === "revision" ? "text-warn" : "text-bad",
               )}
             >
-              Filtro WhatsApp: {c.prefiltroWhatsapp.etiqueta}
+              Filtro {CANAL}: {c.prefiltroWhatsapp.etiqueta}
             </p>
           )}
           {c.adeudoBbva && (
@@ -2594,7 +2595,7 @@ function PestanaResumen({
             </p>
           )}
           {!c.prefiltroResumen ? (
-            <p className="text-sm text-ink-3">{c.prefiltroWeb ? "Filtro por WhatsApp en curso." : "Prefiltro en curso — todavía no hay criterios evaluados."}</p>
+            <p className="text-sm text-ink-3">{c.prefiltroWeb ? `Filtro por ${CANAL} en curso.` : "Prefiltro en curso — todavía no hay criterios evaluados."}</p>
           ) : c.prefiltroResumen.resultado === "no_cumple" || c.prefiltroResumen.incumplidos.length > 0 ? (
             <div>
               <p className="text-sm font-semibold text-warn">
@@ -2614,11 +2615,11 @@ function PestanaResumen({
           <p className="mt-1.5 text-[11px] text-ink-3">Filtro básico de entrada; no forma parte de la evaluación integral.</p>
           {(c.inconsistencias?.length ?? 0) > 0 && (
             <div className="mt-3 rounded-xl border border-warn/40 bg-warn-soft/40 p-3">
-              <p className="text-xs font-semibold text-warn">Respuestas distintas entre el formulario web y WhatsApp — RH decide (no se descartó automáticamente):</p>
+              <p className="text-xs font-semibold text-warn">Respuestas distintas entre el formulario web y {CANAL} — RH decide (no se descartó automáticamente):</p>
               <ul className="mt-1.5 space-y-1">
                 {c.inconsistencias!.map((i, k) => (
                   <li key={k} className="text-xs leading-relaxed text-ink-2">
-                    <b>{i.criterio}</b>: web «{i.web}» · WhatsApp «{i.whatsapp}»
+                    <b>{i.criterio}</b>: web «{i.web}» · {CANAL} «{i.whatsapp}»
                     {i.aclarada ? <span className="text-good"> · aclaró: «{i.aclaracion}»</span> : <span className="text-ink-3"> · pendiente de aclarar</span>}
                   </li>
                 ))}
@@ -3118,7 +3119,7 @@ function PestanaEvaluaciones({
       {/* Respuestas Estructuradas del Pre-filtro (WhatsApp) */}
       {Boolean(a.respuestas_prefiltro?.length) && (
         <div>
-          <Eyebrow>Entrevista Pre-filtro por WhatsApp ({a.respuestas_prefiltro!.length} respuestas)</Eyebrow>
+          <Eyebrow>Entrevista Pre-filtro por {CANAL} ({a.respuestas_prefiltro!.length} respuestas)</Eyebrow>
           <Card className="mt-2 border-good/30 bg-good-soft/10 p-5">
             <div className="space-y-3">
               {a.respuestas_prefiltro!.map((r, i) => (
@@ -3662,6 +3663,29 @@ function PestanaDocumentos({
 /* ============================================================
    PESTAÑA 2: Chat de WhatsApp (Historial de Pre-filtro con IA)
    ============================================================ */
+function VinculoTelegramFicha({ c }: { c: Candidato }) {
+  const [copiado, setCopiado] = useState(false);
+  const vinculado = Boolean(c.telegramVinculado);
+  return (
+    <div className={cn("flex flex-wrap items-center gap-3 rounded-2xl border p-3.5 text-sm", vinculado ? "border-good/30 bg-good/10" : "border-warn/30 bg-warn/10")}>
+      <span className={cn("font-semibold", vinculado ? "text-good" : "text-warn")}>
+        {vinculado ? "Telegram vinculado ✓" : "Aún no vincula Telegram"}
+      </span>
+      <span className="flex-1 text-xs text-ink-2">
+        {vinculado
+          ? "El agente y los avisos le llegan por Telegram."
+          : "Mientras no abra el bot, no le llega ningún mensaje. Mándale esta liga (correo, SMS o en persona): al abrirla queda vinculado."}
+      </span>
+      <button
+        onClick={() => { navigator.clipboard?.writeText(c.ligaTelegram ?? "").then(() => { setCopiado(true); setTimeout(() => setCopiado(false), 1800); }); }}
+        className="rounded-xl border border-border-soft bg-surface px-3 py-1.5 text-xs font-semibold text-ink-2 hover:bg-surface-2"
+      >
+        {copiado ? "¡Copiada!" : "Copiar liga de Telegram"}
+      </button>
+    </div>
+  );
+}
+
 function PestanaWhatsApp({
   c,
   live,
@@ -3708,13 +3732,15 @@ function PestanaWhatsApp({
     return (
       <div className="py-12 text-center text-sm text-ink-3">
         <MessageCircle className="mx-auto h-8 w-8 text-ink-3/60 mb-2" />
-        Levanta la API en el puerto 8001 para ver el historial y sincronización de WhatsApp en tiempo real.
+        Levanta la API en el puerto 8001 para ver el historial y sincronización de {CANAL} en tiempo real.
       </div>
     );
   }
 
   return (
     <div className="flex flex-col gap-3.5">
+      {/* Telegram (2026-10-01): un bot solo escribe a quien ya abrió el chat — estado del vínculo + liga para compartir */}
+      {c.ligaTelegram ? <VinculoTelegramFicha c={c} /> : null}
       {/* Header del Chat */}
       <div className="flex items-center justify-between rounded-2xl border border-border-soft bg-surface p-3.5">
         <div className="flex items-center gap-3">
@@ -3723,7 +3749,7 @@ function PestanaWhatsApp({
           </span>
           <div>
             <p className="text-sm font-semibold text-ink">
-              {c.telefono ? `WhatsApp: +${c.telefono}` : "Conversación de Pre-filtro"}
+              {c.telefono ? `${CANAL}: +${c.telefono}` : "Conversación de Pre-filtro"}
             </p>
             <p className="text-xs text-ink-3">
               {c.prefiltroCompleto ? "Prefiltro completado por el agente" : "Agente de IA (Luna) activo"} · {msgs.length} mensajes
@@ -3749,7 +3775,7 @@ function PestanaWhatsApp({
             <MessageCircle className="mx-auto h-10 w-10 text-ink-3/40" />
             <p className="mt-2 text-sm font-medium text-ink-3">Aún no hay mensajes en este chat.</p>
             <p className="mt-0.5 text-xs text-ink-3">
-              Cuando el candidato escriba a tu bot de WhatsApp, las preguntas y respuestas aparecerán aquí en vivo.
+              Cuando el candidato escriba a tu bot de {CANAL}, las preguntas y respuestas aparecerán aquí en vivo.
             </p>
           </div>
         )}
@@ -3772,7 +3798,7 @@ function PestanaWhatsApp({
                   {esIA ? "Agente Red Human (Luna)" : (c.nombre || "Candidato")}
                 </span>
                 <span className={cn("font-mono", esIA ? "text-ink-3" : "text-brand-ink/70")}>
-                  {m.canal === "whatsapp" ? "WhatsApp" : "Simulador"}
+                  {m.canal === "whatsapp" ? CANAL : "Simulador"}
                 </span>
               </div>
               <p className="whitespace-pre-wrap">{m.texto}</p>
@@ -3876,7 +3902,7 @@ function CargarCVs({
                 onChange={(e) => setFuente(e.target.value)}
                 className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
               >
-                {["RH", "OCC", "LinkedIn", "Indeed", "Formulario", "WhatsApp"].map((f) => (
+                {["RH", "OCC", "LinkedIn", "Indeed", "Formulario", CANAL].map((f) => (
                   <option key={f}>{f}</option>
                 ))}
               </select>
@@ -4217,7 +4243,7 @@ function PanelEntrevistaHumana({
       {confirmacion === "realizada" && (
         <ConfirmacionAccion
           titulo="Reenviar liga de evaluación"
-          texto="Se le manda al entrevistador (correo HTML / WhatsApp) la liga con el expediente y el formulario de evaluación."
+          texto={`Se le manda al entrevistador (correo HTML / ${CANAL}) la liga con el expediente y el formulario de evaluación.`}
           evento="entrevista_humana_terminada"
           hayCliente={hayCliente}
           clienteId={c.clienteIdVacante ?? null}
@@ -4727,7 +4753,7 @@ function ModalProgramarEntrevista({
         <div className="shrink-0 border-b border-border-faint px-5 pt-5 pb-3">
           <h3 className="font-display text-lg font-bold">{esIpv ? "Programar Entrevista IPV (entrevistador humano)" : "Programar entrevista humana"}</h3>
           <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-            Con {c.nombre.split(" ")[0]}. Al guardar, la tarjeta se mueve a Entrevista Humana y se confirma por correo y WhatsApp.
+            Con {c.nombre.split(" ")[0]}. Al guardar, la tarjeta se mueve a Entrevista Humana y se confirma por correo y {CANAL}.
           </p>
           {esIpv && (
             <p className="mt-1.5 flex items-center gap-1.5 text-[12px] text-human">
@@ -4776,7 +4802,7 @@ function ModalProgramarEntrevista({
               {internoSel && (
                 <span className="text-[12px] leading-relaxed text-ink-3">
                   Se notificará a {internoSel.correo}
-                  {internoSel.telefono ? ` · WhatsApp ${internoSel.telefono}` : " · sin WhatsApp en su perfil (agrégalo en Configuración → Usuarios)"}
+                  {internoSel.telefono ? ` · ${CANAL} ${internoSel.telefono}` : ` · sin ${CANAL} en su perfil (agrégalo en Configuración → Usuarios)`}
                 </span>
               )}
             </label>
@@ -4807,7 +4833,7 @@ function ModalProgramarEntrevista({
                 {contactoElegido && (
                   <span className="text-[12px] leading-relaxed text-ink-3">
                     Se notificará a {contactoElegido.correo || "(sin correo registrado)"}
-                    {contactoElegido.telefono ? ` · WhatsApp ${contactoElegido.telefono}` : ""}
+                    {contactoElegido.telefono ? ` · ${CANAL} ${contactoElegido.telefono}` : ""}
                   </span>
                 )}
                 {contactos !== null && contactos.length === 0 && (
@@ -4827,7 +4853,7 @@ function ModalProgramarEntrevista({
                     <input type="email" value={entrevistadorCorreo} onChange={(e) => setEntrevistadorCorreo(e.target.value)} placeholder="correo@empresa.com" className={inputCls} />
                   </label>
                   <label className="col-span-2 flex flex-col gap-1.5">
-                    <span className="text-sm font-medium text-ink-2">WhatsApp (opcional)</span>
+                    <span className="text-sm font-medium text-ink-2">{CANAL} (opcional)</span>
                     <input value={entrevistadorWhatsapp} onChange={(e) => setEntrevistadorWhatsapp(e.target.value)} placeholder="10 dígitos" className={inputCls} />
                   </label>
                 </div>
@@ -4860,7 +4886,7 @@ function ModalProgramarEntrevista({
           {modalidad === "Videollamada" && porTeams && (
             <div className="rounded-xl border border-brand/25 bg-brand-soft/40 px-3.5 py-2.5 text-[13px] leading-relaxed text-ink-2">
               <span className="font-semibold text-ink">Reunión de Microsoft Teams automática.</span> Al programar se crea la reunión, la liga va en el
-              correo y WhatsApp de confirmación y se manda la invitación de calendario a candidato y entrevistador.
+              correo y {CANAL} de confirmación y se manda la invitación de calendario a candidato y entrevistador.
               <button type="button" onClick={() => setOtraLiga(true)} className="ml-1.5 font-medium text-brand hover:underline">
                 Usar otra liga
               </button>
@@ -5437,7 +5463,7 @@ function PanelContratacion({
     const r = await enviarCartaIntencion(c.expedienteId, canal);
     setEnviandoDoc("");
     if (!r.ok) return setResultadoDoc({ ok: false, texto: r.error });
-    setResultadoDoc({ ok: r.data.enviado, texto: r.data.enviado ? `Carta enviada por ${canal === "whatsapp" ? "WhatsApp" : "correo"}.` : `No salió por ${canal}: ${r.data.detalle}` });
+    setResultadoDoc({ ok: r.data.enviado, texto: r.data.enviado ? `Carta enviada por ${canal === "whatsapp" ? CANAL : "correo"}.` : `No salió por ${canal}: ${r.data.detalle}` });
   }
 
   /** Onboarding v2 (Fase 2): abre el resumen; «Iniciar Onboarding» es el único gatillo del cambio de etapa. */
@@ -5543,7 +5569,7 @@ function PanelContratacion({
             placeholder="Ej. Preséntate el lunes a las 9:00 en recepción con INE y comprobante de domicilio; pregunta por Laura de RH."
             className="rounded-xl border border-border-soft bg-surface px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
           />
-          <span className="text-[11px] text-ink-3">Al dar de alta, el colaborador recibe automáticamente su bienvenida con estos datos por WhatsApp y correo.</span>
+          <span className="text-[11px] text-ink-3">Al dar de alta, el colaborador recibe automáticamente su bienvenida con estos datos por {CANAL} y correo.</span>
         </label>
       </div>
       {live && (
@@ -5584,7 +5610,7 @@ function PanelContratacion({
           {firmaCfg?.configurado && (
             <MenuAcciones
               acciones={[
-                { etiqueta: "Ver PDF de la carta (enviar por WhatsApp / correo)", icono: <FileText className="h-4 w-4" />, onClick: () => { setResultadoDoc(null); setDocPreview("carta"); } },
+                { etiqueta: `Ver PDF de la carta (enviar por ${CANAL} / correo)`, icono: <FileText className="h-4 w-4" />, onClick: () => { setResultadoDoc(null); setDocPreview("carta"); } },
                 { etiqueta: "Ver PDF del contrato", icono: <FileCheck2 className="h-4 w-4" />, onClick: () => { setResultadoDoc(null); setDocPreview("contrato"); }, disabled: !documentosListos && !modoPrueba },
               ]}
             />
@@ -5623,7 +5649,7 @@ function PanelContratacion({
             ))}
           </ul>
           {firmas.some((f) => f.estado === "enviada" && f.firmantes.some((x) => x.rol === "candidato" && x.estado !== "firmado")) && (
-            <p className="mt-2 text-[11px] text-ink-3">El candidato firma desde su liga de expediente (compártela con «Ver PDF de la carta» → WhatsApp o correo).</p>
+            <p className="mt-2 text-[11px] text-ink-3">El candidato firma desde su liga de expediente (compártela con «Ver PDF de la carta» → {CANAL} o correo).</p>
           )}
         </div>
       )}
@@ -5749,8 +5775,8 @@ function PanelContratacion({
             <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border-soft bg-surface px-4 py-3">
               {docPreview === "carta" ? (
                 <>
-                  <Button size="sm" variant="outline" onClick={() => enviarCarta("whatsapp")} disabled={Boolean(enviandoDoc) || !c.telefono} title={c.telefono ? "Manda la liga de su expediente con la carta por WhatsApp" : "El candidato no tiene WhatsApp"}>
-                    <MessageCircle className="h-4 w-4" /> {enviandoDoc === "whatsapp" ? "Enviando…" : "WhatsApp"}
+                  <Button size="sm" variant="outline" onClick={() => enviarCarta("whatsapp")} disabled={Boolean(enviandoDoc) || !c.telefono} title={c.telefono ? `Manda la liga de su expediente con la carta por ${CANAL}` : `El candidato no tiene ${CANAL}`}>
+                    <MessageCircle className="h-4 w-4" /> {enviandoDoc === "whatsapp" ? "Enviando…" : CANAL}
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => enviarCarta("correo")} disabled={Boolean(enviandoDoc) || !c.correo} title={c.correo ? "Correo con el PDF adjunto" : "El candidato no tiene correo"}>
                     <Mail className="h-4 w-4" /> {enviandoDoc === "correo" ? "Enviando…" : "Correo"}
@@ -6131,12 +6157,12 @@ function ModalPresentarFranquiciatario({
                 <div className="grid gap-2 sm:grid-cols-3">
                   <CampoTexto label="Nombre" value={nombre} onChange={setNombre} />
                   <CampoTexto label="Correo" value={correo} onChange={setCorreo} placeholder="nombre@franquicia.mx" />
-                  <CampoTexto label="WhatsApp" value={whatsapp} onChange={setWhatsapp} placeholder="10 dígitos" />
+                  <CampoTexto label={CANAL} value={whatsapp} onChange={setWhatsapp} placeholder="10 dígitos" />
                 </div>
               )}
               <label className="flex items-center gap-2 text-sm text-ink-2">
                 <input type="checkbox" className="accent-brand" checked={enviarLiga} onChange={(e) => setEnviarLiga(e.target.checked)} />
-                Enviar liga ahora (correo y/o WhatsApp según los datos del contacto)
+                Enviar liga ahora (correo y/o {CANAL} según los datos del contacto)
               </label>
               {error && <Aviso tono="error">{error}</Aviso>}
             </div>

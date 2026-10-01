@@ -6,6 +6,8 @@ Proveedores (`WHATSAPP_PROVIDER` en .env):
                   servidor extra que mantener. Se paga por conversación.
   · waha       →  https://waha.devlike.pro          (docker devlikeapro/waha)
   · evolution  →  https://github.com/EvolutionAPI/evolution-api
+  · telegram   →  bot de Telegram (2026-10-01, demo Fraiche). Ver services/telegram.py: cada persona
+                  vincula su chat con su teléfono una vez; sin ventana de 24 h ni plantillas.
   · ""         →  modo demo: el mensaje se guarda en la base como "no enviado".
 
 Webhook de entrada:  {API}/webhooks/whatsapp
@@ -29,6 +31,11 @@ from ..config import settings
 
 GRAPH_URL = "https://graph.facebook.com"
 
+# Texto equivalente de las plantillas de Meta cuando el canal es Telegram (no hay plantillas allá).
+TEXTO_PLANTILLAS = {
+    "inicio_entrevista_rh": "Hola {0}, ¡gracias por tu interés! 🙌 Soy Red Human y te acompaño en tu proceso. Escríbeme «Hola» para empezar.",
+}
+
 # Meta rechaza texto libre fuera de la ventana de 24 h con estos códigos.
 CODIGOS_FUERA_DE_VENTANA = {131047, 131026, 132000}
 
@@ -40,7 +47,7 @@ def whatsapp_activo() -> bool:
 def proveedor() -> str:
     """Proveedor efectivo. Si no se declaró pero hay credenciales de Meta, es Meta:
     así un .env incompleto no deja la mensajería en modo demo sin avisar."""
-    if settings.whatsapp_provider in ("meta", "waha", "evolution"):
+    if settings.whatsapp_provider in ("meta", "waha", "evolution", "telegram"):
         return settings.whatsapp_provider
     if settings.meta_whatsapp_token and settings.meta_phone_number_id:
         return "meta"
@@ -148,6 +155,12 @@ async def enviar_plantilla(
     idioma: Optional[str] = None,
 ) -> dict:
     """Manda una plantilla aprobada (único formato válido fuera de la ventana de 24 h)."""
+    if settings.whatsapp_provider == "telegram":
+        # Telegram no tiene plantillas ni ventana: se manda como texto (los parámetros en orden).
+        texto = TEXTO_PLANTILLAS.get(plantilla, "").format(*(parametros or [])) if plantilla in TEXTO_PLANTILLAS else " ".join(parametros or []) or plantilla
+        resultado = await enviar_mensaje(telefono, texto)
+        resultado["formato"] = "texto"
+        return resultado
     componentes = []
     if parametros:
         componentes.append({
@@ -230,12 +243,16 @@ _EXT_POR_MIME = {
 }
 
 
-async def descargar_media(media_id: str) -> dict:
+async def descargar_media(media_id: str, mime: str = "", nombre: str = "") -> dict:
     """Descarga un medio recibido por el webhook (2026-09-15): Graph `GET /{media_id}` regresa la URL
     temporal + mime; la URL se lee con el mismo Bearer. Regresa {ok, contenido, mime, filename,
     detalle} y nunca lanza — el webhook le explica al candidato si algo falla."""
     if not media_id:
         return {"ok": False, "detalle": "sin media_id"}
+    if settings.whatsapp_provider == "telegram":
+        from . import telegram
+
+        return await telegram.descargar_archivo(media_id, mime, nombre)
     if settings.whatsapp_provider != "meta" or not settings.meta_whatsapp_token:
         return {"ok": False, "detalle": "descarga de medios solo disponible con WHATSAPP_PROVIDER=meta"}
     cabeceras = {"Authorization": f"Bearer {settings.meta_whatsapp_token}"}
@@ -283,6 +300,10 @@ async def enviar_texto_sin_plantilla(telefono: str, texto: str) -> dict:
 
 async def enviar_mensaje(telefono: str, texto: str) -> dict:
     """Envía un mensaje de texto. Regresa {enviado, proveedor, detalle}."""
+    if settings.whatsapp_provider == "telegram":
+        from . import telegram
+
+        return await telegram.enviar_a_telefono(telefono, texto)
     if settings.whatsapp_provider == "meta":
         resultado = await _meta_post({
             "messaging_product": "whatsapp",
@@ -479,6 +500,10 @@ async def enviar_lista_interactiva(
     `secciones` (2026-09-17, número compartido): [{"titulo": "Grupo CARBE", "opciones": [...]}] agrupa
     las filas por empresa; si se manda, `opciones` se ignora.
     """
+    if proveedor() == "telegram":
+        from . import telegram
+
+        return await telegram.enviar_opciones(telefono, encabezado, cuerpo, opciones, secciones)
     if proveedor() != "meta":
         return _resultado(False, "Las listas interactivas solo existen en Meta Cloud API")
     if secciones:

@@ -18,7 +18,7 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .migraciones import crear_tablas_base, crear_tablas_conocimiento, crear_tablas_modulos_rh, candidatos_sin_postulacion, relajar_not_null, sincronizar
 from .migraciones import asegurar_reglas_entrevistador
-from .routers import agente, auth, candidatos, capacitacion, clientes, clima, colaboradores, configuracion, conocimiento, contratacion, cuentas, desempeno, emails_preview, empleados, entrevista_humana, entrevistas, evaluacion_externa, evaluaciones, expediente_publico, feeds, firmas, webhooks_proveedores, metricas, notificaciones, onboarding, plantillas, requisiciones, vacantes, webhooks, integraciones
+from .routers import agente, auth, candidatos, capacitacion, clientes, clima, colaboradores, configuracion, conocimiento, contratacion, cuentas, desempeno, emails_preview, empleados, entrevista_humana, entrevistas, evaluacion_externa, evaluaciones, expediente_publico, feeds, firmas, webhooks_proveedores, metricas, notificaciones, onboarding, plantillas, requisiciones, vacantes, webhooks, integraciones, telegram
 from .seed import rellenar_slugs_cuentas, sembrar, sembrar_admin
 from .models import TABLAS_CONOCIMIENTO, TABLAS_MODULOS_RH
 from .services import modulos_rh, rag
@@ -136,6 +136,12 @@ async def lifespan(app: FastAPI):
         max_instances=1, coalesce=True, misfire_grace_time=120,
     )
     scheduler.start()
+    if whatsapp_proveedor() == "telegram":
+        # Telegram (2026-10-01): conocer el @username del bot desde el arranque (las ligas t.me lo necesitan)
+        from .services import telegram as _tg
+
+        bot = await _tg.nombre_bot()
+        print(f"[telegram] Canal de mensajería = Telegram · bot @{bot or '¿?'} · webhook secret {'ok' if settings.telegram_webhook_secret else 'FALTA'}", flush=True)
     try:
         yield
     finally:
@@ -202,6 +208,7 @@ app.include_router(evaluaciones.router)  # 2026-09-28: evaluaciones y verificaci
 app.include_router(evaluacion_externa.router)  # 2026-09-29 (Fraiche): liga limitada para la persona externa (/evaluacion/{token})
 app.include_router(firmas.router)  # 2026-09-29: firma electrónica incrustada (Dropbox Sign)
 app.include_router(webhooks_proveedores.router)  # 2026-09-29: /api/webhooks/dropbox y /api/webhooks/psicometricas
+app.include_router(telegram.router)  # 2026-10-01 (Fraiche): estado del bot, vinculados y ligas de Telegram
 
 
 @app.get("/salud")
@@ -211,7 +218,8 @@ def salud():
         "ia_configurada": ia_activa(),
         "whatsapp_configurado": whatsapp_activo(),
         "whatsapp_proveedor": whatsapp_proveedor(),
-        "whatsapp_webhook_firmado": bool(settings.meta_app_secret) if settings.whatsapp_provider == "meta" else None,
+        "whatsapp_webhook_firmado": bool(settings.meta_app_secret) if settings.whatsapp_provider == "meta" else (bool(settings.telegram_webhook_secret) if settings.whatsapp_provider == "telegram" else None),
+        "canal_mensajeria": "Telegram" if whatsapp_proveedor() == "telegram" else "WhatsApp",
         "avatar_configurado": avatar_activo(),
         "modelo": settings.openai_model,
         "modo": "producción" if ia_activa() else "demo (sin OPENAI_API_KEY)",

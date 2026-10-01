@@ -9,6 +9,8 @@ fuentes, rúbrica IPV y ruta visible. Los routers y `services/ia.py` lo leen; nu
 
 from typing import Dict, List, Optional, Tuple
 
+from . import canal as _canal
+
 # ============================================================
 # §2 · Destinos y §4 · Fuentes de postulación
 # ============================================================
@@ -33,7 +35,7 @@ FUENTES_POSTULACION: Dict[str, str] = {
     "referido": "Referido",
     "campo": "Campo",
     "contacto_directo": "Contacto directo",
-    "whatsapp": "WhatsApp",
+    "whatsapp": _canal.nombre(),
     "rh": "RH",
 }
 
@@ -542,7 +544,7 @@ DECISION_FRANQUICIATARIO_A_INTERNO = {"continuar": "favorable", "no_continuar": 
 PASOS: Dict[str, dict] = {
     "nuevo": {"nombre": "Nuevo", "etapa": "Prefiltro"},
     "prefiltro_web": {"nombre": "Prefiltro web", "etapa": "Prefiltro"},
-    "filtro_whatsapp": {"nombre": "Filtro WhatsApp", "etapa": "Prefiltro"},
+    "filtro_whatsapp": {"nombre": f"Filtro {_canal.nombre()}", "etapa": "Prefiltro"},
     "entrevista_inicial": {"nombre": "Entrevista inicial", "etapa": "Entrevista IA"},
     "ipv": {"nombre": "IPV", "etapa": "Entrevista IA"},
     "psicometria": {"nombre": "Psicometría", "etapa": "Evaluación"},
@@ -704,7 +706,7 @@ BLOQUES_SAP: List[dict] = [
     {"clave": "identificadores", "nombre": "Identificadores",
      "campos": [("curp", "CURP"), ("rfc", "RFC"), ("nss", "NSS")]},
     {"clave": "contacto", "nombre": "Contacto y domicilio",
-     "campos": [("correo", "Correo"), ("telefono", "Teléfono / WhatsApp"), ("domicilio", "Domicilio")]},
+     "campos": [("correo", "Correo"), ("telefono", f"Teléfono / {_canal.nombre()}"), ("domicilio", "Domicilio")]},
     {"clave": "puesto", "nombre": "Empresa, sucursal, puesto, jefe y fecha de ingreso",
      "campos": [("empresa", "Empresa"), ("sucursal", "Sucursal"), ("puesto", "Puesto"), ("jefe", "Jefe directo"), ("fecha_ingreso", "Fecha de ingreso")]},
     {"clave": "condiciones", "nombre": "Condiciones de empleo y compensación",

@@ -86,6 +86,11 @@ import {
   type DatosCuenta,
   type FichaCuenta,
   type IntegracionTeams,
+  fetchEstadoTelegram,
+  ligaTelegramPara,
+  registrarWebhookTelegram,
+  probarTelegram,
+  type EstadoTelegram,
   type Plantilla,
   type ReglaNotificacion,
   type ResumenBorradoPrueba,
@@ -95,6 +100,7 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+import { CANAL, ES_TELEGRAM } from "@/lib/canal";
 /* ============================================================
    Configuración — 6 secciones (Punto 2), completadas en Puntos 9-13
    1. Cuentas (gestión completa: listado, alta, ficha con usuarios/clientes/portal)
@@ -129,8 +135,109 @@ export default function Configuracion() {
       <SeccionPruebasPsicometricas />
       <SeccionNotificaciones />
       <SeccionIntegraciones />
+      {ES_TELEGRAM && <SeccionTelegram />}
       <SeccionModoPrueba />
     </div>
+  );
+}
+
+/* ================================================================== */
+/* Telegram (2026-10-01, demo Fraiche) — canal de mensajería           */
+/* ================================================================== */
+
+function SeccionTelegram() {
+  const [est, setEst] = useState<EstadoTelegram | null>(null);
+  const [msg, setMsg] = useState<{ tono: "ok" | "warn" | "error"; texto: string } | null>(null);
+  const [tel, setTel] = useState("");
+  const [liga, setLiga] = useState("");
+  const [ocupado, setOcupado] = useState("");
+  const recargar = useCallback(() => fetchEstadoTelegram().then((e) => setEst(e)), []);
+  useEffect(() => { recargar(); }, [recargar]);
+
+  async function registrar() {
+    setOcupado("webhook");
+    const r = await registrarWebhookTelegram();
+    setOcupado("");
+    setMsg(r.ok && r.data.ok ? { tono: "ok", texto: `Webhook registrado en ${r.data.url}` } : { tono: "error", texto: r.ok ? (r.data.description ?? "Telegram lo rechazó") : r.error });
+    recargar();
+  }
+  async function generar() {
+    setOcupado("liga");
+    const r = await ligaTelegramPara(tel.replace(/\D/g, "").slice(-10));
+    setOcupado("");
+    if (r) { setLiga(r.liga); setMsg(r.vinculado ? { tono: "ok", texto: "Ese número ya está vinculado." } : null); }
+    else setMsg({ tono: "error", texto: "No se pudo generar la liga (revisa el número a 10 dígitos)." });
+  }
+  async function probar() {
+    setOcupado("prueba");
+    const r = await probarTelegram(tel.replace(/\D/g, "").slice(-10));
+    setOcupado("");
+    setMsg(r.ok && r.data.enviado ? { tono: "ok", texto: "Mensaje de prueba enviado." } : { tono: "warn", texto: r.ok ? r.data.detalle : r.error });
+  }
+
+  return (
+    <Card className="mb-6 p-5">
+      <CabSeccion icono={Link2} titulo="Telegram" subtitulo="Canal de mensajería de esta demo: el agente, los avisos y los recordatorios salen por el bot." />
+      {msg && <div className="mb-3"><Aviso tono={msg.tono}>{msg.texto}</Aviso></div>}
+      {!est ? (
+        <p className="text-[12px] text-ink-3">Cargando…</p>
+      ) : !est.configurado ? (
+        <p className="text-[13px] text-ink-2">Falta <code className="font-mono">TELEGRAM_BOT_TOKEN</code> en el servidor.</p>
+      ) : (
+        <div className="space-y-4 text-[13px]">
+          <div className="rounded-xl border border-border-soft p-4">
+            <p className="font-semibold">Bot <a className="text-brand hover:underline" href={est.liga} target="_blank" rel="noopener noreferrer">@{est.bot}</a></p>
+            <p className="mt-1 text-ink-2">
+              Webhook: {est.webhook?.url ? <Badge tone="good" dot>Activo</Badge> : <Badge tone="neutral">Sin registrar</Badge>}{" "}
+              <span className="text-ink-3">{est.webhook?.url}</span>
+              {est.webhook?.ultimoError && <span className="mt-1 block text-bad">Último error: {est.webhook.ultimoError}</span>}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={registrar} disabled={Boolean(ocupado)}>
+                {ocupado === "webhook" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />} {est.webhook?.url ? "Volver a registrar webhook" : "Registrar webhook"}
+              </Button>
+            </div>
+            <p className="mt-3 text-[12px] text-ink-3">
+              Cómo se vincula una persona: abre <b>{est.liga}</b> (o la liga de una vacante / la que le llega al postularse) y toca <b>📱 Compartir mi número</b>.
+              Candidatos, entrevistadores, colaboradores y contactos de clientes se vinculan igual, una sola vez.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-border-soft p-4">
+            <p className="font-semibold">Liga personal de vinculación</p>
+            <p className="mt-0.5 text-ink-3">Para quien no quiera compartir su número desde Telegram: genera su liga (vincula al abrirla) y mándasela.</p>
+            <div className="mt-2 flex flex-wrap items-end gap-2">
+              <div className="w-48"><Entrada label="Celular (10 dígitos)" value={tel} onChange={setTel} placeholder="55 1234 5678" /></div>
+              <Button size="sm" onClick={generar} disabled={Boolean(ocupado) || tel.replace(/\D/g, "").length < 10}>Generar liga</Button>
+              <Button size="sm" variant="outline" onClick={probar} disabled={Boolean(ocupado) || tel.replace(/\D/g, "").length < 10}>Enviar prueba</Button>
+            </div>
+            {liga && (
+              <p className="mt-2 break-all rounded-lg bg-surface-2 px-3 py-2 font-mono text-[12px] text-ink-2">
+                {liga}
+                <button type="button" onClick={() => navigator.clipboard?.writeText(liga)} className="ml-2 inline-flex items-center gap-1 font-sans text-brand hover:underline"><Copy className="h-3 w-3" /> Copiar</button>
+              </p>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-border-soft p-4">
+            <p className="font-semibold">Personas vinculadas ({est.vinculados.length})</p>
+            {est.sinVincular > 0 && <p className="text-[12px] text-ink-3">{est.sinVincular} chat(s) abrieron el bot pero no han compartido su número.</p>}
+            {est.vinculados.length === 0 ? (
+              <p className="mt-1 text-ink-3">Nadie se ha vinculado todavía.</p>
+            ) : (
+              <ul className="mt-2 divide-y divide-border-soft">
+                {est.vinculados.map((v) => (
+                  <li key={v.telefono} className="flex flex-wrap items-center justify-between gap-2 py-1.5">
+                    <span><b>{v.nombre || "Sin nombre"}</b>{v.usuario ? ` · @${v.usuario}` : ""} · {v.telefono}</span>
+                    <span className="text-[12px] text-ink-3">{v.quien}{v.vinculadoEn ? ` · ${fechaCorta(v.vinculadoEn)}` : ""}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -204,7 +311,7 @@ function SeccionIntegraciones() {
             <p className="text-sm font-semibold">Microsoft Teams / Microsoft 365</p>
             <p className="mt-0.5 text-[13px] leading-relaxed text-ink-2">
               Con la cuenta conectada, al programar una Entrevista Humana en Videollamada Red Human crea la reunión de Teams,
-              guarda la liga, la incluye en el correo y WhatsApp de confirmación y manda la invitación de calendario a
+              guarda la liga, la incluye en el correo y {CANAL} de confirmación y manda la invitación de calendario a
               candidato y entrevistador.
             </p>
             {!teams ? (
@@ -350,7 +457,7 @@ function CamposCuentaForm({ f, set }: { f: FormCuentaState; set: (k: keyof FormC
       <Entrada label="Nombre comercial" value={f.nombreComercial} onChange={(v) => set("nombreComercial", v)} placeholder="Lo que ven los candidatos en el portal" />
       <Entrada label="Razón social (opcional)" value={f.razonSocial} onChange={(v) => set("razonSocial", v)} placeholder="Ej. Carbe S.A. de C.V." />
       <Entrada label="Correo" value={f.correo} onChange={(v) => set("correo", v)} placeholder="rh@empresa.com" type="email" />
-      <Entrada label="Teléfono / WhatsApp" value={f.whatsapp} onChange={(v) => set("whatsapp", v)} placeholder="52 55 1234 5678" />
+      <Entrada label={`Teléfono / ${CANAL}`} value={f.whatsapp} onChange={(v) => set("whatsapp", v)} placeholder="52 55 1234 5678" />
       <Entrada label="Nombre de contacto" value={f.contactoNombre} onChange={(v) => set("contactoNombre", v)} placeholder="Ej. Ana García" />
       <Selector label="Estatus" value={f.estado} onChange={(v) => set("estado", v)} opciones={["Activa", "Inactiva"]} />
       {/* 2026-09-17 (WhatsApp multi-tenant): por defecto el número maestro de WhatsApp atiende a TODAS las
@@ -364,7 +471,7 @@ function CamposCuentaForm({ f, set }: { f: FormCuentaState; set: (k: keyof FormC
           className="mt-0.5 h-4 w-4 accent-[var(--brand)]"
         />
         <span className="text-[13px] leading-relaxed text-ink-2">
-          <b className="text-ink">Número de WhatsApp exclusivo de esta Cuenta</b> (Premium). Los mensajes que lleguen al número capturado
+          <b className="text-ink">Número de {CANAL} exclusivo de esta Cuenta</b> (Premium). Los mensajes que lleguen al número capturado
           arriba verán solo las vacantes de esta Cuenta. Desmarcado, el número maestro es compartido: el candidato ve las vacantes de
           todas las Cuentas activas y su postulación queda en la Cuenta de la vacante que elija.
         </span>
@@ -793,7 +900,7 @@ function TabUsuariosCuenta({ ficha, onCambio }: { ficha: FichaCuenta; onCambio: 
             <Entrada label="Correo" value={f.correo} onChange={(v) => setF((p) => ({ ...p, correo: v }))} placeholder="correo@empresa.com" type="email" />
             <Selector label="Rol" value={f.rol} onChange={(v) => setF((p) => ({ ...p, rol: v as RolUsuario }))} opciones={["Usuario", "Coordinación", "Administrador"]} />
             <Entrada label="Puesto (opcional)" value={f.puesto} onChange={(v) => setF((p) => ({ ...p, puesto: v }))} placeholder="Ej. Reclutadora" />
-            <Entrada label="WhatsApp (opcional)" value={f.telefono} onChange={(v) => setF((p) => ({ ...p, telefono: v }))} placeholder="10 dígitos — para avisos como entrevistador" />
+            <Entrada label={`${CANAL} (opcional)`} value={f.telefono} onChange={(v) => setF((p) => ({ ...p, telefono: v }))} placeholder="10 dígitos — para avisos como entrevistador" />
           </div>
           <p className="mt-2 text-[12px] text-ink-3">Si el correo ya pertenece a un usuario del sistema, solo se le dará acceso a esta Cuenta.</p>
           <div className="mt-3 flex justify-end gap-2">
@@ -809,7 +916,7 @@ function TabUsuariosCuenta({ ficha, onCambio }: { ficha: FichaCuenta; onCambio: 
           <li key={u.id} className="flex items-center gap-3 py-2.5">
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">{u.nombre}{u.id === usuario?.id && <span className="ml-1.5 text-[11px] text-ink-3">(tú)</span>}</p>
-              <p className="truncate text-[12px] text-ink-3">{u.correo}{u.puesto ? ` · ${u.puesto}` : ""}{u.telefono ? ` · WhatsApp ${u.telefono}` : ""}</p>
+              <p className="truncate text-[12px] text-ink-3">{u.correo}{u.puesto ? ` · ${u.puesto}` : ""}{u.telefono ? ` · ${CANAL} ${u.telefono}` : ""}</p>
             </div>
             <Badge tone={u.rol === "Administrador" ? "brand" : u.rol === "Coordinación" ? "human" : "neutral"}>{u.rol}</Badge>
             <Badge tone={u.activo ? "good" : "neutral"} dot>{u.activo ? "Activo" : "Inactivo"}</Badge>
@@ -884,7 +991,7 @@ function SeccionUsuarios() {
             <li key={u.id} className="flex items-center gap-3 py-2.5">
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">{u.nombre}</p>
-                <p className="truncate text-[12px] text-ink-3">{u.correo}{u.puesto ? ` · ${u.puesto}` : ""}{u.telefono ? ` · WhatsApp ${u.telefono}` : ""}</p>
+                <p className="truncate text-[12px] text-ink-3">{u.correo}{u.puesto ? ` · ${u.puesto}` : ""}{u.telefono ? ` · ${CANAL} ${u.telefono}` : ""}</p>
               </div>
               <Badge tone={u.rol === "Administrador" ? "brand" : u.rol === "Coordinación" ? "human" : "neutral"}>{u.rol}</Badge>
               <Badge tone={u.activo ? "good" : "neutral"} dot>{u.activo ? "Activo" : "Inactivo"}</Badge>
@@ -947,7 +1054,7 @@ function FormUsuario({
         {!usuario && <Entrada label="Correo" value={correo} onChange={setCorreo} placeholder="correo@empresa.com" type="email" />}
         <Entrada label="Puesto" value={puesto} onChange={setPuesto} placeholder="Ej. Reclutadora" />
         {/* Fase 7A: WhatsApp del perfil — lo usa la notificación cuando esta persona es Entrevistador */}
-        <Entrada label="WhatsApp (opcional)" value={telefono} onChange={setTelefono} placeholder="10 dígitos — para avisos como entrevistador" />
+        <Entrada label={`${CANAL} (opcional)`} value={telefono} onChange={setTelefono} placeholder="10 dígitos — para avisos como entrevistador" />
         <Selector label="Rol" value={rol} onChange={(v) => setRol(v as RolUsuario)} opciones={["Usuario", "Coordinación", "Administrador"]} />
         <Entrada label={usuario ? "Nueva contraseña (opcional)" : "Contraseña"} value={password} onChange={setPassword} type="password" placeholder="Mínimo 8 caracteres" />
         {usuario && (
@@ -1236,7 +1343,7 @@ function FichaClienteModal({ clienteId, onClose }: { clienteId: number; onClose:
                   <Entrada label="Apellidos" value={formContacto.datos.apellidos ?? ""} onChange={(v) => setC("apellidos", v)} />
                   <Entrada label="Puesto" value={formContacto.datos.puesto ?? ""} onChange={(v) => setC("puesto", v)} placeholder="Ej. Gerente de sucursal" />
                   <Entrada label="Correo" value={formContacto.datos.correo ?? ""} onChange={(v) => setC("correo", v)} type="email" />
-                  <Entrada label="WhatsApp / teléfono" value={formContacto.datos.telefono ?? ""} onChange={(v) => setC("telefono", v)} placeholder="10 dígitos" />
+                  <Entrada label={`${CANAL} / teléfono`} value={formContacto.datos.telefono ?? ""} onChange={(v) => setC("telefono", v)} placeholder="10 dígitos" />
                 </div>
                 <div className="mt-3 flex justify-end gap-2">
                   <Button variant="outline" size="sm" onClick={() => setFormContacto(null)} disabled={ocupado}>Cancelar</Button>
@@ -1532,13 +1639,13 @@ function SeccionNotificaciones() {
                 <tr className="border-b border-border-faint text-center text-[11px] text-ink-3">
                   <th />
                   <th className="px-2 pb-1.5 font-normal">Correo</th>
-                  <th className="px-2 pb-1.5 font-normal">WhatsApp</th>
+                  <th className="px-2 pb-1.5 font-normal">{CANAL}</th>
                   <th className="px-2 pb-1.5 font-normal">Correo</th>
-                  <th className="px-2 pb-1.5 font-normal">WhatsApp</th>
+                  <th className="px-2 pb-1.5 font-normal">{CANAL}</th>
                   {hayClienteActivo && (
                     <>
                       <th className="px-2 pb-1.5 font-normal">Correo</th>
-                      <th className="px-2 pb-1.5 font-normal">WhatsApp</th>
+                      <th className="px-2 pb-1.5 font-normal">{CANAL}</th>
                     </>
                   )}
                 </tr>
@@ -1727,7 +1834,7 @@ function SeccionModoPrueba() {
             {cfg?.modoPrueba && <Badge tone="brand" dot>Activo</Badge>}
           </div>
           <p className="mt-1 max-w-md text-[13px] leading-relaxed text-ink-2">
-            Con Modo Prueba activo, las postulaciones que entren (web o WhatsApp) se marcan como prueba y nunca
+            Con Modo Prueba activo, las postulaciones que entren (web o {CANAL}) se marcan como prueba y nunca
             aparecen en los listados ni reportes de RH; el dedup por teléfono/correo se desactiva para poder
             repetir el flujo con el mismo número.
           </p>
@@ -1752,7 +1859,7 @@ function SeccionModoPrueba() {
       <div className="mt-5 rounded-xl border border-border-soft p-4">
         <p className="text-sm font-semibold">Tiempo automático de nueva sesión</p>
         <p className="mt-1 max-w-lg text-[13px] leading-relaxed text-ink-2">
-          Con Modo Prueba activo, si una conversación de WhatsApp de prueba lleva más de este tiempo sin actividad,
+          Con Modo Prueba activo, si una conversación de {CANAL} de prueba lleva más de este tiempo sin actividad,
           el siguiente mensaje del mismo teléfono cierra la postulación anterior y arranca una nueva desde cero.
         </p>
         <div className="mt-3 flex flex-wrap items-end gap-3">
@@ -1861,7 +1968,7 @@ function SeccionModoPrueba() {
           <p className="text-sm font-semibold">Reiniciar prueba (antes «Liberar número»)</p>
           <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
             Desde la ficha de cualquier postulación de prueba (Candidatos → tarjeta → «Reiniciar prueba») se cierra la
-            postulación actual y se crea una nueva limpia para la misma persona y vacante — el teléfono y el WhatsApp
+            postulación actual y se crea una nueva limpia para la misma persona y vacante — el teléfono y el {CANAL}
             no se tocan, así el mismo número vuelve a empezar el flujo desde cero. Solo está disponible con Modo Prueba
             activo o sobre postulaciones marcadas como prueba.
           </p>
