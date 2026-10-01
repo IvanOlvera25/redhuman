@@ -112,7 +112,7 @@ with TestClient(app) as client:
     p.candidato.cv_datos = {"resumen_profesional": "Abogado con 5 años de experiencia.", "habilidades": ["Fiscal", "Litigio"], "estudios": ["Lic. Derecho"], "idiomas": ["Inglés"]}
     db.add(Archivo(candidato_id=p.candidato_id, tipo="cv", nombre="cv.pdf", ruta="", mime="application/pdf"))
     db.commit()
-    client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Evaluación", "manual": True})
+    client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Entrevista IA", "manual": True})
     CORREOS.clear()
     r = client.post(f"/candidatos/{P}/entrevista-humana", json={"tipo_entrevistador": "interno", "entrevistador_usuario_id": admin.id, "fecha": _cita_en_5h[0], "hora": _cita_en_5h[1], "modalidad": "Llamada", "notificar": {"cliente_correo": False, "cliente_whatsapp": False}})
     check(r.status_code == 201, "entrevista humana programada")
@@ -165,7 +165,7 @@ with TestClient(app) as client:
     print("\n--- 5. RH registra resultado en un solo paso ---")
     r = client.post("/candidatos", json={"nombre": "Ana Ruiz", "telefono": "5599990000", "vacante": VAC, "consentimiento": True, "fuente": "RH"})
     P2 = r.json()["id"]
-    client.patch(f"/candidatos/{P2}/etapa", json={"etapa": "Evaluación", "manual": True})
+    client.patch(f"/candidatos/{P2}/etapa", json={"etapa": "Entrevista IA", "manual": True})
     client.post(f"/candidatos/{P2}/entrevista-humana", json={"tipo_entrevistador": "interno", "entrevistador_usuario_id": admin.id, "fecha": "2026-10-01", "hora": "10:00", "modalidad": "Llamada", "notificar": {"cliente_correo": False, "cliente_whatsapp": False}})
     r = client.post(f"/candidatos/{P2}/entrevista-humana/resultado", json={"resultado": "no_aprobado", "recomendacion": "no_avanzar", "comentario": ""})
     check(r.status_code == 200 and r.json()["entrevistaHumana"]["realizada"] is True and r.json()["entrevistaHumana"]["resultado"] == "no_aprobado", "«Entrevista realizada» + resultado sin comentario → realizada y evaluada en un paso")

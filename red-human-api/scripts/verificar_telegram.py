@@ -137,14 +137,14 @@ with TestClient(app) as client:
     check(res["enviado"] and ultimo["text"] == "<b>hola</b> &lt;b&gt;" and ultimo["parse_mode"] == "HTML", "el marcado *negritas* se convierte a HTML y lo demás se escapa")
 
     # 7) liga firmada → vincula sin pedir número; manipulada → no
-    liga = tg.liga_vinculo("5533332222", "P8899")
+    liga = tg.liga_vinculo("5533332222", "")
     payload = liga.split("start=")[1]
-    check(liga.startswith("https://t.me/FraicheDemoBot?start=L-5533332222-P8899-") and len(payload) <= 64, "liga firmada t.me/<bot>?start=… de ≤ 64 caracteres")
+    check(liga.startswith("https://t.me/FraicheDemoBot?start=L-5533332222--") and len(payload) <= 64, "liga firmada t.me/<bot>?start=… de ≤ 64 caracteres")
     turno(msg(888, f"/start {payload}"))
     db = SessionLocal()
     check(db.query(VinculoTelegram).filter(VinculoTelegram.chat_id == "888").first().telefono == "5533332222", "la liga firmada vincula el chat sin compartir el número")
     db.close()
-    turno(msg(889, "/start L-5500000000-P8899-" + payload[-12:]))
+    turno(msg(889, "/start L-5500000000--" + payload[-12:]))
     db = SessionLocal()
     vv = db.query(VinculoTelegram).filter(VinculoTelegram.chat_id == "889").first()
     check(vv is None or not vv.telefono, "una liga con el teléfono alterado NO vincula")
@@ -169,5 +169,46 @@ with TestClient(app) as client:
     check(r.status_code == 201 and r.json().get("ligaTelegram", "").startswith("https://t.me/FraicheDemoBot?start=L-5522221111-"), "/postular regresa la liga para continuar en Telegram")
     pub = client.get("/vacantes/publicas").json()
     check(pub and pub[0].get("ligaTelegram", "").startswith("https://t.me/FraicheDemoBot?start=VAC-"), "las vacantes públicas traen su liga de Telegram")
+
+    # 10) Cambios integrados 2026-10-01: «Continuar en Telegram» sigue en la postulación EXACTA aunque la persona
+    # tenga una conversación vieja (sin vacante) en OTRA Cuenta — antes le preguntaba la empresa.
+    from app.models import Cuenta
+    from app.routers.candidatos import crear_postulacion, fijar_conversacion
+
+    db = SessionLocal()
+    otra = db.query(Cuenta).filter(Cuenta.id != v.cuenta_id).first()
+    if otra is None:
+        otra = Cuenta(nombre="Otra Cuenta", nombre_comercial="Otra Cuenta", slug="otra-cuenta", estado="Activa")
+        db.add(otra)
+        db.flush()
+    vieja_c = Candidato(codigo="TMP", cuenta_id=otra.id, nombre="Raúl", telefono="5518606528", fuente="WhatsApp")
+    db.add(vieja_c)
+    db.flush()
+    vieja_c.codigo = f"C-{8800 + vieja_c.id}"
+    vieja_p = crear_postulacion(db, vieja_c, None, otra.id, "whatsapp")
+    fijar_conversacion(vieja_p)
+    db.commit()
+    db.close()
+    r = client.post("/candidatos/postular", data={"vacante": v.slug or v.codigo, "nombre": "Raúl Carbajal", "telefono": "5518606528", "correo": "raul@demo.invalid",
+                                                  "consentimiento": "true"})
+    nueva = r.json()["postulacion"]
+    pl = r.json()["ligaTelegram"].split("start=")[1]
+    ENVIADOS.clear()
+    turno(msg(9001, f"/start {pl}"))
+    db = SessionLocal()
+    pn = db.query(Postulacion).filter(Postulacion.codigo == nueva).first()
+    textos_9001 = textos(9001)
+    check(pn.candidato.postulacion_conversacion_id == pn.id, "la liga de continuación fija la conversación en la postulación exacta")
+    check(not any(("inline_keyboard" in str(d.get("reply_markup", ""))) and "CTA-" in str(d.get("reply_markup")) for m, d in ENVIADOS if m == "sendMessage"),
+          "no pregunta la empresa ni muestra vacantes de otras Cuentas")
+    check(db.query(Postulacion).join(Candidato, Candidato.id == Postulacion.candidato_id).filter(Candidato.telefono == "5518606528").count() == 2, "no crea otra postulación")
+    check(any("vinculé este chat con tu postulación" in x.lower() for x in textos_9001) and db.query(Mensaje).filter(Mensaje.postulacion_id == pn.id, Mensaje.rol == "user").count() >= 1,
+          "el agente continúa en esa postulación (el mensaje queda en su ficha)")
+    db.close()
+    # liga de una postulación que no corresponde al teléfono → ofrece reintentar
+    from app.services import telegram as tg2
+    mala = tg2.payload_vinculo("5599990000", nueva.replace("-", ""))
+    turno(msg(9002, f"/start {mala}"))
+    check(any("reintentar" in x.lower() for x in textos(9002)), "si la vinculación falla, ofrece reintentar")
 
 print(f"\n🎉 Telegram verificado: {OK} comprobaciones OK.")

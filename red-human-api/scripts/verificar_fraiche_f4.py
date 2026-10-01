@@ -115,6 +115,10 @@ with TestClient(app) as client:
     check(client.get(f"/evaluaciones-externas/publica/{tok}").json()["cerrada"] is True, "la liga se cierra al revisar")
 
     print("\n--- Socioeconómico por liga del proveedor (PDF + resumen IA sin puntuación) ---")
+    # Cambios integrados 2026-10-01: la ruta Franquicia NO lleva socioeconómico, médico ni psicometría
+    check(client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "socioeconomico"}).status_code == 409, "franquicia rechaza socioeconómico (no aplica a su ruta)")
+    v.destino = "tienda_propia"
+    db.commit()
     r = client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "socioeconomico", "responsable": {"nombre": "Estudios MX", "correo": "estudios@proveedor.invalid"}, "generar_liga": True})
     SOC = r.json()
     check(r.status_code == 201 and SOC["ligaExterna"], "socioeconómico con proveedor y liga")
@@ -165,6 +169,8 @@ with TestClient(app) as client:
     db.commit()
 
     print("\n--- Franquiciatario: Continuar / No continuar ---")
+    v.destino = "franquicia"
+    db.commit()
     r = client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "otra", "nombre": fraiche.NOMBRE_EVALUACION_FRANQUICIATARIO, "responsable": {"contacto_id": contacto.id}})
     FR = r.json()
     check(r.status_code == 201 and FR["esFranquiciatario"] and FR["responsable"] == "Rosa Franquiciataria" and FR["responsableCorreo"] == "rosa@franquicia001.invalid" and FR["ligaExterna"], "evaluación fija «Entrevista con franquiciatario» con contacto de la franquicia y liga automática")
@@ -204,6 +210,8 @@ with TestClient(app) as client:
     check(r.status_code == 200 and len(r.json()["referencias"]) == 2 and r.json()["estadoFraiche"] == "con_resultado", "referencias guardadas; una verificada → Con resultado")
 
     print("\n--- Evaluatest: liga del proveedor + carga de reporte anonimizado ---")
+    v.destino = "tienda_propia"
+    db.commit()
     r = client.post("/evaluaciones/pruebas", json={"clave": "evaluatest-demostrador", "nombre": "Batería Demostrador", "modo": "enlace", "proveedor": "Evaluatest", "url": "https://evaluatest.example/bateria", "puestos": ["Demostrador"]})
     check(r.status_code == 201, "prueba Evaluatest en el catálogo (modo enlace)")
     r = client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "psicometrica", "prueba_id": r.json()["id"]})

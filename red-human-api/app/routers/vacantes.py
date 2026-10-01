@@ -84,8 +84,17 @@ def _con_logo(db: Session, salida: dict, v: Vacante) -> dict:
     """Agrega el logo de la Cuenta al payload candidato-visible (Fase B, punto 12: la vista
     previa/portal público hereda la apariencia mínima de la Cuenta — logo + nombre comercial;
     el nombre ya lo resuelve `nombre_empresa_candidato` dentro de `vacante_dict`)."""
+    publico = {}
+    if (v.sucursal or "") and fraiche.sucursal_publica(v.sucursal) != v.sucursal:
+        # 2026-10-01: la sucursal y las preguntas que ve el candidato no llevan el código interno de la franquicia
+        suc = fraiche.sucursal_publica(v.sucursal)
+        publico = {"sucursal": suc, "criterios": fraiche.preguntas_para_vacante(v.preguntas_filtro or [], sucursal=suc, sueldo=v.sueldo or ""),
+                   "cliente": None, "clienteNombre": None}
+    if v.destino == "franquicia":
+        publico["empresa"] = nombre_empresa_candidato(v)
     return {
         **salida,
+        **publico,
         "logoUrl": v.cuenta.logo if v.cuenta else "",
         "cuentaId": v.cuenta_id,
         "cuentaSlug": (v.cuenta.slug if v.cuenta else "") or "",
@@ -746,8 +755,15 @@ def actualizar(
         if k in cambios and isinstance(cambios[k], str):
             cambios[k] = cambios[k].strip()
 
+    destino_anterior = v.destino or "tienda_propia"
     for campo, valor in cambios.items():
         setattr(v, campo, valor)
+    if "destino" in cambios and (v.destino or "tienda_propia") != destino_anterior:
+        # Cambios integrados 2026-10-01: corregir Tipo de tienda ajusta las actividades PENDIENTES de sus candidatos
+        # (lo que ya no aplica se cancela con motivo); resultados e historial se conservan.
+        from ..services import fraiche_pipeline as fp
+
+        fp.ajustar_por_cambio_de_ruta(db, v, destino_anterior, v.destino or "tienda_propia", u.nombre)
     # Fase 4: si tocó Estado/Municipio, el texto de ubicación se deriva
     if any(k in cambios for k in ("ubicacion_estado", "ubicacion_municipio")):
         v.ubicacion = texto_ubicacion(v.ubicacion_estado, v.ubicacion_municipio, v.ubicacion)

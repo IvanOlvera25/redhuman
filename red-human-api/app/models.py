@@ -282,7 +282,7 @@ ORIGENES_POSTULACION = ["formulario", "whatsapp", "rh_directo", "cv_masivo", "re
 # Por qué se cerró (activa=False). "" mientras sigue en curso.
 # Fraiche (spec §12): «aceptado_franquicia» = el franquiciatario aceptó al candidato presentado; la contratación la
 # hace él y NO cuenta como ingreso de Fraiche. «no_ingreso» ya se usaba (Onboarding v2) y faltaba en la lista.
-MOTIVOS_CIERRE = ["descartado", "contratado", "reinicio_prueba", "prueba_expirada", "sin_interes", "vacante_eliminada", "eliminado", "no_ingreso", "aceptado_franquicia"]
+MOTIVOS_CIERRE = ["descartado", "contratado", "reinicio_prueba", "prueba_expirada", "sin_interes", "vacante_eliminada", "eliminado", "no_ingreso", "aceptado_franquicia", "ingreso_franquicia"]
 
 
 class Postulacion(Base):
@@ -342,6 +342,13 @@ class Postulacion(Base):
     franquicia_estado: Mapped[str] = mapped_column(String(20), default="")
     franquicia_presentado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     franquicia_decidido_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Pipeline Fraiche v2 (2026-10-01): en franquicia la contratación y el ingreso los confirma el franquiciatario;
+    # RH solo REGISTRA esas confirmaciones (no hay expediente, kit de precontratación ni alta SAP de Fraiche).
+    franquicia_contratado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    franquicia_contratado_por: Mapped[str] = mapped_column(String(150), default="")
+    franquicia_ingreso_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    franquicia_ingreso_por: Mapped[str] = mapped_column(String(150), default="")
+    franquicia_nota: Mapped[str] = mapped_column(Text, default="")
 
     # --- Consentimiento LFPDPPP: por proceso de selección ---
     consentimiento: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -428,7 +435,8 @@ class Postulacion(Base):
         if self.etapa == "Prefiltro":
             return not self.prefiltro_completo
         if self.etapa == "Entrevista IA":
-            return self.estado == "cumple" and not self.videollamada_agendada_en
+            # Pipeline Fraiche v2: el filtro por mensaje ocurre dentro de Filtro Red Human (prefiltro aún incompleto)
+            return (not self.prefiltro_completo) or (self.estado == "cumple" and not self.videollamada_agendada_en)
         # Evaluación / Entrevista Humana / Contratación: RH ya tomó el control — aunque el
         # prefiltro haya quedado a medias, el agente no tiene nada que preguntar por chat.
         return False

@@ -371,6 +371,8 @@ function Contenido() {
                   <div className="rounded-xl border border-border-soft bg-surface-2/40 px-3 py-2.5"><p className="text-[11px] text-ink-3">Presentados</p><p className="mt-0.5 font-display text-xl font-bold tabular">{t.franquicias.presentados}</p></div>
                   <div className="rounded-xl border border-border-soft bg-surface-2/40 px-3 py-2.5"><p className="text-[11px] text-ink-3">Aceptados</p><p className="mt-0.5 font-display text-xl font-bold tabular text-good">{t.franquicias.aceptados}</p></div>
                   <div className="rounded-xl border border-border-soft bg-surface-2/40 px-3 py-2.5"><p className="text-[11px] text-ink-3">No aceptados</p><p className="mt-0.5 font-display text-xl font-bold tabular">{t.franquicias.noAceptados}</p></div>
+                  <div className="rounded-xl border border-border-soft bg-surface-2/40 px-3 py-2.5"><p className="text-[11px] text-ink-3">Contratación confirmada</p><p className="mt-0.5 font-display text-xl font-bold tabular">{t.franquicias.contratacionesConfirmadas ?? 0}</p></div>
+                  <div className="rounded-xl border border-border-soft bg-surface-2/40 px-3 py-2.5"><p className="text-[11px] text-ink-3">Ingreso confirmado</p><p className="mt-0.5 font-display text-xl font-bold tabular">{t.franquicias.ingresosConfirmados ?? 0}</p></div>
                 </div>
                 <Tabla filas={t.franquicias.porFranquicia.length} vacio="Sin candidatos presentados a franquicias." cabeceras={["Franquicia", "Presentados", "Aceptados", "No aceptados"]}>
                   {t.franquicias.porFranquicia.map((x) => (

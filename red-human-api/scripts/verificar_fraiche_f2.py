@@ -142,7 +142,8 @@ with TestClient(app) as client:
     guion = [q["pregunta"] for q in PREGUNTAS_USADAS[-1]["preguntas"]]
     check(guion[:3] == ["¿Cuánto tiempo trabajaste en tu empleo más reciente?", "¿Cuál era tu puesto?", "¿Qué función realizabas con más frecuencia?"], "las 3 primeras preguntas en el orden del spec")
     check(guion[3] == "¿Cuánto tiempo acumulado tienes en puestos como Cajero(a)?", "pregunta 4 (experiencia similar reportada) con [puesto] sustituido")
-    check(guion[4] == "¿A partir de cuándo podrías iniciar?" and guion[-1].startswith("¿Tienes algún adeudo con BBVA?"), "sin duda web no hay pregunta 5; BBVA cierra el guion")
+    check(guion[4].startswith("¿Cuándo podrías empezar a trabajar en ") and guion[-1].startswith("¿Tienes algún adeudo con BBVA?"), "sin duda web no hay pregunta 5; disponibilidad con el nombre de la empresa; BBVA cierra el guion")
+    check(guion[-2].startswith("El sueldo de esta vacante es de ") and "pesos mexicanos" in guion[-2], "2026-10-01: el sueldo se muestra y valida por mensaje, en pesos y en palabras")
     check(PREGUNTAS_USADAS[-1]["guion_fijo"] is True and any("Horarios rolados" in x or "rolados" in x for x in PREGUNTAS_USADAS[-1]["respuestas_web"]), "el turno recibe guion_fijo y lo contestado en la web (no se repite)")
     check(PREGUNTAS_USADAS[-1]["preguntas"][-1]["informativa"] is True, "BBVA marcada como informativa")
     check("INFORMATIVA" in ia.criterios_prefiltro(PREGUNTAS_USADAS[-1]["preguntas"]), "el prompt marca BBVA como INFORMATIVA")
@@ -150,10 +151,10 @@ with TestClient(app) as client:
     PREGUNTAS_USADAS.clear()
     client.post(f"/candidatos/{p2.codigo}/prefiltro", json={"texto": "Hola"})
     guion2 = [q["pregunta"] for q in PREGUNTAS_USADAS[-1]["preguntas"]]
-    check(any("tiempo de traslado" in q for q in guion2) and sum(1 for q in guion2 if "traslado" in q or "sueldo" in q.lower()) == 1, "con duda web (traslado «No sé») se agrega UNA pregunta sobre ese único punto")
+    check(any("tiempo de traslado" in q for q in guion2) and sum(1 for q in guion2 if "traslado" in q) == 1 and sum(1 for q in guion2 if "sueldo" in q.lower()) == 1, "con duda web (traslado «No sé») se agrega UNA pregunta sobre ese único punto")
 
     # recorrer el guion en modo demo: 6 preguntas (sin duda) + BBVA
-    respuestas_chat = ["2 años", "Cajero en tienda", "Cobrar y atender clientes", "3 años", "La próxima semana", "Sí"]
+    respuestas_chat = ["2 años", "Cajero en tienda", "Cobrar y atender clientes", "3 años", "La próxima semana", "Sí", "Sí"]  # + sueldo (2026-10-01)
     for t in respuestas_chat:
         r = client.post(f"/candidatos/{p1.codigo}/prefiltro", json={"texto": t})
     db.refresh(p1)

@@ -39,7 +39,16 @@ def por_etapa(db: Session, cuenta_id: int, vacante_id: Optional[int] = None) -> 
         .group_by(Postulacion.etapa)
         .all()
     )
-    return {etapa: int(n) for etapa, n in filas}
+    salida: Dict[str, int] = {}
+    for etapa, n in filas:
+        k = _columna(etapa)
+        salida[k] = salida.get(k, 0) + int(n)
+    return salida
+
+
+def _columna(etapa: str) -> str:
+    """Pipeline Fraiche v2 (2026-10-01): «Evaluación» ya no es columna — lo que quede ahí cuenta en Filtro humano."""
+    return "Entrevista Humana" if etapa == "Evaluación" else etapa
 
 
 def por_estado(db: Session, cuenta_id: int, vacante_id: Optional[int] = None) -> Dict[str, int]:
@@ -74,7 +83,8 @@ def resumen_por_vacante(db: Session, cuenta_id: int, desde_nuevos: datetime) -> 
         .all()
     ):
         f = fila(vid)
-        f["etapas"][etapa] = int(n)
+        k = _columna(etapa)
+        f["etapas"][k] = f["etapas"].get(k, 0) + int(n)
         f["total"] += int(n)
     for vid, estado, n in (
         base.with_entities(Postulacion.vacante_id, Postulacion.estado, func.count(Postulacion.id))

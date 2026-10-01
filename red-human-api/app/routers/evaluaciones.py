@@ -269,6 +269,10 @@ def agregar_evaluacion(codigo: str, datos: AgregarEvaluacionIn, db: Session = De
         raise HTTPException(409, "La postulación está cerrada.")
     if datos.tipo not in TIPOS_EVALUACION:
         raise HTTPException(400, f"Tipo inválido. Usa uno de: {', '.join(TIPOS_EVALUACION)}.")
+    from ..services import fraiche_pipeline as fp
+
+    if fp.es_franquicia(p) and fp.es_ruta_fraiche(p) and datos.tipo in fp.TIPOS_SOLO_TIENDA:
+        raise HTTPException(409, f"«{TIPOS_EVALUACION[datos.tipo]}» no aplica a la ruta Franquicia (sin IPV, psicometría, médico ni socioeconómico de Fraiche).")
     nombre, modo, proveedor, id_prov, url = datos.nombre.strip(), datos.modo.strip(), datos.proveedor.strip(), datos.id_proveedor.strip(), datos.url.strip()
     prueba = None
     if datos.tipo == "psicometrica":
@@ -574,6 +578,10 @@ async def registrar_resultado(
         except ValueError as ex:
             raise HTTPException(400, str(ex))
         avisos.append(f"Decisión registrada: {texto_dec}")
+        if p is not None and sev.es_franquiciatario(ev) and ev.decision_externa in ("continuar", "no_continuar"):
+            # Pipeline v2: la decisión del franquiciatario se refleja en la postulación; NO la cierra ni la mueve
+            p.franquicia_estado = "aceptado" if ev.decision_externa == "continuar" else "no_aceptado"
+            p.franquicia_decidido_en = datetime.now(timezone.utc)
     ev.origen_resultado = origen
     ev.resultado_cargado_por, ev.resultado_cargado_en = actor, datetime.now(timezone.utc)
     ev.realizada_en = ev.realizada_en or ev.resultado_cargado_en

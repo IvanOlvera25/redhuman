@@ -101,7 +101,8 @@ with TestClient(app) as client:
     vac = client.get("/vacantes").json()[0]
     r = client.post("/candidatos", json={"nombre": "Carla Méndez", "telefono": "5512121212", "correo": "carla@correo.mx", "vacante": vac["id"], "consentimiento": True, "fuente": "RH"})
     P = r.json()["id"]
-    client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Evaluación", "manual": True})
+    check(client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Evaluación", "manual": True}).status_code == 400, "la columna Evaluación ya no existe (2026-10-01)")
+    client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Entrevista Humana", "manual": True})
     check(client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "horoscopo"}).status_code == 400, "tipo inválido → 400")
     check(client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "psicometrica"}).status_code == 400, "psicométrica exige una prueba del catálogo")
     check(client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "psicometrica", "prueba_id": VIEJA}).status_code == 409, "…y activa")
@@ -114,7 +115,7 @@ with TestClient(app) as client:
     for tipo in ("tecnica", "referencias", "socioeconomico", "otra"):
         tipos[tipo] = client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": tipo}).json()
     check([tipos[t]["tipoTexto"] for t in tipos] == ["Técnica o caso práctico", "Referencias", "Socioeconómico", "Otra"], "los seis tipos del menú")
-    check(client.get(f"/candidatos/{P}").json()["etapa"] == "Evaluación", "agregar evaluaciones NO mueve la columna del pipeline")
+    check(client.get(f"/candidatos/{P}").json()["etapa"] == "Entrevista Humana", "agregar evaluaciones NO mueve la columna del pipeline")
 
     print("\n--- 3. Consentimiento general antes de enviar ---")
     r = client.post("/candidatos", json={"nombre": "Sin Consentimiento", "telefono": "5534343434", "vacante": vac["id"], "consentimiento": False, "fuente": "RH"})
@@ -216,7 +217,7 @@ with TestClient(app) as client:
     check(r.json()["estado"] == "fallida" and r.json()["motivoFallida"] and r.json()["estadoTexto"] == "Fallida/Cancelada", "Fallida/Cancelada con motivo")
     check(client.post(f"/evaluaciones/{REF}/enviar").status_code == 409, "una fallida ya no se mueve")
     check(len(r.json()["historial"]) >= 2, "cada cambio queda en el historial de la evaluación")
-    check(client.get(f"/candidatos/{P}").json()["etapa"] == "Evaluación", "nada de lo anterior movió el pipeline")
+    check(client.get(f"/candidatos/{P}").json()["etapa"] == "Entrevista Humana", "nada de lo anterior movió el pipeline")
 
     print("\n--- 9. Vacante: sugerencias y «Avisar antes de Onboarding» ---")
     r = client.patch(f"/vacantes/{vac['id']}", json={

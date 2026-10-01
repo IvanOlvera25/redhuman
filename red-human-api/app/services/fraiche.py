@@ -7,6 +7,7 @@ evaluados al franquiciatario, quien decide y contrata). Todo lo que aquí vive e
 fuentes, rúbrica IPV y ruta visible. Los routers y `services/ia.py` lo leen; nunca lo duplican.
 """
 
+import re
 from typing import Dict, List, Optional, Tuple
 
 from . import canal as _canal
@@ -245,7 +246,10 @@ GUION_WHATSAPP: List[dict] = [
     {"clave": "experiencia_acumulada", "pregunta": "¿Cuánto tiempo acumulado tienes en puestos como [puesto]?", "criterio": "Experiencia similar",
      "condicion": "reporto_experiencia_similar"},
     {"clave": "duda_web", "pregunta": "", "criterio": "Duda del prefiltro web", "condicion": "duda_pendiente"},
-    {"clave": "inicio", "pregunta": "¿A partir de cuándo podrías iniciar?", "criterio": "Disponibilidad de inicio"},
+    {"clave": "inicio", "pregunta": "¿Cuándo podrías empezar a trabajar en [empresa]?", "criterio": "Disponibilidad de inicio"},
+    # 2026-10-01 (§7): el sueldo se muestra y se valida AQUÍ (monto, moneda y periodicidad explícitos)
+    {"clave": "sueldo_vacante", "pregunta": "El sueldo de esta vacante es de [sueldo]. ¿Estás de acuerdo con ese sueldo? Sí / No",
+     "criterio": "Sueldo de la vacante", "condicion": "con_sueldo"},
     {"clave": "adeudo_bbva", "pregunta": "¿Tienes algún adeudo con BBVA? Sí / No", "criterio": "Adeudo con BBVA", "informativa": True},
 ]
 
@@ -302,7 +306,8 @@ def reporto_experiencia_similar(analisis: dict) -> Optional[bool]:
     return d.get("cumple")
 
 
-def guion_whatsapp(*, titulo_vacante: str, analisis: dict, sucursal: str = "", sueldo: str = "", extras: Optional[List[dict]] = None) -> List[dict]:
+def guion_whatsapp(*, titulo_vacante: str, analisis: dict, sucursal: str = "", sueldo: str = "", extras: Optional[List[dict]] = None,
+                   empresa: str = "") -> List[dict]:
     """Preguntas del segundo filtro por WhatsApp en la forma que consume `ia.prefiltro_turno` (dicts tipo
     PreguntaFiltro + `clave` / `informativa` / `solo_si`). Orden EXACTO del spec §6; la 4 solo si reportó
     experiencia similar (o no se sabe), la 5 solo si quedó una duda del formulario web; las preguntas
@@ -310,8 +315,17 @@ def guion_whatsapp(*, titulo_vacante: str, analisis: dict, sucursal: str = "", s
     salida: List[dict] = []
     exp = reporto_experiencia_similar(analisis)
     duda = duda_web_pendiente(analisis, sucursal=sucursal, sueldo=sueldo)
+    con_sueldo = bool(sueldo) and "convenir" not in sueldo.lower()
+    if duda and duda.get("clave") == "sueldo" and con_sueldo:
+        duda = None  # la pregunta explícita del sueldo ya cubre esa duda
     for q in GUION_WHATSAPP:
         cond = q.get("condicion")
+        if cond == "con_sueldo":
+            if not con_sueldo:
+                continue
+            salida.append({"clave": q["clave"], "pregunta": q["pregunta"].replace("[sueldo]", sueldo), "tipo": "si_no", "valida": q["criterio"],
+                           "respuesta_esperada": "Sí", "descarta": False, "informativa": False, "solo_si": ""})
+            continue
         if cond == "reporto_experiencia_similar" and exp is False:
             continue
         if cond == "duda_pendiente":
@@ -320,7 +334,7 @@ def guion_whatsapp(*, titulo_vacante: str, analisis: dict, sucursal: str = "", s
             salida.append({"clave": duda["clave"], "pregunta": duda["pregunta"], "tipo": "texto_corto", "valida": duda["criterio"],
                            "respuesta_esperada": "", "descarta": False, "informativa": False})
             continue
-        pregunta = q["pregunta"].replace("[puesto]", titulo_vacante or "este")
+        pregunta = q["pregunta"].replace("[puesto]", titulo_vacante or "este").replace("[empresa]", empresa or "la empresa")
         if cond == "reporto_experiencia_similar" and exp is None:
             pregunta = pregunta  # se pregunta igual; el modelo la omite si el candidato dijo no tener experiencia similar
         salida.append({"clave": q["clave"], "pregunta": pregunta, "tipo": "si_no" if q.get("informativa") else "texto_corto",
@@ -360,9 +374,11 @@ def siguiente_accion_whatsapp(resultado: str) -> str:
 # §7 · Entrevista inicial — temas fijos
 # ============================================================
 
+# Cambios integrados 2026-10-01 (§7): el sueldo se valida SOLO en el prefiltro por mensaje — la entrevista no lo
+# menciona ni lo pregunta (se quitó «expectativa salarial»).
 TEMAS_ENTREVISTA_INICIAL: List[str] = [
     "experiencia", "funciones", "estabilidad laboral", "motivos de salida", "disponibilidad",
-    "servicio al cliente", "expectativa salarial",
+    "servicio al cliente",
 ]
 
 # ============================================================
@@ -461,6 +477,8 @@ def contexto_previo_entrevista(analisis: Optional[dict]) -> List[str]:
             continue
         if r.get("pregunta") and r.get("respuesta"):
             lineas.append(f"{r['pregunta']} → {r['respuesta']}")
+    # 2026-10-01: nada de sueldo en la entrevista; ningún código interno de franquicia frente al candidato
+    lineas = [texto_publico(x) for x in lineas if not re.search(r"sueldo|salari|\$|monto", x, re.I)]
     return lineas[:20]
 
 
@@ -544,12 +562,13 @@ DECISION_FRANQUICIATARIO_A_INTERNO = {"continuar": "favorable", "no_continuar": 
 PASOS: Dict[str, dict] = {
     "nuevo": {"nombre": "Nuevo", "etapa": "Prefiltro"},
     "prefiltro_web": {"nombre": "Prefiltro web", "etapa": "Prefiltro"},
-    "filtro_whatsapp": {"nombre": f"Filtro {_canal.nombre()}", "etapa": "Prefiltro"},
-    "entrevista_inicial": {"nombre": "Entrevista inicial", "etapa": "Entrevista IA"},
-    "ipv": {"nombre": "IPV", "etapa": "Entrevista IA"},
-    "psicometria": {"nombre": "Psicometría", "etapa": "Evaluación"},
-    "evaluaciones_adicionales": {"nombre": "Evaluaciones adicionales", "etapa": "Evaluación"},
-    "referencias": {"nombre": "Referencias laborales", "etapa": "Evaluación"},
+    # Pipeline v2 (2026-10-01): columnas Prefiltro → Filtro Red Human → Filtro humano → Contratación → Onboarding
+    "filtro_whatsapp": {"nombre": f"Filtro {_canal.nombre()}", "etapa": "Entrevista IA"},
+    "entrevista_inicial": {"nombre": "Entrevista Red Human", "etapa": "Entrevista IA"},
+    "ipv": {"nombre": "IPV", "etapa": "Entrevista Humana"},
+    "psicometria": {"nombre": "Psicometría", "etapa": "Entrevista Humana"},
+    "evaluaciones_adicionales": {"nombre": "Evaluaciones adicionales", "etapa": "Entrevista Humana"},
+    "referencias": {"nombre": "Referencias laborales", "etapa": "Entrevista Humana"},
     "documentacion": {"nombre": "Documentación y onboarding", "etapa": "Contratación"},
     "listo_alta": {"nombre": "Listo para alta", "etapa": "Onboarding"},
     "listo_sap": {"nombre": "Listo para enviar a SAP", "etapa": "Onboarding"},
@@ -559,8 +578,9 @@ RUTA_TIENDA_PROPIA: List[str] = [
     "nuevo", "prefiltro_web", "filtro_whatsapp", "entrevista_inicial", "ipv", "psicometria",
     "evaluaciones_adicionales", "referencias", "documentacion", "listo_alta", "listo_sap",
 ]
+# Franquicia: sin IPV ni psicometría (Cambios integrados 2026-10-01)
 RUTA_FRANQUICIA: List[str] = [
-    "nuevo", "prefiltro_web", "filtro_whatsapp", "entrevista_inicial", "ipv", "psicometria", "presentacion",
+    "nuevo", "prefiltro_web", "filtro_whatsapp", "entrevista_inicial", "presentacion",
 ]
 ESTADOS_FRANQUICIA = {"presentado": "Presentado", "aceptado": "Aceptado por franquiciatario", "no_aceptado": "No aceptado"}
 
@@ -714,3 +734,84 @@ BLOQUES_SAP: List[dict] = [
 ]
 ESTADO_LISTO_SAP = "listo_para_enviar_sap"
 MENSAJE_SAP_PENDIENTE = "Conexión con SAP pendiente de configurar"
+
+
+# ============================================================
+# Cambios integrados 2026-10-01 · lo que ve el candidato
+# ============================================================
+
+_RE_FRANQUICIA = re.compile(r"\bFranquicia\s*(?:No\.?\s*)?\d{1,4}\b\s*[·\-–,:]?\s*", re.I)
+
+
+def sucursal_publica(sucursal: str) -> str:
+    """Sucursal tal como la ve el candidato: sin «Franquicia 001»/«002» ni códigos internos (se conservan en la base)."""
+    return re.sub(r"\s{2,}", " ", _RE_FRANQUICIA.sub("", sucursal or "")).strip(" ·-–,")
+
+
+def texto_publico(texto: str, empresa: str = "Fraiche") -> str:
+    """Quita identificadores internos de franquicia de cualquier texto que llegue al candidato (guion, audio, subtítulos)."""
+    t = _RE_FRANQUICIA.sub(f"{empresa} ", texto or "")
+    t = re.sub(rf"\b{re.escape(empresa)}\s+{re.escape(empresa)}\b", empresa, t)
+    return re.sub(r"\s{2,}", " ", t).strip()
+
+
+_UNIDADES = ["", "un", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez", "once", "doce", "trece", "catorce", "quince",
+             "dieciséis", "diecisiete", "dieciocho", "diecinueve", "veinte", "veintiún", "veintidós", "veintitrés", "veinticuatro", "veinticinco",
+             "veintiséis", "veintisiete", "veintiocho", "veintinueve"]
+_DECENAS = ["", "", "", "treinta", "cuarenta", "cincuenta", "sesenta", "setenta", "ochenta", "noventa"]
+_CENTENAS = ["", "ciento", "doscientos", "trescientos", "cuatrocientos", "quinientos", "seiscientos", "setecientos", "ochocientos", "novecientos"]
+
+
+def _menor_mil(n: int) -> str:
+    if n == 0:
+        return ""
+    if n == 100:
+        return "cien"
+    c, r = divmod(n, 100)
+    partes = [_CENTENAS[c]] if c else []
+    if r < 30:
+        partes.append(_UNIDADES[r])
+    else:
+        d, u = divmod(r, 10)
+        partes.append(_DECENAS[d] + (f" y {_UNIDADES[u]}" if u else ""))
+    return " ".join(x for x in partes if x)
+
+
+def numero_a_palabras(n: int) -> str:
+    """Entero 0-999,999,999 en palabras (español de México), para que un sueldo nunca se lea como decimales o dólares."""
+    n = int(n)
+    if n == 0:
+        return "cero"
+    millones, resto = divmod(n, 1_000_000)
+    miles, unidades = divmod(resto, 1000)
+    partes = []
+    if millones:
+        partes.append("un millón" if millones == 1 else f"{_menor_mil(millones)} millones")
+    if miles:
+        partes.append("mil" if miles == 1 else f"{_menor_mil(miles)} mil")
+    if unidades:
+        partes.append(_menor_mil(unidades))
+    return " ".join(partes).strip()
+
+
+_PERIODO_PALABRAS = {"mensual": "al mes", "quincenal": "a la quincena", "semanal": "a la semana", "diario": "al día", "anual": "al año", "por_hora": "por hora"}
+
+
+def sueldo_candidato(v) -> str:
+    """Sueldo inequívoco para el candidato: «$11,500 MXN mensuales (once mil quinientos pesos mexicanos al mes)».
+    Corrige la lectura «11 dólares con 50 centavos» de «$11,500». Sin monto capturado → «A convenir»."""
+    if v is None:
+        return ""
+    desde, hasta = v.sueldo_desde, v.sueldo_hasta
+    base = v.sueldo or ""
+    monto = desde or hasta
+    if not monto or "convenir" in base.lower():
+        return base or "A convenir"
+    moneda = (v.sueldo_moneda or "MXN").upper()
+    nombre_moneda = "pesos mexicanos" if moneda == "MXN" else ("dólares estadounidenses" if moneda == "USD" else moneda)
+    periodo = _PERIODO_PALABRAS.get(v.sueldo_periodicidad or "", "")
+    if desde and hasta and hasta != desde:
+        palabras = f"de {numero_a_palabras(desde)} a {numero_a_palabras(hasta)} {nombre_moneda}"
+    else:
+        palabras = f"{numero_a_palabras(monto)} {nombre_moneda}"
+    return f"{base} ({palabras}{(' ' + periodo) if periodo else ''})"

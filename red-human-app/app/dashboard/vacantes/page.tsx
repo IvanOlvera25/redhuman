@@ -71,6 +71,7 @@ import {
   guardarVacanteComoPlantilla,
   ENFOQUES_ENTREVISTA,
   nombreEtapa,
+  ETAPAS_VISIBLES,
   DESTINOS_VACANTE,
   FUENTES_POSTULACION,
   fetchLigaPostulacion,
@@ -427,7 +428,7 @@ export default function Vacantes() {
           </label>
           {/* Fraiche: destino y zona */}
           <label className="flex flex-col gap-1.5 text-xs text-ink-2">
-            Destino
+            Tipo de tienda
             <select
               value={fDestino}
               onChange={(e) => setFDestino(e.target.value as DestinoVacante | "")}
@@ -546,6 +547,7 @@ export default function Vacantes() {
                 <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1">
                   {Object.entries(v.embudo.etapas)
                     .filter(([, n]) => n > 0)
+                    .sort(([a], [b]) => (ETAPAS_VISIBLES as readonly string[]).indexOf(a) - (ETAPAS_VISIBLES as readonly string[]).indexOf(b))
                     .map(([etapa, n]) => (
                       <button
                         key={etapa}
@@ -650,6 +652,7 @@ export default function Vacantes() {
                       <div className="mt-1 flex flex-wrap gap-1">
                         {Object.entries(v.embudo.etapas)
                           .filter(([, n]) => n > 0)
+                          .sort(([a], [b]) => (ETAPAS_VISIBLES as readonly string[]).indexOf(a) - (ETAPAS_VISIBLES as readonly string[]).indexOf(b))
                           .map(([etapa, n]) => (
                             <button
                               key={etapa}
@@ -792,7 +795,7 @@ function CamposFraiche({
   return (
     <>
       <label className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium text-ink-2">Destino *</span>
+        <span className="text-sm font-medium text-ink-2">Tipo de tienda *</span>
         <select
           value={value.destino}
           onChange={(e) => onChange({ ...value, destino: e.target.value as DestinoVacante })}
@@ -2128,8 +2131,8 @@ function DetalleVacante({
         )}
 
         {/* Embudo de esta vacante — conecta con el pipeline de candidatos (B4: clic → Kanban filtrado por vacante + etapa) */}
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
-          {["Prefiltro", "Entrevista IA", "Evaluación", "Entrevista Humana", "Contratación", "Onboarding"].map((e) => (
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+          {ETAPAS_VISIBLES.map((e) => (
             <Link
               key={e}
               href={`/dashboard/candidatos?${new URLSearchParams({ vacante: v.id, etapa: e }).toString()}`}

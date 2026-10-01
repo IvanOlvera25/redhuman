@@ -834,6 +834,13 @@ async def postular(
             analisis_p["prefiltro_web"] = web
             if p.etapa == "Prefiltro":
                 p.estado = web["resultado"]
+                # Pipeline Fraiche v2 (2026-10-01): formulario y requisitos superados → Filtro Red Human (ahí
+                # sigue el proceso por mensaje y la entrevista del agente). «No cumple» se queda en Prefiltro.
+                from ..services import fraiche_pipeline as fp
+
+                if fp.es_ruta_fraiche(p) and web["resultado"] != "no_cumple":
+                    p.etapa = "Entrevista IA"
+                    fraiche.avanzar_paso(p, "filtro_whatsapp")
             registrar(db, "sistema", "prefiltro_web_evaluado", "postulacion", p.codigo, {"resultado": web["resultado"], "motivo": web["motivo"][:300]})
         p.analisis = analisis_p
     registrar(
@@ -1457,8 +1464,9 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
     analisis_previo = dict(p.analisis or {})
     preguntas_wa = fraiche.guion_whatsapp(
         titulo_vacante=v.titulo if v else "", analisis=analisis_previo,
-        sucursal=(v.sucursal or "") if v else "", sueldo=(v.sueldo or "") if v else "",
+        sucursal=fraiche.sucursal_publica(v.sucursal or "") if v else "", sueldo=fraiche.sueldo_candidato(v) if v else "",
         extras=[x for x in ((v.preguntas_filtro_whatsapp or []) if v else []) if isinstance(x, dict)],
+        empresa=nombre_empresa_candidato(v) if v else "",
     )
     # 2026-09-16 (prefiltro dual): si el turno anterior pidió aclarar una contradicción Web vs WhatsApp,
     # el modelo registra la aclaración y sigue; la contradicción queda documentada para RH.
@@ -1476,8 +1484,8 @@ async def procesar_prefiltro(db: Session, p: Postulacion, texto: str, canal: str
         preguntas_wa,
         historial,
         empresa=nombre_empresa_candidato(v) if v else "",
-        ubicacion=v.ubicacion if v else "",
-        sueldo=v.sueldo if v else "",
+        ubicacion=fraiche.texto_publico(", ".join(x for x in [fraiche.sucursal_publica(v.sucursal or ""), v.ubicacion or ""] if x), nombre_empresa_candidato(v)) if v else "",
+        sueldo=fraiche.sueldo_candidato(v) if v else "",
         modalidad=v.modalidad if v else "",
         beneficios=(v.beneficios or []) if v else [],
         perfil_ideal=v.perfil_ideal if v else "",
@@ -1860,8 +1868,21 @@ async def aplicar_movimiento(
     """Núcleo del movimiento de etapa (hace commit). `desde_iniciar` = lo llama «Iniciar Onboarding»."""
     if datos.etapa not in ETAPAS_CANDIDATO:
         raise HTTPException(400, f"Etapa inválida. Usa una de: {', '.join(ETAPAS_CANDIDATO)}")
+    from ..services import fraiche_pipeline as fp
+
+    if datos.etapa == "Evaluación":
+        raise HTTPException(400, "La columna «Evaluación» ya no existe: la evaluación integral es un resultado acumulado en la ficha.")
     prueba_total = modo_prueba_activo(db)
-    if datos.etapa == "Onboarding" and not desde_iniciar and not prueba_total and datos.etapa != p.etapa:
+    franquicia = fp.es_franquicia(p) and fp.es_ruta_fraiche(p)
+    # Pipeline v2: avanzar a Contratación/Onboarding exige lo aplicable a la ruta; se dice EXACTAMENTE qué falta.
+    # «Mover a otra etapa» (manual) sigue siendo decisión de RH y deja lo saltado como «Omitida manualmente».
+    if not datos.manual and not datos.omitir_entrevista_ia and not prueba_total and datos.etapa != p.etapa:
+        faltan = fp.validar_movimiento(p, datos.etapa)
+        if faltan:
+            raise HTTPException(409, f"Para pasar a {fp.nombre_columna(datos.etapa)} falta: " + "; ".join(faltan) + ".")
+    if franquicia and datos.etapa == "Onboarding" and p.etapa == "Contratación" and not p.franquicia_contratado_en and not datos.manual and not prueba_total:
+        raise HTTPException(409, "Para pasar a Onboarding falta registrar la confirmación de contratación del franquiciatario.")
+    if datos.etapa == "Onboarding" and not desde_iniciar and not prueba_total and datos.etapa != p.etapa and not franquicia:
         raise HTTPException(
             409,
             "Para pasar a Onboarding usa «Enviar a Onboarding» e «Iniciar Onboarding» desde el expediente "
@@ -1905,10 +1926,10 @@ async def aplicar_movimiento(
         except Exception as ex:  # noqa: BLE001
             envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)[:200]}
         registrar(db, u.nombre, "entrevista_ia_forzada", "postulacion", p.codigo, {"whatsapp": envio, "correo_rh": u.correo})
-    if datos.etapa == "Onboarding" and not p.expediente and p.consentimiento:
+    if datos.etapa == "Onboarding" and not p.expediente and p.consentimiento and not franquicia:
         _abrir_expediente(db, p, u)  # movimiento manual directo a Onboarding: el expediente nace aquí
 
-    if datos.etapa == "Contratación" and not p.expediente:
+    if datos.etapa == "Contratación" and not p.expediente and not franquicia:
         if not p.consentimiento:
             raise HTTPException(
                 409,
@@ -1953,7 +1974,7 @@ async def aplicar_movimiento(
          "manual": manual, "omitidas": omitidas, "omitio_entrevista_ia": omitiendo_ia, "correo_rh": u.correo,
          "iniciar_onboarding": desde_iniciar},
     )
-    if datos.etapa == "Onboarding" and not desde_iniciar and p.expediente:
+    if datos.etapa == "Onboarding" and not desde_iniciar and p.expediente and not franquicia:
         # Modo Prueba (única vía sin «Iniciar Onboarding»): las tareas nacen igual desde la plantilla, sin avisos.
         try:
             from ..services import onboarding as onb
@@ -2105,6 +2126,11 @@ async def programar_entrevista_humana(
 
     if datos.modalidad not in MODALIDADES_ENTREVISTA_HUMANA:
         raise HTTPException(400, f"Modalidad inválida. Usa una de: {', '.join(MODALIDADES_ENTREVISTA_HUMANA)}")
+    if datos.es_ipv:
+        from ..services import fraiche_pipeline as fp
+
+        if fp.es_franquicia(p) and fp.es_ruta_fraiche(p):
+            raise HTTPException(409, "La ruta Franquicia no lleva IPV.")
     liga = datos.liga.strip()
     ubicacion = datos.ubicacion.strip()
     if datos.modalidad == "Presencial" and not ubicacion:
@@ -2488,14 +2514,70 @@ async def actualizar_franquicia(
     p.franquicia_estado = datos.estado
     if datos.estado in ("aceptado", "no_aceptado"):
         p.franquicia_decidido_en = datetime.now(timezone.utc)
-    if datos.estado == "aceptado" and p.activa:
-        p.cerrar("aceptado_franquicia")
+    # Pipeline v2 (2026-10-01): «Aceptado» ya NO cierra — sigue a Contratación, donde RH registra la confirmación
+    # de contratación del franquiciatario y después el ingreso (no hay expediente ni alta SAP de Fraiche).
     p.historial = list(p.historial or []) + [{
         "evento": "franquicia_estado", "texto": f"Franquicia: {fraiche.ESTADOS_FRANQUICIA[datos.estado]}",
         "usuario": u.nombre, "fecha": datetime.now(timezone.utc).isoformat(), "desde": anterior, "hacia": datos.estado, "motivo": datos.comentario.strip()[:300],
     }]
     registrar(db, u.nombre, "franquicia_estado_actualizado", "postulacion", p.codigo, {"de": anterior, "a": datos.estado, "comentario": datos.comentario[:300], "correo_rh": u.correo})
     _actualizar_ultima_actividad(p)
+    db.commit()
+    return postulacion_dict(p, detalle=True)
+
+
+class ConfirmacionFranquiciaIn(BaseModel):
+    fecha: str = ""        # ISO (AAAA-MM-DD); vacío = hoy
+    comentario: str = ""
+
+
+def _fecha_confirmacion(texto: str) -> datetime:
+    if not (texto or "").strip():
+        return datetime.now(timezone.utc)
+    try:
+        d = datetime.fromisoformat(texto.strip()[:10])
+    except ValueError:
+        raise HTTPException(400, "Fecha inválida (usa AAAA-MM-DD).")
+    return d.replace(tzinfo=timezone.utc)
+
+
+@router.post("/{codigo}/franquicia/contratacion")
+def confirmar_contratacion_franquicia(codigo: str, datos: ConfirmacionFranquiciaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+                                      cuenta: Cuenta = Depends(cuenta_actual)):
+    """Pipeline v2 · Franquicia · Contratación: RH REGISTRA que el franquiciatario confirmó la contratación (la hace
+    el franquiciatario; Fraiche no arma expediente, kit de precontratación ni alta SAP)."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    if not (p.vacante and p.vacante.destino == "franquicia"):
+        raise HTTPException(409, "Esta postulación no es de una vacante de franquicia.")
+    if p.etapa != "Contratación":
+        raise HTTPException(409, "Primero pasa la postulación a Contratación (con la decisión «Aceptado» del franquiciatario).")
+    p.franquicia_contratado_en, p.franquicia_contratado_por = _fecha_confirmacion(datos.fecha), u.nombre
+    p.franquicia_nota = (datos.comentario or "").strip()[:500] or p.franquicia_nota
+    p.historial = list(p.historial or []) + [{"evento": "franquicia_contratacion", "texto": "Contratación confirmada por el franquiciatario (registrada por RH)",
+                                              "usuario": u.nombre, "fecha": datetime.now(timezone.utc).isoformat(), "motivo": (datos.comentario or "")[:300]}]
+    registrar(db, u.nombre, "franquicia_contratacion_confirmada", "postulacion", p.codigo, {"fecha": p.franquicia_contratado_en.isoformat(), "correo_rh": u.correo})
+    _actualizar_ultima_actividad(p)
+    db.commit()
+    return postulacion_dict(p, detalle=True)
+
+
+@router.post("/{codigo}/franquicia/ingreso")
+def confirmar_ingreso_franquicia(codigo: str, datos: ConfirmacionFranquiciaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+                                 cuenta: Cuenta = Depends(cuenta_actual)):
+    """Pipeline v2 · Franquicia · Onboarding: RH registra el ingreso confirmado por el franquiciatario y la
+    postulación se cierra (`ingreso_franquicia`). Cuenta en el tablero como ingreso de FRANQUICIA, nunca como
+    ingreso de tienda propia."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    if not (p.vacante and p.vacante.destino == "franquicia"):
+        raise HTTPException(409, "Esta postulación no es de una vacante de franquicia.")
+    if p.etapa != "Onboarding":
+        raise HTTPException(409, "Primero pasa la postulación a Onboarding (con la contratación confirmada).")
+    p.franquicia_ingreso_en, p.franquicia_ingreso_por = _fecha_confirmacion(datos.fecha), u.nombre
+    p.historial = list(p.historial or []) + [{"evento": "franquicia_ingreso", "texto": "Ingreso confirmado por el franquiciatario (registrado por RH)",
+                                              "usuario": u.nombre, "fecha": datetime.now(timezone.utc).isoformat(), "motivo": (datos.comentario or "")[:300]}]
+    if p.activa:
+        p.cerrar("ingreso_franquicia")
+    registrar(db, u.nombre, "franquicia_ingreso_confirmado", "postulacion", p.codigo, {"fecha": p.franquicia_ingreso_en.isoformat(), "correo_rh": u.correo})
     db.commit()
     return postulacion_dict(p, detalle=True)
 
@@ -2609,6 +2691,10 @@ async def programar_ipv_red_human(
     p = _por_codigo(db, codigo, cuenta.id)
     if datos.modo != "red_human":
         raise HTTPException(400, "Para un entrevistador humano usa POST /entrevista-humana con es_ipv=true.")
+    from ..services import fraiche_pipeline as fp
+
+    if fp.es_franquicia(p) and fp.es_ruta_fraiche(p):
+        raise HTTPException(409, "La ruta Franquicia no lleva IPV.")
     pendiente = next((e for e in reversed(p.entrevistas) if e.fase == "inicial" and e.estado in ("programada", "en_curso")), None)
     fraiche.avanzar_paso(p, "ipv")  # Fraiche (spec §11): IPV programada
     if pendiente is not None:

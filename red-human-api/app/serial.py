@@ -58,6 +58,10 @@ def nombre_empresa_candidato(v: Vacante) -> str:
     hay uno asignado y `mostrar_cliente_candidato` está activo; si no, el nombre comercial de la
     Cuenta — nunca el texto libre `empresa` salvo que la vacante no tenga Cuenta (no debería
     pasar tras la migración de Fase A, es solo un respaldo defensivo)."""
+    # 2026-10-01 (Fraiche): en una vacante de FRANQUICIA el candidato ve siempre la marca de la Cuenta («Fraiche»),
+    # nunca «Franquicia 001»; el cliente se conserva internamente.
+    if getattr(v, "destino", "") == "franquicia" and v.cuenta:
+        return v.cuenta.nombre_comercial
     if v.cliente_id and v.mostrar_cliente_candidato and v.cliente:
         return v.cliente.nombre_visible
     if v.cuenta:
@@ -511,6 +515,19 @@ def postulacion_dict(p: Postulacion, detalle: bool = False, n_mensajes: Optional
         # --- Persona (maestro) ---
         "candidato": _persona_dict(c),
     }
+    # Pipeline Fraiche v2 (2026-10-01): ruta, columna visible, resultado acumulado y siguiente acción
+    try:
+        from .services import fraiche_pipeline as fp
+
+        av = fp.avance(p)
+        base["avance"] = av if detalle else {
+            "ruta": av["ruta"], "destino": av["destino"], "columnaNombre": av["columnaNombre"],
+            "integral": {k: av["integral"][k] for k in ("conclusion", "texto", "score")},
+            "franquiciaEstado": av["franquiciaEstado"], "franquiciaEstadoTexto": av["franquiciaEstadoTexto"],
+            "siguienteAccion": av["siguienteAccion"], "pendientes": av["pendientes"], "puedeAvanzar": av["puedeAvanzar"],
+        }
+    except Exception as ex:  # noqa: BLE001 — el avance nunca tumba la ficha
+        print(f"[pipeline] avance no disponible para {p.codigo}: {ex}", flush=True)
 
     if not detalle:
         return base

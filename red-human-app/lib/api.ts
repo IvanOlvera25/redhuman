@@ -566,7 +566,7 @@ export interface CriterioFiltro {
 export type DestinoVacante = "tienda_propia" | "franquicia";
 export const DESTINOS_VACANTE: { valor: DestinoVacante; texto: string; detalle: string }[] = [
   { valor: "tienda_propia", texto: "Tienda propia", detalle: "Recluta para una sucursal de Fraiche y prepara la contratación." },
-  { valor: "franquicia", texto: "Franquicia cliente", detalle: "Presenta candidatos evaluados al franquiciatario, quien decide y contrata." },
+  { valor: "franquicia", texto: "Franquicia", detalle: "Presenta candidatos evaluados al franquiciatario, quien decide y contrata; RH registra su confirmación." },
 ];
 
 /** Fraiche (spec §4): fuentes de postulación (lo que viaja en `?fuente=`). */
@@ -850,7 +850,20 @@ export function urlImagenPublicaVacante(slug: string) {
 
 /** "Entrevista IA" es el valor interno/base de la etapa; en la interfaz se muestra como
  * «Entrevista Red Human» (Parte 3, decisión visual — sin migración de datos). */
-export const ETIQUETA_ETAPA: Record<string, string> = { "Entrevista IA": "Entrevista Red Human", Evaluación: "Evaluación integral" };
+/** Pipeline Fraiche v2 (2026-10-01): cinco columnas visibles. Los valores internos no cambian; «Evaluación» ya no es
+ * columna (lo que quede ahí se muestra en Filtro humano) y la Evaluación integral es un resultado en la ficha. */
+export const ETIQUETA_ETAPA: Record<string, string> = { "Entrevista IA": "Filtro Red Human", "Entrevista Humana": "Filtro humano", Evaluación: "Filtro humano" };
+export const ETAPAS_VISIBLES = ["Prefiltro", "Entrevista IA", "Entrevista Humana", "Contratación", "Onboarding"] as const;
+/** Columna visible de una postulación (legado «Evaluación» → Filtro humano). */
+export function columnaDe(etapa: string): string {
+  return etapa === "Evaluación" ? "Entrevista Humana" : etapa;
+}
+export function confirmarContratacionFranquicia(codigo: string, comentario = "") {
+  return post<Candidato>(`/candidatos/${codigo}/franquicia/contratacion`, { comentario });
+}
+export function confirmarIngresoFranquicia(codigo: string, comentario = "") {
+  return post<Candidato>(`/candidatos/${codigo}/franquicia/ingreso`, { comentario });
+}
 export function nombreEtapa(etapa: string): string {
   return ETIQUETA_ETAPA[etapa] ?? etapa;
 }
@@ -1525,7 +1538,7 @@ export interface TableroReclutamiento {
   reclutadores: { reclutador: string; postulados: number; citas: number; entrevistasIA: number; entrevistasHumanas: number; contratados: number; aceptadosFranquicia: number; efectividad: number | null }[];
   fuentes: { fuente: string; postulados: number; viables: number; contratados: number; aceptadosFranquicia: number; efectividad: number | null }[];
   tiendasPropias: { ingresos: number; proximosIngresos: number; listaIngresos: { id: string; nombre: string; puesto: string; sucursal: string; fecha: string; listoSap: boolean }[]; listaProximos: { id: string; nombre: string; puesto: string; sucursal: string; fecha: string; paso: string }[] };
-  franquicias: { presentados: number; aceptados: number; noAceptados: number; porFranquicia: { franquicia: string; presentados: number; aceptados: number; noAceptados: number }[] };
+  franquicias: { presentados: number; aceptados: number; noAceptados: number; contratacionesConfirmadas?: number; ingresosConfirmados?: number; porFranquicia: { franquicia: string; presentados: number; aceptados: number; noAceptados: number }[] };
   futuros: { bajas: null; permanencia: null; nota: string };
   opciones: { reclutadores: [number, string][]; zonas: string[]; sucursales: string[]; fuentes: { clave: string; nombre: string }[] };
 }

@@ -286,16 +286,17 @@ def _system_prompt(e: Entrevista) -> str:
     fase = e.fase or "inicial"
     return ia.prompt_entrevistador(
         v.titulo if v else "vacante general",
-        v.requisitos if v else "",
+        fraiche.texto_publico(v.requisitos if v else "", empresa),
         _nombre_entrevistado(e),
-        list(guion.get("preguntas") or []),
+        [fraiche.texto_publico(x, empresa) for x in (guion.get("preguntas") or [])],
         empresa=empresa,
         temas=ia.temas_de_guion(guion),
         enfoque=guion.get("enfoque", ""),
         enfoque_entrevista=(v.enfoque_entrevista if v else "profesional") or "profesional",
-        ubicacion=(v.ubicacion if v else "") or "",
+        # 2026-10-01: sin «Franquicia 00X» frente al candidato y SIN sueldo (se valida solo en el prefiltro por mensaje)
+        ubicacion=fraiche.texto_publico(", ".join(x for x in [fraiche.sucursal_publica(v.sucursal or ""), v.ubicacion or ""] if x) if v else "", empresa),
         modalidad=(v.modalidad if v else "") or "",
-        sueldo=(v.sueldo if v else "") or "",
+        sueldo="",
         beneficios=list(v.beneficios or []) if v else [],
         area=(v.area if v else "") or "",
         # Fraiche (spec §7-8): parte del prefiltro sin releerlo; IPV en la misma sesión o sesión solo IPV
@@ -598,7 +599,8 @@ async def _evaluar_y_cerrar(db: Session, e: Entrevista, p, v, empresa: str, tema
     # queda solo como dato para que RH decida a mano ahí, mismo patrón HITL que el resto del
     # sistema (ver _auto_decision_zero_touch en candidatos.py).
     if p and p.etapa == "Entrevista IA":
-        p.etapa = "Evaluación"
+        # Pipeline Fraiche v2 (2026-10-01): la columna «Evaluación» ya no existe — la postulación se queda en
+        # Filtro Red Human hasta que RH agregue la entrevista humana (eso la mueve a Filtro humano).
         registrar(
             db, "agente-ia", "auto_evaluacion_zero_touch", "postulacion", p.codigo,
             {"candidato": p.candidato.codigo, "entrevista": e.codigo, "recomendacion": ev.recomendacion, "match": ev.match_perfil},

@@ -579,7 +579,10 @@ def tablero_reclutamiento(
         "fuentes": sorted(por_fuente.values(), key=lambda r: -r["postulados"]),
         "tiendasPropias": {"ingresos": len(ingresos), "proximosIngresos": len(proximos_ingresos), "listaIngresos": ingresos_lista, "listaProximos": proximos_lista},
         "franquicias": {"presentados": sum(1 for p in franq if p.franquicia_estado), "aceptados": sum(1 for p in franq if p.franquicia_estado == "aceptado"),
-                        "noAceptados": sum(1 for p in franq if p.franquicia_estado == "no_aceptado"), "porFranquicia": sorted(por_franquicia.values(), key=lambda r: -r["presentados"])},
+                        "noAceptados": sum(1 for p in franq if p.franquicia_estado == "no_aceptado"),
+                        # 2026-10-01: contratación e ingreso los confirma el franquiciatario (RH los registra); nunca suman a tiendas propias
+                        "contratacionesConfirmadas": sum(1 for p in franq if p.franquicia_contratado_en),
+                        "ingresosConfirmados": sum(1 for p in franq if p.franquicia_ingreso_en), "porFranquicia": sorted(por_franquicia.values(), key=lambda r: -r["presentados"])},
         "futuros": {"bajas": None, "permanencia": None, "nota": "Bajas y permanencia dependen de recibir información de SAP; no se muestran cifras inventadas."},
         "opciones": {
             "reclutadores": sorted({(v.responsable_id, v.responsable.nombre) for v in db.query(Vacante).filter(Vacante.cuenta_id == cuenta.id, Vacante.responsable_id.isnot(None)).all() if v.responsable}, key=lambda x: x[1]),

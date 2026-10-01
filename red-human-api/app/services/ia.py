@@ -804,7 +804,10 @@ def prefiltro_turno(
     if ubicacion:
         lineas_contexto.append(f"Ubicación: {ubicacion}.")
     if sueldo:
-        lineas_contexto.append(f"Sueldo: {sueldo}.")
+        lineas_contexto.append(
+            f"Sueldo: {sueldo}. Es una cantidad en PESOS MEXICANOS con separador de miles (la coma NO es decimal): nunca la "
+            "conviertas a dólares ni la leas con centavos; repítela tal cual."
+        )
     if modalidad:
         lineas_contexto.append(f"Modalidad: {modalidad}.")
     if requisitos:
@@ -1233,13 +1236,14 @@ PREGUNTAS_INICIAL_FRAICHE = {
     "funciones": "¿Qué funciones realizabas con más frecuencia y cuál se te daba mejor?",
     "estabilidad laboral": "¿Cuánto tiempo duraste en tus últimos empleos?",
     "motivos de salida": "¿Por qué saliste de tu empleo más reciente?",
-    "disponibilidad": "¿Cómo es tu disponibilidad de horario y a partir de cuándo podrías iniciar?",
+    # 2026-10-01: pregunta EXACTA de disponibilidad (con el nombre que ve el candidato) y nada de sueldo en la entrevista
+    "disponibilidad": "¿Cuándo podrías empezar a trabajar en [empresa]?",
     "servicio al cliente": "Cuéntame de una vez que atendiste a un cliente difícil.",
-    "expectativa salarial": "¿Cuál es tu expectativa de sueldo mensual?",
 }
 
 
-def guion_entrevista_inicial_fraiche(titulo: str, contexto_previo: Optional[List[str]] = None, enfoque_entrevista: str = "profesional") -> "GuionEntrevista":
+def guion_entrevista_inicial_fraiche(titulo: str, contexto_previo: Optional[List[str]] = None, enfoque_entrevista: str = "profesional",
+                                     empresa: str = "Fraiche") -> "GuionEntrevista":
     """Spec §7: temas FIJOS (experiencia, funciones, estabilidad laboral, motivos de salida, disponibilidad,
     servicio al cliente, expectativa salarial). Determinista: no hace falta la IA para armarlo. Con el enfoque
     «profesional + personal» de la vacante (Punto 6) se agrega el tema de objetivos personales y visión de futuro."""
@@ -1252,11 +1256,11 @@ def guion_entrevista_inicial_fraiche(titulo: str, contexto_previo: Optional[List
         preguntas_extra.append("¿Cómo te ves en dos o tres años?")
     return GuionEntrevista(
         enfoque=(
-            f"Validar experiencia, funciones, estabilidad laboral, motivos de salida, disponibilidad, servicio al cliente "
-            f"y expectativa salarial para {titulo}; partir de lo que ya contestó en el prefiltro y pedir ejemplos concretos."
+            f"Validar experiencia, funciones, estabilidad laboral, motivos de salida, disponibilidad y servicio al cliente "
+            f"para {titulo} en {empresa}; partir de lo que ya contestó en el prefiltro y pedir ejemplos concretos. No hablar de sueldo."
         ),
         temas=temas,
-        preguntas=[PREGUNTAS_INICIAL_FRAICHE[t] for t in temas if t in PREGUNTAS_INICIAL_FRAICHE] + preguntas_extra,
+        preguntas=[PREGUNTAS_INICIAL_FRAICHE[t].replace("[empresa]", empresa or "la empresa") for t in temas if t in PREGUNTAS_INICIAL_FRAICHE] + preguntas_extra,
     )
 
 
@@ -1344,7 +1348,6 @@ def prompt_entrevistador(
         x for x in [
             f"ubicación: {ubicacion}" if ubicacion else "",
             f"modalidad: {modalidad}" if modalidad else "",
-            f"sueldo: {sueldo}" if sueldo and sueldo != "A convenir" else "",
             f"beneficios: {', '.join(beneficios)}" if beneficios else "",
             f"área: {area}" if area else "",
         ] if x
@@ -1358,8 +1361,10 @@ def prompt_entrevistador(
         f"Cuando hables de la empresa, llámala siempre «{empresa_txt}», nunca de otra forma.\n"
         f"Requisitos indispensables: {requisitos or 'no especificados'}.\n"
         f"Condiciones concretas de la vacante: {condiciones}. Si el candidato pregunta por horario, ubicación, "
-        "modalidad o sueldo, usa EXACTAMENTE estos datos; lo que no esté aquí, di que RH lo confirmará. "
-        "Nunca hables en genérico cuando tienes el dato.\n\n"
+        "o modalidad, usa EXACTAMENTE estos datos; lo que no esté aquí, di que RH lo confirmará. "
+        "Nunca hables en genérico cuando tienes el dato. NO menciones ni preguntes el sueldo (ya se validó por mensaje): "
+        "si la persona pregunta, dile que el sueldo es el que se le confirmó en el chat y que RH lo ratifica. "
+        "Nunca digas números ni códigos internos de franquicia o de sucursal: la empresa es siempre la de arriba.\n\n"
         f"Objetivo de la entrevista: {enfoque or 'validar experiencia real, criterio y motivación para el puesto'}.\n"
         f"Enfoque: {enfoque_entrevista} — cubre: {ENFOQUE_ENTREVISTA_TEMAS[enfoque_entrevista]}.\n"
         f"Temas a cubrir (en este orden aproximado):\n{lista_temas}\n"

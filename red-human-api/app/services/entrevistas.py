@@ -74,9 +74,12 @@ def crear_entrevista_para_candidato(
             temas=[c["nombre"] for c in fraiche.COMPETENCIAS_IPV], preguntas=ia.preguntas_ipv_demo(),
         ), False
     else:
+        from ..serial import nombre_empresa_candidato
+
         guion, con_ia = ia.guion_entrevista_inicial_fraiche(
             titulo, fraiche.contexto_previo_entrevista(p.analisis),
             enfoque_entrevista=(v.enfoque_entrevista if v else "profesional") or "profesional",
+            empresa=nombre_empresa_candidato(v) if v else "la empresa",
         ), False
     e = Entrevista(
         codigo="TMP",

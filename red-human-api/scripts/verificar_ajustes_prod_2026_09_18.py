@@ -80,7 +80,7 @@ with TestClient(app) as client:
     vac = client.get("/vacantes").json()[0]
     r = client.post("/candidatos", json={"nombre": "Aviso Persona", "telefono": "5512121212", "correo": "aviso@correo.mx", "vacante": vac["id"], "consentimiento": True, "fuente": "RH"})
     P = r.json()["id"]
-    client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Evaluación", "manual": True})
+    client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Entrevista IA", "manual": True})
     r = client.post(f"/candidatos/{P}/entrevista-humana", json={
         "tipo_entrevistador": "interno", "entrevistador_usuario_id": admin.id, "fecha": "2026-10-01", "hora": "10:00", "modalidad": "Llamada",
         "notificar": {"cliente_correo": False, "cliente_whatsapp": False},

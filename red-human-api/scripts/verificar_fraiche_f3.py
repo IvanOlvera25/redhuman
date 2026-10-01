@@ -61,7 +61,8 @@ check(fraiche.resultado_desde_ipv({"conclusion": "bajo_reserva"}) == ("aprobado"
 check(sum(k["peso"] for k in fraiche.COMPETENCIAS_IPV) == 100 and [k["peso"] for k in fraiche.COMPETENCIAS_IPV] == [30, 15, 10, 20, 20, 5], "pesos del spec: 30/15/10/20/20/5")
 
 g = ia.guion_entrevista_inicial_fraiche("Cajero(a)")
-check(g.temas == fraiche.TEMAS_ENTREVISTA_INICIAL and len(g.preguntas) == 7, "guion de la entrevista inicial con los 7 temas fijos")
+check(g.temas == fraiche.TEMAS_ENTREVISTA_INICIAL and len(g.preguntas) == 6, "guion de la entrevista inicial con los 6 temas fijos (sin sueldo, 2026-10-01)")
+check(not any("sueldo" in x.lower() or "salari" in x.lower() for x in g.preguntas + [g.enfoque] if "No hablar de sueldo" not in x) and "¿Cuándo podrías empezar a trabajar en Fraiche?" in g.preguntas, "sin sueldo y con la pregunta exacta de disponibilidad")
 prompt = ia.prompt_entrevistador("Cajero(a)", "Manejo de efectivo", "Ana", g.preguntas, temas=g.temas, contexto_previo=["¿Has manejado efectivo? → Sí"], incluye_ipv=True)
 check("¿Has manejado efectivo? → Sí" in prompt and "NO vuelvas a hacer estas preguntas" in prompt, "el prompt parte del prefiltro y no lo relee")
 check(fraiche.MARCADOR_IPV in prompt and "Orientación al cliente (30%)" in prompt and "manejo de objeciones" in prompt, "el prompt incluye el bloque IPV con la rúbrica y el marcador")
@@ -146,7 +147,7 @@ with TestClient(app) as client:
     ficha = client.get(f"/candidatos/{P}").json()
     ent = ficha["entrevistas"][-1]
     check(ent["fase"] == "inicial_ipv" and ent["evaluacionIpv"]["calculo"]["puntaje"] == 70 and ent["sugiereNuevaIpv"] is True and len(ent["transcript"]) > 10, "la ficha expone fase, transcripción, resultado IPV y sugiere nueva IPV humana")
-    check(ficha["etapa"] == "Evaluación", "la etapa se movió a Evaluación (igual que antes); la puntuación no decide nada")
+    check(ficha["etapa"] == "Entrevista IA", "la etapa se queda en Filtro Red Human (sin columna Evaluación); la puntuación no decide nada")
 
     print("\n--- Sesión solo IPV (Red Human) ---")
     r = client.post(f"/candidatos/{P}/ipv", json={"modo": "red_human"})

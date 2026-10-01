@@ -65,6 +65,8 @@ import {
   type ResultadoEntrevistaHumana,
   type TipoEntrevistador,
   type Vacante,
+  type AccionSiguiente,
+  type ActividadRuta,
 } from "@/lib/data";
 import type { DocExpediente, NuevoIngreso } from "@/lib/phase2";
 import {
@@ -122,6 +124,9 @@ import {
   type ModalidadEntrevistaHumana,
   type PerfilProfundo,
   nombreEtapa,
+  columnaDe,
+  confirmarContratacionFranquicia,
+  confirmarIngresoFranquicia,
   fetchCliente,
   fetchIntegracionTeams,
   lineasResultados,
@@ -160,14 +165,17 @@ import { INTERVALO_TABLERO_MS, usePolling } from "@/lib/use-polling";
 import { cn, etiquetaRecordatorio } from "@/lib/utils";
 
 import { CANAL } from "@/lib/canal";
+/** Pipeline Fraiche v2 (2026-10-01): cinco columnas — Prefiltro → Filtro Red Human → Filtro humano → Contratación →
+ * Onboarding. «Evaluación» ya no es columna (la Evaluación integral es un resultado en la tarjeta y la ficha). */
 const etapas: EtapaCandidato[] = [
   "Prefiltro",
   "Entrevista IA",
-  "Evaluación",
   "Entrevista Humana",
   "Contratación",
   "Onboarding",
 ];
+const TONO_INTEGRAL: Record<string, "good" | "warn" | "bad" | "neutral"> = { apto: "good", en_proceso: "neutral", no_apto: "bad" };
+const TEXTO_INTEGRAL: Record<string, string> = { apto: "Apto", en_proceso: "En proceso", no_apto: "No cumple" };
 const etapaColor: Record<EtapaCandidato, string> = {
   Prefiltro: "var(--ink-3)",
   "Entrevista IA": "var(--brand)",
@@ -197,7 +205,7 @@ const PASO_PRESENTACION: PasoRuta = { clave: "presentacion", nombre: "Presentaci
 /** Pasos que solo existen en Tienda propia (la ruta de franquicia tiene 7). */
 const PASOS_SOLO_TIENDA: PasoFraiche[] = ["evaluaciones_adicionales", "referencias", "documentacion", "listo_alta", "listo_sap"];
 const DESTINO_NOMBRE: Record<string, string> = { tienda_propia: "Tienda propia", franquicia: "Franquicia" };
-const TEXTO_ACEPTADO_FRANQUICIA = "Se cerrará la postulación: la contratación la realiza el franquiciatario y no cuenta como ingreso de Fraiche";
+const TEXTO_ACEPTADO_FRANQUICIA = "La postulación sigue a Contratación, donde registras la confirmación de contratación del franquiciatario";
 
 /** Zero-touch: la IA ya avanzó sola al candidato hasta aquí; esto es solo el siguiente
  * checkpoint humano al que RH puede mandarlo con un botón explícito (no "cualquier etapa
@@ -322,15 +330,17 @@ function fechaCorta(iso: string | null | undefined): string | null {
  * la API, no esta función); el chip «No cumple» sigue disponible para revisarlas aparte. */
 function coincideEstado(c: Candidato, filtro: FiltroEstado): boolean {
   const yaContratado = ETAPAS_YA_CONTRATADO.includes(c.etapa);
+  // Pipeline v2: un requisito obligatorio «No cumple» prevalece (la tarjeta sigue en su columna; se aparta con este filtro)
+  const noCumple = c.estado === "no_cumple" || c.avance?.integral?.conclusion === "no_apto";
   switch (filtro) {
     case "en_proceso":
-      return !yaContratado && (c.estado === "revision" || c.estado === "pendiente");
+      return !yaContratado && !noCumple && (c.estado === "revision" || c.estado === "pendiente" || c.avance?.integral?.conclusion === "en_proceso");
     case "aptos":
-      return !yaContratado && c.estado === "cumple";
+      return !yaContratado && !noCumple && c.estado === "cumple";
     case "contratados":
       return yaContratado;
     case "descartados":
-      return c.estado === "no_cumple";
+      return noCumple;
     case "todos":
     default:
       return true;
@@ -366,8 +376,8 @@ function CandidatosContenido() {
 
   // Fase C: Vistas, URL params y filtros avanzados
   const [vista, setVista] = useState<"pipeline" | "lista">("pipeline");
-  // Fraiche (spec §11): el Kanban se ve por la ruta visible (pasos) o por etapa interna; se recuerda en localStorage
-  const [vistaRuta, setVistaRuta] = useState(true);
+  // Pipeline v2 (2026-10-01): un solo Kanban de cinco columnas + filtro Todas / Tienda propia / Franquicia
+  const [fTienda, setFTienda] = useState<"" | "tienda_propia" | "franquicia">("");
   const [columnaResaltada, setColumnaResaltada] = useState<string | null>(null);
   const [filtrosAvanzados, setFiltrosAvanzados] = useState(false);
   const [fCliente, setFCliente] = useState<number | "">("");
@@ -401,18 +411,7 @@ function CandidatosContenido() {
     if (guardada === "pipeline" || guardada === "lista") {
       setVista(guardada);
     }
-    try {
-      const ruta = localStorage.getItem("rh-candidatos-vista-ruta");
-      if (ruta === "etapas") setVistaRuta(false);
-      if (ruta === "ruta") setVistaRuta(true);
-    } catch {}
   }, [searchParams]);
-  const cambiarVistaRuta = (ruta: boolean) => {
-    setVistaRuta(ruta);
-    try {
-      localStorage.setItem("rh-candidatos-vista-ruta", ruta ? "ruta" : "etapas");
-    } catch {}
-  };
 
   const cambiarVista = (nueva: "pipeline" | "lista") => {
     setVista(nueva);
@@ -486,7 +485,8 @@ function CandidatosContenido() {
   const datosFiltrados = useMemo(() => {
     let res = datos.filter((c) => {
       if (filtroVacante && c.vacanteId !== filtroVacante) return false;
-      if (columnaResaltada && c.etapa !== columnaResaltada) return false;  // B4: ?etapa= es un filtro exacto
+      if (columnaResaltada && columnaDe(c.etapa) !== columnaDe(columnaResaltada)) return false;  // B4: ?etapa= es un filtro exacto
+      if (fTienda && (c.avance?.destino || c.destino) !== fTienda) return false;
       if (!coincideEstado(c, filtroEstado)) return false;
       if (
         busqueda.trim() &&
@@ -546,6 +546,7 @@ function CandidatosContenido() {
     return res;
   }, [
     columnaResaltada,
+    fTienda,
     datos,
     filtroVacante,
     filtroEstado,
@@ -565,23 +566,6 @@ function CandidatosContenido() {
   ]);
 
   const vacanteSeleccionada = vacantes.find((v) => v.id === filtroVacante);
-  // Fraiche (spec §11): columnas de la ruta visible. Si el servidor manda `ruta`, sus nombres/etapas mandan;
-  // la columna «Presentación al franquiciatario» solo aparece cuando hay candidatos de franquicia.
-  const columnasRuta = useMemo<PasoRuta[]>(() => {
-    const porClave = new Map<string, PasoRuta>();
-    for (const p of RUTA_TIENDA_PROPIA) porClave.set(p.clave, p);
-    porClave.set(PASO_PRESENTACION.clave, PASO_PRESENTACION);
-    for (const c of datos) for (const p of c.ruta ?? []) porClave.set(p.clave, { clave: p.clave as PasoFraiche, nombre: p.nombre, etapa: p.etapa });
-    const hayFranquicia = datos.some((c) => c.destino === "franquicia");
-    const base = RUTA_TIENDA_PROPIA.map((p) => porClave.get(p.clave) ?? p);
-    return hayFranquicia ? [...base, porClave.get(PASO_PRESENTACION.clave) ?? PASO_PRESENTACION] : base;
-  }, [datos]);
-  /** Columna de una tarjeta: su `paso`; si no trae (registro previo), el primer paso de su etapa. */
-  function pasoDe(c: Candidato): string {
-    if (c.paso && columnasRuta.some((p) => p.clave === c.paso)) return c.paso;
-    return columnasRuta.find((p) => p.etapa === c.etapa)?.clave ?? columnasRuta[0].clave;
-  }
-
   const totalFiltrosAvanzadosActivos =
     (fCliente !== "" ? 1 : 0) +
     (fResponsable !== "" ? 1 : 0) +
@@ -657,31 +641,21 @@ function CandidatosContenido() {
             </button>
           </div>
 
-          {/* Fraiche (spec §11): Kanban por ruta visible (pasos) o por etapa interna */}
-          {vista === "pipeline" && (
-            <div className="flex items-center rounded-xl border border-border-soft bg-surface p-1 shadow-sm">
+          {/* Pipeline v2 (2026-10-01): la vacante determina la ruta — filtro Todas / Tienda propia / Franquicia */}
+          <div className="flex items-center rounded-xl border border-border-soft bg-surface p-1 shadow-sm" role="group" aria-label="Tipo de tienda">
+            {([["", "Todas"], ["tienda_propia", "Tienda propia"], ["franquicia", "Franquicia"]] as const).map(([valor, texto]) => (
               <button
-                onClick={() => cambiarVistaRuta(true)}
+                key={valor || "todas"}
+                onClick={() => setFTienda(valor)}
                 className={cn(
                   "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition",
-                  vistaRuta ? "bg-brand text-white shadow-sm" : "text-ink-3 hover:bg-surface-2 hover:text-ink",
+                  fTienda === valor ? "bg-brand text-white shadow-sm" : "text-ink-3 hover:bg-surface-2 hover:text-ink",
                 )}
-                title="Columnas por paso de la ruta (Tienda propia / Franquicia)"
               >
-                <Route className="h-3.5 w-3.5" /> Ruta Fraiche
+                {texto}
               </button>
-              <button
-                onClick={() => cambiarVistaRuta(false)}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition",
-                  !vistaRuta ? "bg-brand text-white shadow-sm" : "text-ink-3 hover:bg-surface-2 hover:text-ink",
-                )}
-                title="Columnas por etapa interna"
-              >
-                Etapas
-              </button>
-            </div>
-          )}
+            ))}
+          </div>
 
           {/* Filtro por vacante */}
           <div className="relative">
@@ -986,59 +960,12 @@ function CandidatosContenido() {
         </div>
       )}
 
-      {/* VISTA 1b: RUTA FRAICHE (spec §11) — una columna por paso visible; tablero con desplazamiento horizontal */}
-      {!cargando && vista === "pipeline" && vistaRuta && (
-        <div className="scroll-x mt-6 items-start gap-4 pb-3" style={{ scrollSnapType: "none" }}>
-          {columnasRuta.filter((p) => !columnaResaltada || p.etapa === columnaResaltada).map((p, idx, arr) => {
-            const cols = datosFiltrados.filter((c) => pasoDe(c) === p.clave);
-            const esResaltada = Boolean(columnaResaltada) && p.etapa === columnaResaltada;
-            const soloTienda = PASOS_SOLO_TIENDA.includes(p.clave);
-            const soloFranquicia = p.clave === "presentacion";
-            // id de etapa solo en la primera columna de cada etapa (para el scroll del deep-link ?etapa=)
-            const primeraDeEtapa = arr.findIndex((x) => x.etapa === p.etapa) === idx;
-            return (
-              <div
-                key={p.clave}
-                id={primeraDeEtapa ? `columna-etapa-${p.etapa.replace(/\s/g, "-")}` : `columna-paso-${p.clave}`}
-                className={cn(
-                  "flex w-[15rem] min-w-[15rem] flex-col whitespace-normal rounded-2xl border p-3 transition-all duration-300",
-                  esResaltada ? "border-brand bg-brand/5 ring-2 ring-brand/30 shadow-md" : "border-border-soft bg-surface-2/40",
-                )}
-              >
-                <div className="mb-3 flex items-start justify-between gap-2 px-1">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: etapaColor[p.etapa as EtapaCandidato] ?? "var(--ink-3)" }} />
-                      <span className={cn("truncate text-sm font-semibold", esResaltada && "text-brand")} title={p.nombre}>{p.nombre}</span>
-                    </div>
-                    <p className="mt-0.5 pl-4 text-[10px] text-ink-3">
-                      {soloFranquicia ? "Solo franquicia" : soloTienda ? "Solo tienda propia" : "Tienda propia · Franquicia"}
-                    </p>
-                  </div>
-                  <span className={cn("shrink-0 rounded-full px-2 py-0.5 font-mono text-[11px]", esResaltada ? "bg-brand font-bold text-white" : "bg-surface text-ink-3")}>
-                    {cols.length}
-                  </span>
-                </div>
-                <div className="flex flex-col gap-2.5">
-                  {cols.map((c) => (
-                    <TarjetaKanban key={c.id} c={c} esDup={duplicadosSet.has(c.id)} puedeDecidir={puedeDecidir} mostrarDestino onAbrir={abrir} onAvance={setAvanceKanban} />
-                  ))}
-                  {cols.length === 0 && (
-                    <div className="rounded-xl border border-dashed border-border-soft py-8 text-center text-xs text-ink-3">Sin candidatos</div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* VISTA 1: PIPELINE (Kanban por etapa interna) */}
-      {!cargando && vista === "pipeline" && !vistaRuta && (
-        <div className={cn("mt-6 grid gap-4", columnaResaltada ? "grid-cols-1 sm:max-w-md" : "sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6")}>
-          {etapas.filter((etapa) => !columnaResaltada || etapa === columnaResaltada).map((etapa) => {
-            const cols = datosFiltrados.filter((c) => c.etapa === etapa);
-            const esResaltada = columnaResaltada === etapa;
+      {/* VISTA 1: PIPELINE — cinco columnas (Pipeline v2); las actividades de cada ruta viven dentro de cada columna */}
+      {!cargando && vista === "pipeline" && (
+        <div className={cn("mt-6 grid gap-4", columnaResaltada ? "grid-cols-1 sm:max-w-md" : "sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5")}>
+          {etapas.filter((etapa) => !columnaResaltada || etapa === columnaDe(columnaResaltada)).map((etapa) => {
+            const cols = datosFiltrados.filter((c) => columnaDe(c.etapa) === etapa);
+            const esResaltada = Boolean(columnaResaltada) && columnaDe(columnaResaltada!) === etapa;
 
             return (
               <div
@@ -1068,7 +995,7 @@ function CandidatosContenido() {
 
                 <div className="flex flex-col gap-2.5">
                   {cols.map((c) => (
-                    <TarjetaKanban key={c.id} c={c} esDup={duplicadosSet.has(c.id)} puedeDecidir={puedeDecidir} onAbrir={abrir} onAvance={setAvanceKanban} />
+                    <TarjetaKanban key={c.id} c={c} esDup={duplicadosSet.has(c.id)} puedeDecidir={puedeDecidir} mostrarDestino onAbrir={abrir} onAvance={setAvanceKanban} />
                   ))}
                   {cols.length === 0 && (
                     <div className="rounded-xl border border-dashed border-border-soft py-8 text-center text-xs text-ink-3">
@@ -1306,19 +1233,6 @@ function TarjetaKanban({
     /* 2026-09-22: el menú «…» va FUERA del botón de la tarjeta (no se anidan botones);
        solo aparece donde tiene sentido avanzar directo a Entrevista Humana. */
     <div className="relative">
-    {puedeDecidir && ETAPAS_AVANCE_DIRECTO.includes(c.etapa) && c.activa !== false && (
-      <div className="absolute right-1.5 top-1.5 z-10">
-        <MenuAcciones
-          etiqueta={`Acciones de ${c.nombre}`}
-          acciones={[{
-            etiqueta: "Avanzar a Entrevista Humana",
-            icono: <CalendarClock />,
-            title: TEXTO_AVANCE_DIRECTO,
-            onClick: () => onAvance(c),
-          }]}
-        />
-      </div>
-    )}
     <button
       onClick={() => onAbrir(c)}
       className="card-hover group w-full rounded-xl border border-border-soft bg-surface p-3.5 text-left transition-all hover:border-brand/40 hover:shadow-md"
@@ -1359,19 +1273,19 @@ function TarjetaKanban({
                 Duplicado
               </span>
             )}
-            {mostrarDestino && c.destino && (
+            {mostrarDestino && (c.avance?.destino || c.destino) && (c.avance ? Boolean(c.avance.ruta) : true) && (
               <span
                 className={cn(
                   "shrink-0 rounded px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide",
                   c.destino === "franquicia" ? "bg-human-soft text-human" : "bg-good-soft text-good",
                 )}
               >
-                {DESTINO_NOMBRE[c.destino] ?? c.destino}
+                {c.avance?.ruta || DESTINO_NOMBRE[c.destino ?? ""] || c.destino}
               </span>
             )}
-            {mostrarDestino && c.destino === "franquicia" && c.franquiciaEstadoTexto && (
+            {mostrarDestino && c.destino === "franquicia" && (c.avance?.franquiciaEstadoTexto || c.franquiciaEstadoTexto) && (
               <span className="shrink-0 rounded bg-human/10 px-1.5 py-0.5 font-mono text-[9px] font-bold text-human">
-                {c.franquiciaEstadoTexto}
+                {c.avance?.franquiciaEstadoTexto || c.franquiciaEstadoTexto}
               </span>
             )}
           </div>
@@ -1412,6 +1326,16 @@ function TarjetaKanban({
           )}
         </span>
       </div>
+
+      {/* Pipeline v2: Evaluación integral (resultado acumulado) y siguiente acción según la ruta */}
+      {c.avance && c.activa !== false && (
+        <div className="mt-2 rounded-lg bg-surface-2/70 px-2 py-1.5 text-[11px] leading-snug">
+          <span className={cn("font-semibold", c.avance.integral.conclusion === "no_apto" ? "text-bad" : c.avance.integral.conclusion === "apto" ? "text-good" : "text-ink-2")}>
+            {TEXTO_INTEGRAL[c.avance.integral.conclusion] ?? ""}
+          </span>
+          {c.avance.siguienteAccion?.texto && <span className="text-ink-3"> · {c.avance.siguienteAccion.texto}</span>}
+        </div>
+      )}
 
       {/* Señales */}
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -1642,7 +1566,58 @@ function ModalCandidato({
   }
   // Evaluaciones (2026-09-28): «Agregar evaluación o verificación» — nunca mueve la columna del pipeline
   const [agregarEval, setAgregarEval] = useState(false);
+  const [tipoEvalInicial, setTipoEvalInicial] = useState<string>("");
   const [versionEval, setVersionEval] = useState(0);
+  // Pipeline v2 (2026-10-01): franquicia — RH registra la contratación y el ingreso confirmados por el franquiciatario
+  const [confirmarFranquicia, setConfirmarFranquicia] = useState<null | "contratacion" | "ingreso">(null);
+  const [notaFranquicia, setNotaFranquicia] = useState("");
+  const esRutaFranquicia = (c.avance?.destino || "") === "franquicia";
+  const esRutaTienda = (c.avance?.destino || "") === "tienda_propia";
+  async function registrarFranquicia() {
+    if (!confirmarFranquicia) return;
+    setOcupado("franquicia");
+    const r = confirmarFranquicia === "contratacion" ? await confirmarContratacionFranquicia(c.id, notaFranquicia.trim()) : await confirmarIngresoFranquicia(c.id, notaFranquicia.trim());
+    const data = resolver(r, confirmarFranquicia === "contratacion" ? "Contratación confirmada por el franquiciatario." : "Ingreso confirmado por el franquiciatario: proceso cerrado.");
+    if (data) {
+      setConfirmarFranquicia(null);
+      setNotaFranquicia("");
+      onCambio(data);
+    }
+  }
+  /** Pipeline v2: la acción principal sale del avance que calcula la API (ruta + pendientes). */
+  function ejecutarSiguiente(acc: AccionSiguiente) {
+    switch (acc.tipo) {
+      case "mover":
+        if (acc.etapa) void enviarAEtapa(acc.etapa as EtapaCandidato);
+        return;
+      case "agregar_evaluacion":
+        if (acc.evaluacion === "entrevista_humana") return setModalEntrevista(true);
+        if (acc.evaluacion === "ipv") return setEligiendoIpv(true);
+        if (acc.evaluacion === "presentacion_franquiciatario") return setPresentarAbierto(true);
+        setTipoEvalInicial(acc.evaluacion ?? "");
+        return setAgregarEval(true);
+      case "revisar_evaluacion":
+      case "esperar_resultado":
+      case "registrar_decision_franquiciatario":
+        return setTab("evaluaciones");
+      case "confirmar_contratacion_franquicia":
+        return setConfirmarFranquicia("contratacion");
+      case "confirmar_ingreso_franquicia":
+        return setConfirmarFranquicia("ingreso");
+      case "expediente":
+      case "preparar_alta_sap":
+        return setTab("contratacion");
+      case "esperar_chat":
+        return setTab("whatsapp");
+      case "no_cumple":
+        return descartar();
+      default:
+        return;
+    }
+  }
+  const ACCIONES_SIN_BOTON = new Set(["esperar", "esperar_entrevista", "ninguna", "alta", "invitar_entrevista_red_human", "reabrir_entrevista", "registrar_entrevista", "revisar_prefiltro"]);
+  const accionSiguiente = c.avance?.siguienteAccion;
+  const botonSiguiente = puedeDecidir && c.activa !== false && accionSiguiente && !ACCIONES_SIN_BOTON.has(accionSiguiente.tipo) ? accionSiguiente : null;
   // 2026-09-22: confirmación de «Avanzar a Entrevista Humana» (omite la Entrevista Red Human)
   const [avanceDirecto, setAvanceDirecto] = useState(false);
   async function confirmarAvanceDirecto() {
@@ -1933,6 +1908,9 @@ function ModalCandidato({
 
           {c.etapa === "Entrevista Humana" && <PanelEntrevistaHumana c={c} live={live} onCambio={onCambio} onNuevaIpv={abrirAgendaIpvHumana} />}
 
+          {tab === "resumen" && c.avance?.actividades && (
+            <PanelAvance c={c} boton={botonSiguiente} ocupado={Boolean(ocupado)} onAccion={ejecutarSiguiente} />
+          )}
           {tab === "resumen" && <PestanaResumen c={c} live={live} onCambio={onCambio} setTab={setTab} />}
           {tab === "evaluaciones" && (
             <PestanaEvaluaciones
@@ -1954,7 +1932,6 @@ function ModalCandidato({
               onDocumentos={setConfirmacion}
               onDescartar={descartar}
               accionesExtra={[
-                { etiqueta: "Mover en la ruta…", icono: <Route />, onClick: () => setMoverPaso({ paso: "", comentario: "" }), disabled: Boolean(ocupado) || !(c.ruta?.length) },
                 { etiqueta: "Generar ficha para presentar", icono: <FileDown />, onClick: () => setFichaAbierta(true), disabled: Boolean(ocupado) },
                 { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
               ]}
@@ -1998,11 +1975,16 @@ function ModalCandidato({
               <MenuAcciones
                 etiqueta="Más acciones"
                 acciones={[
-                  { etiqueta: "Mover en la ruta…", icono: <Route />, onClick: () => setMoverPaso({ paso: "", comentario: "" }), disabled: Boolean(ocupado) || !(c.ruta?.length) },
+                  { etiqueta: "Agregar evaluación", icono: <IconoEvaluacion />, onClick: () => { setTipoEvalInicial(""); setAgregarEval(true); }, disabled: Boolean(ocupado) || c.activa === false },
                   { etiqueta: "Generar ficha para presentar", icono: <FileDown />, onClick: () => setFichaAbierta(true), disabled: Boolean(ocupado) },
                   { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
                 ]}
               />
+              {botonSiguiente && (
+                <Button size="sm" className="ml-auto" onClick={() => ejecutarSiguiente(botonSiguiente)} disabled={Boolean(ocupado)}>
+                  <ThumbsUp className="h-4 w-4" /> {botonSiguiente.texto}
+                </Button>
+              )}
             </div>
           </div>
         )}
@@ -2011,8 +1993,7 @@ function ModalCandidato({
             su propio panel de acciones; este footer genérico no aplica ahí. */}
         {puedeDecidir &&
           c.etapa !== "Prefiltro" &&
-          c.etapa !== "Contratación" &&
-          (c.etapa !== "Entrevista Humana" || c.entrevistaHumana?.realizada) && (
+          c.etapa !== "Contratación" && (
           <div className="border-t border-border-soft bg-surface px-4 py-3 sm:px-6 sm:py-4">
             <div className="flex flex-col gap-3">
               <input
@@ -2025,14 +2006,15 @@ function ModalCandidato({
               {/* Regla de UI (2026-09-16): UNA acción principal = la siguiente esperada; todo lo demás en «…»
                   («Mover a otra etapa» abre un selector simple sin bloqueos de secuencia). */}
               <div className="flex items-center gap-2">
-                {siguientesEtapas[0] && !(esFranquicia && siguientesEtapas[0] === "Contratación") && (
+                {botonSiguiente && (
                   <Button
                     size="sm"
                     className="flex-1"
-                    onClick={() => (siguientesEtapas[0] === "Entrevista Humana" ? setModalEntrevista(true) : enviarAEtapa(siguientesEtapas[0]))}
+                    onClick={() => ejecutarSiguiente(botonSiguiente)}
                     disabled={Boolean(ocupado)}
+                    variant={botonSiguiente.tipo === "no_cumple" ? "outline" : undefined}
                   >
-                    <ThumbsUp className="h-4 w-4" /> Enviar a {nombreEtapa(siguientesEtapas[0])}
+                    <ThumbsUp className="h-4 w-4" /> {botonSiguiente.texto}
                   </Button>
                 )}
                 {c.expedienteId != null && c.etapa !== "Onboarding" && (
@@ -2046,32 +2028,11 @@ function ModalCandidato({
                 <MenuAcciones
                   etiqueta="Más acciones"
                   acciones={[
-                    ...siguientesEtapas.slice(1).map((etapa) => ({
-                      etiqueta: `Enviar a ${nombreEtapa(etapa)}`,
-                      icono: <ThumbsUp />,
-                      onClick: () => (etapa === "Entrevista Humana" ? setModalEntrevista(true) : enviarAEtapa(etapa)),
-                      disabled: Boolean(ocupado),
-                    })),
-                    ...(ETAPAS_AVANCE_DIRECTO.includes(c.etapa)
-                      ? [{
-                          etiqueta: "Avanzar a Entrevista Humana",
-                          icono: <CalendarClock />,
-                          title: TEXTO_AVANCE_DIRECTO,
-                          onClick: () => setAvanceDirecto(true),
-                          disabled: Boolean(ocupado),
-                        }]
-                      : []),
-                    { etiqueta: "Agregar evaluación o verificación", icono: <IconoEvaluacion />, onClick: () => setAgregarEval(true), disabled: Boolean(ocupado) || c.activa === false },
+                    // Cambios integrados 2026-10-01: «Agregar evaluación» es la única entrada (incluye entrevista humana,
+                    // IPV y presentación al franquiciatario). Solo crear una entrevista humana mueve a Filtro humano.
+                    { etiqueta: "Agregar evaluación", icono: <IconoEvaluacion />, onClick: () => { setTipoEvalInicial(""); setAgregarEval(true); }, disabled: Boolean(ocupado) || c.activa === false },
                     { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
-                    // Fraiche (spec §11 y §13): el reclutador confirma el paso visible; ficha en PDF para presentar
-                    { etiqueta: "Mover en la ruta…", icono: <Route />, onClick: () => setMoverPaso({ paso: "", comentario: "" }), disabled: Boolean(ocupado) || !(c.ruta?.length) },
                     { etiqueta: "Generar ficha para presentar", icono: <FileDown />, onClick: () => setFichaAbierta(true), disabled: Boolean(ocupado) },
-                    ...(c.etapa === "Entrevista Humana"
-                      ? [{ etiqueta: "Agendar otra Entrevista Humana", icono: <CalendarClock />, onClick: () => setModalEntrevista(true), disabled: Boolean(ocupado) }]
-                      : []),
-                    ...(ETAPAS_IPV.includes(c.etapa)
-                      ? [{ etiqueta: "Programar IPV (Red Human o humano)", icono: <Sparkles />, onClick: () => setEligiendoIpv(true), disabled: Boolean(ocupado) || c.activa === false }]
-                      : []),
                     ...(c.etapa === "Onboarding" && !esFranquicia
                       ? [
                           { etiqueta: "Solicitar documentos", icono: <Send />, onClick: () => setConfirmacion("solicitar"), disabled: Boolean(ocupado) },
@@ -2184,6 +2145,15 @@ function ModalCandidato({
         <ModalAgregarEvaluacion
           codigo={c.id}
           puesto={c.puesto}
+          tipoInicial={(tipoEvalInicial || "") as never}
+          excluir={esRutaFranquicia ? ["psicometrica", "medico", "socioeconomico"] : []}
+          accionesRuta={[
+            { etiqueta: "Entrevista humana", descripcion: esRutaFranquicia ? "Entrevista inicial de Reclutamiento · pasa a Filtro humano" : "Entrevista inicial · pasa a Filtro humano",
+              onClick: () => { setAgregarEval(false); setModalEntrevista(true); } },
+            ...(esRutaFranquicia
+              ? [{ etiqueta: "Presentación al franquiciatario", descripcion: "Entrevista y decisión del franquiciatario", onClick: () => { setAgregarEval(false); setPresentarAbierto(true); } }]
+              : [{ etiqueta: "Entrevista IPV", descripcion: "Red Human o entrevistador humano", onClick: () => { setAgregarEval(false); setEligiendoIpv(true); } }]),
+          ]}
           onClose={() => setAgregarEval(false)}
           onAgregada={(ev) => {
             setAgregarEval(false);
@@ -2192,6 +2162,29 @@ function ModalCandidato({
             setAviso({ tono: "ok", texto: `«${ev.nombre}» agregada: ${ev.estadoTexto}. El candidato sigue en ${nombreEtapa(c.etapa)}.` });
           }}
         />
+      )}
+      {confirmarFranquicia && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => ocupado !== "franquicia" && setConfirmarFranquicia(null)}>
+          <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-display text-lg font-bold">
+              {confirmarFranquicia === "contratacion" ? "Confirmación de contratación del franquiciatario" : "Ingreso confirmado por el franquiciatario"}
+            </h3>
+            <p className="mt-2 text-sm text-ink-2">
+              {confirmarFranquicia === "contratacion"
+                ? "Registra que el franquiciatario confirmó la contratación. Fraiche no arma expediente, kit de precontratación ni alta SAP en esta ruta."
+                : "Registra que el franquiciatario confirmó el ingreso. La postulación se cierra y cuenta como ingreso de franquicia (nunca de tienda propia)."}
+            </p>
+            <label className="mt-4 flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-ink-2">Comentario (opcional)</span>
+              <input value={notaFranquicia} onChange={(e) => setNotaFranquicia(e.target.value)} placeholder="Ej. confirmó por teléfono"
+                className="h-10 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20" />
+            </label>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setConfirmarFranquicia(null)} disabled={ocupado === "franquicia"}>Cancelar</Button>
+              <Button size="sm" onClick={registrarFranquicia} disabled={ocupado === "franquicia"}>{ocupado === "franquicia" ? "Guardando…" : "Registrar"}</Button>
+            </div>
+          </div>
+        </div>
       )}
       {moverA && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !ocupado && setMoverA(null)}>
@@ -2208,7 +2201,7 @@ function ModalCandidato({
                   className="h-11 rounded-xl border border-border-soft bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
                 >
                   <option value="">Elige…</option>
-                  {(["Prefiltro", "Entrevista IA", "Evaluación", "Entrevista Humana", "Contratación", "Onboarding"] as EtapaCandidato[])
+                  {(["Prefiltro", "Entrevista IA", "Entrevista Humana", "Contratación", "Onboarding"] as EtapaCandidato[])
                     .filter((e) => e !== c.etapa)
                     .map((e) => (
                       <option key={e} value={e}>{nombreEtapa(e)}</option>
@@ -5932,6 +5925,82 @@ function ModalMoverPaso({
 }
 
 /** Franquicia (spec §12): presentar al franquiciatario, actualizar su respuesta y generar la ficha. */
+/** Pipeline v2 (2026-10-01): avance real — ruta, columna, actividades con resultado y «Revisado por», pendientes,
+ * Evaluación integral (resultado acumulado) y siguiente acción. Todo viene de la API (`fraiche_pipeline.avance`). */
+function PanelAvance({ c, boton, ocupado, onAccion }: { c: Candidato; boton: AccionSiguiente | null; ocupado: boolean; onAccion: (a: AccionSiguiente) => void }) {
+  const av = c.avance!;
+  const acts = av.actividades ?? [];
+  const columnas = Array.from(new Set(acts.map((a) => a.columna)));
+  const icono = (a: ActividadRuta) => (a.estado === "hecha" ? (a.noCumple ? "✗" : "✓") : a.estado === "en_curso" ? "…" : "○");
+  const color = (a: ActividadRuta) => (a.tono === "good" ? "text-good" : a.tono === "warn" ? "text-warn" : a.tono === "bad" ? "text-bad" : "text-ink-3");
+  return (
+    <Card className="p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <Eyebrow>Avance del proceso</Eyebrow>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[13px]">
+            {av.ruta && <Badge tone={av.destino === "franquicia" ? "human" : "good"}>{av.ruta}</Badge>}
+            <Badge tone="brand">{av.columnaNombre}</Badge>
+            {av.franquiciaEstadoTexto && <Badge tone={av.franquiciaEstado === "aceptado" ? "good" : av.franquiciaEstado === "no_aceptado" ? "bad" : "neutral"}>{av.franquiciaEstadoTexto}</Badge>}
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="text-[11px] uppercase tracking-wide text-ink-3">Evaluación integral</p>
+          <Badge tone={TONO_INTEGRAL[av.integral.conclusion] ?? "neutral"}>{TEXTO_INTEGRAL[av.integral.conclusion] ?? av.integral.conclusion}</Badge>
+          {av.integral.score != null && <p className="mt-0.5 font-mono text-[11px] text-ink-3">Score CV {av.integral.score}%</p>}
+        </div>
+      </div>
+      <p className="mt-2 text-[13px] text-ink-2">{av.integral.texto}</p>
+
+      <div className="mt-3 rounded-xl border border-border-soft bg-surface-2/50 p-3">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">Siguiente acción</p>
+        <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm font-semibold text-ink">{av.siguienteAccion?.texto || "—"}</p>
+          {boton && (
+            <Button size="sm" onClick={() => onAccion(boton)} disabled={ocupado}>
+              <ThumbsUp className="h-4 w-4" /> {boton.texto}
+            </Button>
+          )}
+        </div>
+        {(av.faltaParaAvanzar?.length ?? 0) > 0 && av.siguienteColumna && (
+          <div className="mt-2 text-[12px] text-ink-2">
+            <p className="font-semibold text-warn">Para pasar a {nombreEtapa(av.siguienteColumna)} falta:</p>
+            <ul className="mt-1 list-disc pl-5">
+              {av.faltaParaAvanzar!.map((f) => <li key={f}>{f}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 space-y-3">
+        {columnas.map((col) => (
+          <div key={col}>
+            <p className={cn("text-[11px] font-semibold uppercase tracking-wide", col === av.columna ? "text-brand" : "text-ink-3")}>
+              {nombreEtapa(col)}{col === av.columna ? " · columna actual" : ""}
+            </p>
+            <ul className="mt-1 divide-y divide-border-faint rounded-lg border border-border-faint">
+              {acts.filter((a) => a.columna === col).map((a) => (
+                <li key={a.clave} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 px-3 py-1.5 text-[12px]">
+                  <span className="min-w-0">
+                    <span className={cn("mr-1.5 font-mono font-bold", color(a))}>{icono(a)}</span>
+                    <b className="text-ink">{a.nombre}</b>
+                    {a.resultado && <span className={cn("ml-1.5", color(a))}>{a.resultado}</span>}
+                    {a.detalle && <span className="ml-1.5 text-ink-3">· {a.detalle}</span>}
+                  </span>
+                  <span className="text-[11px] text-ink-3">
+                    {a.revisadoPor ? `Revisado por: ${a.revisadoPor}` : a.estado === "hecha" ? "" : "Pendiente"}
+                    {a.fecha ? ` · ${fechaCorta(a.fecha)}` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 function PanelFranquicia({
   c,
   live,
@@ -5967,7 +6036,7 @@ function PanelFranquicia({
     setEstado("");
     setComentario("");
     onCambio(r.data);
-    setAviso({ tono: "ok", texto: `Franquicia: ${ESTADOS_FRANQUICIA[estado]}.${estado === "aceptado" ? " La postulación quedó cerrada (no cuenta como ingreso de Fraiche)." : ""}` });
+    setAviso({ tono: "ok", texto: `Franquicia: ${ESTADOS_FRANQUICIA[estado]}.${estado === "aceptado" ? " Ya puede pasar a Contratación." : ""}` });
   }
 
   return (
@@ -5977,20 +6046,18 @@ function PanelFranquicia({
           <Eyebrow>Franquicia</Eyebrow>
           <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
             {c.clienteVacante ? <>Franquiciatario: <b className="text-ink">{c.clienteVacante}</b>. </> : null}
-            La ruta termina en «Presentación al franquiciatario»: él decide y contrata. Sin documentación, socioeconómico, kit ni alta SAP de Fraiche.
+            Dentro de Filtro humano: entrevista inicial de Reclutamiento → presentación al franquiciatario → su entrevista y decisión. En Contratación y Onboarding
+            RH solo registra lo que confirma el franquiciatario. Sin IPV, psicometría, médico, socioeconómico, kit ni alta SAP de Fraiche.
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <Badge tone="human"><Handshake className="h-3 w-3" /> Franquicia</Badge>
-            {c.franquiciaEstadoTexto ? <Badge tone={c.franquiciaEstado === "aceptado" ? "good" : c.franquiciaEstado === "no_aceptado" ? "bad" : "brand"}>{c.franquiciaEstadoTexto}</Badge> : <Badge tone="neutral">Sin presentar</Badge>}
+            <Badge tone={c.avance?.franquiciaEstado === "aceptado" ? "good" : c.avance?.franquiciaEstado === "no_aceptado" ? "bad" : "brand"}>
+              {c.avance?.franquiciaEstadoTexto || c.franquiciaEstadoTexto || "Pendiente de presentar"}
+            </Badge>
           </div>
         </div>
         {puedeDecidir && (
           <div className="flex shrink-0 flex-wrap items-center gap-2">
-            {sinPresentar && activa && (
-              <Button size="sm" onClick={onPresentar} disabled={ocupado || !live}>
-                <Handshake className="h-4 w-4" /> Presentar al franquiciatario
-              </Button>
-            )}
             <Button size="sm" variant="outline" onClick={onFicha} disabled={ocupado || !live}>
               <FileDown className="h-4 w-4" /> Generar ficha para presentar
             </Button>

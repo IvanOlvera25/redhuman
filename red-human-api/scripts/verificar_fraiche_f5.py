@@ -94,9 +94,10 @@ with TestClient(app) as client:
     r = client.post("/entrevistas", json={"candidato": P, "avisar_whatsapp": False})
     check(client.get(f"/candidatos/{P}").json()["paso"] == "entrevista_inicial", "agendar la entrevista inicial mantiene/registra el paso")
     r = client.post(f"/candidatos/{P}/ipv", json={"modo": "red_human"})
-    check(client.get(f"/candidatos/{P}").json()["paso"] == "ipv", "programar IPV avanza a IPV")
+    ipv = next(a for a in client.get(f"/candidatos/{P}").json()["avance"]["actividades"] if a["clave"] == "ipv")
+    check(ipv["estado"] == "en_curso", "programar IPV la deja en curso en el avance (actividad de Filtro humano)")
     r = client.patch(f"/candidatos/{P}/paso", json={"paso": "psicometria"})
-    check(r.status_code == 200 and r.json()["etapa"] == "Evaluación" and r.json()["paso"] == "psicometria", "Psicometría → etapa Evaluación")
+    check(r.status_code == 200 and r.json()["etapa"] == "Entrevista Humana" and r.json()["paso"] == "psicometria", "Psicometría → Filtro humano (la columna Evaluación ya no existe)")
     r = client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "referencias"})
     check(client.get(f"/candidatos/{P}").json()["paso"] == "referencias", "agregar Referencias avanza a Referencias laborales")
     r = client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "psicometrica", "prueba_id": None})
@@ -159,10 +160,12 @@ with TestClient(app) as client:
     check(fr["responsable"] == "Rosa Franquiciataria" and fr["responsableContactoId"] == contacto.id, "la evaluación queda asignada al contacto de la franquicia")
     tok = fr["ligaExterna"].rsplit("/", 1)[-1]
     r = client.post(f"/evaluaciones-externas/publica/{tok}/resultado", data={"decision": "continuar", "comentarios": "Sí"})
-    check(r.status_code == 200 and client.get(f"/candidatos/{PF}").json()["franquiciaEstado"] == "presentado", "el resultado del franquiciatario NO cambia solo el estado: lo actualiza el reclutador")
+    ficha_pf = client.get(f"/candidatos/{PF}").json()
+    check(r.status_code == 200 and ficha_pf["franquiciaEstado"] == "aceptado" and ficha_pf["activa"] is True and ficha_pf["etapa"] == "Entrevista Humana",
+          "2026-10-01: la decisión del franquiciatario se refleja (Aceptado) sin cerrar ni mover la postulación")
     check(client.post(f"/candidatos/{P}/presentar-franquiciatario", json={"contacto_id": contacto.id}).status_code == 409, "una vacante de tienda propia no se presenta a franquiciatario")
     r = client.patch(f"/candidatos/{PF}/franquicia", json={"estado": "aceptado", "comentario": "Contrata la franquicia"})
-    check(r.status_code == 200 and r.json()["franquiciaEstado"] == "aceptado" and r.json()["activa"] is False and r.json()["motivoCierre"] == "aceptado_franquicia", "Aceptado por franquiciatario cierra con motivo aceptado_franquicia (no es ingreso de Fraiche)")
+    check(r.status_code == 200 and r.json()["franquiciaEstado"] == "aceptado" and r.json()["activa"] is True, "2026-10-01: Aceptado ya no cierra — sigue a Contratación")
     check(db.query(Postulacion).filter(Postulacion.codigo == PF).first().expediente is None, "sin expediente ni alta: la contratación la hace el franquiciatario")
     r = client.post("/candidatos/postular", data={"vacante": SLUGF, "nombre": "Ruta Franquicia Dos", "telefono": "5566005566", "consentimiento": "true", "respuestas": "[]"})
     PF2 = r.json()["postulacion"]

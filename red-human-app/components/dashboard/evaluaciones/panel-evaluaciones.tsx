@@ -459,10 +459,13 @@ function ligaPorDefecto(tipo: TipoEvaluacion | "", nombre: string) {
   return tipo === "socioeconomico" || tipo === "medico" || nombre === NOMBRE_EVALUACION_ENCARGADO || nombre === NOMBRE_EVALUACION_FRANQUICIATARIO;
 }
 
-export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombre, onClose, onAgregada }: {
+export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombre, onClose, onAgregada, tipoInicial, excluir, accionesRuta }: {
   codigo: string; puesto?: string; contactos?: ContactoEvaluacion[]; clienteNombre?: string; onClose: () => void; onAgregada: (e: EvaluacionCandidato) => void;
+  /** Pipeline Fraiche v2 (2026-10-01): «Agregar evaluación» es la ÚNICA entrada — incluye entrevista humana, IPV y
+   * presentación al franquiciatario (`accionesRuta`, abren su propio formulario); `excluir` quita lo que no aplica a la ruta. */
+  tipoInicial?: TipoEvaluacion | ""; excluir?: string[]; accionesRuta?: { etiqueta: string; descripcion?: string; onClick: () => void }[];
 }) {
-  const [tipo, setTipo] = useState<TipoEvaluacion | "">("");
+  const [tipo, setTipo] = useState<TipoEvaluacion | "">(tipoInicial ?? "");
   const [pruebas, setPruebas] = useState<PruebaPsicometrica[] | null>(null);
   const [pruebaId, setPruebaId] = useState<number | null>(null);
   const [nombre, setNombre] = useState("");
@@ -493,9 +496,20 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
   }
 
   return (
-    <ModalMarco titulo="Agregar evaluación o verificación" subtitulo="La columna del pipeline no cambia. Antes de enviarla se comprueban los consentimientos." onClose={onClose}>
+    <ModalMarco titulo="Agregar evaluación" subtitulo="Una entrevista humana mueve al candidato a Filtro humano; las demás evaluaciones y sus resultados no cambian la columna." onClose={onClose}>
+      {accionesRuta && accionesRuta.length > 0 && (
+        <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          {accionesRuta.map((a) => (
+            <button key={a.etiqueta} type="button" onClick={a.onClick}
+              className="rounded-xl border border-brand/30 bg-brand-soft/40 px-3 py-2.5 text-left text-sm font-semibold text-brand transition hover:border-brand">
+              {a.etiqueta}
+              {a.descripcion && <span className="mt-0.5 block text-[11px] font-normal text-ink-3">{a.descripcion}</span>}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {TIPOS_EVALUACION.map((t) => (
+        {TIPOS_EVALUACION.filter((t) => !(excluir ?? []).includes(t.valor)).map((t) => (
           <button
             key={t.valor}
             type="button"

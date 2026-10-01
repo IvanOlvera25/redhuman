@@ -152,6 +152,8 @@ export interface Candidato {
   activa?: boolean;
   motivoCierre?: string | null;
   cerradaEn?: string | null;
+  /** Pipeline Fraiche v2 (2026-10-01): ruta, columna, actividades, resultado acumulado y siguiente acción (lo calcula la API). */
+  avance?: AvancePostulacion;
   /** Telegram (2026-10-01): si la persona ya vinculó su chat y la liga firmada para que lo haga. */
   telegramVinculado?: boolean;
   ligaTelegram?: string;
@@ -561,3 +563,46 @@ export const conversacionDemo = [
       "Puedes solicitarlas directamente por aquí: dime las fechas que quieres y genero tu solicitud con folio para que tu jefe(a) la autorice. También puedo revisar tu saldo actual de días disponibles antes de continuar. ¿Qué fechas tienes en mente?",
   },
 ];
+
+
+/* Pipeline Fraiche v2 (2026-10-01) — calculado por services/fraiche_pipeline.avance */
+export interface AccionSiguiente {
+  tipo: string;
+  texto: string;
+  etapa?: string;
+  evaluacion?: string;
+  codigo?: string;
+  actividad?: string;
+}
+export interface ActividadRuta {
+  clave: string;
+  nombre: string;
+  columna: string;
+  columnaNombre: string;
+  estado: "hecha" | "en_curso" | "pendiente" | "no_aplica";
+  resultado: string;
+  tono: "good" | "warn" | "bad" | "neutral";
+  revisadoPor: string;
+  fecha: string | null;
+  detalle: string;
+  obligatoria: boolean;
+  noCumple: boolean;
+  accion: AccionSiguiente | null;
+}
+export interface AvancePostulacion {
+  destino: string;
+  ruta: string;
+  columna?: string;
+  columnaNombre: string;
+  actividades?: ActividadRuta[];
+  realizadas?: string[];
+  pendientes: string[];
+  integral: { conclusion: "apto" | "no_apto" | "en_proceso"; texto: string; score: number | null; cumplidos?: string[]; pendientes?: string[]; noCumplidos?: string[];
+              resultados?: { nombre: string; resultado: string; tono: string; revisadoPor: string }[] };
+  franquiciaEstado: string | null;
+  franquiciaEstadoTexto: string | null;
+  siguienteAccion: AccionSiguiente;
+  siguienteColumna?: string | null;
+  puedeAvanzar: boolean;
+  faltaParaAvanzar?: string[];
+}

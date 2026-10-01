@@ -409,3 +409,37 @@ explícita. Toda constante/regla del cliente está en `services/fraiche.py` (nun
 - Etiquetas: backend `services/canal.nombre()` (importar como `_canal`; `canal` choca con parámetros locales), frontend
   `lib/canal.ts` (`CANAL`, `ES_TELEGRAM`, de `NEXT_PUBLIC_CANAL_MENSAJERIA` en build). Los valores internos (`canal="whatsapp"`,
   plataformas, reglas de notificación, `filtro_whatsapp`) NO cambian. Regresión: `scripts/verificar_telegram.py`.
+
+## Cambios integrados Fraiche — pipeline v2 (2026-10-01)
+
+Reemplaza en la rama `demo-fraiche` la vista «Ruta Fraiche / Etapas», la columna «Evaluación» y el cierre de franquicia por «Aceptado».
+- UN pipeline de cinco columnas: Prefiltro → Filtro Red Human («Entrevista IA») → Filtro humano («Entrevista Humana») →
+  Contratación → Onboarding (`services/fraiche_pipeline.py`, `ETIQUETA_ETAPA`, `ETAPAS_VISIBLES`, `columnaDe`). Valores
+  internos SIN cambio; «Evaluación» ya no es columna: `aplicar_movimiento` rechaza moverla ahí (400), la Entrevista Red Human
+  ya no mueve a ella y lo que quede se cuenta/muestra en Filtro humano (`conteos._columna`). Datos viejos:
+  `scripts/migrar_pipeline_fraiche_v2.py --ejecutar` (manual).
+- `fraiche_pipeline.avance(p)` es la ÚNICA fuente de ruta, columna, actividades (resultado, «Revisado por»), Evaluación
+  integral (resultado acumulado; un requisito obligatorio «No cumple» prevalece sobre el score), estado de franquicia
+  (Pendiente de presentar / Presentado / Pendiente de decisión / Aceptado / No aceptado), siguiente acción y
+  `faltaParaAvanzar`. Viaja en `postulacion_dict["avance"]`; tarjeta y ficha (`PanelAvance`) solo lo pintan.
+- Reglas de ruta solo para vacantes de Fraiche (`es_ruta_fraiche`: con sucursal/zona o franquicia); las demás Cuentas usan
+  las mismas columnas sin bloqueos. Avanzar a Contratación/Onboarding (no manual) exige lo aplicable y responde 409 con lo
+  que falta EXACTAMENTE; «Mover a otra etapa» (manual) sigue registrando lo omitido.
+- Formulario web superado (vacante de Fraiche) → Filtro Red Human; ahí ocurre el filtro por mensaje (`espera_respuesta`
+  cubre Entrevista IA con prefiltro incompleto). Crear una entrevista humana mueve a Filtro humano; agregar otras
+  evaluaciones o recibir resultados NUNCA cambia la columna. «Agregar evaluación» es la única entrada (incluye entrevista
+  humana, IPV y presentación al franquiciatario).
+- Franquicia: sin IPV, psicometría, médico, socioeconómico, expediente ni SAP (la API los rechaza con 409). «Aceptado» ya NO
+  cierra: Contratación = `POST /candidatos/{c}/franquicia/contratacion` (registra la confirmación del franquiciatario);
+  Onboarding = `POST …/franquicia/ingreso` (cierra con `ingreso_franquicia`). Cambiar el Tipo de tienda de una vacante cancela
+  lo PENDIENTE que ya no aplica (`ajustar_por_cambio_de_ruta`) y conserva resultados e historial.
+- Tienda propia: psicometría solo con batería (`BATERIAS_EVALUATEST`, Cajero no), socioeconómico solo Cajero. «Listo para
+  enviar a SAP» nunca se muestra como «Enviado».
+- Candidato: la empresa es SIEMPRE la marca de la Cuenta en franquicia (`nombre_empresa_candidato`); `sucursal_publica` /
+  `texto_publico` quitan «Franquicia 00X» de portal, guion, prompt y chat. Entrevista SIN sueldo (sin «expectativa salarial»,
+  sin sueldo en el prompt); disponibilidad «¿Cuándo podrías empezar a trabajar en Fraiche?». El sueldo se muestra y valida SOLO
+  en el prefiltro por mensaje con `fraiche.sueldo_candidato` («$11,500 MXN mensuales (once mil quinientos pesos mexicanos al
+  mes)»), que evita la lectura «11 dólares con 50 centavos».
+- Telegram: «Continuar en Telegram» trae la postulación EXACTA (`postulacion_codigo` en el mensaje → sin menú de empresa ni
+  postulación nueva); si la liga no corresponde se ofrece reintentar. Regresión: `scripts/verificar_fraiche_v2.py` (dos
+  rutas de punta a punta) y `scripts/verificar_telegram.py`.

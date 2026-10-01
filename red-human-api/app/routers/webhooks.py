@@ -649,19 +649,36 @@ async def procesar_mensaje_entrante(db: Session, msg: dict) -> dict:
     alcance_ids = [x.id for x in alcance]
     prueba = modo_prueba_activo(db)
 
-    # ── 1. Persona y postulación en conversación (dentro del alcance del número) ──
-    personas = _personas_en_alcance(db, telefono, alcance_ids)
-    cuenta = _cuenta_ancla(db, alcance, personas)
-    c = _buscar_o_crear_candidato(db, telefono, nombre_wa, cuenta.id, prueba) if not personas else personas[0]
-    if not personas:
+    # ── 0. Telegram (2026-10-01): «Continuar en Telegram» trae la postulación EXACTA (liga firmada) → se sigue en
+    # ella: misma persona, Cuenta, vacante, sucursal, tipo de tienda y respuestas; nunca menú de empresa/vacante. ──
+    forzada = None
+    if msg.get("postulacion_codigo"):
+        forzada = db.query(Postulacion).filter(Postulacion.codigo == msg["postulacion_codigo"], Postulacion.activa.is_(True)).first()
+    if forzada is not None and forzada.candidato is not None:
+        c = forzada.candidato
         personas = [c]
-    else:
+        cuenta = next((x for x in alcance if x.id == forzada.cuenta_id), None) or forzada.cuenta or (alcance[0] if alcance else None)
         if not c.wa_id:
             c.wa_id = telefono
         if nombre_wa and not c.wa_nombre:
             c.wa_nombre = nombre_wa
-    print(f"[agente] Alcance del número: {modo_numero} ({len(alcance)} Cuenta(s)); persona(s): {[x.codigo for x in personas]}")
-    p, ruteo = await _resolver_postulacion(db, c, texto, id_seleccionado, alcance_ids, prueba, telefono, personas=personas)
+        fijar_conversacion(forzada)
+        p, ruteo = forzada, "postulacion_vinculada"
+        print(f"[agente] Postulación {forzada.codigo} fijada por la liga de continuación ({c.codigo})")
+    else:
+        # ── 1. Persona y postulación en conversación (dentro del alcance del número) ──
+        personas = _personas_en_alcance(db, telefono, alcance_ids)
+        cuenta = _cuenta_ancla(db, alcance, personas)
+        c = _buscar_o_crear_candidato(db, telefono, nombre_wa, cuenta.id, prueba) if not personas else personas[0]
+        if not personas:
+            personas = [c]
+        else:
+            if not c.wa_id:
+                c.wa_id = telefono
+            if nombre_wa and not c.wa_nombre:
+                c.wa_nombre = nombre_wa
+        print(f"[agente] Alcance del número: {modo_numero} ({len(alcance)} Cuenta(s)); persona(s): {[x.codigo for x in personas]}")
+        p, ruteo = await _resolver_postulacion(db, c, texto, id_seleccionado, alcance_ids, prueba, telefono, personas=personas)
     if p is None:
         db.commit()
         return {"ok": True, "accion": ruteo, "candidato": c.codigo}
@@ -852,6 +869,18 @@ def _msg_desde_inicio(payload: str) -> Tuple[str, str]:
     return "Hola", ""
 
 
+async def _reintentar_vinculo(chat: str, motivo: str) -> None:
+    """La liga de continuación falló: se explica y se ofrece reintentar (botón de número o volver a la página)."""
+    from ..services import telegram as tg
+
+    await tg.enviar_a_chat(
+        chat,
+        f"No pude vincular este chat con tu postulación 😕 {motivo}\n\nPara reintentar, vuelve a tocar *Continuar en Telegram* en la "
+        "página de tu postulación, o toca *📱 Compartir mi número* (el mismo que registraste).",
+        tg.TECLADO_COMPARTIR,
+    )
+
+
 async def _turno_telegram(update: dict) -> None:
     from ..models import VinculoTelegram
     from ..services import telegram as tg
@@ -863,7 +892,7 @@ async def _turno_telegram(update: dict) -> None:
             return
         chat = u["chat_id"]
         v = db.query(VinculoTelegram).filter(VinculoTelegram.chat_id == chat).first()
-        texto, id_sel, tipo, media = "", "", "text", None
+        texto, id_sel, tipo, media, forzar = "", "", "text", None, ""
 
         if u.get("callback"):
             await tg.responder_callback(u["callback"]["id"])
@@ -883,11 +912,24 @@ async def _turno_telegram(update: dict) -> None:
             texto, id_sel = _msg_desde_inicio(pendiente)
         elif "inicio" in u:
             firmado = tg.leer_payload_vinculo(u["inicio"])
+            if u["inicio"].startswith("L-") and not firmado:
+                await _reintentar_vinculo(chat, "La liga ya no es válida.")
+                return
             if firmado:
+                ref = firmado["ref"]
+                cod_p = f"P-{ref[1:]}" if ref[:1] == "P" and ref[1:].isdigit() else ""
+                if cod_p:
+                    post = db.query(Postulacion).filter(Postulacion.codigo == cod_p).first()
+                    if post is None or not post.activa or tg.clave(post.telefono or "") != firmado["telefono"]:
+                        await _reintentar_vinculo(chat, "No encontré una postulación activa con esos datos.")
+                        return
                 v = tg.vincular(db, chat, firmado["telefono"], u["nombre"], u["usuario"])
                 db.commit()
-                await tg.enviar_a_chat(chat, "¡Listo! ✅ Vinculé este chat con tu número. Por aquí seguimos con tu proceso.", tg.QUITAR_TECLADO)
-                texto, id_sel = _msg_desde_inicio(firmado["ref"])
+                await tg.enviar_a_chat(chat, "¡Listo! ✅ Vinculé este chat con tu postulación. Seguimos por aquí con las preguntas que faltan.", tg.QUITAR_TECLADO)
+                if cod_p:
+                    texto, id_sel, forzar = "Hola, vengo de la página para continuar mi postulación.", "", cod_p
+                else:
+                    texto, id_sel = _msg_desde_inicio(ref)
             elif v and v.telefono:
                 texto, id_sel = _msg_desde_inicio(u["inicio"])
             else:
@@ -911,7 +953,7 @@ async def _turno_telegram(update: dict) -> None:
                 return
 
         msg = {"telefono": v.telefono, "texto": texto, "nombre": u["nombre"], "wa_id": f"tg-{u.get('update_id')}",
-               "tipo": tipo, "media": media, "id_seleccionado": id_sel, "numero_receptor": ""}
+               "tipo": tipo, "media": media, "id_seleccionado": id_sel, "numero_receptor": "", "postulacion_codigo": forzar}
         await procesar_mensaje_entrante(db, msg)
     except Exception:
         import traceback
