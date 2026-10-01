@@ -432,7 +432,7 @@ def siguiente_accion(p, acts: List[dict], integ: dict) -> dict:
                 "expediente": "Completar el expediente de contratación",
                 "preparar_alta_sap": "Preparar alta: confirmar datos para SAP",
             }
-            acc["texto"] = textos.get(acc["tipo"], a["nombre"])
+            acc["texto"] = textos.get(acc["tipo"], f"Pendiente: {a['nombre']}" + (f" ({a['resultado']})" if a.get("resultado") else ""))
             acc["actividad"] = a["clave"]
             return acc
     # todo lo de esta columna está hecho → avanzar
