@@ -428,6 +428,13 @@ def _amarrar_a_cuenta(db: Session, p: Postulacion, vacante: Vacante, personas: L
         p.candidato = persona
         for m in p.mensajes:
             m.candidato_id = persona.id
+        db.flush()
+        if anterior is not None and not db.query(Postulacion).filter(Postulacion.candidato_id == anterior.id).count():
+            # 2026-10-02: la fila ancla se quedó sin procesos → se FUSIONA con la de la Cuenta destino (baja lógica). Una
+            # persona sin postulaciones impide arrancar la API (guardia de Fase 2).
+            anterior.eliminado_en = datetime.now(timezone.utc)
+            anterior.eliminado_por = f"fusionada con {persona.codigo}"
+            registrar(db, "sistema", "persona_fusionada", "candidato", anterior.codigo, {"con": persona.codigo, "postulacion": p.codigo})
     p.cuenta_id = vacante.cuenta_id
     fijar_conversacion(p)
     db.flush()

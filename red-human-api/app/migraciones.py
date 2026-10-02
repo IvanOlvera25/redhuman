@@ -178,7 +178,8 @@ def candidatos_sin_postulacion(db) -> int:
     from .models import Candidato, Postulacion
 
     tiene = db.query(Postulacion.candidato_id).distinct()
-    return db.query(Candidato).filter(Candidato.id.not_in(tiene)).count()
+    # 2026-10-02: una persona dada de baja (p. ej. fusionada con su fila de otra Cuenta) no es un pendiente de migración
+    return db.query(Candidato).filter(Candidato.id.not_in(tiene), Candidato.eliminado_en.is_(None)).count()
 
 
 def migrar_postulaciones(db) -> dict:
