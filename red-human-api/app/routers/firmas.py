@@ -63,7 +63,7 @@ def _sign_url(f: FirmaDocumento, rol: str) -> Optional[str]:
     try:
         return dsign.sign_url(x["signature_id"])
     except dsign.FirmaError as ex:
-        raise HTTPException(502 if (ex.status or 500) >= 500 or ex.status is None else 409, str(ex))
+        raise HTTPException(502 if ex.status is None or ex.status >= 500 or ex.status in (401, 403) else 409, str(ex))
 
 
 # Orden de `signers` en la solicitud: 0 = representante de RH (empresa), 1 = candidato. Los campos usan este índice.

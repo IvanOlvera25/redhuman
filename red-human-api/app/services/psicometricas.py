@@ -30,6 +30,12 @@ class PsicometricasError(Exception):
         self.status = status
 
 
+def _sin_conexion(ex: httpx.HTTPError) -> PsicometricasError:
+    if isinstance(ex, httpx.TimeoutException):
+        return PsicometricasError("Psicométricas.mx no respondió a tiempo. Intenta de nuevo en unos minutos.", 504)
+    return PsicometricasError(f"No se pudo conectar con Psicométricas.mx: {ex}")
+
+
 def _password() -> str:
     return settings.psicometricas_password or settings.psicometricas_usuario
 
@@ -77,7 +83,7 @@ def agregar_candidato(nombre: str, correo: str, vacante: str, tests: str, lang: 
     try:
         r = httpx.post(_url("agregaCandidato"), data={**_cred(), "Candidate": nombre, "Email": correo, "Vacancy": vacante, "Tests": tests, "Lang": lang}, timeout=30)
     except httpx.HTTPError as ex:
-        raise PsicometricasError(f"No se pudo conectar con Psicométricas.mx: {ex}")
+        raise _sin_conexion(ex)
     datos = _revisar(r)
     clave = str((datos or {}).get("clave") or "") if isinstance(datos, dict) else ""
     if not clave:
@@ -89,7 +95,7 @@ def consultar_candidato(clave: str) -> List[dict]:
     try:
         r = httpx.get(_url("consultaCandidato"), params={**_cred(), "Clave": clave}, timeout=30)
     except httpx.HTTPError as ex:
-        raise PsicometricasError(f"No se pudo conectar con Psicométricas.mx: {ex}")
+        raise _sin_conexion(ex)
     datos = _revisar(r)
     filas = datos if isinstance(datos, list) else [datos]
     return [f for f in filas if isinstance(f, dict) and str(f.get("clave") or clave) == clave]
@@ -104,7 +110,7 @@ def resultado_json(clave: str) -> Union[dict, list]:
     try:
         r = httpx.get(_url("consultaResultado"), params={**_cred(), "Clave": clave, "Pdf": "false"}, timeout=60)
     except httpx.HTTPError as ex:
-        raise PsicometricasError(f"No se pudo conectar con Psicométricas.mx: {ex}")
+        raise _sin_conexion(ex)
     return _revisar(r)
 
 
@@ -112,7 +118,7 @@ def resultado_pdf(clave: str) -> Optional[bytes]:
     try:
         r = httpx.get(_url("consultaResultado"), params={**_cred(), "Clave": clave, "Pdf": "true"}, timeout=60)
     except httpx.HTTPError as ex:
-        raise PsicometricasError(f"No se pudo conectar con Psicométricas.mx: {ex}")
+        raise _sin_conexion(ex)
     if r.status_code >= 400:
         raise PsicometricasError(f"Psicométricas.mx respondió {r.status_code} al pedir el PDF.", r.status_code)
     return r.content if r.content.startswith(b"%PDF") else None
