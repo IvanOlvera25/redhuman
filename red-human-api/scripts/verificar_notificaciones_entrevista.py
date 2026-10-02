@@ -1,4 +1,4 @@
-"""Verificación (2026-09-18): notificaciones automatizadas de Entrevista Humana — WhatsApp (plantilla de Meta
+"""Verificación (2026-09-18; sobre Evaluaciones unificadas desde 2026-09-29): notificaciones automatizadas de Entrevista Humana — WhatsApp (plantilla de Meta
 «alerta_entrevista_asignada» con 6 parámetros posicionales al entrevistador) y correo (Resend, plantillas
 HTML corporativas para entrevistador y candidato) + vistas previas. Modo demo, base desechable.
 
@@ -97,7 +97,7 @@ with TestClient(app) as client:
     r = client.get("/api/emails/preview/candidato?modalidad=Presencial")
     check("Reforma 222" in r.text and "Unirme a la entrevista" not in r.text, "variante presencial (lugar en vez de liga)")
     r = client.get("/api/emails/preview/entrevistador?json=1").json()
-    check(r["parametros_meta"] == ["Mariana López", "Carlos Hernández Ruiz", "Abogado Fiscalista", "jueves 24 de septiembre de 2026", "10:30 h", r["datos"]["liga_expediente"]], "orden de los 6 parámetros de Meta en la vista previa")
+    check(r["parametros_meta"] == ["Mariana López", "Carlos Hernández Ruiz", "Abogado Fiscalista", "jueves 24 de septiembre de 2026", "10:30 h (hora de Ciudad de México)", r["datos"]["liga_expediente"]], "orden de los 6 parámetros de Meta en la vista previa (hora con su zona, 2026-09-29)")
 
     # ================= 2. Disparo al asignar Entrevista Humana =================
     print("\n--- 2. Asignar Entrevista Humana → WhatsApp (plantilla) + correos ---")
@@ -106,19 +106,23 @@ with TestClient(app) as client:
     P = r.json()["id"]
     client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Evaluación", "manual": True})
     WA_PLANTILLA.clear(); WA_TEXTO.clear(); CORREOS.clear()
-    r = client.post(f"/candidatos/{P}/entrevista-humana", json={
-        "tipo_entrevistador": "interno", "entrevistador_usuario_id": admin.id, "fecha": "2026-09-24", "hora": "10:30",
-        "modalidad": "Videollamada", "liga": "https://teams.microsoft.com/l/meetup-join/abc", "comentario": "Validar experiencia con auditorías.",
-        "notificar": {"cliente_correo": False, "cliente_whatsapp": False},
+    # Evaluaciones unificadas (2026-09-29): «Agregar evaluación» → entrevista humana asignada con cita
+    SIN_CLIENTE = {"cliente_correo": False, "cliente_whatsapp": False}
+    r = client.post(f"/evaluaciones/postulaciones/{P}", json={
+        "tipo": "entrevista_humana", "forma": "asignada", "evaluador": {"tipo": "interno", "usuario_id": admin.id},
+        "instrucciones": "Validar experiencia con auditorías.",
+        "cita": {"fecha": "2026-09-24", "hora": "10:30", "modalidad": "Videollamada", "liga_videollamada": "https://teams.microsoft.com/l/meetup-join/abc"},
+        "notificar": SIN_CLIENTE,
     })
     check(r.status_code == 201, f"entrevista humana programada ({r.status_code})")
+    COD = r.json()["evaluacion"]["codigo"]
     res = {(x["destinatario"], x["canal"]): x for x in r.json()["resultados"]}
     check(len(WA_PLANTILLA) == 1 and WA_PLANTILLA[0][1] == "alerta_entrevista_asignada" and WA_PLANTILLA[0][0] == "3399998888", "al entrevistador le llega la plantilla de Meta «alerta_entrevista_asignada» a su WhatsApp del perfil")
     params = WA_PLANTILLA[0][2]
     check(len(params) == 6, "exactamente 6 parámetros posicionales")
     check(params[0] == admin.nombre and params[1] == "Carlos Hernández" and params[2] == vac["titulo"], "1 entrevistador · 2 candidato · 3 vacante")
-    check("2026" in params[3] and "septiembre" in params[3] and params[4].endswith(" h"), f"4 fecha «{params[3]}» · 5 hora «{params[4]}» (hora de México)")
-    check(params[5].startswith(settings.app_url + "/entrevista-humana/") and len(params[5]) > len(settings.app_url) + 25, "6 liga al expediente del candidato (sala del entrevistador)")
+    check("2026" in params[3] and "septiembre" in params[3] and params[4].endswith(" h (hora de Ciudad de México)"), f"4 fecha «{params[3]}» · 5 hora «{params[4]}» (hora de México)")
+    check(params[5].startswith(settings.app_url + "/evaluacion/") and len(params[5]) > len(settings.app_url) + 25, "6 liga al expediente del candidato (liga del evaluador)")
     check(res[("entrevistador", "whatsapp")]["enviado"] is True and "plantilla" in res[("entrevistador", "whatsapp")], "resultado visible para RH: plantilla enviada")
     check(any(t[0] == "5512345678" for t in WA_TEXTO), "el candidato recibe su WhatsApp de texto (aviso de entrevista)")
     correos = {c[0]: c for c in CORREOS}
@@ -133,19 +137,20 @@ with TestClient(app) as client:
     # ================= 2b. Mismo layout para modificada / recordatorio / cancelada =================
     print("\n--- 2b. Modificada, recordatorio y cancelada con el layout corporativo ---")
     CORREOS.clear()
-    r = client.patch(f"/candidatos/{P}/entrevista-humana", json={"fecha": "2026-09-25", "hora": "12:00", "modalidad": "Videollamada", "liga": "https://teams.microsoft.com/l/meetup-join/abc", "notificar": {"candidato_correo": True, "entrevistador_correo": True, "cliente_correo": False, "cliente_whatsapp": False}})
-    check(r.status_code == 200, f"modificar entrevista ({r.status_code})")
+    r = client.patch(f"/evaluaciones/{COD}", json={"cita": {"fecha": "2026-09-25", "hora": "12:00", "modalidad": "Videollamada", "liga_videollamada": "https://teams.microsoft.com/l/meetup-join/abc"},
+                                                  "notificar": {"candidato_correo": True, "entrevistador_correo": True, **SIN_CLIENTE}})
+    check(r.status_code == 200, f"reprogramar entrevista ({r.status_code})")
     cm = {c[0]: c for c in CORREOS}
     check("modificada" in cm[admin.correo][1].lower() and "<!doctype html>" in cm[admin.correo][2].lower() and "Ver expediente del candidato" in cm[admin.correo][2] and "25 de septiembre" in cm[admin.correo][2], "entrevistador · modificada: HTML corporativo con la nueva fecha y CTA")
     check("modificada" in cm["carlos@correo.mx"][1].lower() and "12:00 h" in cm["carlos@correo.mx"][2] and "Unirme a la entrevista" in cm["carlos@correo.mx"][2], "candidato · modificada: HTML con nueva hora y liga")
     CORREOS.clear()
-    r = client.post(f"/candidatos/{P}/entrevista-humana/recordatorio", json={"notificar": {"candidato_correo": True, "entrevistador_correo": True, "cliente_correo": False, "cliente_whatsapp": False}})
+    r = client.post(f"/evaluaciones/{COD}/recordatorio", json={"a": "ambos", "notificar": {"candidato_correo": True, "entrevistador_correo": True, **SIN_CLIENTE}})
     check(r.status_code == 200, f"recordatorio ({r.status_code})")
     cm = {c[0]: c for c in CORREOS}
     check(admin.correo in cm and "Recordatorio" in cm[admin.correo][1] and "<!doctype html>" in cm[admin.correo][2].lower(), "entrevistador · recordatorio: HTML corporativo")
     check("carlos@correo.mx" in cm and "Recordatorio" in cm["carlos@correo.mx"][1] and "se acerca" in cm["carlos@correo.mx"][2], "candidato · recordatorio: HTML corporativo")
     CORREOS.clear()
-    r = client.post(f"/candidatos/{P}/entrevista-humana/cancelar", json={"notificar": {"candidato_correo": True, "entrevistador_correo": True, "cliente_correo": False, "cliente_whatsapp": False}})
+    r = client.post(f"/evaluaciones/{COD}/cancelar", json={"motivo": "Prueba", "notificar": {"candidato_correo": True, "entrevistador_correo": True, **SIN_CLIENTE}})
     check(r.status_code == 200, f"cancelar ({r.status_code})")
     cm = {c[0]: c for c in CORREOS}
     check(admin.correo in cm and "cancelada" in cm[admin.correo][1].lower() and "<!doctype html>" in cm[admin.correo][2].lower() and "Ver expediente" not in cm[admin.correo][2], "entrevistador · cancelada: HTML corporativo sin CTA")
@@ -155,7 +160,7 @@ with TestClient(app) as client:
     # ================= 2c. Vista previa con datos reales =================
     print("\n--- 2c. Vista previa dinámica (query params) ---")
     r = client.get("/api/emails/preview/candidato?evento=modificada&candidato=Ana%20Ruiz&entrevistador=Luis%20P%C3%A9rez&vacante=Cajera&empresa=Grupo%20CARBE&fecha=2026-09-24&hora=10:30&modalidad=Videollamada&liga=https://meet.google.com/abc&json=1").json()
-    check(r["asunto"] == "Tu entrevista para Cajera fue modificada" and r["datos"]["fecha"] == "jueves 24 de septiembre de 2026" and r["datos"]["hora"] == "10:30 h", "fecha ISO + hora del formulario → texto legible en México")
+    check(r["asunto"] == "Tu entrevista para Cajera fue modificada" and r["datos"]["fecha"] == "jueves 24 de septiembre de 2026" and r["datos"]["hora"] == "10:30 h (hora de Ciudad de México)", "fecha ISO + hora del formulario → texto legible en México")
     check(r["datos"]["liga_conexion"] == "https://meet.google.com/abc" and r["datos"]["entrevistador"] == "Luis Pérez", "liga y entrevistador reales")
     r = client.get("/api/emails/preview/entrevistador?candidato=Ana%20Ruiz&vacante=Cajera&modalidad=Presencial&ubicacion=Reforma%20222&fecha=2026-09-24")
     check(r.status_code == 200 and "Ana Ruiz" in r.text and "Reforma 222" in r.text and "Mariana" not in r.text, "vista previa del entrevistador con datos reales (sin mock)")
@@ -168,12 +173,12 @@ with TestClient(app) as client:
     print("\n--- 3. Respaldos ---")
     PLANTILLA_OK["ok"] = False
     WA_PLANTILLA.clear(); WA_TEXTO.clear()
-    r = client.post(f"/candidatos/{P}/entrevista-humana", json={
-        "tipo_entrevistador": "interno", "entrevistador_usuario_id": admin.id, "fecha": "2026-09-25", "hora": "12:00", "modalidad": "Llamada",
-        "notificar": {"cliente_correo": False, "cliente_whatsapp": False},
+    r = client.post(f"/evaluaciones/postulaciones/{P}", json={
+        "tipo": "entrevista_humana", "forma": "asignada", "evaluador": {"tipo": "interno", "usuario_id": admin.id},
+        "cita": {"fecha": "2026-09-25", "hora": "12:00", "modalidad": "Teléfono"}, "notificar": SIN_CLIENTE,
     })
     res = {(x["destinatario"], x["canal"]): x for x in r.json()["resultados"]}
-    check(len(WA_PLANTILLA) == 1 and any(t[0] == "3399998888" and "entrevista-humana/" in t[1] for t in WA_TEXTO), "si Meta rechaza la plantilla, sale texto libre al entrevistador con la liga (nunca silencio)")
+    check(len(WA_PLANTILLA) == 1 and any(t[0] == "3399998888" and "/evaluacion/" in t[1] for t in WA_TEXTO), "si Meta rechaza la plantilla, sale texto libre al entrevistador con la liga (nunca silencio)")
     check("motivo_fallback" in res[("entrevistador", "whatsapp")], "el resultado explica el respaldo")
     PLANTILLA_OK["ok"] = True
 

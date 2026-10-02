@@ -16,6 +16,12 @@ from typing import List, Optional
 from ..config import settings
 
 
+# Timeouts (conexión, lectura) en segundos: el SDK no trae ninguno por defecto y una llamada colgada bloquearía al
+# worker. La descarga del PDF final puede tardar más (documento + auditoría).
+TIMEOUT = (10.0, 30.0)
+TIMEOUT_ARCHIVO = (10.0, 90.0)
+
+
 class FirmaError(Exception):
     def __init__(self, mensaje: str, status: Optional[int] = None):
         super().__init__(mensaje)
@@ -38,6 +44,11 @@ def _cliente():
 
 def _error_sdk(ex: Exception) -> FirmaError:
     status = getattr(ex, "status", None)
+    nombre = type(ex).__name__.lower()
+    if status is None and ("timeout" in nombre or "timed out" in str(ex).lower()):
+        return FirmaError("Dropbox Sign no respondió a tiempo. Intenta de nuevo en unos minutos.", 504)
+    if status is None and any(x in nombre for x in ("maxretry", "newconnection", "connection", "protocol")):
+        return FirmaError(f"No se pudo conectar con Dropbox Sign: {str(ex)[:200]}", 502)
     cuerpo = str(getattr(ex, "body", "") or ex)[:300]
     if status in (401, 403):
         return FirmaError(f"Dropbox Sign rechazó la credencial ({status}). Revisa DROPBOX_SIGN_API_KEY.", status)
@@ -86,7 +97,7 @@ def crear_solicitud_embebida(pdf: bytes, nombre_archivo: str, titulo: str, asunt
                 test_mode=bool(settings.dropbox_sign_test_mode),
                 form_fields_per_document=campos_de_zonas(zonas, indice_por_rol or {}) if zonas else None,
             )
-            resp = api.signature_request_create_embedded(req)
+            resp = api.signature_request_create_embedded(req, _request_timeout=TIMEOUT_ARCHIVO)
     except FirmaError:
         raise
     except Exception as ex:  # noqa: BLE001
@@ -106,7 +117,7 @@ def sign_url(signature_id: str) -> str:
     ds, cliente = _cliente()
     try:
         with cliente as api_client:
-            resp = ds.apis.EmbeddedApi(api_client).embedded_sign_url(signature_id)
+            resp = ds.apis.EmbeddedApi(api_client).embedded_sign_url(signature_id, _request_timeout=TIMEOUT)
     except Exception as ex:  # noqa: BLE001
         raise _error_sdk(ex)
     return resp.embedded.sign_url
@@ -117,7 +128,7 @@ def descargar_pdf(signature_request_id: str) -> bytes:
     ds, cliente = _cliente()
     try:
         with cliente as api_client:
-            archivo = ds.apis.SignatureRequestApi(api_client).signature_request_files(signature_request_id, file_type="pdf")
+            archivo = ds.apis.SignatureRequestApi(api_client).signature_request_files(signature_request_id, file_type="pdf", _request_timeout=TIMEOUT_ARCHIVO)
     except Exception as ex:  # noqa: BLE001
         raise _error_sdk(ex)
     datos = archivo.read() if hasattr(archivo, "read") else bytes(archivo)
