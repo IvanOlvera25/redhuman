@@ -459,6 +459,10 @@ def _exigir_consentimiento(ev: EvaluacionCandidato, p: Optional[Postulacion]) ->
 
 
 def _abierta(ev: EvaluacionCandidato) -> None:
+    from ..services.configuracion import ambiente_prueba
+
+    if ambiente_prueba() and ev.estado == "revisada":
+        return  # 2026-10-02: en el ambiente de prueba una evaluación revisada se puede repetir (el resultado previo queda en historial)
     if ev.estado in ("revisada", "fallida"):
         raise HTTPException(409, f"La evaluación ya está {'revisada' if ev.estado == 'revisada' else 'fallida/cancelada'}.")
 

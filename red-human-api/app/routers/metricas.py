@@ -22,10 +22,18 @@ from ..services import conteos, fraiche
 router = APIRouter(prefix="/metricas", tags=["metricas"], dependencies=[Depends(usuario_actual)])
 
 
+def _sin_pruebas(q):
+    """2026-10-02: los reportes PRODUCTIVOS nunca cuentan pruebas; dentro del ambiente de prueba sí (ahí todo es prueba
+    y RH necesita ver sus métricas)."""
+    from ..services.configuracion import ambiente_prueba
+
+    return q if ambiente_prueba() else q.filter(Postulacion.es_prueba.is_(False))
+
+
 def _postulaciones(db: Session, cuenta_id: int):
     """Base de todo conteo de este módulo (Fase 2: se cuentan POSTULACIONES, no personas) —
-    nunca cuenta postulaciones de Modo Prueba."""
-    return db.query(Postulacion).filter(Postulacion.es_prueba.is_(False), Postulacion.cuenta_id == cuenta_id)
+    sin postulaciones de prueba fuera del ambiente de prueba."""
+    return _sin_pruebas(db.query(Postulacion).filter(Postulacion.cuenta_id == cuenta_id))
 
 
 @router.get("/pipeline")
@@ -195,7 +203,7 @@ def tablero(db: Session = Depends(get_db), cuenta: Cuenta = Depends(cuenta_actua
     dias = [hoy - timedelta(days=i) for i in range(6, -1, -1)]
     desde_7d = ahora - timedelta(days=8)
 
-    visibles = conteos.postulaciones_visibles(db, cuenta.id)
+    visibles = _sin_pruebas(conteos.postulaciones_visibles(db, cuenta.id))
     activos_pipeline = visibles.count()
 
     # --- actividad de los últimos 7 días: postulaciones nuevas y entrevistas (IA finalizadas + humanas del día) ---
@@ -428,9 +436,10 @@ def tablero_reclutamiento(
 
     # --- postulaciones (activas y cerradas) de esas vacantes, sin Modo Prueba ---
     qp = db.query(Postulacion).join(Candidato, Postulacion.candidato_id == Candidato.id).filter(
-        Postulacion.cuenta_id == cuenta.id, Postulacion.es_prueba.is_(False), Candidato.eliminado_en.is_(None),
+        Postulacion.cuenta_id == cuenta.id, Candidato.eliminado_en.is_(None),
         Postulacion.vacante_id.in_(ids_v) if ids_v else False,
     )
+    qp = _sin_pruebas(qp)
     if fuente.strip():
         qp = qp.filter(Postulacion.fuente_postulacion == fraiche.normalizar_fuente(fuente))
     postulaciones = qp.all() if ids_v else []

@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { fetchConfiguracion, fetchYo, logout as apiLogout, type UsuarioRH } from "@/lib/api";
+import { fetchConfiguracion, fetchSalud, fetchYo, logout as apiLogout, type UsuarioRH } from "@/lib/api";
 
 /* ============================================================
    Sesión de la persona de RH.
@@ -31,6 +31,8 @@ interface Contexto {
   usuario: UsuarioRH | null;
   cargando: boolean;
   modoPrueba: boolean;
+  /** 2026-10-02: ambiente de prueba (AMBIENTE_PRUEBA en la API). */
+  ambientePrueba: boolean;
   /** Id de la Cuenta activa en esta sesión. Null mientras carga o si el usuario no tiene Cuentas. */
   cuentaActualId: number | null;
   refrescar: () => Promise<void>;
@@ -43,6 +45,7 @@ const SesionCtx = createContext<Contexto>({
   usuario: null,
   cargando: true,
   modoPrueba: false,
+  ambientePrueba: false,
   cuentaActualId: null,
   refrescar: async () => {},
   salir: async () => {},
@@ -67,6 +70,7 @@ export function ProveedorSesion({ children }: { children: React.ReactNode }) {
   const [usuario, setUsuario] = useState<UsuarioRH | null>(null);
   const [cargando, setCargando] = useState(true);
   const [modoPrueba, setModoPrueba] = useState(false);
+  const [ambientePrueba, setAmbientePrueba] = useState(false);
   const [cuentaActualId, setCuentaActualId] = useState<number | null>(null);
   const router = useRouter();
 
@@ -93,6 +97,8 @@ export function ProveedorSesion({ children }: { children: React.ReactNode }) {
     fetchConfiguracion().then((cfg) => {
       if (cfg) setModoPrueba(cfg.modoPrueba);
     });
+    // 2026-10-02: el ambiente de prueba se lee de /salud (público) — así lo ve CUALQUIER rol, no solo Administrador
+    fetchSalud().then((s) => setAmbientePrueba(Boolean(s?.ambiente_prueba)));
   }, [cuentaActualId, usuario?.id]);
 
   const salir = useCallback(async () => {
@@ -115,7 +121,7 @@ export function ProveedorSesion({ children }: { children: React.ReactNode }) {
   );
 
   return (
-    <SesionCtx.Provider value={{ usuario, cargando, modoPrueba, cuentaActualId, refrescar, salir, cambiarCuenta }}>
+    <SesionCtx.Provider value={{ usuario, cargando, modoPrueba, ambientePrueba, cuentaActualId, refrescar, salir, cambiarCuenta }}>
       {children}
     </SesionCtx.Provider>
   );
@@ -152,6 +158,11 @@ export function usePuedeVerTableroReclutamiento() {
  * si esto es `false`, el servidor nunca lo obedece fuera de Modo Prueba. */
 export function useModoPrueba() {
   return useSesion().modoPrueba;
+}
+
+/** 2026-10-02: ambiente de desarrollo/demo — se muestra «Ambiente de prueba» y «Reiniciar prueba» en cada postulación. */
+export function useAmbientePrueba() {
+  return useSesion().ambientePrueba;
 }
 
 /** Id de la Cuenta activa — util para saber cuál está seleccionada sin acceder al usuario completo. */

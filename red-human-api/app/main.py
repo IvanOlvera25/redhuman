@@ -220,6 +220,7 @@ def salud():
         "whatsapp_proveedor": whatsapp_proveedor(),
         "whatsapp_webhook_firmado": bool(settings.meta_app_secret) if settings.whatsapp_provider == "meta" else (bool(settings.telegram_webhook_secret) if settings.whatsapp_provider == "telegram" else None),
         "canal_mensajeria": "Telegram" if whatsapp_proveedor() == "telegram" else "WhatsApp",
+        "ambiente_prueba": bool(settings.ambiente_prueba),
         "avatar_configurado": avatar_activo(),
         "modelo": settings.openai_model,
         "modo": "producción" if ia_activa() else "demo (sin OPENAI_API_KEY)",

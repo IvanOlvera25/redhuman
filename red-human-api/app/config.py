@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     # {{6}} liga al expediente. Si Meta la rechaza (no aprobada, nombre distinto) sale texto libre.
     meta_plantilla_entrevista: str = "alerta_entrevista_asignada"
 
+    # --- Ambiente de prueba (2026-10-02) ---
+    # true en ambientes de DESARROLLO y DEMO: toda postulación y persona nace como prueba (sin marcar a mano), se ve el
+    # indicador «Ambiente de prueba», «Reiniciar prueba» está en cada postulación y los envíos/procesos se pueden repetir.
+    # NO relaja validaciones (eso es el Modo Prueba de Configuración). En producción: false (y ver
+    # scripts/preparar_produccion.py para arrancar sin datos de prueba).
+    ambiente_prueba: bool = False
+
     # --- Telegram (2026-10-01, demo Fraiche) ---
     # WHATSAPP_PROVIDER=telegram manda TODA la mensajería (agente, avisos, recordatorios) por un bot de
     # Telegram en lugar de WhatsApp. Un bot no puede escribirle a un número: cada persona vincula su chat

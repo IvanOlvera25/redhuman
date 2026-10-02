@@ -462,3 +462,22 @@ Reemplaza en la rama `demo-fraiche` la vista «Ruta Fraiche / Etapas», la colum
 - `prefiltroResumen` excluye datos informativos (BBVA) y trae `detalle` con el estado de CADA criterio (cumple / no_cumple /
   por_validar + motivo). Domicilio vigente ÚNICO (`fraiche.cambiar_domicilio`, `PATCH /candidatos/{c}/domicilio` y el
   formulario de alta SAP) con `datos_personales.historial_domicilio`.
+
+## Ambiente de prueba (desarrollo y demo, 2026-10-02)
+
+- `AMBIENTE_PRUEBA=true` (solo `.env` del servidor; `configuracion.ambiente_prueba()`, viaja en `/salud` → `useAmbientePrueba`
+  y la banda «Ambiente de prueba» del dashboard): toda persona y postulación nace con `es_prueba` (`crear_postulacion`,
+  `_crear_candidato`) sin marcarla a mano. NO es el Modo Prueba TOTAL de Configuración: no relaja reglas del proceso ni
+  permite duplicados.
+- «Reiniciar prueba» en CADA postulación (`POST /candidatos/{c}/reiniciar`): cierra SOLO esa (`reinicio_prueba`, todo queda
+  como historial), crea una limpia para la misma persona y vacante, FIJA la conversación en la nueva (excepción documentada
+  a B1) y avisa al candidato para empezar desde el primer paso. Identidad y `VinculoTelegram` intactos.
+- Webhook: la conversación vigente se busca entre TODAS las filas del teléfono, pero la de otra fila solo gana si es más
+  reciente que lo activo de la fila vigente (Causa B). Así nunca responde por la cita de una prueba anterior ni mezcla procesos.
+- Repetibles en el ambiente: volver a postularse re-manda el aviso de inicio, reasignar un curso re-avisa, una evaluación
+  revisada admite otro resultado (el previo queda en historial) y el recordatorio de entrevista humana sale aunque ya se haya
+  realizado. Los jobs automáticos conservan sus candados (sin ciclos ni duplicados involuntarios).
+- Métricas (`metricas._sin_pruebas`): dentro del ambiente se cuentan las pruebas; fuera, los reportes productivos las
+  excluyen. Producción: `AMBIENTE_PRUEBA=false` + `scripts/preparar_produccion.py --ejecutar` (apaga Modo Prueba, cierra
+  postulaciones de prueba y da de baja lógica a personas solo de prueba; nada se borra). Regresión:
+  `scripts/verificar_ambiente_prueba.py`.

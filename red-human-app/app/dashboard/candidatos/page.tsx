@@ -149,7 +149,7 @@ import {
   urlFichaPresentacion,
   generarFichaPresentacion,
 } from "@/lib/api";
-import { usePuedeDecidir, useModoPrueba } from "@/components/sesion";
+import { usePuedeDecidir, useModoPrueba, useAmbientePrueba } from "@/components/sesion";
 import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveedor";
 import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import { LineaNotificar, useNotificarAccion } from "@/components/dashboard/linea-notificar";
@@ -1437,6 +1437,7 @@ function ModalCandidato({
 }) {
   const puedeDecidir = usePuedeDecidir();
   const modoPrueba = useModoPrueba();
+  const ambientePrueba = useAmbientePrueba();
   // CRUD (2026-09-15): eliminar candidato (baja lógica de la persona) con confirmación
   const [confirmarEliminar, setConfirmarEliminar] = useState(false);
   const [eliminando, setEliminando] = useState(false);
@@ -1528,12 +1529,12 @@ function ModalCandidato({
    * vacante, conservando teléfono y wa_id para volver a probar el flujo desde cero. */
   async function reiniciarPrueba() {
     if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar la acción en la bitácora." });
-    if (!window.confirm(`¿Reiniciar postulación de prueba para ${c.nombre}? Se cerrará la postulación actual y se creará una limpia para volver a probar desde cero.`)) {
+    if (!window.confirm(`¿Reiniciar la prueba de ${c.nombre} en «${c.puesto || "esta vacante"}»? Se reinician respuestas, resultados, etapa, citas y conversación SOLO de esta postulación (la anterior queda como historial). La persona y su vínculo con ${CANAL} se conservan.`)) {
       return;
     }
     setOcupado("reiniciar-prueba");
     const r = await reiniciarPostulacionPrueba(c.id);
-    const data = resolver(r, "Postulación reiniciada — la anterior quedó cerrada como historial; esta es la nueva.");
+    const data = resolver(r, `Prueba reiniciada: el candidato vuelve a empezar desde el primer paso por ${CANAL}.`);
     if (data) onCambio(data);
   }
 
@@ -1940,7 +1941,7 @@ function ModalCandidato({
 
         {/* MODO PRUEBA (Punto 8): independiente de la etapa — reinicia la postulación sin borrar teléfono.
             Solo visible con Modo Prueba activo o sobre una postulación de prueba (el backend lo exige). */}
-        {puedeDecidir && (modoPrueba || c.esPrueba) && (
+        {puedeDecidir && (modoPrueba || ambientePrueba || c.esPrueba) && (
           <div className="border-t border-border-soft bg-surface px-6 py-2">
             <div className="flex justify-end">
               <Button

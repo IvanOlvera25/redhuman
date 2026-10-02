@@ -31,7 +31,7 @@ import {
 import { Logo, Avatar, Button } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
-import { usePuedeVerTableroReclutamiento, useSesion } from "@/components/sesion";
+import { useAmbientePrueba, usePuedeVerTableroReclutamiento, useSesion } from "@/components/sesion";
 import { fetchActividadAgente } from "@/lib/api";
 import { usePolling } from "@/lib/use-polling";
 import { BarraAgente } from "@/components/dashboard/agente/barra";
@@ -383,7 +383,10 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
         </div>
       </header>
 
-      <main className="pt-16 lg:pl-64">{children}</main>
+      <main className="pt-16 lg:pl-64">
+        <BandaAmbientePrueba />
+        {children}
+      </main>
 
       <PanelAgente />
     </div>
@@ -438,6 +441,17 @@ function UsuarioBarra() {
       >
         <LogOut className="h-4 w-4" />
       </button>
+    </div>
+  );
+}
+
+/** 2026-10-02: indicador visible del ambiente de prueba (AMBIENTE_PRUEBA en la API). */
+function BandaAmbientePrueba() {
+  const ambiente = useAmbientePrueba();
+  if (!ambiente) return null;
+  return (
+    <div role="status" className="sticky top-16 z-20 flex items-center justify-center gap-2 border-b border-warn/40 bg-warn-soft px-4 py-1.5 text-center text-xs font-semibold text-warn">
+      <span className="h-2 w-2 rounded-full bg-warn" /> Ambiente de prueba · todas las postulaciones son de prueba y se pueden repetir o reiniciar · no cuentan en reportes productivos
     </div>
   );
 }

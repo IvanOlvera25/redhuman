@@ -437,6 +437,11 @@ async def asignar(codigo: str, datos: AsignarIn, db: Session = Depends(get_db), 
         raise HTTPException(404, "Ninguna de las personas indicadas existe.")
 
     envios = []
+    from ..services.configuracion import ambiente_prueba
+
+    if ambiente_prueba():  # 2026-10-02: en el ambiente de prueba un reenvío solicitado siempre sale
+        creadas = creadas + reutilizadas
+        reutilizadas = []
     for a in creadas:
         envio = await notificar_seguro(a) if datos.notificar and (a.telefono_persona or a.correo_persona) else {}
         envios.append({"asignacion": a.codigo, "tipo": a.tipo, "persona": a.nombre_persona, "liga": liga_asignacion(a), **envio})

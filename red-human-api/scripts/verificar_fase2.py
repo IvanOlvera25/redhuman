@@ -218,8 +218,8 @@ with TestClient(app) as client:
     check(r.status_code == 200 and r.json()["nueva"] != P3 and r.json()["anterior"] == P3, "reiniciar cierra la actual y crea una limpia")
     P4 = r.json()["nueva"]
     db.expire_all()
-    check(persona.telefono == TEL and persona.postulacion_conversacion_id != db.query(Postulacion).filter_by(codigo=P4).one().id,
-          "reiniciar no toca el teléfono ni fija el puntero (B1)")
+    check(persona.telefono == TEL and persona.postulacion_conversacion_id == db.query(Postulacion).filter_by(codigo=P4).one().id,
+          "reiniciar no toca el teléfono y SÍ fija la conversación en la nueva (excepción de prueba a B1, 2026-10-02)")
     r = client.post("/webhooks/whatsapp", json=meta_texto(WA, "Hola de nuevo"))
     check(r.json().get("postulacion") == P4, f"el siguiente mensaje del candidato se enruta a {P4} (única que espera respuesta) y la fija")
     cfg.modo_prueba = False

@@ -100,6 +100,12 @@ def _postulacion_principal(c: Candidato) -> Optional[Postulacion]:
     return c.postulaciones[-1] if c.postulaciones else None
 
 
+def _ambiente_prueba() -> bool:
+    from ..services.configuracion import ambiente_prueba
+
+    return ambiente_prueba()
+
+
 def crear_postulacion(
     db: Session,
     c: Candidato,
@@ -120,7 +126,7 @@ def crear_postulacion(
         cuenta_id=cuenta_id,
         origen=origen,
         etapa=etapa,
-        es_prueba=es_prueba or c.es_prueba,
+        es_prueba=es_prueba or c.es_prueba or _ambiente_prueba(),  # 2026-10-02: en el ambiente de prueba TODO es prueba
         consentimiento=consentimiento,
         consentimiento_fecha=datetime.now(timezone.utc) if consentimiento else None,
     )
@@ -244,7 +250,7 @@ def _duplicado(db: Session, telefono: str, correo: str, cuenta_id: int, excluir:
 
 
 def _crear_candidato(db: Session, cuenta_id: int, nombre: str, fuente: str, es_prueba: bool, **campos) -> Candidato:
-    c = Candidato(codigo="TMP", cuenta_id=cuenta_id, nombre=nombre, fuente=fuente, es_prueba=es_prueba, **campos)
+    c = Candidato(codigo="TMP", cuenta_id=cuenta_id, nombre=nombre, fuente=fuente, es_prueba=es_prueba or _ambiente_prueba(), **campos)
     db.add(c)
     db.flush()
     c.codigo = f"C-{8800 + c.id}"
@@ -867,7 +873,7 @@ async def postular(
     # para no volver a "romper el hielo" en una que ya está en curso. Se manda DESPUÉS del commit:
     # si el candidato responde muy rápido, el webhook corre en otra transacción que ya ve este
     # registro y la conversación queda fijada en esta postulación.
-    if nueva_postulacion:
+    if nueva_postulacion or _ambiente_prueba():  # 2026-10-02: en prueba, volver a postularse vuelve a avisar
         await _disparar_plantilla_inicio(db, p)
         db.commit()
 
@@ -1021,7 +1027,7 @@ async def asignar(
 
 
 @router.post("/{codigo}/reiniciar")
-def reiniciar_postulacion(
+async def reiniciar_postulacion(
     codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
 ):
     """SOLO PRUEBAS (Punto 8) — «Reiniciar prueba»: cierra esta postulación
@@ -1031,18 +1037,33 @@ def reiniciar_postulacion(
     webhook lo asocie a la postulación anterior. Reemplaza al viejo «Liberar número»."""
     p = _por_codigo(db, codigo, cuenta.id)
     c = p.candidato
-    if not (modo_prueba_activo(db) or c.es_prueba or p.es_prueba):
-        raise HTTPException(409, "Reiniciar una postulación es una acción de Modo Prueba: actívalo en Configuración.")
+    if not (_ambiente_prueba() or modo_prueba_activo(db) or c.es_prueba or p.es_prueba):
+        raise HTTPException(409, "Reiniciar una postulación es una acción de prueba: solo en el ambiente de prueba o con Modo Prueba activo.")
+    if p.expediente is not None and p.expediente.estado == "alta" and not _ambiente_prueba():
+        raise HTTPException(409, "Esta postulación ya terminó en alta de colaborador.")
+    # 2026-10-02 (ambiente de prueba): se reinicia SOLO esta postulación — respuestas, resultados, etapa, citas y estado
+    # de conversación quedan en la cerrada (historial); la nueva arranca limpia. La persona y su vínculo con Telegram no
+    # se tocan. EXCEPCIÓN DOCUMENTADA a B1: el reinicio es una acción de prueba, así que la conversación se fija aquí en
+    # la nueva — el bot nunca vuelve a la anterior (ni a «Ya tienes tu videollamada agendada»).
     p.cerrar("reinicio_prueba")
-    nueva = crear_postulacion(db, c, p.vacante, cuenta.id, "reinicio_prueba", es_prueba=True)
-    # No se fija la conversación aquí (B1: solo la mueve el candidato): al cerrarse la anterior,
-    # el webhook enruta el siguiente mensaje a la nueva por ser la única que espera respuesta.
+    nueva = crear_postulacion(db, c, p.vacante, p.cuenta_id or cuenta.id, "reinicio_prueba", es_prueba=True)
+    c.postulacion_conversacion_id = nueva.id
     registrar(
         db, u.nombre, "postulacion_reiniciada", "postulacion", nueva.codigo,
         {"candidato": c.codigo, "anterior": p.codigo, "correo_rh": u.correo},
     )
     db.commit()
-    return {"ok": True, "candidato": c.codigo, "anterior": p.codigo, "nueva": nueva.codigo, **postulacion_dict(nueva, detalle=True)}
+    envio = {}
+    if p.vacante is not None and (c.telefono or "").strip():
+        texto = (f"🔄 Reiniciamos tu proceso de prueba para *{p.vacante.titulo}*. Empezamos desde el primer paso: "
+                 "respóndeme «Hola» cuando quieras comenzar.")
+        try:
+            envio = await enviar_mensaje(c.telefono, texto)
+        except Exception as ex:  # noqa: BLE001 — un envío fallido nunca bloquea el reinicio
+            envio = {"enviado": False, "detalle": str(ex)[:200]}
+        guardar_mensaje(db, nueva, "assistant", texto, "whatsapp", envio)
+        db.commit()
+    return {"ok": True, "candidato": c.codigo, "anterior": p.codigo, "nueva": nueva.codigo, "aviso": envio, **postulacion_dict(nueva, detalle=True)}
 
 
 # ------------------------------------------------------------
@@ -2743,7 +2764,7 @@ async def recordatorio_entrevista_humana(
     if p.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
         raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
     eh = _ultima_entrevista_humana(p)
-    if eh.realizada and not puede_forzar_prueba(db, forzar_prueba):
+    if eh.realizada and not puede_forzar_prueba(db, forzar_prueba) and not _ambiente_prueba():
         raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
 
     override = override_de(notificar)

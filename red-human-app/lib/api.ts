@@ -210,6 +210,8 @@ export function actualizarUsuario(
 
 export interface ConfiguracionSistema {
   modoPrueba: boolean;
+  /** 2026-10-02: ambiente de desarrollo/demo — todo es prueba y se puede repetir/reiniciar. */
+  ambientePrueba?: boolean;
   /** Punto 13: minutos sin actividad para que una conversación de prueba arranque una sesión nueva. */
   modoPruebaVentanaMin: number;
   /** 2026-09-19: horas antes de la Entrevista Humana para el recordatorio automático (0 = apagado). */
@@ -2406,6 +2408,7 @@ export function fetchSalud() {
     whatsapp_configurado: boolean;
     avatar_configurado: boolean;
     modo: string;
+    ambiente_prueba?: boolean;
   }>("/salud");
 }
 

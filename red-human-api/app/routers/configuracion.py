@@ -27,6 +27,7 @@ def _salida(db: Session, cuenta_id: int) -> dict:
     postulaciones_prueba = db.query(Postulacion).filter(Postulacion.es_prueba.is_(True), Postulacion.cuenta_id == cuenta_id).count()
     return {
         "modoPrueba": cfg.modo_prueba,
+        "ambientePrueba": cfg_service.ambiente_prueba(),  # 2026-10-02: ambiente de desarrollo/demo (AMBIENTE_PRUEBA)
         "modoPruebaVentanaMin": cfg.modo_prueba_ventana_min,
         # Fase 3: recordatorios automáticos de documentos
         "recordatorioDocumentosDias": cfg.recordatorio_documentos_dias,

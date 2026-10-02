@@ -103,7 +103,9 @@ async def registrar_resultado_externo(
 
     ev = _por_token(db, token)
     p = _post(db, ev)
-    if ev.estado in ("revisada", "fallida"):
+    from ..services.configuracion import ambiente_prueba
+
+    if ev.estado == "fallida" or (ev.estado == "revisada" and not ambiente_prueba()):  # prueba: se puede volver a capturar
         raise HTTPException(409, "Esta evaluación ya está cerrada; contacta al equipo de RH.")
     falta = sev.falta_consentimiento(ev, p)
     if falta:

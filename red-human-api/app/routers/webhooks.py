@@ -288,12 +288,32 @@ async def _resolver_postulacion(
     `personas` (número compartido, 2026-09-17): TODAS las filas de esta persona en el alcance; sus
     postulaciones activas cuentan igual aunque vivan en otra Cuenta. `c` es la fila ancla (donde
     nacería una postulación nueva sin vacante)."""
-    personas = personas or [c]
+    personas = list(personas or [c])
+    # 2026-10-02 (separación de procesos): la conversación vigente se busca entre TODAS las filas de este teléfono en el
+    # alcance — no solo la más reciente por Cuenta — para que un «Reiniciar prueba» (que fija la conversación en la
+    # postulación nueva) siempre gane y el bot nunca caiga en otro proceso de la misma persona.
+    tel = _normalizar_telefono(telefono)
+    filas = personas
+    if tel:
+        filas = personas + [x for x in db.query(Candidato).filter(
+            Candidato.telefono == tel, Candidato.cuenta_id.in_(_ids(cuenta_id)), Candidato.eliminado_en.is_(None)).all() if x not in personas]
     conv = None
-    for per in personas:  # la conversación en curso más reciente entre todas sus filas
+    for per in filas:  # la conversación en curso más reciente entre todas sus filas
         cand = per.postulacion_conversacion
         if cand and cand.activa and (conv is None or cand.id > conv.id):
             conv = cand
+    if conv is not None and conv.candidato is not None and conv.candidato not in personas:
+        # Solo si es MÁS reciente que lo activo de las filas vigentes (p. ej. un «Reiniciar prueba»); una fila vieja nunca le
+        # gana a una postulación nueva de la persona vigente (Causa B, 2026-09-11).
+        recientes = [x.id for per in personas for x in per.postulaciones_activas]
+        if recientes and conv.id < max(recientes):
+            conv = None
+            for per in personas:
+                cand = per.postulacion_conversacion
+                if cand and cand.activa and (conv is None or cand.id > conv.id):
+                    conv = cand
+        else:
+            personas.append(conv.candidato)
 
     # Modo Prueba: la conversación en curso ya está fría → se cierra y se empieza de cero,
     # sin tocar teléfono ni wa_id de la persona. 2026-09-15: la ventana depende de la etapa —

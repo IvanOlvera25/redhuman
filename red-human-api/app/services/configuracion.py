@@ -18,6 +18,19 @@ def modo_prueba_activo(db: Session) -> bool:
     return obtener(db).modo_prueba
 
 
+def ambiente_prueba() -> bool:
+    """2026-10-02: ambiente de desarrollo/demo (variable AMBIENTE_PRUEBA). Todo nace como prueba y los procesos y
+    envíos se pueden repetir; las reglas del proceso siguen igual (no es el Modo Prueba TOTAL)."""
+    from ..config import settings
+
+    return bool(settings.ambiente_prueba)
+
+
+def es_prueba(db: Session) -> bool:
+    """¿Lo que nace ahora es de prueba? — Modo Prueba de Configuración o ambiente de prueba."""
+    return ambiente_prueba() or modo_prueba_activo(db)
+
+
 def permite_duplicados(db: Session) -> bool:
     """2026-09-16 (Modo Prueba flexible): con Modo Prueba activo, el mismo teléfono/WhatsApp o correo
     puede repetirse entre candidatos y registros sin bloquear ni fusionar (cada alta es una persona
