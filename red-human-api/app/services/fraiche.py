@@ -385,20 +385,32 @@ TEMAS_ENTREVISTA_INICIAL: List[str] = [
 # §8 · Entrevista IPV — rúbrica (misma para Red Human y entrevistador humano)
 # ============================================================
 
+# 2026-10-02 (cambios integrados §6): `pregunta` = pregunta inicial EXACTA de cada competencia (misma para Red Human
+# y para el entrevistador humano). Los pesos y los umbrales de Fraiche no cambian.
 COMPETENCIAS_IPV: List[dict] = [
     {"clave": "orientacion_cliente", "nombre": "Orientación al cliente", "peso": 30,
-     "situacion": "Un cliente está molesto o exige demasiado", "evidencia": "Escucha, identifica necesidad, ofrece solución"},
+     "situacion": "Un cliente está molesto o exige demasiado", "evidencia": "Escucha, identifica necesidad, ofrece solución",
+     "pregunta": "Cuéntame una ocasión en que atendiste a un cliente inconforme."},
     {"clave": "motivacion", "nombre": "Motivación y energía", "peso": 15,
-     "situacion": "Hay pocas ventas durante el día", "evidencia": "Iniciativa y constancia"},
+     "situacion": "Hay pocas ventas durante el día", "evidencia": "Iniciativa y constancia",
+     "pregunta": "Cuéntame un día en que había pocas ventas. ¿Qué hiciste tú?"},
     {"clave": "resiliencia", "nombre": "Resiliencia y manejo de estrés", "peso": 10,
-     "situacion": "Existe presión por cumplir la meta", "evidencia": "Respuesta ante presión y rechazo"},
+     "situacion": "Existe presión por cumplir la meta", "evidencia": "Respuesta ante presión y rechazo",
+     "pregunta": "Cuéntame una ocasión en que una venta se complicó y te sentiste presionado."},
     {"clave": "trabajo_equipo", "nombre": "Trabajo en equipo", "peso": 20,
-     "situacion": "Apoyó a un compañero", "evidencia": "Colaboración y manejo de conflictos"},
+     "situacion": "Apoyó a un compañero", "evidencia": "Colaboración y manejo de conflictos",
+     "pregunta": "Cuéntame una ocasión en que colaboraste con un compañero para resolver un problema."},
     {"clave": "etica", "nombre": "Ética y responsabilidad", "peso": 20,
-     "situacion": "Cometió un error en tienda", "evidencia": "Lo reconoce, comunica y corrige"},
+     "situacion": "Cometió un error en tienda", "evidencia": "Lo reconoce, comunica y corrige",
+     "pregunta": "Cuéntame una ocasión en que cometiste un error que afectó a un cliente o al trabajo."},
     {"clave": "adaptabilidad", "nombre": "Adaptabilidad", "peso": 5,
-     "situacion": "Cambia una promoción o se asignan otras tareas", "evidencia": "Apertura y ejecución"},
+     "situacion": "Cambia una promoción o se asignan otras tareas", "evidencia": "Apertura y ejecución",
+     "pregunta": "Cuéntame una ocasión en que cambiaron una promoción o una forma de trabajar."},
 ]
+
+# Repreguntas permitidas (solo lo que falte: contexto, acción personal, razón, resultado o aprendizaje).
+REPREGUNTAS_IPV = ["¿Qué hiciste exactamente?", "¿Qué pasó después?", "¿Por qué decidiste hacerlo así?", "¿Qué harías diferente?"]
+MAX_REPREGUNTAS_IPV = 3
 
 # Observaciones SIN peso ni porcentaje (spec §8).
 OBSERVACIONES_IPV: List[dict] = [
@@ -408,7 +420,7 @@ OBSERVACIONES_IPV: List[dict] = [
 ]
 
 NIVELES_IPV = ["alto", "medio", "bajo", "sin_evidencia"]
-NOMBRE_NIVEL_IPV = {"alto": "Alto", "medio": "Medio", "bajo": "Bajo", "sin_evidencia": "Sin evidencia"}
+NOMBRE_NIVEL_IPV = {"alto": "Alto", "medio": "Medio", "bajo": "Bajo", "sin_evidencia": "Por validar — evidencia insuficiente"}
 # Equivalencia por default (ajustable en ConfiguracionSistema.ipv_equivalencias).
 EQUIVALENCIAS_IPV_DEFAULT = {"alto": 100, "medio": 70, "bajo": 30}
 
@@ -511,9 +523,25 @@ def calcular_ipv(niveles: Dict[str, str], equivalencias: Optional[Dict[str, int]
         total += puntos
         detalle.append({"clave": c["clave"], "nombre": c["nombre"], "peso": c["peso"], "nivel": nivel, "puntos": puntos})
     if sin_evidencia:
-        return {"puntaje": None, "conclusion": "", "requiere_revision": True, "sin_evidencia": sin_evidencia, "detalle": detalle, "equivalencias": eq}
+        # 2026-10-02 (§6): resultado PROVISIONAL con el peso pendiente a la vista — sin redistribuirlo ni inventar
+        # un «Medio» por falta de información; la conclusión espera a que se valide lo que falta.
+        pendiente = sum(d["peso"] for d in detalle if d["puntos"] is None)
+        return {"puntaje": None, "conclusion": "", "requiere_revision": True, "sin_evidencia": sin_evidencia, "detalle": detalle, "equivalencias": eq,
+                "puntaje_provisional": round(total, 1), "peso_evaluado": 100 - pendiente, "peso_pendiente": pendiente}
     puntaje = round(total, 1)
-    return {"puntaje": puntaje, "conclusion": conclusion_ipv(puntaje), "requiere_revision": False, "sin_evidencia": [], "detalle": detalle, "equivalencias": eq}
+    return {"puntaje": puntaje, "conclusion": conclusion_ipv(puntaje), "requiere_revision": False, "sin_evidencia": [], "detalle": detalle, "equivalencias": eq,
+            "puntaje_provisional": puntaje, "peso_evaluado": 100, "peso_pendiente": 0}
+
+
+def texto_resultado_ipv(calc: Optional[dict]) -> str:
+    """«Recomendable · 82.5 pts» o «Provisional: 61 pts con 30 % por validar»."""
+    if not calc:
+        return ""
+    if calc.get("conclusion"):
+        return f"{CONCLUSIONES_IPV.get(calc['conclusion'], calc['conclusion'])} · {calc.get('puntaje')} pts"
+    if calc.get("peso_pendiente"):
+        return f"Provisional: {calc.get('puntaje_provisional', 0)} pts · {calc['peso_pendiente']} % por validar"
+    return "Por validar — evidencia insuficiente"
 
 
 # ============================================================

@@ -132,7 +132,7 @@ export default function EvaluacionEntrevistaHumana() {
         {fase === "formulario" && info && (
           <>
             <div className="text-center">
-              <Badge tone="brand" dot>{info.expediente?.vacante.empresa || "Red Human"} · {esIpv ? "Entrevista IPV" : "Entrevista humana"}</Badge>
+              <Badge tone="brand" dot>{info.expediente?.vacante.empresa || "Red Human"} · {info.tipoEntrevista || (esIpv ? "Entrevista IPV" : "Entrevista humana")}</Badge>
               <h1 className="font-display mt-3 text-2xl font-bold sm:text-3xl">Expediente de {info.candidato}</h1>
               <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">
                 {info.puesto && `Vacante: ${info.puesto}. `}
@@ -203,6 +203,25 @@ export default function EvaluacionEntrevistaHumana() {
                     <p className="text-sm text-ink-3">Sin Entrevista Red Human evaluada.</p>
                   )}
                 </Seccion>
+
+                {(exp.ipvRedHuman || (exp.puntosPorValidar?.length ?? 0) > 0) && (
+                  <Seccion icono={Bot} titulo="IPV Red Human y puntos por validar" abierto>
+                    {exp.ipvRedHuman && (
+                      <p className="text-sm text-ink-2">
+                        IPV Red Human:{" "}
+                        <b className="text-ink">
+                          {exp.ipvRedHuman.puntaje != null
+                            ? `${exp.ipvRedHuman.puntaje}/100 · ${exp.ipvRedHuman.conclusion}`
+                            : exp.ipvRedHuman.pesoPendiente
+                              ? `provisional ${exp.ipvRedHuman.puntajeProvisional} pts · ${exp.ipvRedHuman.pesoPendiente} % por validar`
+                              : exp.ipvRedHuman.conclusion}
+                        </b>
+                      </p>
+                    )}
+                    <Lista titulo="Reservas" items={exp.ipvRedHuman?.reservas ?? []} tono="warn" />
+                    <Lista titulo="Valida en tu entrevista" items={exp.puntosPorValidar ?? []} tono="warn" />
+                  </Seccion>
+                )}
 
                 {(exp.capacitacion.length > 0 || exp.documentos.length > 0) && (
                   <Seccion icono={GraduationCap} titulo="Capacitación y documentos">

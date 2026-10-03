@@ -56,7 +56,7 @@ async def _fake_wa(telefono, texto):
     return {"enviado": True, "proveedor": "meta", "detalle": 200}
 
 
-async def _fake_correo(destino, asunto, html):
+async def _fake_correo(destino, asunto, html, adjuntos=None):
     ENVIOS.append(("correo", destino))
     return {"enviado": True, "proveedor": "resend", "detalle": "ok"}
 

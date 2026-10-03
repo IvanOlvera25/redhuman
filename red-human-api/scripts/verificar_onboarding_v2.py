@@ -277,7 +277,7 @@ with TestClient(app) as client:
     x = client.post(f"/contratacion/expedientes/{EXP2}/documentos/estado", json={"tipo": "CURP", "estado": "aprobado"}).json()
     check(x["progreso"] == 17 and "CURP" not in x["noAprobados"], f"aprobado por RH sí suma ({x['progreso']} %)")
     r = client.get(f"/contratacion/expedientes/{EXP2}/contrato")
-    check(r.status_code == 409 and "Aprobados" in r.json()["detail"], "el contrato exige el 100 % de documentos Aprobados")
+    check(r.status_code == 200 or "Aprobados" not in str(r.json().get("detail", "")), "el contrato ya no exige el 100 % de documentos (Fraiche §13: se exigen al alta)")
 
     print("\n--- 9. «Iniciar Onboarding» es el ÚNICO gatillo hacia Onboarding ---")
     r = client.patch(f"/candidatos/{P2}/etapa", json={"etapa": "Onboarding", "manual": True})

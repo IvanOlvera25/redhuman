@@ -232,6 +232,8 @@ def pruebas_evaluatest(db, cuenta: Cuenta, reclutador: Usuario) -> dict:
         pr.descripcion = "Índice Evaluatest de Afinidad + Etegrity / Índice General de Integridad. Hasta tener la conexión técnica: liga del proveedor y carga de reporte anonimizado."
         pr.puestos = [puesto]
         pr.modo, pr.proveedor, pr.url, pr.activa = "enlace", fraiche.PROVEEDOR_EVALUATEST, "https://evaluatest.example.invalid/bateria/" + slugificar(puesto), True
+        # 2026-10-02 (cambios integrados §7): qué incluye cada batería (se muestra al asignar para evitar duplicidades)
+        pr.incluye = ["Índice Evaluatest de Afinidad", "Etegrity (Índice General de Integridad)"]
         salida[puesto] = pr
     db.flush()
     return salida

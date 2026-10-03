@@ -86,7 +86,7 @@ class CrearFirmaIn(BaseModel):
 def crear_firma(exp_id: int, datos: CrearFirmaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
     from ..services.configuracion import modo_prueba_activo
     from ..services.pdf import pdf_carta_intencion, pdf_contrato
-    from .contratacion import _datos_carta_intencion, _documentos_listos, _expediente
+    from .contratacion import _datos_carta_intencion, _expediente
 
     if datos.documento not in DOCUMENTOS_FIRMA:
         raise HTTPException(400, "Documento inválido: usa carta o contrato.")
@@ -108,8 +108,14 @@ def crear_firma(exp_id: int, datos: CrearFirmaIn, db: Session = Depends(get_db),
     prueba = modo_prueba_activo(db)
     if not (e.puesto and e.sueldo and e.tipo_contratacion and e.fecha_ingreso) and not prueba:
         raise HTTPException(409, "Captura y guarda las condiciones de contratación antes de mandar a firmar.")
-    if datos.documento == "contrato" and not _documentos_listos(e) and not prueba:
-        raise HTTPException(409, f"El contrato se firma cuando el expediente tiene el 100 % de documentos Aprobados (hoy {e.progreso} %).")
+    if datos.documento == "contrato" and not prueba:
+        # 2026-10-02 (Fraiche §13): el contrato se puede generar y enviar en Contratación u Onboarding con las condiciones
+        # guardadas; los documentos pendientes no lo bloquean (se exigen al completar el ingreso y al alta).
+        from .contratacion import faltantes_contrato
+
+        falta = faltantes_contrato(e)
+        if falta:
+            raise HTTPException(409, "Para mandar a firmar el contrato falta: " + ", ".join(falta) + ".")
     p = e.postulacion
     correo_cand = (p.correo if p else "") or (e.candidato.correo if e.candidato else "")
     if not correo_cand:

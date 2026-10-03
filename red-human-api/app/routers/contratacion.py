@@ -971,18 +971,34 @@ def _documentos_listos(e: Expediente) -> bool:
     return e.progreso == 100
 
 
+def faltantes_contrato(e: Expediente) -> list:
+    """2026-10-02 (Fraiche §13): qué falta EXACTAMENTE para generar el contrato. Son los DATOS guardados en
+    Condiciones de contratación (los mismos en Contratación y en Onboarding); los documentos pendientes NO lo
+    bloquean — se exigen al completar el ingreso y al preparar el alta."""
+    from ..models import TIPO_CONTRATACION_DETERMINADO
+
+    falta = []
+    for campo, nombre in (("puesto", "puesto"), ("sueldo", "sueldo"), ("tipo_contratacion", "tipo de contratación"), ("fecha_ingreso", "fecha de ingreso")):
+        if not getattr(e, campo, None):
+            falta.append(nombre)
+    if e.tipo_contratacion == TIPO_CONTRATACION_DETERMINADO and not (getattr(e, "duracion_contrato", None) and getattr(e, "duracion_unidad", None)):
+        falta.append("duración del contrato (tiempo determinado)")
+    if not e.condiciones_guardadas_en:
+        falta.append("guardar las condiciones de contratación")
+    return falta
+
+
 @router.get("/expedientes/{exp_id}/contrato")
 def contrato(
     exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
 ):
-    """Contrato individual de trabajo (PDF) con las condiciones FINALES guardadas (2026-09-19). Solo cuando
-    los documentos requeridos ya están (expediente al 100 %), salvo Modo Prueba."""
+    """Contrato individual de trabajo (PDF) con las condiciones FINALES guardadas. 2026-10-02 (Fraiche §13): se
+    genera en Contratación Y en Onboarding con esas mismas condiciones; si falta un dato dice EXACTAMENTE cuál."""
     e = _expediente(db, exp_id, cuenta.id)
-    if not _documentos_listos(e) and not modo_prueba_activo(db):
-        raise HTTPException(409, f"El contrato se genera cuando el expediente está al 100 % de documentos Aprobados (hoy {e.progreso} %). Faltan: {', '.join(e.no_aprobados)}.")
     d = _datos_carta_intencion(e)
-    if not (e.puesto and e.sueldo and e.tipo_contratacion and e.fecha_ingreso) and not modo_prueba_activo(db):
-        raise HTTPException(409, "Captura y guarda las condiciones de contratación (puesto, sueldo, tipo y fecha de ingreso) antes de generar el contrato.")
+    falta = faltantes_contrato(e)
+    if falta and not modo_prueba_activo(db):
+        raise HTTPException(409, "Para generar el contrato falta: " + ", ".join(falta) + ". Complétalo en «Condiciones de contratación».")
     d["borrador"] = True  # Onboarding v2: lo generado es BORRADOR; el firmado se carga en la tarea «Contrato firmado»
     try:
         pdf = pdf_contrato(d)
@@ -1042,6 +1058,52 @@ async def enviar_carta_intencion(
     else:
         raise HTTPException(400, "canal debe ser whatsapp o correo")
     registrar(db, u.nombre, "carta_intencion_enviada", "expediente", str(e.id), {"canal": datos.canal, "enviado": bool(envio.get("enviado")), "detalle": str(envio.get("detalle", ""))[:200], "correo_rh": u.correo})
+    db.commit()
+    return {"canal": datos.canal, **envio, "detalle": str(envio.get("detalle", ""))}
+
+
+@router.post("/expedientes/{exp_id}/contrato/enviar")
+async def enviar_contrato(
+    exp_id: int, datos: EnviarCartaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)
+):
+    """2026-10-02 (Fraiche §13): envía el contrato (borrador para revisión) al candidato — por mensaje la liga de su
+    expediente, donde lo descarga; por correo el PDF adjunto. No duplica nada: se genera de las condiciones guardadas."""
+    e = _expediente(db, exp_id, cuenta.id)
+    p, c = e.postulacion, e.candidato
+    if not c:
+        raise HTTPException(404, "Expediente sin candidato.")
+    falta = faltantes_contrato(e)
+    if falta and not modo_prueba_activo(db):
+        raise HTTPException(409, "Para enviar el contrato falta: " + ", ".join(falta) + ".")
+    if not e.token:
+        e.token = secrets.token_urlsafe(24)
+    liga = f"{settings.app_url}/expediente/{e.token}"
+    d = _datos_carta_intencion(e)
+    if datos.canal == "whatsapp":
+        if not c.telefono:
+            raise HTTPException(400, f"El candidato no tiene {_canal.nombre()} registrado.")
+        texto = (f"Hola {c.nombre.split(' ')[0]}, {d['empresa']} te comparte tu contrato para el puesto de {d['puesto']} para que lo revises. "
+                 f"Lo puedes descargar desde tu expediente: {liga}")
+        envio = await enviar_mensaje(c.telefono, texto)
+        if p:
+            from .candidatos import guardar_mensaje
+
+            guardar_mensaje(db, p, "assistant", texto, "whatsapp", envio)
+    elif datos.canal == "correo":
+        if not c.correo:
+            raise HTTPException(400, "El candidato no tiene correo registrado.")
+        try:
+            pdf = pdf_contrato({**d, "borrador": True})
+        except Exception as ex:  # noqa: BLE001
+            raise HTTPException(503, f"No se pudo generar el contrato: {ex}")
+        asunto, html = plantillas_correo.html_aviso(
+            f"Tu contrato · {d['puesto']}", f"{d['empresa']} te comparte tu contrato individual de trabajo para que lo revises. Lo encuentras adjunto en PDF y en tu expediente.",
+            d["empresa"], [("Puesto", d["puesto"]), ("Sueldo", d["sueldo"]), ("Tipo de contratación", d["tipo_contratacion"]), ("Fecha de ingreso", d["fecha_ingreso"])],
+            ("Ver mi expediente", liga))
+        envio = await enviar_correo(c.correo, asunto, html, adjuntos=[{"filename": "contrato.pdf", "content": pdf}])
+    else:
+        raise HTTPException(400, "canal debe ser whatsapp o correo")
+    registrar(db, u.nombre, "contrato_enviado", "expediente", str(e.id), {"canal": datos.canal, "enviado": bool(envio.get("enviado")), "detalle": str(envio.get("detalle", ""))[:200], "correo_rh": u.correo})
     db.commit()
     return {"canal": datos.canal, **envio, "detalle": str(envio.get("detalle", ""))}
 

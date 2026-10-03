@@ -18,13 +18,10 @@ import {
   type RecursoPlantillaOnboarding, type TipoRecursoOnboarding,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { CampoPlazo, textoPlazo } from "@/components/dashboard/onboarding/campo-plazo";
 
 const ETIQUETA_RECURSO: Record<TipoRecursoOnboarding, string> = { correo: "Correo", equipo: "Equipo", accesos: "Accesos", otro: "Otro" };
 
-function textoPlazo(dias: number) {
-  if (!dias) return "el día de ingreso";
-  return dias < 0 ? `${-dias} día${dias === -1 ? "" : "s"} antes del ingreso` : `${dias} día${dias === 1 ? "" : "s"} después del ingreso`;
-}
 
 export function SeccionPlantillasOnboarding() {
   const [lista, setLista] = useState<PlantillaOnboarding[] | null>(null);
@@ -239,14 +236,14 @@ function ModalPlantillaOnboarding({ plantilla, opciones, onClose, onGuardada }: 
       </div>
 
       <h3 className="mt-6 text-sm font-semibold">Tareas fijas: responsables y plazos</h3>
-      <p className="mt-0.5 text-[11px] text-ink-3">Días respecto a la fecha de ingreso (negativo = antes). Si la fecha de ingreso cambia, los plazos se recalculan.</p>
+      <p className="mt-0.5 text-[11px] text-ink-3">Antes del ingreso, el día de ingreso o después, en días. Se usan para recordatorios, alertas e indicadores de cumplimiento; si la fecha de ingreso cambia, se recalculan.</p>
       <div className="mt-2 overflow-x-auto">
         <table className="w-full min-w-[520px] text-sm">
           <thead>
             <tr className="text-left text-[11px] text-ink-3">
               <th className="py-1.5 font-medium">Tarea</th>
               <th className="py-1.5 font-medium">Responsable por defecto</th>
-              <th className="w-28 py-1.5 font-medium">Días</th>
+              <th className="w-56 py-1.5 font-medium">Plazo</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border-faint">
@@ -260,12 +257,7 @@ function ModalPlantillaOnboarding({ plantilla, opciones, onClose, onGuardada }: 
                   <input value={responsables[f.clave] ?? ""} onChange={(e) => setResponsables({ ...responsables, [f.clave]: e.target.value })} className={inputRH} placeholder="p. ej. Nómina" />
                 </td>
                 <td className="py-2">
-                  <input
-                    type="number"
-                    value={plazos[f.clave] ?? 0}
-                    onChange={(e) => setPlazos({ ...plazos, [f.clave]: Number(e.target.value) || 0 })}
-                    className={inputRH}
-                  />
+                  <CampoPlazo dias={plazos[f.clave] ?? 0} onChange={(d) => setPlazos({ ...plazos, [f.clave]: d })} compacto />
                 </td>
               </tr>
             ))}
@@ -281,13 +273,13 @@ function ModalPlantillaOnboarding({ plantilla, opciones, onClose, onGuardada }: 
           <p className="text-[11px] text-ink-3">Cada recurso se vuelve una tarea del Onboarding con su responsable y plazo.</p>
           <div className="mt-2 space-y-2">
             {recursos.map((r, i) => (
-              <div key={i} className="grid gap-2 sm:grid-cols-[1fr_120px_1fr_90px_auto]">
+              <div key={i} className="grid gap-2 sm:grid-cols-[1fr_120px_1fr_auto_auto]">
                 <input value={r.nombre} onChange={(e) => setRecursos(recursos.map((x, j) => (j === i ? { ...x, nombre: e.target.value } : x)))} className={inputRH} placeholder="Recurso (p. ej. Laptop)" />
                 <select value={r.tipo} onChange={(e) => setRecursos(recursos.map((x, j) => (j === i ? { ...x, tipo: e.target.value as TipoRecursoOnboarding } : x)))} className={inputRH}>
                   {opciones.tiposRecurso.map((t) => <option key={t} value={t}>{ETIQUETA_RECURSO[t]}</option>)}
                 </select>
                 <input value={r.responsable} onChange={(e) => setRecursos(recursos.map((x, j) => (j === i ? { ...x, responsable: e.target.value } : x)))} className={inputRH} placeholder="Responsable" />
-                <input type="number" value={r.dias} onChange={(e) => setRecursos(recursos.map((x, j) => (j === i ? { ...x, dias: Number(e.target.value) || 0 } : x)))} className={inputRH} aria-label="Días respecto al ingreso" />
+                <CampoPlazo dias={r.dias} onChange={(d) => setRecursos(recursos.map((x, j) => (j === i ? { ...x, dias: d } : x)))} compacto />
                 <button type="button" aria-label="Quitar recurso" onClick={() => setRecursos(recursos.filter((_, j) => j !== i))} className="grid h-11 w-11 place-items-center text-ink-3 hover:text-bad">
                   <X className="h-4 w-4" />
                 </button>

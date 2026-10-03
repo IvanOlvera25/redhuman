@@ -225,7 +225,20 @@ def recalcular_fechas(db: Session, e: Expediente) -> int:
         if nueva != t.fecha_limite:
             t.fecha_limite = nueva
             n += 1
+    aplicar_plazo_documentos(e)
     return n
+
+
+def aplicar_plazo_documentos(e: Expediente) -> None:
+    """2026-10-02 (Fraiche §14): la fecha límite de documentos sale del plazo de la plantilla y la fecha de ingreso
+    (recordatorios, alertas e indicadores de cumplimiento la usan). Sin documentos pendientes no se toca."""
+    if e.plazo_documentos_dias is None or not fecha_base(e):
+        return
+    if any(not d.aprobado for d in e.obligatorios):
+        nueva = fecha_limite(fecha_base(e), e.plazo_documentos_dias)
+        nueva = nueva if nueva is None or nueva.tzinfo else nueva.replace(tzinfo=timezone.utc)
+        if nueva and (nueva > datetime.now(timezone.utc) or e.documentos_hasta is None):
+            e.documentos_hasta = nueva
 
 
 def atrasada(t: TareaOnboarding, ahora: Optional[datetime] = None) -> bool:

@@ -61,7 +61,7 @@ export function SeccionPruebasPsicometricas() {
                     <Badge tone={p.activa ? "good" : "neutral"}>{p.activa ? "Activa" : "Inactiva"}</Badge>
                   </p>
                   <p className="truncate text-[11px] text-ink-3">
-                    {p.modoTexto}{p.proveedor ? ` · ${p.proveedor}` : ""}{p.idProveedor ? ` (${p.idProveedor})` : ""}
+                    {p.modoTexto}{p.proveedor ? ` · ${p.proveedor}` : ""}{p.idProveedor ? ` (${p.idProveedor})` : ""}{(p.incluye?.length ?? 0) > 0 ? ` · Incluye: ${p.incluye!.join(", ")}` : ""}
                     {p.puestos.length ? ` · sugerida para: ${p.puestos.join(", ")}` : ""}
                   </p>
                 </div>
@@ -97,6 +97,9 @@ function ModalPrueba({ prueba, onClose, onGuardada }: { prueba: PruebaPsicometri
   const [idProveedor, setIdProveedor] = useState(prueba?.idProveedor ?? "");
   const [url, setUrl] = useState(prueba?.url ?? "");
   const [activa, setActiva] = useState(prueba?.activa ?? true);
+  // 2026-10-02 (Fraiche §7-8): qué incluye la batería (evita duplicidades) e instrucciones para el candidato
+  const [incluye, setIncluye] = useState((prueba?.incluye ?? []).join(", "));
+  const [instrucciones, setInstrucciones] = useState(prueba?.instrucciones ?? "");
   const [ocupado, setOcupado] = useState(false);
   const [error, setError] = useState("");
 
@@ -105,6 +108,7 @@ function ModalPrueba({ prueba, onClose, onGuardada }: { prueba: PruebaPsicometri
     const datos = {
       clave, nombre, descripcion, puestos: puestos.split(",").map((x) => x.trim()).filter(Boolean),
       modo, proveedor, id_proveedor: idProveedor, url, activa,
+      incluye: incluye.split(",").map((x) => x.trim()).filter(Boolean), instrucciones,
     };
     const r = prueba ? await editarPruebaPsicometrica(prueba.id, datos) : await crearPruebaPsicometrica(datos);
     setOcupado(false);
@@ -133,11 +137,21 @@ function ModalPrueba({ prueba, onClose, onGuardada }: { prueba: PruebaPsicometri
         <CampoRH label={modo === "integrada" ? "Proveedor" : "Proveedor (opcional)"}><input value={proveedor} onChange={(e) => setProveedor(e.target.value)} className={inputRH} /></CampoRH>
         <CampoRH label="Identificador en el proveedor"><input value={idProveedor} onChange={(e) => setIdProveedor(e.target.value)} className={inputRH} /></CampoRH>
         {modo === "enlace" && <CampoRH label="Liga de la prueba"><input value={url} onChange={(e) => setUrl(e.target.value)} className={inputRH} placeholder="https://…" /></CampoRH>}
+        <div className="sm:col-span-2">
+          <CampoRH label="Pruebas que incluye" ayuda="Separadas por coma. Se muestran al asignar para evitar duplicidades.">
+            <input value={incluye} onChange={(e) => setIncluye(e.target.value)} className={inputRH} placeholder="Índice Evaluatest de Afinidad, Etegrity" />
+          </CampoRH>
+        </div>
+        <div className="sm:col-span-2">
+          <CampoRH label="Instrucciones para el candidato" ayuda="Se envían junto con su liga. Vacío = instrucciones generales.">
+            <textarea value={instrucciones} onChange={(e) => setInstrucciones(e.target.value)} rows={2} className="w-full rounded-xl border border-border-soft bg-surface px-3 py-2 text-sm outline-none focus:border-brand" />
+          </CampoRH>
+        </div>
         <label className="flex items-center gap-2 text-sm text-ink-2 sm:col-span-2">
           <input type="checkbox" checked={activa} onChange={(e) => setActiva(e.target.checked)} /> Activa
         </label>
         {modo === "integrada" && (
-          <p className="text-[11px] text-ink-3 sm:col-span-2">Integrada: por ahora los pasos (Asignada → Enviada → Iniciada → Completada → Resultado recibido) se registran a mano; la conexión con el proveedor llega después.</p>
+          <p className="text-[11px] text-ink-3 sm:col-span-2">Conectada con el proveedor: al asignarla se crea la evaluación real en el proveedor, el candidato recibe su acceso y el resultado e informe llegan solos. Sin credenciales del proveedor, los pasos se registran a mano.</p>
         )}
       </div>
       {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}

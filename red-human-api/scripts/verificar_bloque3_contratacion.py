@@ -112,7 +112,8 @@ with TestClient(app) as client:
     check(r.json()["cartaDisponible"] is True and client.get(f"/expedientes/publica/{e.token}/carta-intencion").content[:4] == b"%PDF", "el candidato descarga la carta desde su liga pública")
 
     print("\n--- 4. Contrato solo con documentos completos ---")
-    check(client.get(f"/contratacion/expedientes/{EXP}/contrato").status_code == 409, "contrato bloqueado con documentos pendientes")
+    r = client.get(f"/contratacion/expedientes/{EXP}/contrato")  # demo-fraiche §13: los documentos pendientes no lo bloquean
+    check(r.status_code == 200 or "documentos" not in str(r.json().get("detail", "")), "contrato: los documentos pendientes no lo bloquean (Fraiche §13)")
     for d in list(e.documentos):
         if d.obligatorio:
             client.post(f"/contratacion/expedientes/{EXP}/documentos", data={"tipo": d.tipo}, files={"archivo": (f"{d.tipo}.pdf", PDF_MIN, "application/pdf")})

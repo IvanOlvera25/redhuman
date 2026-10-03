@@ -57,6 +57,7 @@ import { Aviso, Dropzone, pesoLegible } from "@/components/dashboard/subida";
 import {
   type CalculoIPV,
   type Candidato,
+  type EnvioAviso,
   type EntrevistaHumana,
   type EtapaCandidato,
   type NivelIPV,
@@ -81,6 +82,13 @@ import {
   urlPreviewCorreo,
   urlContratoPdf,
   enviarCartaIntencion,
+  enviarContrato,
+  reenviarIpvRedHuman,
+  lineasEnvios,
+  type EvaluacionCandidato,
+  reenviarAvisoEntrevistaHumana,
+  reabrirEntrevista,
+  agendarEntrevista,
   urlCartaIntencionPdf,
   fetchClientes,
   fetchEntrevistadores,
@@ -154,6 +162,7 @@ import { useAnunciarContextoAgente } from "@/components/dashboard/agente/proveed
 import { ConfirmacionAccion } from "@/components/dashboard/confirmacion-accion";
 import { LineaNotificar, useNotificarAccion } from "@/components/dashboard/linea-notificar";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
+import { EstadoEnvios } from "@/components/dashboard/estado-envios";
 import { ModalIniciarOnboarding } from "@/components/dashboard/onboarding/iniciar-onboarding";
 import { PanelTareasOnboarding } from "@/components/dashboard/onboarding/tareas-onboarding";
 import { ModalAgregarEvaluacion, PanelEvaluaciones } from "@/components/dashboard/evaluaciones/panel-evaluaciones";
@@ -1408,7 +1417,7 @@ type TabCandidato = "resumen" | "evaluaciones" | "documentos" | "whatsapp" | "co
 /** `reintentar` (Lote 4): presente solo en avisos de error de acciones que pueden toparse con
  * un bloqueo de estado forzable — el botón "Continuar de todos modos" solo se pinta si además
  * Modo Prueba está activo (ver useModoPrueba). */
-type AvisoEstado = { tono: "ok" | "error" | "warn"; texto: string; reintentar?: () => void } | null;
+type AvisoEstado = { tono: "ok" | "error" | "warn"; texto: string; reintentar?: () => void; accion?: { texto: string; onClick: () => void } } | null;
 
 /* ============================================================
    MODAL CENTRADO: Detalle del Candidato (4 pestañas + Contratación condicional)
@@ -1515,14 +1524,26 @@ function ModalCandidato({
     if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
     setOcupado(etapa);
     const r = await moverEtapaCandidato(c.id, etapa, comentario, forzarPrueba);
-    const data = resolver(
-      r, `Enviado a ${nombreEtapa(etapa)}.`,
-      modoPrueba && !forzarPrueba ? () => enviarAEtapa(etapa, true) : undefined,
-    );
-    if (data) {
-      setComentario("");
-      onCambio(data);
+    setOcupado("");
+    if (!r.ok) {
+      // 2026-10-02 (§11): si falta una validación obligatoria se dice cuál y se ofrece ir a resolverla; el botón se conserva
+      setAviso({
+        tono: "error", texto: r.error,
+        reintentar: modoPrueba && !forzarPrueba ? () => enviarAEtapa(etapa, true) : undefined,
+        accion: /falta/i.test(r.error) ? { texto: "Ver qué falta", onClick: () => verAvance() } : undefined,
+      });
+      return;
     }
+    setComentario("");
+    onCambio(r.data);
+    setTab(etapa === "Contratación" || etapa === "Onboarding" ? "contratacion" : "resumen");
+    const sig = r.data.avance?.siguienteAccion?.texto;
+    setAviso({ tono: "ok", texto: `Movido a ${nombreEtapa(etapa)}.${sig ? ` Siguiente: ${sig}.` : ""}` });
+  }
+  /** Lleva al bloque «Avance» del Resumen (qué falta y cómo resolverlo). */
+  function verAvance() {
+    setTab("resumen");
+    setTimeout(() => document.getElementById("ficha-avance")?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
   }
 
   /** MODO PRUEBA (Punto 8): cierra la postulación actual y crea una nueva limpia para la misma
@@ -1575,6 +1596,16 @@ function ModalCandidato({
   const [notaFranquicia, setNotaFranquicia] = useState("");
   const esRutaFranquicia = (c.avance?.destino || "") === "franquicia";
   const esRutaTienda = (c.avance?.destino || "") === "tienda_propia";
+  // 2026-10-02 (§12): Entrevista humana e IPV SIEMPRE visibles en «Agregar evaluación» (aunque ya haya entrevistas o
+  // el candidato esté en etapas posteriores); en franquicia, la presentación al franquiciatario.
+  const antesDeFiltroHumano = c.etapa === "Prefiltro" || c.etapa === "Entrevista IA";
+  const accionesRutaEval = [
+    { etiqueta: "Entrevista humana", descripcion: antesDeFiltroHumano ? "Reclutamiento, encargado o franquiciatario · pasa a Filtro humano" : "Reclutamiento, encargado o franquiciatario · adicional",
+      onClick: () => { setAgregarEval(false); setModalEntrevista(true); } },
+    ...(esRutaFranquicia
+      ? [{ etiqueta: "Presentación al franquiciatario", descripcion: "Entrevista y decisión del franquiciatario", onClick: () => { setAgregarEval(false); setPresentarAbierto(true); } }]
+      : [{ etiqueta: "Entrevista IPV", descripcion: "Red Human (recomendada) o entrevistador humano", onClick: () => { setAgregarEval(false); setEligiendoIpv(true); } }]),
+  ];
   async function registrarFranquicia() {
     if (!confirmarFranquicia) return;
     setOcupado("franquicia");
@@ -1594,7 +1625,7 @@ function ModalCandidato({
         return;
       case "agregar_evaluacion":
         if (acc.evaluacion === "entrevista_humana") return setModalEntrevista(true);
-        if (acc.evaluacion === "ipv") return setEligiendoIpv(true);
+        if (acc.evaluacion === "ipv") return acc.modo === "humano" ? abrirAgendaIpvHumana() : setEligiendoIpv(true);
         if (acc.evaluacion === "presentacion_franquiciatario") return setPresentarAbierto(true);
         setTipoEvalInicial(acc.evaluacion ?? "");
         return setAgregarEval(true);
@@ -1625,6 +1656,64 @@ function ModalCandidato({
   const ACCIONES_SIN_BOTON = new Set(["esperar", "esperar_entrevista", "ninguna", "alta", "invitar_entrevista_red_human", "reabrir_entrevista", "registrar_entrevista", "revisar_prefiltro"]);
   const accionSiguiente = c.avance?.siguienteAccion;
   const botonSiguiente = puedeDecidir && c.activa !== false && accionSiguiente && !ACCIONES_SIN_BOTON.has(accionSiguiente.tipo) ? accionSiguiente : null;
+  // 2026-10-02 (§3/§11): la barra fija ejecuta la siguiente acción desde CUALQUIER pestaña.
+  const [autoIniciarOnboarding, setAutoIniciarOnboarding] = useState(false);
+  const limpiarAutoIniciar = useCallback(() => setAutoIniciarOnboarding(false), []);
+  function verEntrevistasHumanas() {
+    setTimeout(() => document.getElementById("entrevistas-humanas")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  }
+  async function invitarRedHuman() {
+    setOcupado("invitar");
+    const r = await agendarEntrevista(c.id, true);
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    await refrescarFicha(`Entrevista Red Human programada; la liga se envió al candidato por ${CANAL}.`);
+  }
+  async function reabrirRedHuman(codigo?: string) {
+    if (!codigo) return;
+    setOcupado("reabrir");
+    const r = await reabrirEntrevista(codigo, "Reabierta desde la ficha");
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    await refrescarFicha("Entrevista Red Human reabierta con la misma liga.");
+  }
+  type BotonBarra = { texto: string; onClick?: () => void; espera?: boolean; disabled?: boolean; title?: string };
+  const principal: BotonBarra | null = (() => {
+    if (!puedeDecidir || c.activa === false) return null;
+    const a = accionSiguiente;
+    if (!a) return null;
+    switch (a.tipo) {
+      case "alta":
+        if (esFranquicia) return { texto: a.texto, espera: true };
+        return {
+          texto: c.expedienteEstado === "alta" ? "Alta completada ✓" : (c.expedienteProgreso ?? 0) < 100 && modoPrueba ? `Dar de alta (Modo Prueba · ${c.expedienteProgreso ?? 0}%)` : "Dar de alta como colaborador",
+          onClick: () => setConfirmacion("alta"),
+          disabled: c.expedienteEstado === "alta" || ((c.expedienteProgreso ?? 0) < 100 && !modoPrueba),
+          title: (c.expedienteProgreso ?? 0) < 100 && !modoPrueba ? "Completa y valida el expediente al 100% (o activa Modo Prueba) para dar de alta." : undefined,
+        };
+      case "mover":
+        if (a.etapa === "Onboarding" && !esRutaFranquicia) return { texto: "Pasar a Onboarding", onClick: () => { setTab("contratacion"); setAutoIniciarOnboarding(true); } };
+        return { texto: a.texto, onClick: () => a.etapa && void enviarAEtapa(a.etapa as EtapaCandidato) };
+      case "registrar_entrevista":
+        return { texto: a.texto, onClick: verEntrevistasHumanas };
+      case "invitar_entrevista_red_human":
+        return { texto: a.texto, onClick: () => void invitarRedHuman() };
+      case "reabrir_entrevista":
+        return { texto: a.texto, onClick: () => void reabrirRedHuman(a.codigo) };
+      case "revisar_prefiltro":
+        return { texto: a.texto, onClick: () => verEvaluacion("eval-prefiltro") };
+      case "esperar_chat":
+        return { texto: a.texto, espera: true, onClick: () => setTab("whatsapp") };
+      case "esperar_resultado":
+        return { texto: a.texto, espera: true, onClick: () => setTab("evaluaciones") };
+      case "esperar_entrevista":
+      case "esperar":
+      case "ninguna":
+        return { texto: a.texto || "Sin acciones pendientes", espera: true };
+      default:
+        return { texto: a.tipo === "no_cumple" ? "Descartar candidato…" : a.texto, onClick: () => ejecutarSiguiente(a) };
+    }
+  })();
   // 2026-09-22: confirmación de «Avanzar a Entrevista Humana» (omite la Entrevista Red Human)
   const [avanceDirecto, setAvanceDirecto] = useState(false);
   async function confirmarAvanceDirecto() {
@@ -1638,7 +1727,7 @@ function ModalCandidato({
     setAviso({ tono: "ok", texto: "Candidato en Entrevista Humana. La Entrevista Red Human quedó registrada como omitida manualmente." });
   }
   async function moverManual() {
-    if (!moverA?.etapa) return;
+    if (!moverA?.etapa || !moverA.motivo.trim()) return;
     if (!live) return setAviso({ tono: "warn", texto: "Levanta la API para registrar decisiones en la bitácora." });
     setOcupado("mover");
     const r = await moverEtapaCandidato(c.id, moverA.etapa, moverA.motivo, false, true);
@@ -1866,10 +1955,17 @@ function ModalCandidato({
           {aviso && (
             <Aviso tono={aviso.tono} onCerrar={() => setAviso(null)}>
               {aviso.texto}
-              {aviso.reintentar && (
-                <Button size="sm" variant="outline" className="mt-2" onClick={aviso.reintentar}>
-                  <FlaskConical className="h-3.5 w-3.5" /> Continuar de todos modos (modo prueba)
-                </Button>
+              {(aviso.reintentar || aviso.accion) && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {aviso.accion && (
+                    <Button size="sm" variant="outline" onClick={aviso.accion.onClick}>{aviso.accion.texto}</Button>
+                  )}
+                  {aviso.reintentar && (
+                    <Button size="sm" variant="outline" onClick={aviso.reintentar}>
+                      <FlaskConical className="h-3.5 w-3.5" /> Continuar de todos modos (modo prueba)
+                    </Button>
+                  )}
+                </div>
               )}
             </Aviso>
           )}
@@ -1906,7 +2002,22 @@ function ModalCandidato({
             />
           )}
 
-          {c.etapa === "Entrevista Humana" && <PanelEntrevistaHumana c={c} live={live} onCambio={onCambio} onNuevaIpv={abrirAgendaIpvHumana} />}
+          {/* 2026-10-02 (§12): cada entrevista (reclutamiento, IPV humana, encargado, franquiciatario) con su agenda,
+              resultado y avisos propios — visibles en cualquier etapa mientras sigan abiertas */}
+          {(() => {
+            const todas = c.entrevistasHumanas?.length ? c.entrevistasHumanas : c.entrevistaHumana ? [c.entrevistaHumana] : [];
+            const vivas = todas.filter((x) => !x.cancelada && !x.resultado);
+            const ultima = todas[todas.length - 1];
+            const mostrar = vivas.length ? vivas : c.etapa === "Entrevista Humana" && ultima && !ultima.cancelada ? [ultima] : [];
+            if (!mostrar.length) return null;
+            return (
+              <div id="entrevistas-humanas" className="flex flex-col gap-3">
+                {mostrar.map((x, i) => (
+                  <PanelEntrevistaHumana key={x.id ?? `eh-${i}`} c={c} eh={x} live={live} onCambio={onCambio} onNuevaIpv={abrirAgendaIpvHumana} />
+                ))}
+              </div>
+            );
+          })()}
 
           {tab === "resumen" && (
             <PestanaResumen c={c} live={live} onCambio={onCambio} setTab={setTab} boton={botonSiguiente} ocupado={Boolean(ocupado)}
@@ -1919,6 +2030,7 @@ function ModalCandidato({
               onCambio={onCambio}
               versionEval={versionEval}
               onProgramarIpv={(modo) => (modo === "humano" ? abrirAgendaIpvHumana() : setEligiendoIpv(true))}
+              accionesRuta={accionesRutaEval}
             />
           )}
           {tab === "documentos" && <PestanaDocumentos c={c} live={live} onCambio={onCambio} setAviso={setAviso} />}
@@ -1931,10 +2043,9 @@ function ModalCandidato({
               setAviso={setAviso}
               onDocumentos={setConfirmacion}
               onDescartar={descartar}
-              accionesExtra={[
-                { etiqueta: "Generar ficha para presentar", icono: <FileDown />, onClick: () => setFichaAbierta(true), disabled: Boolean(ocupado) },
-                { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
-              ]}
+              accionesExtra={[]}
+              autoIniciarOnboarding={autoIniciarOnboarding}
+              onAutoIniciado={limpiarAutoIniciar}
             />
           )}
         </div>
@@ -1958,124 +2069,63 @@ function ModalCandidato({
           </div>
         )}
 
-        {/* Etapa Prefiltro: solo Descartar — el paso a Entrevista IA es zero-touch, lo dispara
-            la IA sola por {CANAL} al completar el prefiltro (no hay botón manual). */}
-        {puedeDecidir && c.etapa === "Prefiltro" && (
-          <div className="border-t border-border-soft bg-surface px-4 py-3 sm:px-6 sm:py-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={descartar}
-                disabled={Boolean(ocupado)}
-                className="border-bad/30 text-bad hover:bg-bad-soft"
-              >
-                <ThumbsDown className="h-4 w-4" /> Descartar candidato
-              </Button>
+        {/* 2026-10-02 (Fraiche §3/§11): BARRA FIJA al pie de la ficha, visible desde cualquier pestaña y en cualquier
+            etapa: UN botón principal con la siguiente acción según la ruta y el avance + «Más acciones ⋯». Programar
+            una evaluación (modales) nunca la oculta. */}
+        {puedeDecidir && (
+          <div className="shrink-0 border-t border-border-soft bg-surface px-4 py-3 sm:px-6">
+            {c.etapa === "Onboarding" && !esFranquicia && aviso && aviso.tono !== "ok" && (
+              <div role="alert" className="mb-2 flex items-start gap-2 rounded-xl border border-bad/40 bg-bad-soft px-3 py-2 text-xs font-semibold text-bad">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>{aviso.texto}</span>
+              </div>
+            )}
+            {c.etapa === "Onboarding" && !esFranquicia && principal && accionSiguiente?.tipo === "alta" && (
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[12px] text-ink-3">
+                  Expediente al <b className={cn("font-mono", (c.expedienteProgreso ?? 0) >= 100 ? "text-good" : "text-warn")}>{c.expedienteProgreso ?? 0}%</b>
+                  {(c.expedienteProgreso ?? 0) < 100 && !modoPrueba ? " · el alta exige 100% validado" : ""}
+                </span>
+                <SwitchModoPrueba />
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              {principal ? (
+                principal.espera ? (
+                  <button
+                    type="button"
+                    onClick={principal.onClick}
+                    disabled={!principal.onClick}
+                    className="flex min-h-10 flex-1 items-center gap-2 rounded-xl border border-border-soft bg-surface-2 px-3 py-2 text-left text-[13px] text-ink-2 enabled:hover:bg-surface-2/70"
+                    title={principal.onClick ? "Ver" : undefined}
+                  >
+                    <Clock className="h-4 w-4 shrink-0 text-ink-3" />
+                    <span className="min-w-0 truncate">{principal.texto}</span>
+                  </button>
+                ) : (
+                  <Button className="min-h-10 flex-1" onClick={principal.onClick} disabled={Boolean(ocupado) || principal.disabled} title={principal.title}>
+                    {ocupado && ocupado !== "" && !principal.disabled ? "Procesando…" : principal.texto}
+                  </Button>
+                )
+              ) : (
+                <span className="flex-1 text-[12px] text-ink-3">{c.activa === false ? "Postulación cerrada" : ""}</span>
+              )}
               <MenuAcciones
+                conTexto
                 etiqueta="Más acciones"
                 acciones={[
                   { etiqueta: "Agregar evaluación", icono: <IconoEvaluacion />, onClick: () => { setTipoEvalInicial(""); setAgregarEval(true); }, disabled: Boolean(ocupado) || c.activa === false },
+                  { etiqueta: "Movimiento excepcional…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
                   { etiqueta: "Generar ficha para presentar", icono: <FileDown />, onClick: () => setFichaAbierta(true), disabled: Boolean(ocupado) },
-                  { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
+                  ...(c.etapa === "Onboarding" && !esFranquicia
+                    ? [
+                        { etiqueta: "Solicitar documentos", icono: <Send />, onClick: () => setConfirmacion("solicitar"), disabled: Boolean(ocupado) },
+                        { etiqueta: etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).texto, icono: <RotateCw />, onClick: () => setConfirmacion("recordatorio"), disabled: Boolean(ocupado) },
+                      ]
+                    : []),
+                  { etiqueta: "Descartar candidato…", icono: <ThumbsDown />, peligrosa: true, onClick: descartar, disabled: Boolean(ocupado) || c.activa === false },
                 ]}
               />
-            </div>
-          </div>
-        )}
-
-        {/* Footer Fijo con HITL y Acciones — Prefiltro, Entrevista Humana y Contratación tienen
-            su propio panel de acciones; este footer genérico no aplica ahí. */}
-        {puedeDecidir &&
-          c.etapa !== "Prefiltro" &&
-          c.etapa !== "Contratación" && (
-          <div className="border-t border-border-soft bg-surface px-4 py-3 sm:px-6 sm:py-4">
-            <div className="flex flex-col gap-3">
-              <input
-                value={comentario}
-                onChange={(e) => setComentario(e.target.value)}
-                placeholder="Nota de decisión para auditoría (opcional)…"
-                className="h-10 w-full rounded-xl border border-border-soft bg-bg px-3.5 text-xs sm:text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
-              />
-
-              {/* Regla de UI (2026-09-16): UNA acción principal = la siguiente esperada; todo lo demás en «…»
-                  («Mover a otra etapa» abre un selector simple sin bloqueos de secuencia). */}
-              <div className="flex items-center gap-2">
-                {tab !== "resumen" && botonSiguiente && (
-                  <button type="button" onClick={() => setTab("resumen")} className="flex-1 text-left text-xs font-semibold text-brand hover:underline">
-                    Siguiente acción en Resumen: {botonSiguiente.texto} →
-                  </button>
-                )}
-                {c.expedienteId != null && c.etapa !== "Onboarding" && (
-                  <a
-                    href="/dashboard/onboarding"
-                    className="flex items-center gap-1.5 rounded-xl border border-good/30 bg-good-soft px-3 py-2 text-xs font-semibold text-good transition hover:brightness-105"
-                  >
-                    <UserCheck className="h-4 w-4" /> Expediente ({c.expedienteProgreso ?? 0}%)
-                  </a>
-                )}
-                <MenuAcciones
-                  etiqueta="Más acciones"
-                  acciones={[
-                    // Cambios integrados 2026-10-01: «Agregar evaluación» es la única entrada (incluye entrevista humana,
-                    // IPV y presentación al franquiciatario). Solo crear una entrevista humana mueve a Filtro humano.
-                    { etiqueta: "Agregar evaluación", icono: <IconoEvaluacion />, onClick: () => { setTipoEvalInicial(""); setAgregarEval(true); }, disabled: Boolean(ocupado) || c.activa === false },
-                    { etiqueta: "Mover a otra etapa…", icono: <ArrowRightLeft />, onClick: () => setMoverA({ etapa: "", motivo: "" }), disabled: Boolean(ocupado) },
-                    { etiqueta: "Generar ficha para presentar", icono: <FileDown />, onClick: () => setFichaAbierta(true), disabled: Boolean(ocupado) },
-                    ...(c.etapa === "Onboarding" && !esFranquicia
-                      ? [
-                          { etiqueta: "Solicitar documentos", icono: <Send />, onClick: () => setConfirmacion("solicitar"), disabled: Boolean(ocupado) },
-                          { etiqueta: etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).texto, icono: <RotateCw />, onClick: () => setConfirmacion("recordatorio"), disabled: Boolean(ocupado) },
-                        ]
-                      : []),
-                    { etiqueta: "Descartar candidato…", icono: <ThumbsDown />, peligrosa: true, onClick: descartar, disabled: Boolean(ocupado) },
-                  ]}
-                />
-              </div>
-
-              {/* 2026-09-15 (Fase 1): el error del alta se muestra AQUÍ, pegado al botón — antes solo
-                  aparecía arriba del cuerpo scrolleable y RH veía «parpadear» el botón sin explicación. */}
-              {c.etapa === "Onboarding" && !esFranquicia && aviso && aviso.tono !== "ok" && (
-                <div
-                  role="alert"
-                  className="flex items-start gap-2 rounded-xl border border-bad/40 bg-bad-soft px-3 py-2.5 text-xs font-semibold text-bad"
-                >
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>{aviso.texto}</span>
-                </div>
-              )}
-              {/* Botón principal — siempre visible en Onboarding, sin importar el estado de los documentos.
-                  Franquicia (spec §12): no hay alta de Fraiche; la contratación la hace el franquiciatario. */}
-              {c.etapa === "Onboarding" && !esFranquicia && (
-                <>
-                  {/* 2026-09-18: switch de Modo Prueba junto al alta. ACTIVO → se permite con expediente
-                      incompleto (se manda forzar_prueba directo); INACTIVO → el botón queda bloqueado
-                      hasta que el expediente esté validado al 100% (el backend lo refuerza). */}
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-[12px] text-ink-3">
-                      Expediente al <b className={cn("font-mono", (c.expedienteProgreso ?? 0) >= 100 ? "text-good" : "text-warn")}>{c.expedienteProgreso ?? 0}%</b>
-                      {(c.expedienteProgreso ?? 0) < 100 && !modoPrueba ? " · el alta exige 100% validado" : ""}
-                      {(c.expedienteProgreso ?? 0) < 100 && modoPrueba ? " · Modo Prueba permite el alta incompleta" : ""}
-                    </span>
-                    <SwitchModoPrueba />
-                  </div>
-                  <Button
-                    className="w-full"
-                    onClick={() => setConfirmacion("alta")}
-                    disabled={Boolean(ocupado) || c.expedienteEstado === "alta" || ((c.expedienteProgreso ?? 0) < 100 && !modoPrueba)}
-                    title={(c.expedienteProgreso ?? 0) < 100 && !modoPrueba ? "Completa y valida el expediente al 100% (o activa Modo Prueba) para dar de alta." : undefined}
-                  >
-                    <UserCheck className="h-4 w-4" />
-                    {c.expedienteEstado === "alta"
-                      ? "Alta completada ✓"
-                      : ocupado === "alta"
-                        ? "Dando de alta…"
-                        : (c.expedienteProgreso ?? 0) < 100 && modoPrueba
-                          ? `DAR DE ALTA (Modo Prueba · expediente al ${c.expedienteProgreso ?? 0}%)`
-                          : "DAR DE ALTA COMO COLABORADOR"}
-                  </Button>
-                </>
-              )}
             </div>
           </div>
         )}
@@ -2136,19 +2186,21 @@ function ModalCandidato({
           puesto={c.puesto}
           tipoInicial={(tipoEvalInicial || "") as never}
           excluir={esRutaFranquicia ? ["psicometrica", "medico", "socioeconomico"] : []}
-          accionesRuta={[
-            { etiqueta: "Entrevista humana", descripcion: esRutaFranquicia ? "Entrevista inicial de Reclutamiento · pasa a Filtro humano" : "Entrevista inicial · pasa a Filtro humano",
-              onClick: () => { setAgregarEval(false); setModalEntrevista(true); } },
-            ...(esRutaFranquicia
-              ? [{ etiqueta: "Presentación al franquiciatario", descripcion: "Entrevista y decisión del franquiciatario", onClick: () => { setAgregarEval(false); setPresentarAbierto(true); } }]
-              : [{ etiqueta: "Entrevista IPV", descripcion: "Red Human o entrevistador humano", onClick: () => { setAgregarEval(false); setEligiendoIpv(true); } }]),
-          ]}
+          accionesRuta={accionesRutaEval}
           onClose={() => setAgregarEval(false)}
           onAgregada={(ev) => {
             setAgregarEval(false);
             setVersionEval((x) => x + 1);
             setTab("evaluaciones");
-            setAviso({ tono: "ok", texto: `«${ev.nombre}» agregada: ${ev.estadoTexto}. El candidato sigue en ${nombreEtapa(c.etapa)}.` });
+            const extra = ev as EvaluacionCandidato & { evaluaciones?: EvaluacionCandidato[]; omitidas?: string[]; envios?: EnvioAviso[] };
+            const nombres = (extra.evaluaciones ?? [ev]).map((x) => `«${x.nombre}»`).join(", ");
+            const envios = lineasEnvios(extra.envios ?? ev.envios);
+            setAviso({
+              tono: envios.some((l) => l.estado === "fallido") ? "warn" : "ok",
+              texto: `${nombres} agregada${(extra.evaluaciones?.length ?? 1) > 1 ? "s" : ""}. El candidato sigue en ${nombreEtapa(c.etapa)}.`
+                + (extra.omitidas?.length ? ` Ya estaban asignadas: ${extra.omitidas.join("; ")}.` : "")
+                + (envios.length ? ` Avisos: ${envios.map((l) => `${l.estado === "enviado" ? "✓" : l.estado === "pendiente" ? "…" : "✗"} ${l.texto}`).join(" · ")}` : ""),
+            });
           }}
         />
       )}
@@ -2178,9 +2230,10 @@ function ModalCandidato({
       {moverA && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !ocupado && setMoverA(null)}>
             <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-              <h3 className="font-display text-lg font-bold">Mover a otra etapa</h3>
+              <h3 className="font-display text-lg font-bold">Movimiento excepcional</h3>
               <p className="mt-1 text-sm text-ink-2">
-                RH decide: el candidato se mueve aunque {CANAL} o el correo fallen. Lo que se salte queda registrado como «Omitida manualmente».
+                Para retrocesos y saltos. Las evaluaciones y el historial se conservan; mover la tarjeta NO aprueba ni omite sola sus pendientes:
+                lo que se salte queda registrado como «Omitida manualmente» con tu nombre y el motivo.
               </p>
               <label className="mt-4 flex flex-col gap-1.5">
                 <span className="text-xs font-medium text-ink-2">Etapa destino</span>
@@ -2197,8 +2250,13 @@ function ModalCandidato({
                     ))}
                 </select>
               </label>
+              {moverA.etapa && (c.avance?.pendientes?.length ?? 0) > 0 && (
+                <div className="mt-3 rounded-xl border border-warn/30 bg-warn-soft/40 p-3 text-[12px] text-ink-2">
+                  <b className="text-warn">Pendientes que seguirán visibles:</b> {(c.avance?.pendientes ?? []).join(" · ")}
+                </div>
+              )}
               <label className="mt-3 flex flex-col gap-1.5">
-                <span className="text-xs font-medium text-ink-2">Motivo (opcional)</span>
+                <span className="text-xs font-medium text-ink-2">Motivo (obligatorio)</span>
                 <input
                   value={moverA.motivo}
                   onChange={(e) => setMoverA({ ...moverA, motivo: e.target.value })}
@@ -2208,8 +2266,8 @@ function ModalCandidato({
               </label>
               <div className="mt-5 flex justify-end gap-2">
                 <Button variant="outline" size="sm" onClick={() => setMoverA(null)} disabled={ocupado === "mover"}>Cancelar</Button>
-                <Button size="sm" onClick={moverManual} disabled={!moverA.etapa || ocupado === "mover"}>
-                  {ocupado === "mover" ? "Moviendo…" : "Mover"}
+                <Button size="sm" onClick={moverManual} disabled={!moverA.etapa || !moverA.motivo.trim() || ocupado === "mover"}>
+                  {ocupado === "mover" ? "Moviendo…" : moverA.etapa ? `Confirmar: mover a ${nombreEtapa(moverA.etapa)}` : "Confirmar"}
                 </Button>
               </div>
             </div>
@@ -2480,29 +2538,22 @@ function PestanaResumen({
         </button>
       </div>
 
-      {/* Siguiente acción — un único botón principal */}
+      {/* Siguiente acción — 2026-10-02 (§3): el botón vive en la barra fija al pie de la ficha (visible en todas las pestañas) */}
       {av?.siguienteAccion?.texto && (
         <div className="rounded-xl border border-brand/30 bg-brand-soft/30 p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">Siguiente acción</p>
-          <div className="mt-1.5">
-            {boton ? (
-              <Button size="sm" onClick={() => onAccion(boton)} disabled={ocupado} variant={boton.tipo === "no_cumple" ? "outline" : undefined}>
-                <ThumbsUp className="h-4 w-4" /> {boton.tipo === "no_cumple" ? "Descartar candidato…" : boton.texto}
-              </Button>
-            ) : (
-              <p className="text-sm font-semibold text-ink">{av.siguienteAccion.texto}</p>
-            )}
-            {boton?.tipo === "no_cumple" && <p className="mt-1 text-[12px] text-ink-2">{av.siguienteAccion.texto}</p>}
-          </div>
-          {(av.faltaParaAvanzar?.length ?? 0) > 0 && av.siguienteColumna && boton?.tipo === "mover" && (
-            <p className="mt-1.5 text-[12px] text-warn">Falta: {av.faltaParaAvanzar!.join("; ")}</p>
+          <p className="mt-1 text-sm font-semibold text-ink">{boton?.tipo === "no_cumple" ? "Descartar candidato (decide RH)" : av.siguienteAccion.texto}</p>
+          {boton?.tipo === "no_cumple" && <p className="mt-1 text-[12px] text-ink-2">{av.siguienteAccion.texto}</p>}
+          {(av.faltaParaAvanzar?.length ?? 0) > 0 && av.siguienteColumna && (
+            <p className="mt-1.5 text-[12px] text-warn">Para pasar a {nombreEtapa(av.siguienteColumna)} falta: {av.faltaParaAvanzar!.join("; ")}</p>
           )}
+          {puedeDecidir && <p className="mt-1 text-[11px] text-ink-3">Usa el botón principal de la barra inferior.</p>}
         </div>
       )}
 
       {/* Avance — actividades de la ruta con su estado real */}
       {(av?.lista?.length ?? 0) > 0 && (
-        <div>
+        <div id="ficha-avance">
           <Eyebrow>Avance</Eyebrow>
           <ul className="mt-1.5 divide-y divide-border-faint rounded-xl border border-border-soft">
             {av!.lista!.map((a) => (
@@ -2986,11 +3037,14 @@ function PestanaEvaluaciones({
   onCambio,
   versionEval = 0,
   onProgramarIpv,
+  accionesRuta,
 }: {
   c: Candidato;
   live?: boolean;
   onCambio?: (c: Candidato) => void;
   versionEval?: number;
+  /** 2026-10-02 (§12): Entrevista humana / IPV / Presentación siempre visibles en «Agregar evaluación». */
+  accionesRuta?: { etiqueta: string; descripcion?: string; onClick: () => void }[];
   /** Fraiche (spec §8): «elegir» abre el selector Red Human / humano; «humano» agenda directo la IPV humana. */
   onProgramarIpv?: (modo: "elegir" | "humano") => void;
 }) {
@@ -3233,9 +3287,32 @@ function PestanaEvaluaciones({
           )}
         </div>
         {!hayIpv && <p className="mt-3 text-sm text-ink-3">Todavía no hay Entrevista IPV para esta postulación.</p>}
+        {/* 2026-10-02 (§1/§5): IPV Red Human aún sin evaluar → estado del envío de su liga + Copiar / Reenviar */}
+        {(c.entrevistas ?? []).filter((e) => (e.fase === "ipv" || e.fase === "inicial_ipv") && !e.evaluacionIpv && e.estado !== "cancelada").slice(-1).map((e) => (
+          <div key={e.id} className="mt-3 rounded-xl border border-human/25 bg-human-soft/20 p-3">
+            <p className="flex flex-wrap items-center gap-2 text-xs text-ink-2">
+              <Badge tone="human">IPV Red Human</Badge>
+              <span>Filtro Red Human · responsable: Red Human (IA) · {e.estado === "evaluada" ? "evaluada" : e.estado === "interrumpida" || e.estado === "parcial" ? "interrumpida (se puede reabrir)" : "esperando al candidato"}</span>
+            </p>
+            {live && puedeDecidir && (
+              <div className="mt-2">
+                <EstadoEnvios
+                  compacto
+                  titulo="Liga al candidato"
+                  envios={e.envios}
+                  ligas={[{ etiqueta: "Copiar liga", url: e.liga }]}
+                  reenvios={[{ etiqueta: "Reenviar", onClick: async () => {
+                    const r = await reenviarIpvRedHuman(c.id, e.id);
+                    if (r.ok) onCambio?.(r.data.candidato);
+                  } }]}
+                />
+              </div>
+            )}
+          </div>
+        ))}
         {ipvRedHuman?.evaluacionIpv && (
           <ResultadoIpvVista
-            titulo="Red Human"
+            titulo="IPV Red Human · Filtro Red Human"
             rubrica={ipvRedHuman.evaluacionIpv}
             calculo={ipvRedHuman.evaluacionIpv.calculo}
             evaluador={ipvRedHuman.evaluacionIpv.evaluador}
@@ -3246,7 +3323,7 @@ function PestanaEvaluaciones({
           eh.resultadoIpv ? (
             <ResultadoIpvVista
               key={i}
-              titulo={`IPV humana ${rondasIpv.length > 1 ? i + 1 : ""}`.trim()}
+              titulo={`IPV humana ${rondasIpv.length > 1 ? i + 1 : ""} · Filtro humano`.replace("  ", " ")}
               rubrica={eh.rubrica}
               calculo={eh.resultadoIpv}
               evaluador={eh.entrevistador}
@@ -3254,7 +3331,7 @@ function PestanaEvaluaciones({
             />
           ) : (
             <div key={i} className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-border-soft bg-surface-2/40 px-3 py-2 text-xs text-ink-2">
-              <Badge tone="human">IPV</Badge>
+              <Badge tone="human">IPV humana</Badge>
               <span>
                 {eh.entrevistador || "Sin asignar"}
                 {eh.fecha ? ` · ${fechaHoraCorta(eh.fecha)}` : ""}
@@ -3405,7 +3482,7 @@ function PestanaEvaluaciones({
       )}
 
       {/* ===== Evaluaciones y verificaciones (2026-09-28): no mueven la columna del pipeline ===== */}
-      <div id="eval-validaciones"><PanelEvaluaciones codigo={c.id} puesto={c.puesto} live={Boolean(live) && puedeDecidir} version={versionEval} /></div>
+      <div id="eval-validaciones"><PanelEvaluaciones codigo={c.id} puesto={c.puesto} live={Boolean(live) && puedeDecidir} version={versionEval} accionesRuta={accionesRuta} excluir={(c.avance?.destino || "") === "franquicia" ? ["psicometrica", "medico", "socioeconomico"] : []} /></div>
     </div>
   );
 }
@@ -3448,8 +3525,12 @@ function ResultadoIpvVista({
               {calculo.puntaje}
               <span className="text-sm font-normal text-ink-3"> / 100</span>
             </span>
+          ) : calculo.puntaje_provisional != null && calculo.peso_pendiente ? (
+            <span className="text-sm font-semibold text-warn">
+              Provisional: {calculo.puntaje_provisional} pts · {calculo.peso_pendiente} % del peso por validar
+            </span>
           ) : (
-            <span className="text-sm font-semibold text-warn">Sin puntaje · requiere revisión</span>
+            <span className="text-sm font-semibold text-warn">Por validar — evidencia insuficiente</span>
           )}
           {calculo.conclusion && (
             <Badge tone={tonoConclusionIpv(calculo.conclusion)} dot>
@@ -3459,7 +3540,10 @@ function ResultadoIpvVista({
         </div>
       </div>
       {calculo.puntaje == null && Boolean(calculo.sin_evidencia?.length) && (
-        <p className="mt-2 text-xs leading-relaxed text-warn">Sin evidencia en: {calculo.sin_evidencia.join(", ")}. No se calcula puntaje; RH debe revisar.</p>
+        <p className="mt-2 text-xs leading-relaxed text-warn">
+          Por validar — evidencia insuficiente en: {calculo.sin_evidencia.join(", ")}. El resultado es provisional: el peso pendiente no se
+          redistribuye ni se asigna «Medio» por falta de información. Valídalo en la entrevista humana.
+        </p>
       )}
 
       <div className="mt-3 divide-y divide-border-soft">
@@ -3503,6 +3587,26 @@ function ResultadoIpvVista({
           </ul>
         </div>
       )}
+      {(() => {
+        const extra = (rubrica ?? {}) as { reservas?: string[]; puntos_validar?: string[] };
+        if (!extra.reservas?.length && !extra.puntos_validar?.length) return null;
+        return (
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            {Boolean(extra.reservas?.length) && (
+              <div>
+                <p className="font-mono text-[10px] font-bold uppercase tracking-wider text-warn">Reservas</p>
+                <ul className="mt-1 space-y-0.5">{extra.reservas!.map((x, i) => <li key={i} className="text-xs leading-relaxed text-ink-2">• {x}</li>)}</ul>
+              </div>
+            )}
+            {Boolean(extra.puntos_validar?.length) && (
+              <div>
+                <p className="font-mono text-[10px] font-bold uppercase tracking-wider text-brand">Validar en la entrevista humana</p>
+                <ul className="mt-1 space-y-0.5">{extra.puntos_validar!.map((x, i) => <li key={i} className="text-xs leading-relaxed text-ink-2">• {x}</li>)}</ul>
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -3523,8 +3627,12 @@ function ModalElegirIpv({
 }) {
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState("");
-  const [listo, setListo] = useState<null | { modo: "misma_sesion" | "sesion_ipv"; token: string }>(null);
-  const [copiado, setCopiado] = useState(false);
+  const [listo, setListo] = useState<null | { modo: "misma_sesion" | "sesion_ipv"; liga: string; envios: EnvioAviso[] }>(null);
+  // 2026-10-02 (§5): qué modalidades ya existen — la otra es OPCIONAL (RH decide), nunca se exige ni se genera sola
+  const mods = (c.avance?.actividades ?? []).find((a) => a.clave === "ipv")?.modalidades ?? [];
+  const hayRh = mods.some((m) => m.modo === "red_human");
+  const hayHumana = mods.some((m) => m.modo === "humano");
+  const etapaPosterior = c.etapa === "Contratación" || c.etapa === "Onboarding";
 
   async function redHuman() {
     setCargando(true);
@@ -3532,48 +3640,41 @@ function ModalElegirIpv({
     const r = await programarIpvRedHuman(c.id);
     setCargando(false);
     if (!r.ok) return setError(r.error);
-    setListo({ modo: r.data.modo, token: r.data.entrevista.token });
+    setListo({ modo: r.data.modo, liga: r.data.liga, envios: r.data.envios ?? [] });
     onCambio(r.data.candidato);
   }
-
-  const liga = listo ? (typeof window === "undefined" ? `/entrevista/${listo.token}` : `${window.location.origin}/entrevista/${listo.token}`) : "";
-
-  async function copiar() {
-    try {
-      await navigator.clipboard.writeText(liga);
-      setCopiado(true);
-      setTimeout(() => setCopiado(false), 2000);
-    } catch {
-      /* sin portapapeles: la liga queda visible para copiarla a mano */
-    }
+  async function reenviar() {
+    const r = await reenviarIpvRedHuman(c.id);
+    if (!r.ok) return setError(r.error);
+    setListo((x) => (x ? { ...x, envios: r.data.envios ?? [] } : x));
+    onCambio(r.data.candidato);
   }
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={() => !cargando && onClose()}>
-      <div className="w-full max-w-md rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-        <h3 className="font-display text-lg font-bold">Programar Entrevista IPV</h3>
+      <div className="max-h-[90dvh] w-full max-w-md overflow-y-auto rounded-3xl border border-border-soft bg-bg p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <h3 className="font-display text-lg font-bold">Agregar evaluación · Entrevista IPV</h3>
         <p className="mt-1 text-sm leading-relaxed text-ink-2">
           Para <b className="text-ink">{c.nombre}</b>. Misma rúbrica de 6 competencias, la aplique Red Human o una persona.
+          {(hayRh || hayHumana) && ` Ya tiene ${hayRh && hayHumana ? "IPV Red Human e IPV humana" : hayRh ? "IPV Red Human" : "IPV humana"}: la otra modalidad es opcional y se conservan ambos resultados.`}
         </p>
         {error && <div className="mt-3"><Aviso tono="error" onCerrar={() => setError("")}>{error}</Aviso></div>}
 
         {listo ? (
-          <div className="mt-4 rounded-xl border border-good/30 bg-good-soft/40 p-3.5 text-[13px] leading-relaxed text-ink-2">
-            {listo.modo === "misma_sesion" ? (
-              <p>
-                <b className="text-ink">Listo.</b> La IPV continuará en la misma sesión de la Entrevista Red Human: al terminar la entrevista inicial, Red Human aplica la rúbrica sin liga adicional.
-              </p>
-            ) : (
-              <>
-                <p><b className="text-ink">Sesión IPV creada.</b> Comparte esta liga con el candidato:</p>
-                <div className="mt-2 flex items-center gap-2">
-                  <code className="min-w-0 flex-1 truncate rounded-lg bg-surface px-2.5 py-1.5 font-mono text-[11px] text-ink">{liga}</code>
-                  <Button size="sm" variant="outline" onClick={copiar}>
-                    <Copy className="h-3.5 w-3.5" /> {copiado ? "Copiada" : "Copiar"}
-                  </Button>
-                </div>
-              </>
-            )}
+          <div className="mt-4 flex flex-col gap-3">
+            <div className="rounded-xl border border-good/30 bg-good-soft/40 p-3.5 text-[13px] leading-relaxed text-ink-2">
+              {listo.modo === "misma_sesion" ? (
+                <p><b className="text-ink">Listo.</b> La IPV Red Human continúa en la misma sesión de la Entrevista Red Human pendiente; se le avisó al candidato con su liga.</p>
+              ) : (
+                <p><b className="text-ink">IPV Red Human creada.</b> La liga se envió automáticamente al candidato por su canal vinculado. La IPV queda en Filtro Red Human{etapaPosterior ? "; el candidato no se regresa de etapa" : ""}.</p>
+              )}
+            </div>
+            <EstadoEnvios
+              titulo="Envío de la liga"
+              envios={listo.envios}
+              ligas={[{ etiqueta: "Copiar liga", url: listo.liga }]}
+              reenvios={[{ etiqueta: "Reenviar", onClick: reenviar }]}
+            />
           </div>
         ) : (
           <div className="mt-4 grid gap-2 sm:grid-cols-2">
@@ -3585,8 +3686,11 @@ function ModalElegirIpv({
             >
               <span className="flex items-center gap-1.5 text-sm font-semibold text-human">
                 {cargando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />} Red Human
+                {!hayHumana && <Badge tone="human">Recomendada</Badge>}
               </span>
-              <span className="text-[12px] leading-relaxed text-ink-2">Continúa en la sesión inicial pendiente o abre una sesión solo IPV.</span>
+              <span className="text-[12px] leading-relaxed text-ink-2">
+                IPV Red Human (Filtro Red Human). Se recomienda antes de la entrevista humana; la liga se envía sola al candidato.
+              </span>
             </button>
             <button
               type="button"
@@ -3597,7 +3701,9 @@ function ModalElegirIpv({
               <span className="flex items-center gap-1.5 text-sm font-semibold text-brand">
                 <UserCheck className="h-4 w-4" /> Entrevistador humano
               </span>
-              <span className="text-[12px] leading-relaxed text-ink-2">Agenda una ronda con la misma rúbrica; el entrevistador la captura desde su liga.</span>
+              <span className="text-[12px] leading-relaxed text-ink-2">
+                IPV humana (Filtro humano). Agenda una ronda con la misma rúbrica; el entrevistador la registra desde su liga.
+              </span>
             </button>
           </div>
         )}
@@ -4211,15 +4317,19 @@ function PanelEntrevistaHumana({
   live,
   onCambio,
   onNuevaIpv,
+  eh: ehProp,
 }: {
   c: Candidato;
   live: boolean;
   onCambio: (c: Candidato) => void;
   /** Fraiche (spec §8): abre la agenda de una nueva ronda IPV con entrevistador humano. */
   onNuevaIpv?: () => void;
+  /** 2026-10-02 (§12): la entrevista de ESTA tarjeta (hay varias); sin ella, la más reciente. */
+  eh?: EntrevistaHumana | null;
 }) {
   const modoPrueba = useModoPrueba();
-  const eh = c.entrevistaHumana;
+  const eh = ehProp ?? c.entrevistaHumana;
+  const ehId = eh?.id;
   const [modalResultado, setModalResultado] = useState(false);
   const [modalModificar, setModalModificar] = useState(false);
   const [marcando, setMarcando] = useState(false);
@@ -4238,13 +4348,14 @@ function PanelEntrevistaHumana({
   async function cancelar(notificar?: NotificarAccion) {
     setCancelando(true);
     setAviso(null);
-    const r = await cancelarEntrevistaHumana(c.id, notificar);
+    const r = await cancelarEntrevistaHumana(c.id, notificar, ehId);
     setCancelando(false);
     if (!r.ok) {
       setAviso({ tono: "error", texto: r.error });
       return;
     }
     onCambio(r.data);
+    avisarResultados("Entrevista cancelada.", r.data.resultados);
   }
 
   /** Ya no pide resultado (Lote 3, Eje 2): solo confirma que la entrevista ocurrió y dispara el
@@ -4255,7 +4366,7 @@ function PanelEntrevistaHumana({
     if (notificar) ultimoNotificar.current = notificar;
     setMarcando(true);
     setAviso(null);
-    const r = await marcarEntrevistaHumanaRealizada(c.id, forzarPrueba, ultimoNotificar.current);
+    const r = await marcarEntrevistaHumanaRealizada(c.id, forzarPrueba, ultimoNotificar.current, ehId);
     setMarcando(false);
     if (!r.ok) {
       setAviso({
@@ -4275,7 +4386,7 @@ function PanelEntrevistaHumana({
   ) {
     setGuardando(true);
     setAviso(null);
-    const r = await registrarResultadoEntrevistaHumana(c.id, datos, forzarPrueba);
+    const r = await registrarResultadoEntrevistaHumana(c.id, { ...datos, entrevistaId: ehId }, forzarPrueba);
     setGuardando(false);
     if (!r.ok) {
       setAviso({
@@ -4292,7 +4403,7 @@ function PanelEntrevistaHumana({
     if (notificar) ultimoNotificar.current = notificar;
     setRecordando(true);
     setAvisoRecordatorio(null);
-    const r = await recordatorioEntrevistaHumana(c.id, forzarPrueba, ultimoNotificar.current);
+    const r = await recordatorioEntrevistaHumana(c.id, forzarPrueba, ultimoNotificar.current, ehId);
     setRecordando(false);
     if (!r.ok) {
       setAvisoRecordatorio({
@@ -4311,6 +4422,21 @@ function PanelEntrevistaHumana({
     onCambio(r.data.candidato);
   }
 
+  /** Muestra el resultado por destinatario de un aviso (reprogramar, cancelar, reenviar). */
+  function avisarResultados(titulo: string, resultados?: { enviado: boolean; destinatario?: string; canal?: string; destino?: string; detalle?: string }[]) {
+    const lineas = lineasResultados(resultados as never);
+    setAviso({
+      tono: lineas.some((l) => !l.ok) ? "warn" : "ok",
+      texto: lineas.length ? `${titulo} ${lineas.map((l) => `${l.ok ? "✓" : "✗"} ${l.texto}`).join(" · ")}` : `${titulo} No había destinatarios activos para avisar.`,
+    });
+  }
+  async function reenviar(destinatario: "candidato" | "entrevistador" | "") {
+    const r = await reenviarAvisoEntrevistaHumana(c.id, { entrevistaId: ehId, destinatario });
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    onCambio(r.data.candidato);
+    avisarResultados("Aviso reenviado.", r.data.resultados);
+  }
+
   if (!eh) return null;
 
   const detalleModalidad =
@@ -4327,8 +4453,9 @@ function PanelEntrevistaHumana({
   return (
     <Card className="border-[color:var(--brand-2)]/30 bg-surface-2/40 p-4">
       <div className="flex flex-wrap items-center gap-2">
-        <Eyebrow>{eh.esIpv ? "Entrevista IPV programada" : "Entrevista Humana programada"}</Eyebrow>
-        {eh.esIpv && <Badge tone="human">IPV</Badge>}
+        <Eyebrow>{eh.esIpv ? "IPV humana programada" : `${eh.claseNombre || "Entrevista Humana"} programada`}</Eyebrow>
+        {eh.esIpv && <Badge tone="human">IPV humana</Badge>}
+        {!eh.esIpv && eh.clase && eh.clase !== "reclutamiento" && <Badge tone={eh.obligatoria ? "warn" : "neutral"}>{eh.obligatoria ? "Obligatoria" : "Adicional"}</Badge>}
       </div>
       <div className="mt-2.5 grid gap-2 sm:grid-cols-2">
         <Info
@@ -4343,6 +4470,21 @@ function PanelEntrevistaHumana({
         {detalleModalidad && <Info icon={Mail} v={detalleModalidad} />}
       </div>
       {eh.comentario && <p className="mt-2.5 text-[13px] leading-relaxed text-ink-2">{eh.comentario}</p>}
+
+      {/* 2026-10-02 (§2/§12): estado del envío por destinatario + Copiar liga / Reenviar */}
+      {live && !eh.resultado && (
+        <div className="mt-3">
+          <EstadoEnvios
+            titulo="Avisos de la cita"
+            envios={eh.envios}
+            ligas={[{ etiqueta: "Copiar liga del entrevistador", url: eh.ligaEntrevistador }]}
+            reenvios={eh.cancelada ? [] : [
+              { etiqueta: "Reenviar al candidato", onClick: () => reenviar("candidato") },
+              { etiqueta: "Reenviar al entrevistador", onClick: () => reenviar("entrevistador") },
+            ]}
+          />
+        </div>
+      )}
 
       {aviso && (
         <div className="mt-3">
@@ -4501,6 +4643,7 @@ function PanelEntrevistaHumana({
           onListo={(datos) => {
             setModalModificar(false);
             onCambio(datos);
+            avisarResultados("Entrevista reprogramada; el recordatorio se programó para la nueva cita.", (datos as Candidato & { resultados?: [] }).resultados);
           }}
         />
       )}
@@ -4825,6 +4968,11 @@ function ModalProgramarEntrevista({
   const [error, setError] = useState("");
   const [enviando, setEnviando] = useState(false);
   const [preview, setPreview] = useState<null | "entrevistador" | "candidato">(null);
+  // 2026-10-02 (§12/§14): entrevistas con encargado y franquiciatario usan ESTE mismo flujo (nunca «Otra»)
+  const [clase, setClase] = useState<"reclutamiento" | "encargado" | "franquiciatario">("reclutamiento");
+  const [obligatoria, setObligatoria] = useState(false);
+  const [enviarFicha, setEnviarFicha] = useState(true);
+  const etapaAnterior = c.etapa === "Prefiltro" || c.etapa === "Entrevista IA";
   // Fase 7B: con Teams conectado en la Cuenta la videollamada se crea sola; «Usar otra liga» = excepción
   const [teamsConectado, setTeamsConectado] = useState(false);
   const [otraLiga, setOtraLiga] = useState(false);
@@ -4887,6 +5035,9 @@ function ModalProgramarEntrevista({
     setError("");
     const r = await programarEntrevistaHumana(c.id, {
       esIpv,
+      clase: esIpv ? "reclutamiento" : clase,
+      obligatoria: !esIpv && clase !== "reclutamiento" ? obligatoria : false,
+      enviarFicha,
       tipoEntrevistador,
       entrevistadorUsuarioId: tipoEntrevistador === "interno" ? entrevistadorUsuarioId : null,
       entrevistadorContactoId: tipoEntrevistador === "externo" && typeof contactoSel === "number" ? contactoSel : null,
@@ -4942,10 +5093,14 @@ function ModalProgramarEntrevista({
       {/* 2026-09-18: más ancho, cuerpo con scroll propio y footer fijo — los botones nunca se pierden (web y móvil) */}
       <Card className="flex h-[100dvh] w-full flex-col overflow-hidden rounded-none p-0 sm:h-auto sm:max-h-[85vh] sm:max-w-2xl sm:rounded-2xl">
         <div className="shrink-0 border-b border-border-faint px-5 pt-5 pb-3">
-          <h3 className="font-display text-lg font-bold">{esIpv ? "Agregar evaluación · Entrevista IPV" : "Agregar evaluación · Entrevista humana"}</h3>
-          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-            Al guardar, la tarjeta se mueve a Filtro humano.
-          </p>
+          <h3 className="font-display text-lg font-bold">{esIpv ? "Agregar evaluación · Entrevista IPV (IPV humana)" : "Agregar evaluación · Entrevista humana"}</h3>
+          {etapaAnterior ? (
+            <p className="mt-1 text-[13px] font-medium leading-relaxed text-warn">
+              {esIpv ? "Al programar esta IPV, el candidato se moverá a Filtro humano." : "Al programar esta entrevista, el candidato se moverá a Filtro humano."} Solo se mueve al guardar.
+            </p>
+          ) : (
+            <p className="mt-1 text-[13px] leading-relaxed text-ink-2">El candidato se queda en {nombreEtapa(c.etapa)}; la entrevista se agrega con su propia agenda y resultado.</p>
+          )}
           {esIpv && (
             <p className="mt-1.5 flex items-center gap-1.5 text-[12px] text-human">
               <Sparkles className="h-3.5 w-3.5" /> Misma rúbrica de 6 competencias que Red Human; el entrevistador la captura desde su liga.
@@ -4954,6 +5109,48 @@ function ModalProgramarEntrevista({
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-4">
         <div className="mt-4 flex flex-col gap-3">
+          {!esIpv && (
+            <div>
+              <span className="text-sm font-medium text-ink-2">Tipo de entrevista</span>
+              <div className="mt-1.5 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {([
+                  ["reclutamiento", "Reclutamiento"],
+                  ["encargado", "Con encargado de tienda"],
+                  ["franquiciatario", "Con franquiciatario"],
+                ] as const).map(([v, t]) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => setClase(v)}
+                    className={`min-h-10 rounded-xl border px-2 text-sm font-medium transition ${clase === v ? "border-brand/25 bg-brand-soft text-brand" : "border-border-soft text-ink-2"}`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+              {clase !== "reclutamiento" && (
+                <label className="mt-2 flex items-center gap-2 text-[13px] text-ink-2">
+                  <input type="checkbox" checked={obligatoria} onChange={(e) => setObligatoria(e.target.checked)} className="h-4 w-4 accent-[var(--brand)]" />
+                  Obligatoria para avanzar (si no, es adicional y no bloquea ni reemplaza la entrevista inicial)
+                </label>
+              )}
+            </div>
+          )}
+          {/* §12: ficha del candidato para el entrevistador (respeta su acceso: sin datos de contacto, médico ni socioeconómico) */}
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border-soft bg-surface-2/50 px-3 py-2.5">
+            <label className="flex items-center gap-2 text-[13px] text-ink-2">
+              <input type="checkbox" checked={enviarFicha} onChange={(e) => setEnviarFicha(e.target.checked)} className="h-4 w-4 accent-[var(--brand)]" />
+              Ficha del candidato: se generará y enviará al entrevistador
+            </label>
+            <a
+              href={urlFichaPresentacion(c.id, { siguienteAccion: `${esIpv ? "Entrevista IPV" : "Entrevista"} ${fecha ? `el ${fecha} ${hora}` : ""}`.trim() })}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[12px] font-semibold text-brand hover:underline"
+            >
+              Ver ficha
+            </a>
+          </div>
           <div>
             <span className="text-sm font-medium text-ink-2">Entrevistador</span>
             <div className="mt-1.5 grid grid-cols-2 gap-2">
@@ -5225,7 +5422,7 @@ function ModalModificarEntrevista({
     }
     setEnviando(true);
     setError("");
-    const r = await modificarEntrevistaHumana(c.id, { fecha, hora, modalidad, liga, ubicacion, telefonoContacto, comentario, notificar: notificar.value });
+    const r = await modificarEntrevistaHumana(c.id, { fecha, hora, modalidad, liga, ubicacion, telefonoContacto, comentario, notificar: notificar.value, entrevistaId: eh.id });
     setEnviando(false);
     if (!r.ok) {
       setError(r.error);
@@ -5237,9 +5434,10 @@ function ModalModificarEntrevista({
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
       <Card className="w-full max-w-md p-5">
-        <h3 className="font-display text-lg font-bold">Modificar entrevista</h3>
+        <h3 className="font-display text-lg font-bold">Reprogramar entrevista{eh.claseNombre && eh.clase !== "reclutamiento" ? ` · ${eh.claseNombre}` : ""}</h3>
         <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-          Con {c.nombre.split(" ")[0]}. Abajo puedes ajustar a quién se avisa solo por esta vez.
+          Con {c.nombre.split(" ")[0]}. Al guardar se avisa por defecto al candidato y al entrevistador con la nueva fecha, hora, modalidad,
+          ubicación o liga e instrucciones; el recordatorio anterior se cancela y se programa el de la nueva cita. Abajo puedes ajustar a quién se avisa solo por esta vez.
         </p>
 
         <div className="mt-4 flex flex-col gap-3">
@@ -5478,6 +5676,8 @@ function PanelContratacion({
   onDocumentos,
   onDescartar,
   accionesExtra,
+  autoIniciarOnboarding = false,
+  onAutoIniciado,
 }: {
   c: Candidato;
   live: boolean;
@@ -5490,6 +5690,9 @@ function PanelContratacion({
   onDescartar?: () => void;
   /** Fraiche: acciones del modal que también deben verse aquí («Mover en la ruta…», ficha, mover etapa). */
   accionesExtra?: { etiqueta: string; icono: React.ReactNode; onClick: () => void; disabled?: boolean }[];
+  /** 2026-10-02 (§11): el botón principal de la ficha («Pasar a Onboarding») abre aquí el resumen de Iniciar Onboarding. */
+  autoIniciarOnboarding?: boolean;
+  onAutoIniciado?: () => void;
 }) {
   const modoPrueba = useModoPrueba();
   const cond = c.expedienteCondiciones;
@@ -5548,6 +5751,7 @@ function PanelContratacion({
   const requisitosOnboarding = condicionesListas && Boolean(c.consentimiento);
   const [iniciarAbierto, setIniciarAbierto] = useState(false);
   const documentosListos = (c.expedienteProgreso ?? 0) >= 100;
+  void documentosListos;
   const [expediente, setExpediente] = useState<NuevoIngreso | null>(null);
   const [cancelando, setCancelando] = useState(false);
   const [motivoCancelar, setMotivoCancelar] = useState("");
@@ -5660,6 +5864,25 @@ function PanelContratacion({
   /** Onboarding v2 (Fase 2): abre el resumen; «Iniciar Onboarding» es el único gatillo del cambio de etapa. */
   function enviarOnboarding() {
     setIniciarAbierto(true);
+  }
+  useEffect(() => {
+    if (autoIniciarOnboarding && c.expedienteId != null && c.etapa === "Contratación") {
+      setIniciarAbierto(true);
+      onAutoIniciado?.();
+    }
+  }, [autoIniciarOnboarding, c.expedienteId, c.etapa, onAutoIniciado]);
+  // 2026-10-02 (Fraiche §13): el contrato se genera en Contratación Y en Onboarding con las MISMAS condiciones
+  // guardadas; si falta algo se dice exactamente qué. Los documentos pendientes no lo bloquean.
+  const faltanContrato = expediente?.contratoFaltan ?? (condicionesListas ? [] : ["guardar las condiciones de contratación"]);
+  const contratoListo = faltanContrato.length === 0 || modoPrueba;
+  async function enviarContratoA(canal: "whatsapp" | "correo") {
+    if (!c.expedienteId) return;
+    setEnviandoDoc(canal);
+    setResultadoDoc(null);
+    const r = await enviarContrato(c.expedienteId, canal);
+    setEnviandoDoc("");
+    if (!r.ok) return setResultadoDoc({ ok: false, texto: r.error });
+    setResultadoDoc({ ok: r.data.enviado, texto: r.data.enviado ? `Contrato enviado por ${canal === "whatsapp" ? CANAL : "correo"}.` : `No salió por ${canal}: ${r.data.detalle}` });
   }
 
   async function confirmarCancelacion() {
@@ -5791,18 +6014,18 @@ function PanelContratacion({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => void firmarOVer("contrato")}
-            disabled={(!documentosListos && !modoPrueba) || firmando !== ""}
-            title={documentosListos || modoPrueba ? "Borrador del contrato con las condiciones finales (el firmado se carga en el Onboarding)" : `Se habilita cuando el expediente tenga el 100 % de documentos Aprobados (hoy ${c.expedienteProgreso ?? 0} %)`}
+            onClick={() => (expediente?.contratoFirmado ? setDocPreview("contrato") : void firmarOVer("contrato"))}
+            disabled={!contratoListo || firmando !== ""}
+            title={contratoListo ? "Contrato con las condiciones guardadas: vista previa, descarga y envío (el firmado se conserva en el expediente)" : `Para el contrato falta: ${faltanContrato.join(", ")}`}
           >
-            <FileCheck2 className="h-4 w-4" /> {firmando === "contrato" ? "Preparando firma…" : firmaCfg?.configurado ? "Generar contrato" : "Generar contrato (borrador)"}
+            <FileCheck2 className="h-4 w-4" /> {firmando === "contrato" ? "Preparando firma…" : expediente?.contratoFirmado ? "Contrato firmado ✓ · Ver" : firmaCfg?.configurado ? "Generar contrato" : "Generar contrato (borrador)"}
           </Button>
           )}
           {firmaCfg?.configurado && (
             <MenuAcciones
               acciones={[
                 { etiqueta: `Ver PDF de la carta (enviar por ${CANAL} / correo)`, icono: <FileText className="h-4 w-4" />, onClick: () => { setResultadoDoc(null); setDocPreview("carta"); } },
-                { etiqueta: "Ver PDF del contrato", icono: <FileCheck2 className="h-4 w-4" />, onClick: () => { setResultadoDoc(null); setDocPreview("contrato"); }, disabled: !documentosListos && !modoPrueba },
+                { etiqueta: `Ver PDF del contrato (enviar por ${CANAL} / correo)`, icono: <FileCheck2 className="h-4 w-4" />, onClick: () => { setResultadoDoc(null); setDocPreview("contrato"); }, disabled: !contratoListo },
               ]}
             />
           )}
@@ -5822,6 +6045,13 @@ function PanelContratacion({
             </Button>
           )}
         </div>
+      )}
+
+      {live && condicionesListas && !esFranquicia && !contratoListo && (
+        <p className="mt-2 text-[12px] text-warn">Para generar el contrato falta: {faltanContrato.join(", ")}. Complétalo arriba en «Condiciones de contratación» y guarda.</p>
+      )}
+      {live && !condicionesListas && !esFranquicia && (
+        <p className="mt-2 text-[12px] text-ink-3">El contrato se genera aquí (o en Onboarding) en cuanto guardes puesto, sueldo, tipo y fecha de ingreso.</p>
       )}
 
       {firmas.length > 0 && (
@@ -5921,14 +6151,8 @@ function PanelContratacion({
               <RotateCw className="h-4 w-4" /> {etiquetaRecordatorio(c.recordatorioNivel, c.recordatoriosEnviados).texto}
             </Button>
           )}
-          {onDescartar && (
-            <MenuAcciones
-              acciones={[
-                ...(accionesExtra ?? []),
-                { etiqueta: "Descartar candidato…", icono: <ThumbsDown />, peligrosa: true, onClick: onDescartar, disabled: Boolean(ocupado) },
-              ]}
-            />
-          )}
+          {/* 2026-10-02 (§3): «Más acciones» (agregar evaluación, movimiento excepcional, ficha, descartar) vive en la barra fija de la ficha */}
+          {onDescartar && (accionesExtra ?? []).length > 0 && <MenuAcciones acciones={accionesExtra ?? []} />}
         </div>
       )}
 
@@ -5964,6 +6188,16 @@ function PanelContratacion({
             </div>
             <iframe title={docPreview} src={docPreview === "carta" ? urlCartaIntencionPdf(c.expedienteId) : urlContratoPdf(c.expedienteId)} className="min-h-0 w-full flex-1 bg-surface-2" />
             <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border-soft bg-surface px-4 py-3">
+              {docPreview === "contrato" ? (
+                <>
+                  <Button size="sm" variant="outline" onClick={() => enviarContratoA("whatsapp")} disabled={Boolean(enviandoDoc) || !c.telefono} title={c.telefono ? `Manda la liga de su expediente con el contrato por ${CANAL}` : `El candidato no tiene ${CANAL}`}>
+                    <MessageCircle className="h-4 w-4" /> {enviandoDoc === "whatsapp" ? "Enviando…" : CANAL}
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => enviarContratoA("correo")} disabled={Boolean(enviandoDoc) || !c.correo} title={c.correo ? "Correo con el PDF adjunto" : "El candidato no tiene correo"}>
+                    <Mail className="h-4 w-4" /> {enviandoDoc === "correo" ? "Enviando…" : "Correo"}
+                  </Button>
+                </>
+              ) : null}
               {docPreview === "carta" ? (
                 <>
                   <Button size="sm" variant="outline" onClick={() => enviarCarta("whatsapp")} disabled={Boolean(enviandoDoc) || !c.telefono} title={c.telefono ? `Manda la liga de su expediente con la carta por ${CANAL}` : `El candidato no tiene ${CANAL}`}>

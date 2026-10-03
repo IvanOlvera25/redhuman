@@ -289,7 +289,7 @@ with TestClient(app) as client:
     PR = client.post("/evaluaciones/pruebas", headers=H, json={"clave": "PSI-INTEG", "nombre": "Cleaver", "modo": "integrada",
                                                               "proveedor": "Psicométricas.mx", "id_proveedor": "1"}).json()["id"]
     PE = nueva_postulacion("Psico Externa", "5512340003", "psico.externa@correo.mx")
-    NUEVA = {"tipo": "psicometrica", "prueba_id": PR}
+    NUEVA = {"tipo": "psicometrica", "prueba_id": PR, "enviar": False}
 
     def crear_ev():
         r = client.post(f"/evaluaciones/postulaciones/{PE}", headers=H, json=NUEVA)

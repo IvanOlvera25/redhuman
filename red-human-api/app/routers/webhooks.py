@@ -913,6 +913,41 @@ async def _reintentar_vinculo(chat: str, motivo: str) -> None:
     )
 
 
+def _es_solo_responsable(db, telefono: str) -> bool:
+    """El teléfono es de un Usuario, contacto de Cliente o responsable externo de una entrevista/evaluación y de NINGÚN
+    candidato vivo. (Si también es candidato, manda la conversación del candidato.)"""
+    from ..models import ClienteContacto, EntrevistaHumana, EvaluacionCandidato
+    from ..services.telegram import clave
+
+    tel = clave(telefono)
+    if not tel:
+        return False
+    if db.query(Candidato).filter(Candidato.telefono.like(f"%{tel}"), Candidato.eliminado_en.is_(None)).first():
+        return False
+    for modelo, col in ((Usuario, Usuario.telefono), (ClienteContacto, ClienteContacto.telefono),
+                        (EntrevistaHumana, EntrevistaHumana.whatsapp_externo), (EvaluacionCandidato, EvaluacionCandidato.responsable_whatsapp)):
+        try:
+            if db.query(modelo).filter(col.like(f"%{tel}")).first():
+                return True
+        except Exception:  # noqa: BLE001 — tablas de módulos no disponibles
+            continue
+    return False
+
+
+async def _entregar_avisos_pendientes(db, telefono: str) -> int:
+    """2026-10-02 (Fraiche §4): al vincular, entrega los avisos que esperaban a ese número (una sola vez)."""
+    from ..services import avisos
+
+    try:
+        n = await avisos.entregar_pendientes(db, telefono)
+        db.commit()
+        return n
+    except Exception as ex:  # noqa: BLE001
+        print(f"[telegram] no se pudieron entregar avisos pendientes de {telefono}: {ex}", flush=True)
+        db.rollback()
+        return 0
+
+
 async def _turno_telegram(update: dict) -> None:
     from ..models import VinculoTelegram
     from ..services import telegram as tg
@@ -941,6 +976,8 @@ async def _turno_telegram(update: dict) -> None:
             pendiente, v.inicio_pendiente = v.inicio_pendiente, ""
             db.commit()
             await tg.enviar_a_chat(chat, "¡Listo! ✅ Tu número quedó vinculado. Por aquí te escribiré durante tu proceso.", tg.QUITAR_TECLADO)
+            if await _entregar_avisos_pendientes(db, v.telefono) and not pendiente:
+                return  # era un responsable (entrevistador, médico…) que esperaba sus avisos: no es un turno de candidato
             texto, id_sel = _msg_desde_inicio(pendiente)
         elif "inicio" in u:
             firmado = tg.leer_payload_vinculo(u["inicio"])
@@ -957,6 +994,11 @@ async def _turno_telegram(update: dict) -> None:
                         return
                 v = tg.vincular(db, chat, firmado["telefono"], u["nombre"], u["usuario"])
                 db.commit()
+                entregados = await _entregar_avisos_pendientes(db, v.telefono)
+                if ref[:1] == "R":  # liga de vinculación de un responsable (no candidato)
+                    await tg.enviar_a_chat(chat, "¡Listo! ✅ Este chat quedó vinculado. Aquí recibirás los avisos de las actividades que te asignen."
+                                           + ("" if entregados else " Por ahora no tienes avisos pendientes."), tg.QUITAR_TECLADO)
+                    return
                 await tg.enviar_a_chat(chat, "¡Listo! ✅ Vinculé este chat con tu postulación. Seguimos por aquí con las preguntas que faltan.", tg.QUITAR_TECLADO)
                 if cod_p:
                     texto, id_sel, forzar = "Hola, vengo de la página para continuar mi postulación.", "", cod_p
@@ -984,6 +1026,12 @@ async def _turno_telegram(update: dict) -> None:
                 await tg.enviar_a_chat(chat, "Por ahora solo puedo leer texto, fotos y documentos PDF. 🙂")
                 return
 
+        if not forzar and not id_sel and _es_solo_responsable(db, v.telefono):
+            # 2026-10-02 (Fraiche §4): este chat es de un entrevistador / médico / responsable que solo recibe avisos;
+            # no se mezcla con conversaciones de candidatos ni nace una persona nueva.
+            await tg.enviar_a_chat(chat, "Este chat recibe los avisos de las actividades que te asigna Recursos Humanos (entrevistas, evaluaciones). "
+                                         "Para registrar resultados usa la liga que viene en cada aviso. 🙂")
+            return
         msg = {"telefono": v.telefono, "texto": texto, "nombre": u["nombre"], "wa_id": f"tg-{u.get('update_id')}",
                "tipo": tipo, "media": media, "id_seleccionado": id_sel, "numero_receptor": "", "postulacion_codigo": forzar}
         await procesar_mensaje_entrante(db, msg)

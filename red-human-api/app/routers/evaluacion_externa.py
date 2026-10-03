@@ -35,6 +35,8 @@ def _post(db: Session, ev: EvaluacionCandidato) -> Optional[Postulacion]:
 
 
 def _rol(ev: EvaluacionCandidato) -> str:
+    if ev.tipo == "referencias":
+        return "referencias"
     if ev.es_medico:
         return "medico"
     if ev.tipo == "socioeconomico":
@@ -63,6 +65,9 @@ def ver(token: str, db: Session = Depends(get_db)):
         "medico": "Adjunta el dictamen y selecciona Apto, Apto condicionado o No recomendable. La información médica solo la ve el rol autorizado.",
         "franquiciatario": "Revisa al candidato que Fraiche te presenta y registra Continuar o No continuar con tus comentarios.",
         "externo": "Registra el resultado de la evaluación y adjunta el informe si aplica.",
+        "referencias": "Captura los datos de cada referencia (si faltan) y registra su validación: quién contestó, cargo, fecha, medio, "
+                       "si confirma puesto y periodo, desempeño, motivo de salida y si lo volverían a contratar. Si nadie contesta, "
+                       "márcala como «No contactada» (no es un resultado desfavorable).",
     }[rol]
     cerrada = ev.estado in ("revisada", "fallida")
     return {
@@ -89,7 +94,79 @@ def ver(token: str, db: Session = Depends(get_db)):
             "experiencia": (p.experiencia if p else "") or "",
             "ubicacion": (p.ubicacion if p else "") or "",
         } if rol in ("franquiciatario", "encargado") and p else None,
+        # 2026-10-02 (§10): el responsable de referencias captura y valida (ve las referencias; nada más del expediente)
+        "referencias": list(ev.referencias or []) if rol == "referencias" else None,
+        "referenciasResumen": sev.resumen_referencias(ev) if rol == "referencias" else None,
     }
+
+
+class ReferenciasPublicasIn(BaseModel):
+    referencias: list = []
+
+
+@router.post("/publica/{token}/referencias")
+async def referencias_responsable(token: str, datos: ReferenciasPublicasIn, db: Session = Depends(get_db)):
+    """El RESPONSABLE (interno o externo) captura y valida las referencias desde su liga."""
+    from .evaluaciones import aplicar_referencias
+
+    ev = _por_token(db, token)
+    p = _post(db, ev)
+    if ev.tipo != "referencias":
+        raise HTTPException(409, "Esta evaluación no es de referencias.")
+    if ev.estado in ("revisada", "fallida"):
+        raise HTTPException(409, "Esta evaluación ya está cerrada; contacta al equipo de RH.")
+    falta = sev.falta_consentimiento(ev, p)
+    if falta:
+        raise HTTPException(409, falta)
+    actor = ev.responsable or "responsable externo"
+    r = await aplicar_referencias(db, ev, p, datos.referencias, actor, validar=True)
+    registrar(db, actor, "referencias_por_liga_responsable", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, **{k: r["resumen"][k] for k in ("total", "validadas", "requeridas")}})
+    db.commit()
+    return {"ok": True, "referencias": ev.referencias, "resumen": r["resumen"], "estadoTexto": sev.etiqueta_estado_fraiche(ev)}
+
+
+# ---------------- Liga del CANDIDATO para capturar sus referencias (2026-10-02, §10) ----------------
+
+def _por_token_candidato(db: Session, token: str) -> EvaluacionCandidato:
+    ev = db.query(EvaluacionCandidato).filter(EvaluacionCandidato.token_candidato == token).first() if token else None
+    if not ev or ev.tipo != "referencias":
+        raise HTTPException(404, "Esta liga no es válida o ya no está disponible.")
+    return ev
+
+
+@router.get("/referencias/{token}")
+def ver_referencias_candidato(token: str, db: Session = Depends(get_db)):
+    """El candidato SOLO ve y captura los datos de sus referencias (nunca la validación ni el resultado)."""
+    ev = _por_token_candidato(db, token)
+    p = _post(db, ev)
+    v = p.vacante if p else None
+    datos = [{k: r.get(k, "") for k in sev.CAMPOS_DATOS_REFERENCIA} for r in ev.referencias or []]
+    return {
+        "candidato": p.nombre if p else "", "vacante": v.titulo if v else "", "empresa": nombre_empresa_candidato(v) if v else "",
+        "requeridas": max(1, int(ev.referencias_requeridas or 1)), "referencias": datos,
+        "cerrada": ev.estado in ("revisada", "fallida", "resultado_recibido"),
+    }
+
+
+@router.post("/referencias/{token}")
+async def capturar_referencias_candidato(token: str, datos: ReferenciasPublicasIn, db: Session = Depends(get_db)):
+    from .evaluaciones import aplicar_referencias
+
+    ev = _por_token_candidato(db, token)
+    p = _post(db, ev)
+    if ev.estado in ("revisada", "fallida", "resultado_recibido"):
+        raise HTTPException(409, "Tus referencias ya se recibieron. Gracias.")
+    if p is not None and not p.consentimiento:
+        raise HTTPException(409, "Falta tu consentimiento de privacidad para continuar.")
+    limpias = [{k: (r or {}).get(k, "") for k in sev.CAMPOS_DATOS_REFERENCIA} for r in datos.referencias or [] if isinstance(r, dict)]
+    for i, r in enumerate(limpias):
+        r["capturada_por"] = "candidato"
+        if not (r["empresa"] and r["contacto_nombre"] and r["telefono"]):
+            raise HTTPException(400, f"Referencia {i + 1}: captura al menos la empresa, el nombre del contacto y su teléfono.")
+    r = await aplicar_referencias(db, ev, p, limpias, "candidato", validar=False)
+    registrar(db, "candidato", "referencias_capturadas_por_candidato", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "total": r["resumen"]["total"]})
+    db.commit()
+    return {"ok": True, "total": r["resumen"]["total"], "requeridas": r["resumen"]["requeridas"]}
 
 
 @router.post("/publica/{token}/resultado")
@@ -111,6 +188,8 @@ async def registrar_resultado_externo(
     if falta:
         raise HTTPException(409, falta)
     rol = _rol(ev)
+    if rol == "referencias":
+        raise HTTPException(409, "Las referencias se registran una por una con su validación (sección Referencias laborales de esta liga).")
     if rol in ("medico", "franquiciatario", "encargado") and not decision.strip():
         raise HTTPException(400, "Selecciona la conclusión.")
     if rol == "socioeconomico" and not (archivo and archivo.filename) and not resumen.strip():

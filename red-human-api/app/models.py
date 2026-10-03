@@ -62,6 +62,8 @@ class Vacante(Base):
     # aviso al enviar a Onboarding cuando falte alguna o no esté revisada. Solo SUGIERE: nunca bloquea ni asigna sola.
     evaluaciones_sugeridas: Mapped[list] = mapped_column(JSON, default=list)
     avisar_evaluaciones_antes_onboarding: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 2026-10-02 (Fraiche §10): cuántas referencias laborales verificadas pide esta vacante (configurable; NO es 3 fijo).
+    referencias_requeridas: Mapped[int] = mapped_column(Integer, default=1)
     area: Mapped[str] = mapped_column(String(100), default="")
     empresa: Mapped[str] = mapped_column(String(150), default="Grupo Carbe")
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
@@ -493,6 +495,14 @@ class EntrevistaHumana(Base):
     es_ipv: Mapped[bool] = mapped_column(Boolean, default=False)
     rubrica: Mapped[dict] = mapped_column(JSON, default=dict)
     resultado_ipv: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 2026-10-02 (Fraiche, cambios integrados §12/§14): con quién es la entrevista — reclutamiento (la inicial, la
+    # que cuenta para Filtro humano), encargado de tienda o franquiciatario (MISMO flujo de agenda, nunca «Otra»).
+    # Una entrevista adicional solo bloquea el avance si RH la marcó `obligatoria`.
+    clase: Mapped[str] = mapped_column(String(20), default="reclutamiento")  # CLASES_ENTREVISTA_HUMANA
+    obligatoria: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Historial de avisos por destinatario (agendada/reprogramada/cancelada/reenvío): [{fecha, evento, destinatario,
+    # canal, destino, estado: enviado|pendiente|fallido, detalle}]
+    envios: Mapped[list] = mapped_column(JSON, default=list)
     # --- evaluación del entrevistador por liga (Lote 3) ---
     token: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # liga pública para que el entrevistador registre su evaluación
     # "" hasta que alguien capture el resultado; "rh" | "entrevistador" según quién ganó la
@@ -564,6 +574,8 @@ class Entrevista(Base):
     # `inicial_ipv` (Red Human hace las dos en la misma sesión de video: el transcript se parte en
     # ia.MARCADOR_IPV y se guardan DOS resultados separados: `evaluacion` y `evaluacion_ipv`).
     fase: Mapped[str] = mapped_column(String(20), default="inicial")
+    # 2026-10-02: envíos de la liga al candidato (IPV Red Human y reenvíos): [{fecha, canal, destino, estado, detalle, por}]
+    envios: Mapped[list] = mapped_column(JSON, default=list)
     evaluacion_ipv: Mapped[dict] = mapped_column(JSON, default=dict)
     # Fase 4 (Punto 4): cómo terminó — señal que el backend pudo verificar (ver CIERRES_ENTREVISTA).
     # Vacío mientras sigue abierta. La transición a evaluada/interrumpida SOLO ocurre en /finalizar.
@@ -844,6 +856,9 @@ class Expediente(Base):
     # Fase 3 (2026-09-15): «recordar hasta» — fecha límite que respeta el cron de recordatorios de
     # documentos. Null = sin recordatorios automáticos para este expediente.
     documentos_hasta: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 2026-10-02 (Fraiche §14): plazo «Documentos completos» (días respecto al ingreso, negativo = antes) con el que se
+    # calcula `documentos_hasta`; se recalcula al cambiar la fecha de ingreso.
+    plazo_documentos_dias: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     ultimo_recordatorio_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     documentos_vencidos_avisado: Mapped[bool] = mapped_column(Boolean, default=False)
     # 2026-09-17: recordatorios en 3 niveles progresivos (ligero → intermedio → definitivo). Cuenta los
@@ -1626,7 +1641,10 @@ REGLAS_NOTIFICACION_DEFAULT = {
     "solicitud_documentos": {"candidato_whatsapp": True},
     "recordatorio_documentos": {"candidato_whatsapp": True},
     "instrucciones_ingreso": {"candidato_correo": True, "candidato_whatsapp": True},
-    # entrevista_modificada, entrevista_cancelada, recomendacion_final, candidato_apto: todo apagado.
+    # 2026-10-02 (Fraiche §2, §9): reprogramar o cancelar avisa por defecto a candidato y entrevistador.
+    "entrevista_modificada": {"candidato_correo": True, "candidato_whatsapp": True, "entrevistador_correo": True, "entrevistador_whatsapp": True},
+    "entrevista_cancelada": {"candidato_correo": True, "candidato_whatsapp": True, "entrevistador_correo": True, "entrevistador_whatsapp": True},
+    # recomendacion_final, candidato_apto: todo apagado.
 }
 
 
@@ -2079,7 +2097,7 @@ TIPOS_EVALUACION = {
     "socioeconomico": "Socioeconómico",
     "otra": "Otra",
 }
-MODOS_PRUEBA = {"integrada": "Integrada", "enlace": "Enlace externo", "manual": "Carga manual"}
+MODOS_PRUEBA = {"integrada": "Conectada con el proveedor", "enlace": "Liga del proveedor", "manual": "Carga manual de resultados"}
 # Seguimiento (lo que ve RH). «fallida» = Fallida/Cancelada, siempre con motivo.
 ESTADOS_EVALUACION = {
     "en_espera_consentimiento": "En espera de consentimiento",
@@ -2106,6 +2124,28 @@ TEXTO_CONSENTIMIENTO_MEDICO = (
 )
 
 
+CLASES_ENTREVISTA_HUMANA = {
+    "reclutamiento": "Entrevista de Reclutamiento",
+    "encargado": "Entrevista con encargado de tienda",
+    "franquiciatario": "Entrevista con franquiciatario",
+}
+
+
+class AvisoPendiente(Base):
+    """2026-10-02 (Fraiche §4): aviso que no salió porque el destinatario aún no vincula su chat (Telegram). Al
+    vincularse se entregan en orden, una sola vez. Sin FK (mismo criterio que las tablas nuevas)."""
+
+    __tablename__ = "avisos_pendientes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telefono: Mapped[str] = mapped_column(String(20), index=True)  # 10 dígitos
+    rol: Mapped[str] = mapped_column(String(30), default="")
+    texto: Mapped[str] = mapped_column(Text, default="")
+    referencia: Mapped[str] = mapped_column(String(60), default="")  # P-####, EVA-####, ENT-####
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+    entregado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class PruebaPsicometrica(Base):
     """Catálogo de Configuración → Pruebas psicométricas (por Cuenta). «Eliminar» = inactivar."""
 
@@ -2121,6 +2161,10 @@ class PruebaPsicometrica(Base):
     proveedor: Mapped[str] = mapped_column(String(150), default="")
     id_proveedor: Mapped[str] = mapped_column(String(150), default="")  # identificador en el proveedor
     url: Mapped[str] = mapped_column(String(500), default="")  # modo «Enlace externo»
+    # 2026-10-02: qué pruebas incluye (batería) — se muestra al asignar para evitar duplicidades.
+    incluye: Mapped[list] = mapped_column(JSON, default=list)
+    # Instrucciones que se mandan al candidato junto con su liga (vacío = las genéricas).
+    instrucciones: Mapped[str] = mapped_column(Text, default="")
     activa: Mapped[bool] = mapped_column(Boolean, default=True)
     creado_por: Mapped[str] = mapped_column(String(150), default="")
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
@@ -2197,6 +2241,13 @@ class EvaluacionCandidato(Base):
     referencias: Mapped[list] = mapped_column(JSON, default=list)
     # Médico: el dictamen/resumen/comentario se guardan CIFRADOS (services/cifrado.py); ver services/evaluaciones.
     cifrado: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 2026-10-02 (Fraiche, cambios integrados §8-10): avisos por destinatario (candidato / responsable / RH) con su
+    # estado real; liga del candidato (psicometría del proveedor); captura de referencias por el candidato.
+    envios: Mapped[list] = mapped_column(JSON, default=list)  # [{fecha, evento, destinatario, canal, destino, estado, detalle}]
+    liga_candidato: Mapped[str] = mapped_column(String(500), default="")
+    token_candidato: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)  # /referencias/{token}
+    referencias_modo: Mapped[str] = mapped_column(String(20), default="")  # candidato | responsable
+    referencias_requeridas: Mapped[int] = mapped_column(Integer, default=1)
 
     @property
     def es_medico(self) -> bool:

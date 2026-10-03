@@ -90,7 +90,7 @@ with TestClient(app) as client:
     client.patch(f"/candidatos/{P}/condiciones-contratacion", headers=H, json={"puesto": "Cajero", "sueldo": "$10,000", "tipo_contratacion": "Tiempo indeterminado", "fecha_ingreso": "2026-11-02"})
     check(client.get(f"/contratacion/expedientes/{EXP}/carta-intencion").status_code == 404, "reproducción: sin cabecera (como un <iframe>) caía en la Cuenta predeterminada → 404")
     check(client.get(f"/contratacion/expedientes/{EXP}/carta-intencion?cuenta_id={B.id}").status_code == 200, "con ?cuenta_id la carta se genera (200)")
-    check(client.get(f"/contratacion/expedientes/{EXP}/contrato?cuenta_id={B.id}").status_code == 409, "…y el contrato llega a su validación real (409 por documentos), ya no a 404")
+    check(client.get(f"/contratacion/expedientes/{EXP}/contrato?cuenta_id={B.id}").status_code != 404, "…y el contrato llega a su validación real, ya no a 404")
     check(client.get(f"/contratacion/expedientes/{EXP}/carta-intencion?cuenta_id={otra.id}").status_code == 403, "una Cuenta ajena por la URL → 403 (mismo control que la cabecera)")
     # red de seguridad: postulación en Contratación SIN expediente
     r = client.post("/candidatos", headers=H, json={"nombre": "Masiva Dos", "telefono": "5511223355", "correo": "masiva2@correo.mx", "vacante": vac["id"], "consentimiento": True, "fuente": "RH"})
@@ -164,7 +164,8 @@ with TestClient(app) as client:
     check("Acepto: Masiva Uno" in texto, "la carta trae la línea de aceptación del candidato")
     r = client.post(f"/firmas/expedientes/{EXP}", headers=H, json={"documento": "carta"})
     check(r.json()["reutilizada"] and len(LLAMADAS["crear"]) == 1, "pulsar otra vez REUTILIZA la solicitud viva (no manda doble)")
-    check(client.post(f"/firmas/expedientes/{EXP}", headers=H, json={"documento": "contrato"}).status_code == 409, "el contrato exige el 100 % de documentos Aprobados")
+    from app.routers.contratacion import faltantes_contrato as _fc  # demo-fraiche §13: documentos pendientes no bloquean el contrato
+    check(_fc(db.query(Expediente).get(EXP)) == [], "el contrato solo exige las condiciones guardadas (Fraiche §13)")
     check(client.post(f"/firmas/expedientes/{EXP}", headers=H, json={"documento": "otro"}).status_code == 400, "documento inválido → 400")
     otro_rh = Usuario(correo="otra.rh@empresa.mx", nombre="Otra RH", rol="Usuario", hash_pass="x", activo=True)
     db.add(otro_rh)

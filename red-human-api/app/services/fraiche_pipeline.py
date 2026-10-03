@@ -72,6 +72,8 @@ def es_ruta_fraiche(p) -> bool:
 def _iso(dt) -> Optional[str]:
     if not dt:
         return None
+    if isinstance(dt, str):
+        return dt
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
@@ -95,8 +97,10 @@ def aplica_psicometria(p) -> bool:
 
 
 def aplica_socioeconomico(p) -> bool:
+    """2026-10-02 (alcance Fraiche): socioeconómico en tienda propia SOLO para Cajero y Encargado."""
     v = p.vacante
-    return bool(v and (v.titulo or "").strip().lower().startswith("cajer")) and not es_franquicia(p)
+    t = (v.titulo or "").strip().lower() if v else ""
+    return bool(t.startswith("cajer") or t.startswith("encargad")) and not es_franquicia(p)
 
 
 # ------------------------------------------------------------
@@ -104,11 +108,11 @@ def aplica_socioeconomico(p) -> bool:
 # ------------------------------------------------------------
 
 def _act(clave, nombre, etapa, estado, *, resultado="", tono="neutral", revisado_por="", fecha=None, detalle="", obligatoria=True,
-         no_cumple=False, accion=None) -> dict:
+         no_cumple=False, accion=None, **extra) -> dict:
     """estado ∈ hecha | en_curso | pendiente | no_aplica. `no_cumple` = resultado negativo de un requisito."""
     return {"clave": clave, "nombre": nombre, "columna": etapa, "columnaNombre": nombre_columna(etapa), "estado": estado,
             "resultado": resultado, "tono": tono, "revisadoPor": revisado_por, "fecha": _iso(fecha), "detalle": detalle,
-            "obligatoria": obligatoria, "noCumple": no_cumple, "accion": accion}
+            "obligatoria": obligatoria, "noCumple": no_cumple, "accion": accion, **extra}
 
 
 def _ev_validacion(ev, nombre: str, etapa: str, clave: str) -> dict:
@@ -140,6 +144,20 @@ def _ev_validacion(ev, nombre: str, etapa: str, clave: str) -> dict:
 
 def _actividad_eval(p, evs, tipo: str, nombre: str, clave: str, etapa: str = "Entrevista Humana") -> dict:
     vivas = [e for e in evs if e.tipo == tipo and e.estado != "fallida"]
+    if len(vivas) > 1:
+        # 2026-10-02 (§7): varias pruebas, cada una con estado y resultado propios; avance conjunto «1 de 2 completadas»
+        from . import evaluaciones as sev
+
+        partes = [_ev_validacion(e, e.nombre, etapa, f"{clave}_{e.codigo}") for e in vivas]
+        hechas = [a for a in partes if a["estado"] == "hecha"]
+        malas = [a for a in hechas if a["noCumple"]]
+        sin_revisar = next((a for a in partes if (a.get("accion") or {}).get("tipo") == "revisar_evaluacion"), None)
+        siguiente = sin_revisar or next((a for a in partes if a["estado"] != "hecha"), None)
+        return _act(clave, nombre, etapa, "hecha" if len(hechas) == len(partes) else "en_curso",
+                    resultado=f"{len(hechas)} de {len(partes)} completadas" + (f" · {', '.join(a['nombre'] + ': ' + a['resultado'] for a in malas)}" if malas else ""),
+                    tono="bad" if malas else ("good" if len(hechas) == len(partes) else "neutral"), no_cumple=bool(malas),
+                    revisado_por=", ".join(dict.fromkeys(a["revisadoPor"] for a in hechas if a["revisadoPor"])),
+                    accion=(siguiente or {}).get("accion"), partes=[{k: a[k] for k in ("nombre", "estado", "resultado", "tono")} for a in partes])
     if vivas:
         return _ev_validacion(vivas[-1], nombre, etapa, clave)
     caidas = [e for e in evs if e.tipo == tipo]
@@ -201,13 +219,20 @@ def _entrevista_agente(p) -> dict:
     return _act("entrevista_agente", "Entrevista Red Human", "Entrevista IA", "en_curso", resultado="Programada · esperando al candidato", accion={"tipo": "esperar_entrevista"})
 
 
+def _es_reclutamiento(eh) -> bool:
+    return not eh.es_ipv and (getattr(eh, "clase", "") or "reclutamiento") == "reclutamiento"
+
+
 def _entrevista_inicial(p) -> dict:
     nombre = "Entrevista de Reclutamiento" if es_franquicia(p) else "Entrevista inicial"
-    ehs = [eh for eh in p.entrevistas_humanas if not eh.es_ipv and not eh.cancelada]
+    # 2026-10-02 (§5/§14): solo la entrevista de Reclutamiento cuenta aquí — omitir la IPV humana no la omite, y una
+    # entrevista adicional (encargado, franquiciatario) nunca reemplaza el resultado aprobado de la inicial.
+    ehs = [eh for eh in p.entrevistas_humanas if _es_reclutamiento(eh) and not eh.cancelada]
     if not ehs:
         return _act("entrevista_inicial", nombre, "Entrevista Humana", "pendiente", resultado="Sin agendar",
                     accion={"tipo": "agregar_evaluacion", "evaluacion": "entrevista_humana"})
-    eh = ehs[-1]
+    aprobada = next((x for x in ehs if x.realizada and x.resultado == "aprobado"), None)
+    eh = aprobada or ehs[-1]
     if eh.realizada and eh.resultado:
         ok = eh.resultado == "aprobado"
         return _act("entrevista_inicial", nombre, "Entrevista Humana", "hecha", resultado="Aprobada" if ok else "No aprobada", tono="good" if ok else "bad",
@@ -219,35 +244,87 @@ def _entrevista_inicial(p) -> dict:
                 accion={"tipo": "registrar_entrevista"})
 
 
-def _ipv(p) -> dict:
-    from .fraiche import resultado_desde_ipv  # noqa: F401  (misma regla de conclusión)
+def modalidades_ipv(p) -> List[dict]:
+    """2026-10-02 (§5): cada IPV identificada como «IPV Red Human» (Filtro Red Human) o «IPV humana» (Filtro humano),
+    con responsable, estado y resultado propios. Se conservan ambas si se realizan las dos."""
+    from .fraiche import texto_resultado_ipv
 
-    textos = {"recomendable": "Recomendable", "bajo_reserva": "Bajo reserva", "no_recomendable": "No recomendable", "requiere_revision": "Requiere revisión"}
-    mejor = None
+    salida = []
+    for e in p.entrevistas:
+        if (e.fase or "") not in ("ipv", "inicial_ipv"):
+            continue
+        calc = (e.evaluacion_ipv or {}).get("calculo") or {}
+        if e.evaluacion_ipv:
+            estado, res = "hecha" if calc.get("conclusion") else "por_validar", texto_resultado_ipv(calc)
+        elif e.estado in ("cancelada",):
+            continue
+        elif e.estado in ("interrumpida", "parcial"):
+            estado, res = "en_curso", "Interrumpida · se puede reabrir"
+        else:
+            estado, res = "en_curso", "Esperando al candidato"
+        salida.append({"modo": "red_human", "nombre": "IPV Red Human", "columna": "Entrevista IA", "codigo": e.codigo, "responsable": "Red Human (IA) · decide RH",
+                       "estado": estado, "resultado": res, "conclusion": calc.get("conclusion") or "", "fecha": _iso(e.finalizada_en or e.creada_en)})
     for eh in p.entrevistas_humanas:
+        if not eh.es_ipv or eh.cancelada:
+            continue
         ri = eh.resultado_ipv or {}
-        calc = ri if ri.get("conclusion") else (ri.get("calculo") or {})
-        if eh.es_ipv and calc.get("conclusion"):
-            mejor = (calc, eh.entrevistador or "Entrevistador", eh.evaluada_en or eh.fecha)
-    if mejor is None:
-        for e in p.entrevistas:
-            calc = (e.evaluacion_ipv or {}).get("calculo") or {}
-            if calc.get("conclusion"):
-                mejor = (calc, "Red Human (IA) · decide RH", e.finalizada_en)
-    if mejor:
-        calc, quien, fecha = mejor
-        concl = calc.get("conclusion")
-        puntaje = calc.get("puntaje")
-        return _act("ipv", "IPV", "Entrevista Humana", "hecha" if concl != "requiere_revision" else "en_curso",
-                    resultado=textos.get(concl, concl) + (f" · {puntaje} pts" if puntaje is not None else ""),
-                    tono="good" if concl == "recomendable" else "warn" if concl in ("bajo_reserva", "requiere_revision") else "bad",
-                    revisado_por=quien, fecha=fecha, no_cumple=concl == "no_recomendable")
-    pendiente_h = any(eh.es_ipv and not eh.realizada and not eh.cancelada for eh in p.entrevistas_humanas)
-    if pendiente_h:
-        return _act("ipv", "IPV", "Entrevista Humana", "en_curso", resultado="IPV agendada", accion={"tipo": "registrar_entrevista"})
-    if any((e.fase or "") in ("ipv", "inicial_ipv") and e.estado != "evaluada" for e in p.entrevistas):
-        return _act("ipv", "IPV", "Entrevista Humana", "en_curso", resultado="IPV programada con Red Human", accion={"tipo": "esperar_entrevista"})
-    return _act("ipv", "IPV", "Entrevista Humana", "pendiente", resultado="Sin programar", accion={"tipo": "agregar_evaluacion", "evaluacion": "ipv"})
+        calc = ri if ("conclusion" in ri or "puntaje" in ri) else (ri.get("calculo") or {})
+        if ri:
+            estado, res = "hecha" if calc.get("conclusion") else "por_validar", texto_resultado_ipv(calc)
+        elif eh.realizada:
+            estado, res = "en_curso", "Realizada · falta registrar la rúbrica"
+        else:
+            estado, res = "en_curso", "Agendada"
+        salida.append({"modo": "humano", "nombre": "IPV humana", "columna": "Entrevista Humana", "id": eh.id, "responsable": eh.entrevistador or "Entrevistador",
+                       "estado": estado, "resultado": res, "conclusion": calc.get("conclusion") or "", "fecha": _iso(eh.evaluada_en or eh.fecha)})
+    return salida
+
+
+def _ipv(p) -> dict:
+    """La IPV se cumple con CUALQUIERA de las dos modalidades (RH decide si hace la otra; nunca se exigen ambas ni se
+    genera una segunda sola). Con las dos, prevalece la más reciente con conclusión y se muestran ambas."""
+    mods = modalidades_ipv(p)
+    con_concl = [m for m in mods if m["conclusion"]]
+    if con_concl:
+        m = sorted(con_concl, key=lambda x: x["fecha"] or "")[-1]
+        concl = m["conclusion"]
+        resultado = " · ".join(f"{x['nombre']}: {x['resultado']}" for x in con_concl) if len(con_concl) > 1 else m["resultado"]
+        return _act("ipv", "IPV", "Entrevista Humana", "hecha", resultado=resultado,
+                    tono="good" if concl == "recomendable" else "warn" if concl == "bajo_reserva" else "bad",
+                    revisado_por=m["responsable"], fecha=m["fecha"], no_cumple=concl == "no_recomendable", modalidades=mods)
+    por_validar = [m for m in mods if m["estado"] == "por_validar"]
+    if por_validar:
+        m = por_validar[-1]
+        return _act("ipv", "IPV", "Entrevista Humana", "en_curso", resultado=m["resultado"], tono="warn", revisado_por=m["responsable"], fecha=m["fecha"],
+                    detalle="Evidencia insuficiente en algunas competencias: valídalas en la entrevista humana o con una IPV humana.",
+                    accion={"tipo": "agregar_evaluacion", "evaluacion": "ipv", "modo": "humano"}, modalidades=mods)
+    curso = [m for m in mods if m["estado"] == "en_curso"]
+    if curso:
+        m = curso[-1]
+        acc = {"tipo": "registrar_entrevista", "entrevista_id": m.get("id")} if m["modo"] == "humano" else {"tipo": "esperar_entrevista"}
+        return _act("ipv", "IPV", "Entrevista Humana", "en_curso", resultado=f"{m['nombre']}: {m['resultado']}", revisado_por=m["responsable"], accion=acc, modalidades=mods)
+    return _act("ipv", "IPV", "Entrevista Humana", "pendiente", resultado="Sin programar · se recomienda IPV Red Human antes de la entrevista humana",
+                accion={"tipo": "agregar_evaluacion", "evaluacion": "ipv", "modo": "red_human"}, modalidades=mods)
+
+
+def _entrevistas_adicionales(p) -> List[dict]:
+    """§12/§14: entrevistas con encargado o franquiciatario (mismo flujo de agenda). Solo bloquean si RH las marcó obligatorias."""
+    from ..models import CLASES_ENTREVISTA_HUMANA
+
+    salida = []
+    for eh in p.entrevistas_humanas:
+        if eh.es_ipv or (eh.clase or "reclutamiento") == "reclutamiento" or eh.cancelada:
+            continue
+        nombre = CLASES_ENTREVISTA_HUMANA.get(eh.clase, "Entrevista adicional")
+        if eh.realizada and eh.resultado:
+            ok = eh.resultado == "aprobado"
+            salida.append(_act(f"entrevista_{eh.id}", nombre, "Entrevista Humana", "hecha", resultado="Aprobada" if ok else "No aprobada", tono="good" if ok else "bad",
+                               revisado_por=eh.entrevistador or "", fecha=eh.evaluada_en or eh.fecha, obligatoria=bool(eh.obligatoria), no_cumple=(not ok) and bool(eh.obligatoria)))
+        else:
+            salida.append(_act(f"entrevista_{eh.id}", nombre, "Entrevista Humana", "en_curso", resultado="Realizada · falta resultado" if eh.realizada else "Agendada",
+                               revisado_por=eh.entrevistador or "", fecha=eh.fecha, obligatoria=bool(eh.obligatoria),
+                               accion={"tipo": "registrar_entrevista", "entrevista_id": eh.id}))
+    return salida
 
 
 def estado_franquicia(p, evs=None) -> str:
@@ -309,11 +386,13 @@ def _contratacion_tienda(p) -> dict:
     falta = []
     if not e.condiciones_guardadas_en:
         falta.append("condiciones")
-    if (e.progreso or 0) < 100:
-        falta.append(f"documentos ({e.progreso or 0} %)")
     if not falta:
-        return _act("contratacion", "Condiciones y documentación de contratación", "Contratación", "hecha", resultado="Completa", tono="good",
-                    revisado_por=e.seleccionado_por or "", fecha=e.condiciones_guardadas_en)
+        # 2026-10-02 (§14): con las condiciones guardadas se puede iniciar Onboarding aunque falten documentos o el contrato
+        # firmado (se solicitan/generan allá y se exigen al completar el ingreso y el alta).
+        pendientes_docs = (e.progreso or 0) < 100
+        return _act("contratacion", "Condiciones y documentación de contratación", "Contratación", "hecha",
+                    resultado="Condiciones guardadas" + (f" · documentos {e.progreso or 0} % (siguen en Onboarding)" if pendientes_docs else " · documentos completos"),
+                    tono="good", revisado_por=e.seleccionado_por or "", fecha=e.condiciones_guardadas_en)
     return _act("contratacion", "Condiciones y documentación de contratación", "Contratación", "en_curso", resultado="Falta: " + ", ".join(falta), tono="warn",
                 revisado_por=e.seleccionado_por or "", accion={"tipo": "expediente"})
 
@@ -340,7 +419,7 @@ def _onboarding_tienda(p) -> List[dict]:
 
 def actividades(p, evs=None) -> List[dict]:
     evs = evs if evs is not None else evaluaciones_de(p)
-    acts = [_prefiltro(p), _filtro_mensaje(p), _entrevista_agente(p), _entrevista_inicial(p)]
+    acts = [_prefiltro(p), _filtro_mensaje(p), _entrevista_agente(p), _entrevista_inicial(p)] + _entrevistas_adicionales(p)
     if not es_ruta_fraiche(p):
         return acts
     if es_franquicia(p):
@@ -434,11 +513,18 @@ def siguiente_accion(p, acts: List[dict], integ: dict) -> dict:
                 "preparar_alta_sap": "Preparar alta: confirmar datos para SAP",
             }
             acc["texto"] = textos.get(acc["tipo"], f"Pendiente: {a['nombre']}" + (f" ({a['resultado']})" if a.get("resultado") else ""))
+            if acc["tipo"] == "agregar_evaluacion" and acc.get("evaluacion") == "ipv":
+                acc["texto"] = ("Programar IPV humana para validar lo pendiente" if acc.get("modo") == "humano"
+                                else "Programar IPV con Red Human (recomendada antes de la entrevista humana)")
             acc["actividad"] = a["clave"]
             return acc
     # todo lo de esta columna está hecho → avanzar
     idx = _orden(col)
     if col == "Entrevista IA":
+        ipv = next((a for a in acts if a["clave"] == "ipv"), None)
+        if ipv and ipv["estado"] == "pendiente":  # §5: se RECOMIENDA la IPV Red Human antes de la entrevista humana (RH decide el orden)
+            return {"tipo": "agregar_evaluacion", "evaluacion": "ipv", "modo": "red_human", "actividad": "ipv",
+                    "texto": "Programar IPV con Red Human (recomendada antes de la entrevista humana)"}
         return {"tipo": "agregar_evaluacion", "evaluacion": "entrevista_humana", "texto": "Agregar evaluación: Entrevista humana (pasa a Filtro humano)"}
     if col == "Prefiltro":
         return {"tipo": "mover", "etapa": "Entrevista IA", "texto": "Pasar a Filtro Red Human"}

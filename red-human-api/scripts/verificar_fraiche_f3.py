@@ -65,7 +65,8 @@ check(g.temas == fraiche.TEMAS_ENTREVISTA_INICIAL and len(g.preguntas) == 6, "gu
 check(not any("sueldo" in x.lower() or "salari" in x.lower() for x in g.preguntas + [g.enfoque] if "No hablar de sueldo" not in x) and "¿Cuándo podrías empezar a trabajar en Fraiche?" in g.preguntas, "sin sueldo y con la pregunta exacta de disponibilidad")
 prompt = ia.prompt_entrevistador("Cajero(a)", "Manejo de efectivo", "Ana", g.preguntas, temas=g.temas, contexto_previo=["¿Has manejado efectivo? → Sí"], incluye_ipv=True)
 check("¿Has manejado efectivo? → Sí" in prompt and "NO vuelvas a hacer estas preguntas" in prompt, "el prompt parte del prefiltro y no lo relee")
-check(fraiche.MARCADOR_IPV in prompt and "Orientación al cliente (30%)" in prompt and "manejo de objeciones" in prompt, "el prompt incluye el bloque IPV con la rúbrica y el marcador")
+check(fraiche.MARCADOR_IPV in prompt and "Cuéntame una ocasión en que atendiste a un cliente inconforme." in prompt and "manejo de objeciones" in prompt
+      and "UNA cosa a la vez" in prompt and "Máximo 3" in prompt, "el prompt incluye el bloque IPV con las preguntas base, las reglas de conversación y el marcador")
 ini, ipv = ia.dividir_transcript_ipv([{"rol": "assistant", "texto": "Hola"}, {"rol": "user", "texto": "sí"}, {"rol": "assistant", "texto": f"{fraiche.MARCADOR_IPV}. Un cliente está molesto…"}, {"rol": "user", "texto": "Lo escucho"}])
 check(len(ini) == 2 and len(ipv) == 2, "el transcript se parte en el marcador")
 
@@ -120,14 +121,13 @@ with TestClient(app) as client:
         "Salí porque cerraron la sucursal donde trabajaba.",
         "Tengo disponibilidad de lunes a domingo y puedo iniciar la próxima semana.",
         "Una vez un cliente llegó molesto por un cobro doble; lo escuché y le devolví el cargo.",
-        "Espero alrededor de catorce mil pesos mensuales.",
         # bloque IPV (6 situaciones)
         "Escuché al cliente molesto, identifiqué que quería su reembolso y lo resolví con mi encargada.",
-        "Cuando hay pocas ventas ofrezco productos en promoción a cada persona que entra.",
-        "Con presión por la meta me organizo y sigo intentando sin desanimarme.",
+        "Un día con pocas ventas ofrecí los productos en promoción a cada persona que entró.",
+        "Una vez con presión por la meta me organicé por horas y seguí intentando sin desanimarme.",
         "Apoyé a un compañero cubriendo su caja cuando se enfermó.",
         "Cometí un error de cobro, lo reconocí de inmediato y lo corregí con mi jefa.",
-        "Cuando cambian una promoción la aprendo rápido y la aplico ese mismo día.",
+        "Cuando cambiaron una promoción la aprendí rápido y la apliqué ese mismo día.",
         "Gracias",
     ]
     ultimo = {}

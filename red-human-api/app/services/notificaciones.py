@@ -61,6 +61,8 @@ def _texto_cita_entrevista_humana(eh: EntrevistaHumana, c: Postulacion) -> str:
     """Fragmento reusado por agendada/recordatorio/modificada, candidato/entrevistador/cliente."""
     cuando = _fecha_hora_legible_mx(eh.fecha) if eh.fecha else "fecha por confirmar"
     texto = f"con {eh.entrevistador or 'nuestro equipo de RH'} el {cuando}, modalidad {eh.modalidad or 'por confirmar'}."
+    if getattr(eh, "es_ipv", False):
+        texto = "(Entrevista IPV: situaciones reales de tienda) " + texto
     detalle = _detalle_modalidad(eh, c)
     if detalle:
         texto += f" {detalle}."
@@ -272,10 +274,10 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
 
     if evento == "entrevista_modificada" and eh:
         if audiencia == "candidato":
-            texto = f"Hola {primer_nombre}, tu entrevista cambió — ahora es {cita}"
+            texto = f"Hola {primer_nombre}, tu entrevista se reprogramó — ahora es {cita} Si no puedes asistir, respóndenos por aquí."
             return texto if canal == "whatsapp" else (plantillas_correo.html_candidato(d, "modificada") if d else _html("Tu entrevista fue modificada", texto))
         if audiencia == "entrevistador":
-            texto = f"La entrevista con {c.nombre} ({puesto}) fue modificada — ahora es {cita}"
+            texto = f"La entrevista con {c.nombre} ({puesto}) fue reprogramada — ahora es {cita} Ficha del candidato y registro de tu evaluación: {d.get('liga_expediente', '')}".strip()
             return texto if canal == "whatsapp" else (plantillas_correo.html_entrevistador(d, "modificada") if d else _html("Entrevista modificada", texto))
         if audiencia == "cliente":
             texto = f"La entrevista con el candidato {c.nombre} ({puesto}) fue modificada — ahora es {cita}"
@@ -455,10 +457,19 @@ async def _enviar_y_registrar(
             # plantilla de Meta «alerta_entrevista_asignada» (6 parámetros); si Meta la rechaza cae a texto
             envio = await enviar_plantilla_entrevista(destino, plantilla_entrevista, contenido)
         elif canal == "whatsapp":
-            envio = await enviar_mensaje(destino, contenido)
+            from . import avisos
+
+            # 2026-10-02 (Fraiche §4): en Telegram un número puede ser de varios roles (modo prueba): el aviso que
+            # no es para el candidato va identificado por rol y, si el chat aún no está vinculado, queda pendiente.
+            cuerpo = contenido if destinatario_tipo == "candidato" or settings.whatsapp_provider != "telegram" else avisos._encabezado(destinatario_tipo, contenido)
+            envio = await enviar_mensaje(destino, cuerpo)
+            if envio.get("sin_vinculo"):
+                avisos.encolar_pendiente(db, destino, destinatario_tipo, cuerpo, p.codigo or "")
+                envio = {**envio, "detalle": f"{envio.get('detalle', '')} Se entregará en cuanto vincule su chat."}
         else:
-            asunto, html = contenido
-            envio = await enviar_correo(destino, asunto, html)
+            asunto, html = contenido[0], contenido[1]
+            adjuntos = contenido[2] if len(contenido) > 2 else None  # 2026-10-02: ficha del candidato al entrevistador
+            envio = await (enviar_correo(destino, asunto, html, adjuntos=adjuntos) if adjuntos else enviar_correo(destino, asunto, html))
     except Exception as ex:  # que un proveedor falle no debe tumbar el flujo que disparó el evento
         envio = {"enviado": False, "proveedor": "error", "detalle": str(ex)}
     db.add(NotificacionEnviada(
@@ -601,6 +612,8 @@ async def disparar(
             ))
         if regla.entrevistador_correo:
             contenido = _mensaje(evento, "entrevistador", "correo", c, eh, liga, extra)
+            if extra.get("_adjuntos_entrevistador") and isinstance(contenido, tuple):
+                contenido = (contenido[0], contenido[1], extra["_adjuntos_entrevistador"])
             resultados.append(await _enviar_y_registrar(
                 db, c, evento, "entrevistador", "correo", _correo_entrevistador(db, eh), contenido
             ))

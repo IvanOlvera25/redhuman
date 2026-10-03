@@ -42,7 +42,23 @@ def publica(token: str, db: Session = Depends(get_db)):
         ],
         # 2026-09-19: la carta de intención se descarga desde la misma liga (la comparte RH por WhatsApp)
         "cartaDisponible": bool(e.puesto and e.sueldo),
+        # 2026-10-02 (Fraiche §13): el contrato (borrador para revisión) también se descarga desde aquí
+        "contratoDisponible": bool(e.puesto and e.sueldo and e.tipo_contratacion and e.fecha_ingreso and e.condiciones_guardadas_en),
     }
+
+
+@router.get("/publica/{token}/contrato")
+def contrato_publico(token: str, db: Session = Depends(get_db)):
+    from ..services.pdf import pdf_contrato
+
+    e = _por_token(db, token)
+    if not (e.puesto and e.sueldo and e.tipo_contratacion and e.fecha_ingreso and e.condiciones_guardadas_en):
+        raise HTTPException(404, "Tu contrato todavía no está listo.")
+    try:
+        pdf = pdf_contrato({**_datos_carta_intencion(e), "borrador": True})
+    except Exception as ex:  # noqa: BLE001
+        raise HTTPException(503, f"No se pudo generar el contrato: {ex}")
+    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": 'inline; filename="contrato.pdf"'})
 
 
 @router.get("/publica/{token}/carta-intencion")

@@ -19,6 +19,7 @@ import {
   type DocumentoExpedientePublico,
   type ExpedientePublico,
   urlCartaIntencionPublica,
+  urlContratoPublico,
   fetchFirmasPublicas,
   signUrlFirmaCandidato,
 } from "@/lib/api";
@@ -136,6 +137,11 @@ export default function ExpedientePublico() {
               {info.cartaDisponible && (
                 <a href={urlCartaIntencionPublica(token)} target="_blank" rel="noreferrer" className="mt-4 inline-flex items-center gap-1.5 rounded-xl border border-brand/40 bg-brand-soft px-4 py-2 text-sm font-semibold text-brand transition hover:brightness-105">
                   Descargar mi carta de intención (PDF)
+                </a>
+              )}
+              {info.contratoDisponible && (
+                <a href={urlContratoPublico(token)} target="_blank" rel="noreferrer" className="mt-2 ml-2 inline-flex items-center gap-1.5 rounded-xl border border-brand/40 bg-brand-soft px-4 py-2 text-sm font-semibold text-brand transition hover:brightness-105">
+                  Descargar mi contrato (PDF)
                 </a>
               )}
             </div>

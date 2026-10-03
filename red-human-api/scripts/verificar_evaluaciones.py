@@ -103,24 +103,24 @@ with TestClient(app) as client:
     P = r.json()["id"]
     check(client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Evaluación", "manual": True}).status_code == 400, "la columna Evaluación ya no existe (2026-10-01)")
     client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Entrevista Humana", "manual": True})
-    check(client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "horoscopo"}).status_code == 400, "tipo inválido → 400")
-    check(client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "psicometrica"}).status_code == 400, "psicométrica exige una prueba del catálogo")
-    check(client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "psicometrica", "prueba_id": VIEJA}).status_code == 409, "…y activa")
-    r = client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "psicometrica", "prueba_id": CLEAVER})
+    check(client.post(f"/evaluaciones/postulaciones/{P}", json={"enviar": False, "tipo": "horoscopo"}).status_code == 400, "tipo inválido → 400")
+    check(client.post(f"/evaluaciones/postulaciones/{P}", json={"enviar": False, "tipo": "psicometrica"}).status_code == 400, "psicométrica exige una prueba del catálogo")
+    check(client.post(f"/evaluaciones/postulaciones/{P}", json={"enviar": False, "tipo": "psicometrica", "prueba_id": VIEJA}).status_code == 409, "…y activa")
+    r = client.post(f"/evaluaciones/postulaciones/{P}", json={"enviar": False, "tipo": "psicometrica", "prueba_id": CLEAVER})
     PSI = r.json()
     check(r.status_code == 201 and PSI["nombre"] == "Cleaver" and PSI["modo"] == "integrada" and PSI["proveedor"] == "Psicometrix",
           "la psicométrica toma nombre, modo y proveedor del catálogo")
     check(PSI["estado"] == "pendiente" and PSI["pasoIntegrada"] == "asignada", "con consentimiento de privacidad nace Pendiente (Integrada: Asignada)")
     tipos = {}
     for tipo in ("tecnica", "referencias", "socioeconomico", "otra"):
-        tipos[tipo] = client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": tipo}).json()
+        tipos[tipo] = client.post(f"/evaluaciones/postulaciones/{P}", json={"enviar": False, "tipo": tipo}).json()
     check([tipos[t]["tipoTexto"] for t in tipos] == ["Técnica o caso práctico", "Referencias", "Socioeconómico", "Otra"], "los seis tipos del menú")
     check(client.get(f"/candidatos/{P}").json()["etapa"] == "Entrevista Humana", "agregar evaluaciones NO mueve la columna del pipeline")
 
     print("\n--- 3. Consentimiento general antes de enviar ---")
     r = client.post("/candidatos", json={"nombre": "Sin Consentimiento", "telefono": "5534343434", "vacante": vac["id"], "consentimiento": False, "fuente": "RH"})
     P2 = r.json()["id"]
-    r = client.post(f"/evaluaciones/postulaciones/{P2}", json={"tipo": "referencias"})
+    r = client.post(f"/evaluaciones/postulaciones/{P2}", json={"enviar": False, "tipo": "referencias"})
     SIN = r.json()
     check(SIN["estado"] == "en_espera_consentimiento" and SIN["estadoTexto"] == "En espera de consentimiento", "sin consentimiento: «En espera de consentimiento»")
     r = client.post(f"/evaluaciones/{SIN['id']}/enviar")
@@ -129,7 +129,7 @@ with TestClient(app) as client:
     check(client.get(f"/evaluaciones/postulaciones/{P2}").json()[0]["estado"] == "pendiente", "al registrar el consentimiento pasa a Pendiente")
 
     print("\n--- 4. Estudio médico: consentimiento expreso por escrito (electrónico) ---")
-    r = client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "medico", "nombre": "Examen médico de ingreso"})
+    r = client.post(f"/evaluaciones/postulaciones/{P}", json={"enviar": False, "tipo": "medico", "nombre": "Examen médico de ingreso"})
     MED = r.json()
     check(MED["estado"] == "en_espera_consentimiento" and MED["requiereConsentimientoExpreso"] and MED["ligaConsentimiento"],
           "el médico nace «En espera de consentimiento» aunque haya consentimiento general, con liga de aceptación")
@@ -231,7 +231,7 @@ with TestClient(app) as client:
     r = client.post("/candidatos", json={"nombre": "Diego Onboarding", "telefono": "5556565656", "correo": "diego@correo.mx", "vacante": vac["id"], "consentimiento": True, "fuente": "RH"})
     P3 = r.json()["id"]
     EXP3 = client.patch(f"/candidatos/{P3}/etapa", json={"etapa": "Contratación", "manual": True}).json()["expedienteId"]
-    client.post(f"/evaluaciones/postulaciones/{P3}", json={"tipo": "psicometrica", "prueba_id": CLEAVER})
+    client.post(f"/evaluaciones/postulaciones/{P3}", json={"enviar": False, "tipo": "psicometrica", "prueba_id": CLEAVER})
     avisos = client.get(f"/onboarding/expedientes/{EXP3}/resumen").json()["avisosEvaluaciones"]
     check(any("Médico" in a for a in avisos) and any("Referencias" in a for a in avisos) and any("Cleaver" in a and "sin revisar" in a for a in avisos),
           f"el resumen de «Enviar a Onboarding» avisa lo sugerido que falta y lo no revisado ({len(avisos)} avisos)")

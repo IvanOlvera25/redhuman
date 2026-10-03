@@ -11,6 +11,7 @@
 import type {
   CalculoIPV,
   Candidato,
+  EnvioAviso,
   NivelIPV,
   RecomendacionEntrevistaHumana,
   ResultadoEntrevistaHumana,
@@ -1304,9 +1305,16 @@ export function programarEntrevistaHumana(
     notificar?: NotificarAccion;
     /** Fraiche (spec §8): esta ronda es la Entrevista IPV con entrevistador humano (misma rúbrica que Red Human). */
     esIpv?: boolean;
+    /** 2026-10-02: reclutamiento | encargado | franquiciatario (mismo flujo de agenda). */
+    clase?: "reclutamiento" | "encargado" | "franquiciatario";
+    obligatoria?: boolean;
+    enviarFicha?: boolean;
   },
 ) {
-  return post<{ resultados: ResultadoNotificacion[]; advertencias?: string[]; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana`, {
+  return post<{ resultados: ResultadoNotificacion[]; advertencias?: string[]; movioAFiltroHumano?: boolean; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana`, {
+    clase: datos.clase ?? "reclutamiento",
+    obligatoria: datos.obligatoria ?? false,
+    enviar_ficha: datos.enviarFicha ?? true,
     tipo_entrevistador: datos.tipoEntrevistador,
     entrevistador_usuario_id: datos.entrevistadorUsuarioId ?? null,
     entrevistador_contacto_id: datos.entrevistadorContactoId ?? null,
@@ -1339,9 +1347,11 @@ export function modificarEntrevistaHumana(
     telefonoContacto?: string;
     comentario?: string;
     notificar?: NotificarAccion;
+    entrevistaId?: number;
   },
 ) {
-  return patch<Candidato>(`/candidatos/${codigo}/entrevista-humana`, {
+  return patch<Candidato & { resultados?: ResultadoNotificacion[]; advertencias?: string[]; avisoTeams?: string | null }>(`/candidatos/${codigo}/entrevista-humana`, {
+    entrevista_id: datos.entrevistaId ?? null,
     fecha: datos.fecha,
     hora: datos.hora,
     modalidad: datos.modalidad,
@@ -1355,17 +1365,26 @@ export function modificarEntrevistaHumana(
 
 /** Botón «Cancelar» — Fase D, evento "entrevista_cancelada". No mueve la etapa del candidato:
  * RH agenda otra ronda o mueve la tarjeta a mano según corresponda. */
-export function cancelarEntrevistaHumana(codigo: string, notificar?: NotificarAccion) {
-  return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/cancelar`, { notificar: notificarSnake(notificar) });
+export function cancelarEntrevistaHumana(codigo: string, notificar?: NotificarAccion, entrevistaId?: number) {
+  return post<Candidato & { resultados?: ResultadoNotificacion[]; advertencias?: string[] }>(`/candidatos/${codigo}/entrevista-humana/cancelar`, {
+    notificar: notificarSnake(notificar), entrevista_id: entrevistaId ?? null,
+  });
+}
+
+/** 2026-10-02: «Reenviar» el aviso de la cita (al candidato, al entrevistador o a ambos) y registrar su estado. */
+export function reenviarAvisoEntrevistaHumana(codigo: string, datos: { entrevistaId?: number; destinatario?: "candidato" | "entrevistador" | ""; canal?: "whatsapp" | "correo" | "" }) {
+  return post<{ resultados: ResultadoNotificacion[]; advertencias?: string[]; liga: string; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana/reenviar`, {
+    entrevista_id: datos.entrevistaId ?? null, destinatario: datos.destinatario ?? "", canal: datos.canal ?? "",
+  });
 }
 
 /** Ya no pide resultado — solo confirma que la entrevista ocurrió y dispara el correo con la
  * liga pública al entrevistador (ver registrarResultadoEntrevistaHumana para la captura manual).
  * `forzarPrueba` (Lote 4): inerte salvo que Modo Prueba esté activo en el servidor. */
-export function marcarEntrevistaHumanaRealizada(codigo: string, forzarPrueba = false, notificar?: NotificarAccion) {
+export function marcarEntrevistaHumanaRealizada(codigo: string, forzarPrueba = false, notificar?: NotificarAccion, entrevistaId?: number) {
   return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(
     `/candidatos/${codigo}/entrevista-humana/realizada${forzarPrueba ? "?forzar_prueba=true" : ""}`,
-    { notificar: notificarSnake(notificar) },
+    { notificar: notificarSnake(notificar), entrevista_id: entrevistaId ?? null },
   );
 }
 
@@ -1381,10 +1400,12 @@ export function registrarResultadoEntrevistaHumana(
     notificar?: NotificarAccion;
     /** Fraiche (spec §8): rúbrica IPV — obligatoria si la ronda es IPV. */
     rubrica?: RubricaIPV;
+    entrevistaId?: number;
   },
   forzarPrueba = false,
 ) {
   return post<Candidato>(`/candidatos/${codigo}/entrevista-humana/resultado${forzarPrueba ? "?forzar_prueba=true" : ""}`, {
+    entrevista_id: datos.entrevistaId ?? null,
     resultado: datos.resultado ?? "",
     recomendacion: datos.recomendacion ?? "",
     comentario: datos.comentario ?? "",
@@ -1422,7 +1443,7 @@ export const NIVELES_IPV: { clave: NivelIPV; nombre: string }[] = [
   { clave: "alto", nombre: "Alto" },
   { clave: "medio", nombre: "Medio" },
   { clave: "bajo", nombre: "Bajo" },
-  { clave: "sin_evidencia", nombre: "Sin evidencia" },
+  { clave: "sin_evidencia", nombre: "Por validar — evidencia insuficiente" },
 ];
 export const CONCLUSIONES_IPV: Record<string, string> = { recomendable: "Recomendable", bajo_reserva: "Bajo reserva", no_recomendable: "No recomendable" };
 export const EQUIVALENCIAS_IPV_DEFAULT = { alto: 100, medio: 70, bajo: 30 };
@@ -1562,14 +1583,31 @@ export function fetchTableroReclutamiento(filtros: { destino?: string; reclutado
 
 /** «Programar IPV → Red Human»: continúa en la sesión inicial pendiente (misma_sesion) o crea una sesión solo IPV. */
 export function programarIpvRedHuman(codigo: string) {
-  return post<{ modo: "misma_sesion" | "sesion_ipv"; entrevista: { id: string; token: string; fase: string }; candidato: Candidato }>(`/candidatos/${codigo}/ipv`, { modo: "red_human" });
+  return post<{ modo: "misma_sesion" | "sesion_ipv"; entrevista: { id: string; token: string; fase: string }; liga: string; envios: EnvioAviso[]; candidato: Candidato }>(`/candidatos/${codigo}/ipv`, { modo: "red_human" });
 }
 
-export function recordatorioEntrevistaHumana(codigo: string, forzarPrueba = false, notificar?: NotificarAccion) {
+/** 2026-10-02 (Fraiche §1): «Reenviar» la liga de la IPV con Red Human al candidato. */
+export function reenviarIpvRedHuman(codigo: string, entrevista = "") {
+  return post<{ liga: string; envios: EnvioAviso[]; candidato: Candidato }>(`/candidatos/${codigo}/ipv/reenviar`, { entrevista });
+}
+
+export function recordatorioEntrevistaHumana(codigo: string, forzarPrueba = false, notificar?: NotificarAccion, entrevistaId?: number) {
   return post<{ resultados: ResultadoNotificacion[]; candidato: Candidato }>(
     `/candidatos/${codigo}/entrevista-humana/recordatorio${forzarPrueba ? "?forzar_prueba=true" : ""}`,
-    { notificar: notificarSnake(notificar) },
+    { notificar: notificarSnake(notificar), entrevista_id: entrevistaId ?? null },
   );
+}
+
+/** Texto corto por envío: «Telegram al candidato: enviado» / «…: pendiente — falta vincular». */
+export function lineasEnvios(envios: EnvioAviso[] | undefined): { estado: EnvioAviso["estado"]; texto: string; ligaVinculo?: string }[] {
+  const QUIEN: Record<string, string> = { candidato: "candidato", entrevistador: "entrevistador", responsable: "responsable", medico: "médico", franquiciatario: "franquiciatario", rh: "RH" };
+  return (envios ?? []).map((e) => {
+    const canal = e.canalNombre || (e.canal === "correo" ? "Correo" : e.canal === "whatsapp" ? CANAL : "Aviso");
+    const a = e.destinatario ? ` al ${QUIEN[e.destinatario] ?? e.destinatario}` : "";
+    const destino = e.destino ? ` (${e.destino})` : "";
+    const est = e.estado === "enviado" ? "enviado" : e.estado === "pendiente" ? "pendiente" : "fallido";
+    return { estado: e.estado, texto: `${canal}${a}${destino}: ${est}${e.estado !== "enviado" && e.detalle ? ` — ${e.detalle}` : ""}`, ligaVinculo: e.ligaVinculo };
+  });
 }
 
 /* Liga pública del entrevistador (sin sesión, un solo submit) */
@@ -1595,7 +1633,11 @@ export interface EntrevistaHumanaPublica {
     capacitacion: { curso: string; aprobado: boolean; calificacion: number }[];
     archivos: { id: number; tipo: string; nombre: string; mime: string }[];
     documentos: { tipo: string; estado: string; obligatorio: boolean }[];
+    /** 2026-10-02 (§12): resultado de la IPV Red Human y puntos concretos por validar en esta entrevista. */
+    ipvRedHuman?: { puntaje: number | null; puntajeProvisional?: number | null; pesoPendiente?: number | null; conclusion: string; porValidar: string[]; reservas: string[]; puntosValidar: string[] } | null;
+    puntosPorValidar?: string[];
   };
+  tipoEntrevista?: string;
   /* --- Fraiche (spec §8): ronda IPV — rúbrica y equivalencias vigentes --- */
   esIpv?: boolean;
   rubricaIpv?: {
@@ -2295,6 +2337,11 @@ export function urlContratoPdf(expedienteId: number) {
   return urlArchivo(`/contratacion/expedientes/${expedienteId}/contrato`);
 }
 
+/** 2026-10-02 (Fraiche §13): enviar el contrato (borrador para revisión) al candidato. */
+export function enviarContrato(expedienteId: number, canal: "whatsapp" | "correo") {
+  return post<{ canal: string; enviado: boolean; detalle: string }>(`/contratacion/expedientes/${expedienteId}/contrato/enviar`, { canal });
+}
+
 export function enviarCartaIntencion(expedienteId: number, canal: "whatsapp" | "correo") {
   return post<{ canal: string; enviado: boolean; detalle: string }>(`/contratacion/expedientes/${expedienteId}/carta-intencion/enviar`, { canal });
 }
@@ -2330,10 +2377,15 @@ export interface ExpedientePublico {
   documentos: DocumentoExpedientePublico[];
   /** 2026-09-19: la carta de intención se puede descargar desde la liga pública. */
   cartaDisponible?: boolean;
+  /** 2026-10-02 (Fraiche §13): el contrato (para revisión) también se descarga desde la liga pública. */
+  contratoDisponible?: boolean;
 }
 
 export function urlCartaIntencionPublica(token: string) {
   return urlArchivo(`/expedientes/publica/${token}/carta-intencion`);
+}
+export function urlContratoPublico(token: string) {
+  return urlArchivo(`/expedientes/publica/${token}/contrato`);
 }
 
 export function fetchExpedientePublico(token: string) {
@@ -3461,6 +3513,8 @@ export interface ResumenOnboarding {
   expedienteId: number;
   etapa: string;
   requisitos: { items: { clave: string; nombre: string; ok: boolean }[]; faltan: string[]; completos: boolean };
+  /** 2026-10-02 (Fraiche §14) */
+  fechaIngreso?: string | null; documentosPendientes?: string[]; documentosRecibidos?: string[]; contratoFaltan?: string[]; contratoFirmado?: boolean;
   modoPrueba: boolean;
   puedeIniciar: boolean;
   iniciado: boolean;
@@ -3604,16 +3658,19 @@ export const TIPOS_EVALUACION: { valor: TipoEvaluacion; texto: string }[] = [
 ];
 export type ModoPrueba = "integrada" | "enlace" | "manual";
 export const MODOS_PRUEBA: { valor: ModoPrueba; texto: string }[] = [
-  { valor: "integrada", texto: "Integrada" },
-  { valor: "enlace", texto: "Enlace externo" },
-  { valor: "manual", texto: "Carga manual" },
+  { valor: "integrada", texto: "Conectada con el proveedor" },
+  { valor: "enlace", texto: "Liga del proveedor" },
+  { valor: "manual", texto: "Carga manual de resultados" },
 ];
 export interface PruebaPsicometrica {
   id: number; clave: string; nombre: string; descripcion: string; puestos: string[]; modo: ModoPrueba; modoTexto: string;
   proveedor: string; idProveedor: string; url: string; activa: boolean; actualizada: string | null; sugerida?: boolean;
+  /** 2026-10-02: pruebas que incluye la batería e instrucciones para el candidato. */
+  incluye?: string[]; instrucciones?: string;
 }
 export interface PruebaPsicometricaIn {
   clave: string; nombre: string; descripcion: string; puestos: string[]; modo: ModoPrueba; proveedor: string; id_proveedor: string; url: string; activa: boolean;
+  incluye?: string[]; instrucciones?: string;
 }
 export interface EvaluacionCandidato {
   id: string; tipo: TipoEvaluacion; tipoTexto: string; nombre: string; pruebaId: number | null; modo: ModoPrueba; modoTexto: string;
@@ -3643,6 +3700,17 @@ export interface EvaluacionCandidato {
   cifrado: boolean;
   /** Socioeconómico: propuesta de Red Human (solo con permiso en lo médico). */
   resumenIa?: string;
+  /* --- 2026-10-02 (Fraiche §7-10) --- */
+  /** Liga que usa el CANDIDATO para hacer su prueba (nunca el formulario del evaluador). */
+  ligaCandidato?: string | null;
+  estadoPsicometria?: "pendiente" | "en_curso" | "esperando_resultado" | "completada" | "cancelada" | null;
+  estadoPsicometriaTexto?: string | null;
+  proveedorTexto?: string;
+  envios?: EnvioAviso[];
+  envioEstado?: "" | "enviado" | "pendiente" | "fallido";
+  referenciasModo?: "candidato" | "responsable" | null;
+  referenciasResumen?: { total: number; requeridas: number; validadas: number; completas: boolean; texto: string; porEstado: Record<string, number> } | null;
+  ligaReferenciasCandidato?: string | null;
 }
 export type EstadoEvaluacionFraiche = "pendiente" | "realizada_pendiente" | "con_resultado" | "no_realizada" | "cancelada";
 export const ESTADOS_EVALUACION_FRAICHE: Record<EstadoEvaluacionFraiche, string> = {
@@ -3651,10 +3719,18 @@ export const ESTADOS_EVALUACION_FRAICHE: Record<EstadoEvaluacionFraiche, string>
 export interface EvaluatestResultado {
   indice_afinidad: number | null; igi: number | null; competencias: string[]; fortalezas: string[]; areas_oportunidad: string[]; riesgo: string;
 }
+/** 2026-10-02 (Fraiche §10): datos de la referencia (los captura el candidato o el responsable) + su validación (solo responsable/RH). */
 export interface ReferenciaLaboral {
-  contacto: string; empresa: string; telefono: string; puesto: string; fecha_verificacion: string;
-  resultado: "favorable" | "con_observaciones" | "desfavorable" | "sin_respuesta" | ""; comentarios: string; responsable: string;
+  empresa: string; puesto_candidato: string; periodo: string; contacto_nombre: string; contacto_cargo: string; relacion: string; telefono: string; correo: string;
+  contesto_nombre?: string; contesto_cargo?: string; fecha_contacto?: string; medio?: string;
+  confirma_puesto?: "si" | "no" | "no_informado" | ""; confirma_periodo?: "si" | "no" | "no_informado" | "";
+  desempeno?: string; motivo_salida?: string; recontrataria?: "si" | "no" | "no_informado" | "";
+  observaciones?: string; resultado?: "favorable" | "con_observaciones" | "desfavorable" | ""; no_contactada?: boolean; intentos?: number;
+  estado?: "pendiente_datos" | "por_contactar" | "no_contactada" | "validada"; estadoTexto?: string; capturada_por?: string;
 }
+export const REFERENCIA_VACIA: ReferenciaLaboral = {
+  empresa: "", puesto_candidato: "", periodo: "", contacto_nombre: "", contacto_cargo: "", relacion: "", telefono: "", correo: "",
+};
 export interface ResponsableEvaluacion { usuario_id?: number | null; contacto_id?: number | null; nombre?: string; correo?: string; whatsapp?: string }
 /** Nombres FIJOS de las evaluaciones tipo «Otra» del proceso Fraiche (spec §10, §12). */
 export const NOMBRE_EVALUACION_FRANQUICIATARIO = "Entrevista con franquiciatario";
@@ -3678,8 +3754,22 @@ export function ligaExternaEvaluacion(codigo: string, opts: { enviar?: boolean; 
 export function marcarEvaluacionRealizada(codigo: string, nota = "") {
   return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/realizada`, { nota });
 }
-export function guardarReferenciasEvaluacion(codigo: string, referencias: ReferenciaLaboral[]) {
-  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/referencias`, { referencias });
+export function guardarReferenciasEvaluacion(codigo: string, referencias: ReferenciaLaboral[], requeridas?: number) {
+  return post<EvaluacionCandidato & { envios?: EnvioAviso[] }>(`/evaluaciones/${codigo}/referencias`, { referencias, requeridas: requeridas ?? null });
+}
+/** «Reenviar»: aviso con su liga al candidato y/o al responsable. */
+export function reenviarAvisosEvaluacion(codigo: string, destinatario: "candidato" | "responsable" | "" = "") {
+  return post<EvaluacionCandidato & { envios: EnvioAviso[] }>(`/evaluaciones/${codigo}/avisos`, { destinatario });
+}
+/* Referencias: liga del candidato (captura de datos) y liga del responsable (captura + validación) */
+export function fetchReferenciasCandidato(token: string) {
+  return get<{ candidato: string; vacante: string; empresa: string; requeridas: number; referencias: ReferenciaLaboral[]; cerrada: boolean }>(`/evaluaciones-externas/referencias/${token}`);
+}
+export function capturarReferenciasCandidato(token: string, referencias: ReferenciaLaboral[]) {
+  return post<{ ok: boolean; total: number; requeridas: number }>(`/evaluaciones-externas/referencias/${token}`, { referencias });
+}
+export function guardarReferenciasResponsable(token: string, referencias: ReferenciaLaboral[]) {
+  return post<{ ok: boolean; referencias: ReferenciaLaboral[]; resumen: NonNullable<EvaluacionCandidato["referenciasResumen"]>; estadoTexto: string }>(`/evaluaciones-externas/publica/${token}/referencias`, { referencias });
 }
 /** Dictamen médico completo (cifrado en la base): solo con permiso; cada consulta queda en bitácora. */
 export function fetchDetalleMedico(codigo: string) {
@@ -3690,11 +3780,13 @@ export function urlAdjuntoEvaluacion(codigo: string, indice: number) {
 }
 /* Liga pública de la persona externa (sin sesión) */
 export interface EvaluacionExternaPublica {
-  evaluacion: string; tipo: TipoEvaluacion; rol: "encargado" | "socioeconomico" | "medico" | "franquiciatario" | "externo";
+  evaluacion: string; tipo: TipoEvaluacion; rol: "encargado" | "socioeconomico" | "medico" | "franquiciatario" | "externo" | "referencias";
   candidato: string; vacante: string; sucursal: string; empresa: string; responsable: string; citaEn: string | null; citaLugar: string;
   estado: EstadoEvaluacionFraiche; estadoTexto: string; yaRegistrada: boolean; cerrada: boolean; consentimientoPendiente: boolean;
   opciones: { valor: string; texto: string }[]; pideArchivo: boolean; instrucciones: string;
   resumenCandidato: { experiencia: string; ubicacion: string } | null;
+  referencias?: ReferenciaLaboral[] | null;
+  referenciasResumen?: EvaluacionCandidato["referenciasResumen"];
 }
 export function fetchEvaluacionExternaPublica(token: string) {
   return get<EvaluacionExternaPublica>(`/evaluaciones-externas/publica/${token}`);
@@ -3733,11 +3825,13 @@ export function agregarEvaluacionCandidato(codigo: string, datos: {
   tipo: TipoEvaluacion; nombre?: string; prueba_id?: number | null; modo?: string; proveedor?: string; url?: string; notas?: string;
   /** Fraiche (spec §10): responsable (usuario / contacto del Cliente / captura), cita y liga de acceso para la persona externa. */
   responsable?: ResponsableEvaluacion; cita?: string; cita_lugar?: string; generar_liga?: boolean;
+  /** 2026-10-02: varias pruebas a la vez, avisos automáticos, correo del candidato y referencias. */
+  prueba_ids?: number[]; enviar?: boolean; correo_candidato?: string; referencias_modo?: "candidato" | "responsable" | ""; referencias_requeridas?: number | null;
 }) {
-  return post<EvaluacionCandidato>(`/evaluaciones/postulaciones/${codigo}`, datos);
+  return post<EvaluacionCandidato & { evaluaciones?: EvaluacionCandidato[]; omitidas?: string[]; envios?: EnvioAviso[] }>(`/evaluaciones/postulaciones/${codigo}`, datos);
 }
-export function enviarEvaluacion(codigo: string) {
-  return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/enviar`, {});
+export function enviarEvaluacion(codigo: string, correo = "") {
+  return post<EvaluacionCandidato & { envios?: EnvioAviso[] }>(`/evaluaciones/${codigo}/enviar`, { correo });
 }
 export function avanzarEvaluacionIntegrada(codigo: string) {
   return post<EvaluacionCandidato>(`/evaluaciones/${codigo}/integracion/avanzar`, {});

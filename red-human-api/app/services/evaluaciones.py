@@ -248,23 +248,113 @@ def archivar_resultado_previo(ev: EvaluacionCandidato, usuario: str) -> None:
     }]
 
 
-def normalizar_referencias(lista: List[dict]) -> List[dict]:
-    """Referencias laborales (spec §10): contactos, fecha de verificación, resultado, comentarios y responsable."""
+# ---------- Referencias laborales estructuradas (2026-10-02, cambios integrados §10) ----------
+# Datos (los captura el candidato por su liga o el responsable): empresa, puesto del candidato, periodo, contacto
+# (nombre, cargo, relación, teléfono, correo opcional). Validación (SOLO el responsable/RH): quién contestó, cargo,
+# fecha, medio, confirmación de puesto y periodo, desempeño, motivo de salida, ¿lo volverían a contratar?,
+# observaciones, resultado e informe. Capturar contactos NO es validarlos; no contestar NO es desfavorable.
+
+ESTADOS_REFERENCIA = {"pendiente_datos": "Pendiente de datos", "por_contactar": "Por contactar", "no_contactada": "No contactada", "validada": "Validada"}
+RESULTADOS_REFERENCIA = {"favorable": "Favorable", "con_observaciones": "Con observaciones", "desfavorable": "Desfavorable"}
+SI_NO_NI = ("si", "no", "no_informado")
+CAMPOS_DATOS_REFERENCIA = ("empresa", "puesto_candidato", "periodo", "contacto_nombre", "contacto_cargo", "relacion", "telefono", "correo")
+CAMPOS_VALIDACION_REFERENCIA = ("contesto_nombre", "contesto_cargo", "fecha_contacto", "medio", "confirma_puesto", "confirma_periodo",
+                                "desempeno", "motivo_salida", "recontrataria", "observaciones", "resultado", "no_contactada", "intentos")
+
+
+def _txt(r: dict, k: str, n: int = 200) -> str:
+    return str(r.get(k) or "").strip()[:n]
+
+
+def estado_referencia(r: dict) -> str:
+    if not (r.get("empresa") and r.get("contacto_nombre") and r.get("telefono")):
+        return "pendiente_datos"
+    if r.get("resultado") in RESULTADOS_REFERENCIA and r.get("fecha_contacto"):
+        return "validada"
+    if r.get("no_contactada"):
+        return "no_contactada"
+    return "por_contactar"
+
+
+def normalizar_referencias(lista: List[dict], previas: Optional[List[dict]] = None, validar: bool = True) -> List[dict]:
+    """`validar=False` (liga del candidato): solo se toman los DATOS; la validación previa se conserva tal cual.
+    Acepta el formato anterior (contacto, puesto, fecha_verificacion, comentarios) para no perder registros."""
+    previas = previas or []
     salida = []
-    for r in lista or []:
+    for i, r in enumerate(lista or []):
         if not isinstance(r, dict):
             continue
-        contacto = str(r.get("contacto") or "").strip()[:150]
-        if not contacto:
+        ant = previas[i] if i < len(previas) and isinstance(previas[i], dict) else {}
+        d = {
+            "empresa": _txt(r, "empresa", 150), "puesto_candidato": _txt(r, "puesto_candidato", 120) or _txt(r, "puesto", 120),
+            "periodo": _txt(r, "periodo", 80), "contacto_nombre": _txt(r, "contacto_nombre", 150) or _txt(r, "contacto", 150),
+            "contacto_cargo": _txt(r, "contacto_cargo", 120), "relacion": _txt(r, "relacion", 120),
+            "telefono": _txt(r, "telefono", 30), "correo": _txt(r, "correo", 200),
+        }
+        if not any(d.values()):
             continue
-        resultado = str(r.get("resultado") or "").strip().lower()
-        salida.append({
-            "contacto": contacto, "empresa": str(r.get("empresa") or "").strip()[:150], "telefono": str(r.get("telefono") or "").strip()[:30],
-            "puesto": str(r.get("puesto") or "").strip()[:120], "fecha_verificacion": str(r.get("fecha_verificacion") or "").strip()[:10],
-            "resultado": resultado if resultado in ("favorable", "con_observaciones", "desfavorable", "sin_respuesta", "") else "",
-            "comentarios": str(r.get("comentarios") or "").strip()[:1000], "responsable": str(r.get("responsable") or "").strip()[:150],
-        })
+        if validar:
+            resultado = _txt(r, "resultado", 30).lower()
+            v = {
+                "contesto_nombre": _txt(r, "contesto_nombre", 150), "contesto_cargo": _txt(r, "contesto_cargo", 120),
+                "fecha_contacto": _txt(r, "fecha_contacto", 10) or _txt(r, "fecha_verificacion", 10), "medio": _txt(r, "medio", 60),
+                "confirma_puesto": _txt(r, "confirma_puesto", 15) if _txt(r, "confirma_puesto", 15) in SI_NO_NI else "",
+                "confirma_periodo": _txt(r, "confirma_periodo", 15) if _txt(r, "confirma_periodo", 15) in SI_NO_NI else "",
+                "desempeno": _txt(r, "desempeno", 1000) or "", "motivo_salida": _txt(r, "motivo_salida", 500),
+                "recontrataria": _txt(r, "recontrataria", 15) if _txt(r, "recontrataria", 15) in SI_NO_NI else "",
+                "observaciones": _txt(r, "observaciones", 1500) or _txt(r, "comentarios", 1500),
+                "resultado": resultado if resultado in RESULTADOS_REFERENCIA else "",
+                "no_contactada": bool(r.get("no_contactada")) or resultado == "sin_respuesta",
+                "intentos": int(r.get("intentos") or 0) if str(r.get("intentos") or "0").isdigit() else 0,
+                "informe": ant.get("informe") or r.get("informe") or None,
+            }
+        else:
+            v = {k: ant.get(k) for k in CAMPOS_VALIDACION_REFERENCIA + ("informe",) if k in ant}
+        ref = {**d, **v, "capturada_por": _txt(r, "capturada_por", 60) or ant.get("capturada_por") or ""}
+        ref["estado"] = estado_referencia(ref)
+        ref["estadoTexto"] = ESTADOS_REFERENCIA[ref["estado"]]
+        salida.append(ref)
     return salida[:10]
+
+
+def resumen_referencias(ev: EvaluacionCandidato) -> dict:
+    refs = [r for r in (ev.referencias or []) if isinstance(r, dict)]
+    por = {k: sum(1 for r in refs if (r.get("estado") or estado_referencia(r)) == k) for k in ESTADOS_REFERENCIA}
+    requeridas = max(1, int(ev.referencias_requeridas or 1))
+    return {"total": len(refs), "requeridas": requeridas, "validadas": por["validada"], "porEstado": por,
+            "completas": por["validada"] >= requeridas,
+            "texto": f"{por['validada']} de {requeridas} validada{'s' if requeridas != 1 else ''}"}
+
+
+# ---------- Psicometría conectada (2026-10-02, cambios integrados §7-8) ----------
+
+def liga_candidato(ev: EvaluacionCandidato) -> str:
+    """La liga que el CANDIDATO usa para hacer su prueba (nunca el formulario del evaluador)."""
+    if ev.liga_candidato:
+        return ev.liga_candidato
+    if ev.clave_proveedor:
+        from . import psicometricas as psi
+
+        return psi.url_candidato(ev.clave_proveedor) or ""
+    if ev.tipo == "psicometrica" and ev.modo == "enlace":
+        return ev.url or ""
+    return ""
+
+
+ESTADOS_PSICOMETRIA = {"pendiente": "Pendiente", "en_curso": "En curso", "esperando_resultado": "Esperando resultado", "completada": "Completada",
+                       "cancelada": "Cancelada"}
+
+
+def estado_psicometria(ev: EvaluacionCandidato) -> str:
+    if ev.estado == "fallida":
+        return "cancelada"
+    if ev.estado in ("resultado_recibido", "revisada"):
+        return "completada"
+    if ev.paso_integrada == "completada" or ev.realizada_en:
+        return "esperando_resultado"
+    if ev.estado == "en_proceso" or ev.clave_proveedor or ev.liga_enviada_en:
+        return "en_curso"
+    return "pendiente"
 
 
 def evaluatest_normalizado(datos: dict) -> dict:

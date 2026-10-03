@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import { Check, CheckCircle2, Loader2, PenLine, Plus, Rocket, X, XCircle } from "lucide-react";
 import { Badge, Button } from "@/components/ui";
 import { CampoRH, ModalMarco, inputRH } from "@/components/dashboard/modulos-rh";
+import { CampoPlazo, fechaDePlazo, textoPlazo } from "@/components/dashboard/onboarding/campo-plazo";
 import {
   fetchResumenOnboarding, iniciarOnboarding, lineasResultados,
   type ClavePlazoOnboarding, type DocumentoPlantillaOnboarding, type RecursoPlantillaOnboarding, type ResultadoIniciarOnboarding,
@@ -28,9 +29,9 @@ const ORIGEN: Record<string, string> = {
 };
 const TIPOS_RECURSO: TipoRecursoOnboarding[] = ["correo", "equipo", "accesos", "otro"];
 
-function textoPlazo(dias: number) {
-  if (!dias) return "el día de ingreso";
-  return dias < 0 ? `${-dias} día${dias === -1 ? "" : "s"} antes` : `${dias} día${dias === 1 ? "" : "s"} después`;
+function textoPlazoConFecha(dias: number, fecha?: string | null) {
+  const f = fechaDePlazo(fecha, dias);
+  return f ? `${textoPlazo(dias)} · ${f}` : textoPlazo(dias);
 }
 
 export function ModalIniciarOnboarding({ expedienteId, onClose, onIniciado }: {
@@ -205,6 +206,22 @@ export function ModalIniciarOnboarding({ expedienteId, onClose, onIniciado }: {
             </p>
           )}
 
+          {/* 2026-10-02 (§14): iniciar no exige documentos ni contrato — se solicitan/generan aquí; se exigen al completar el ingreso */}
+          {((resumen.documentosPendientes?.length ?? 0) > 0 || !resumen.contratoFirmado) && (
+            <div className="mt-4 rounded-xl border border-border-soft bg-surface-2/50 p-3 text-[12px] leading-relaxed text-ink-2">
+              {(resumen.documentosPendientes?.length ?? 0) > 0 && (
+                <p>Documentos pendientes ({resumen.documentosPendientes!.join(", ")}): se solicitan automáticamente al iniciar; los ya recibidos se reutilizan.</p>
+              )}
+              {!resumen.contratoFirmado && (
+                <p className="mt-1">
+                  Contrato pendiente: lo generas en el Onboarding con las mismas condiciones guardadas
+                  {(resumen.contratoFaltan?.length ?? 0) > 0 ? ` (falta: ${resumen.contratoFaltan!.join(", ")})` : ""}.
+                </p>
+              )}
+              <p className="mt-1 text-ink-3">Iniciar el Onboarding no completa el ingreso ni da de alta en SAP: eso se exige al confirmar el ingreso y preparar el alta.</p>
+            </div>
+          )}
+
           <h3 className="mt-5 text-sm font-semibold">Tareas</h3>
           <datalist id="usuarios-onboarding">{resumen.usuarios.map((x) => <option key={x.id} value={x.nombre} />)}</datalist>
           <div className="mt-2 overflow-x-auto">
@@ -213,7 +230,7 @@ export function ModalIniciarOnboarding({ expedienteId, onClose, onIniciado }: {
                 <tr className="text-left text-[11px] text-ink-3">
                   <th className="py-1.5 font-medium">Tarea</th>
                   <th className="py-1.5 font-medium">Responsable</th>
-                  <th className="w-36 py-1.5 font-medium">Plazo</th>
+                  <th className="w-56 py-1.5 font-medium">Plazo</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border-faint">
@@ -227,8 +244,8 @@ export function ModalIniciarOnboarding({ expedienteId, onClose, onIniciado }: {
                     </td>
                     <td className="py-2">
                       {editando ? (
-                        <input type="number" value={plazos[k] ?? 0} onChange={(e) => setPlazos({ ...plazos, [k]: Number(e.target.value) || 0 })} className={inputRH} aria-label="Días respecto al ingreso" />
-                      ) : textoPlazo(plazos[k] ?? 0)}
+                        <CampoPlazo dias={plazos[k] ?? 0} onChange={(d) => setPlazos({ ...plazos, [k]: d })} fechaIngreso={resumen.fechaIngreso} />
+                      ) : textoPlazoConFecha(plazos[k] ?? 0, resumen.fechaIngreso)}
                     </td>
                   </tr>
                 ))}
@@ -251,11 +268,11 @@ export function ModalIniciarOnboarding({ expedienteId, onClose, onIniciado }: {
                     </td>
                     <td className="py-2">
                       {editando ? (
-                        <div className="flex items-center gap-1">
-                          <input type="number" value={r.dias} onChange={(e) => setRecursos(recursos.map((x, j) => (j === i ? { ...x, dias: Number(e.target.value) || 0 } : x)))} className={inputRH} />
-                          <button type="button" aria-label="Quitar" onClick={() => setRecursos(recursos.filter((_, j) => j !== i))} className="text-ink-3 hover:text-bad"><X className="h-4 w-4" /></button>
+                        <div className="flex items-start gap-1">
+                          <CampoPlazo dias={r.dias} onChange={(d) => setRecursos(recursos.map((x, j) => (j === i ? { ...x, dias: d } : x)))} fechaIngreso={resumen.fechaIngreso} />
+                          <button type="button" aria-label="Quitar" onClick={() => setRecursos(recursos.filter((_, j) => j !== i))} className="mt-2.5 text-ink-3 hover:text-bad"><X className="h-4 w-4" /></button>
                         </div>
-                      ) : textoPlazo(r.dias)}
+                      ) : textoPlazoConFecha(r.dias, resumen.fechaIngreso)}
                     </td>
                   </tr>
                 ))}

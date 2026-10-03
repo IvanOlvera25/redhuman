@@ -482,3 +482,41 @@ Reemplaza en la rama `demo-fraiche` la vista «Ruta Fraiche / Etapas», la colum
   excluyen. Producción: `AMBIENTE_PRUEBA=false` + `scripts/preparar_produccion.py --ejecutar` (apaga Modo Prueba, cierra
   postulaciones de prueba y da de baja lógica a personas solo de prueba; nada se borra). Regresión:
   `scripts/verificar_ambiente_prueba.py`.
+
+## Cambios integrados Fraiche — avisos, IPV, evaluaciones y contrato (2026-10-02)
+
+- Avisos por rol: `services/avisos.py` (`avisar` → un destinatario con SU liga; estado real `enviado | pendiente | fallido`).
+  En Telegram un número puede ser candidato y responsable a la vez: lo que no es para el candidato va encabezado con el
+  rol (`_encabezado`) y no entra a su chat. Sin vínculo → `AvisoPendiente` (se pide vincular UNA vez con
+  `telegram.liga_vinculo(tel, "R")`) y `webhooks._entregar_avisos_pendientes` los entrega al vincular. Un chat que solo
+  es de responsables (`_es_solo_responsable`) nunca crea un candidato. `notificaciones._enviar_y_registrar` usa la misma cola.
+- IPV Red Human (`POST /candidatos/{c}/ipv`): la liga sale SOLA (`enviar_liga_ipv`), regresa `liga` + `envios` y queda en
+  `Entrevista.envios`; `POST …/ipv/reenviar`. Nunca regresa de etapa (corresponde a Filtro Red Human).
+- Entrevistas humanas: varias por postulación con agenda, resultado y avisos propios (`EntrevistaHumana.clase` =
+  reclutamiento | encargado | franquiciatario, `obligatoria`, `envios`); todas las acciones aceptan `entrevista_id`.
+  Programar mueve a Filtro humano SOLO desde Prefiltro/Filtro Red Human (`_antes_de_filtro_humano`). Reprogramar avisa por
+  defecto a candidato y entrevistador (`REGLAS_NOTIFICACION_DEFAULT` de modificada/cancelada), reinicia
+  `recordatorio_enviado_en` y regresa `resultados`; `POST …/entrevista-humana/reenviar`. El entrevistador recibe la ficha
+  PDF (`_ficha_para_entrevistador`, sin contacto/médico/socioeconómico) y su liga muestra IPV Red Human y puntos a validar
+  (sin teléfono/correo del candidato si es externo). Solo la entrevista de Reclutamiento cuenta como «Entrevista inicial»;
+  una adicional nunca reemplaza la aprobada y solo bloquea si es obligatoria (`fraiche_pipeline._entrevistas_adicionales`).
+- IPV: preguntas base y repreguntas en `fraiche.COMPETENCIAS_IPV[*].pregunta` / `REPREGUNTAS_IPV` (máx. 3 por competencia);
+  `calcular_ipv` da `puntaje_provisional` + `peso_pendiente` sin redistribuir cuando falta evidencia («Por validar —
+  evidencia insuficiente», nunca «Medio» por default); `ia.evaluar_ipv` agrega `reservas` y `puntos_validar`. Modalidades
+  IPV Red Human / IPV humana en `fraiche_pipeline.modalidades_ipv`; cualquiera cumple, la otra es opcional.
+- Evaluaciones: `prueba_ids` asigna varias psicometrías (sin duplicar las vivas); `PruebaPsicometrica.incluye/instrucciones`;
+  al asignar (`enviar`, default true) `avisar_asignacion` crea la evaluación real en el proveedor (`_activar_psicometria`,
+  nunca duplica al reintentar) y manda a cada quien su liga: candidato = `sev.liga_candidato` (NUNCA `/evaluacion/{token}`),
+  responsable = liga externa. Estados de psicometría `sev.estado_psicometria` (Pendiente / En curso / Esperando resultado /
+  Completada). Médico: el consentimiento sale solo al crearlo y al aceptarse se avisa al médico. `POST /evaluaciones/{c}/avisos`.
+- Referencias (§10): `sev.normalizar_referencias` (datos + validación), estados `ESTADOS_REFERENCIA`, `referencias_requeridas`
+  (vacante o evaluación; no 3 fijo). Liga del candidato `/referencias/{token}` (solo datos) y del responsable
+  `/evaluacion/{token}` (captura + validación). Favorable exige las requeridas validadas (409 en revisar/resultado).
+- Contrato (§13): `contratacion.faltantes_contrato` = solo datos guardados; se genera/envía en Contratación y Onboarding
+  (`POST …/contrato/enviar`, `/expedientes/publica/{token}/contrato`); los documentos se exigen al ingreso y al alta.
+  Onboarding (§14): plazos «Antes / Día / Después» (`components/dashboard/onboarding/campo-plazo.tsx`), el plazo
+  «documentos» fija `Expediente.documentos_hasta` (`onb.aplicar_plazo_documentos`); iniciar no exige documentos ni contrato.
+- Ficha: barra fija al pie con UN botón de siguiente acción (desde cualquier pestaña) + «Más acciones ⋯» (Agregar evaluación,
+  Movimiento excepcional, Generar ficha, Descartar); `MenuAcciones` nunca se desborda (alto máximo + scroll). Movimiento
+  excepcional exige motivo en rutas de Fraiche. Socioeconómico de tienda propia: solo Cajero y Encargado.
+- Regresión: `scripts/verificar_fraiche_cambios_integrados.py`.

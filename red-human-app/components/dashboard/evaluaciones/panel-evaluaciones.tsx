@@ -16,9 +16,10 @@ import {
 } from "lucide-react";
 import { Badge, Button, Card, Eyebrow } from "@/components/ui";
 import { MenuAcciones } from "@/components/dashboard/menu-acciones";
+import { EstadoEnvios } from "@/components/dashboard/estado-envios";
 import { CampoRH, ModalMarco, inputRH } from "@/components/dashboard/modulos-rh";
 import {
-  CAMPOS_EVALUATEST, NOMBRE_EVALUACION_ENCARGADO, NOMBRE_EVALUACION_FRANQUICIATARIO, TIPOS_EVALUACION,
+  CAMPOS_EVALUATEST, MODOS_PRUEBA, NOMBRE_EVALUACION_ENCARGADO, NOMBRE_EVALUACION_FRANQUICIATARIO, REFERENCIA_VACIA, TIPOS_EVALUACION, lineasEnvios, reenviarAvisosEvaluacion,
   agregarEvaluacionCandidato, avanzarEvaluacionIntegrada, cancelarEvaluacion, cargarResultadoEvaluacion, editarEvaluacion,
   enviarEvaluacion, enviarLigaConsentimientoMedico, fetchDetalleMedico, fetchEntrevistadores, fetchEvaluacionesCandidato,
   fetchPruebasPsicometricas, guardarReferenciasEvaluacion, ligaExternaEvaluacion, lineasResultados, marcarEvaluacionRealizada,
@@ -36,12 +37,14 @@ const ORIGEN_TEXTO: Record<string, string> = {
   manual: "Manual",
   webhook: "Webhook",
 };
-const RESULTADOS_REFERENCIA: { valor: ReferenciaLaboral["resultado"]; texto: string }[] = [
-  { valor: "", texto: "Sin verificar" },
+const RESULTADOS_REFERENCIA: { valor: NonNullable<ReferenciaLaboral["resultado"]>; texto: string }[] = [
+  { valor: "", texto: "Sin validar" },
   { valor: "favorable", texto: "Favorable" },
   { valor: "con_observaciones", texto: "Con observaciones" },
   { valor: "desfavorable", texto: "Desfavorable" },
-  { valor: "sin_respuesta", texto: "Sin respuesta" },
+];
+const SI_NO: { valor: "" | "si" | "no" | "no_informado"; texto: string }[] = [
+  { valor: "", texto: "—" }, { valor: "si", texto: "Sí" }, { valor: "no", texto: "No" }, { valor: "no_informado", texto: "No informado" },
 ];
 const textareaRH = "w-full rounded-xl border border-border-soft bg-surface px-3 py-2 text-sm outline-none focus:border-brand";
 
@@ -78,8 +81,11 @@ function tonoEstado(e: EvaluacionCandidato): "good" | "warn" | "bad" | "neutral"
 function cerrada(e: EvaluacionCandidato) {
   return e.estado === "revisada" || e.estado === "fallida" || e.estadoFraiche === "no_realizada" || e.estadoFraiche === "cancelada";
 }
-function referenciasVerificadas(refs: ReferenciaLaboral[] | null | undefined) {
-  return (refs ?? []).filter((r) => r.resultado && r.resultado !== "sin_respuesta").length;
+/** 2026-10-02 (§8): estado CLARO de la psicometría (Pendiente / En curso / Esperando resultado / Completada). */
+function textoEstado(e: EvaluacionCandidato) {
+  if (e.estado === "revisada" && e.dictamenTexto) return `Revisada · ${e.dictamenTexto}`;
+  if (e.tipo === "psicometrica" && e.estadoPsicometriaTexto) return e.estadoPsicometriaTexto;
+  return e.estadoFraicheTexto;
 }
 
 /* ---------- Responsable / cita (bloque compartido por Agregar y Editar) ---------- */
@@ -164,8 +170,9 @@ function BloqueResponsable({ f, onChange, contactos, clienteNombre }: {
 }
 
 /* ---------- Panel ---------- */
-export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, clienteNombre }: {
+export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, clienteNombre, accionesRuta, excluir }: {
   codigo: string; puesto?: string; live: boolean; version?: number; contactos?: ContactoEvaluacion[]; clienteNombre?: string;
+  accionesRuta?: { etiqueta: string; descripcion?: string; onClick: () => void }[]; excluir?: string[];
 }) {
   const [lista, setLista] = useState<EvaluacionCandidato[] | null>(null);
   const [error, setError] = useState("");
@@ -180,6 +187,25 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
   const [agregar, setAgregar] = useState(false);
   /* Resultado del último envío de liga externa (líneas por canal + liga para copiar). */
   const [envioLiga, setEnvioLiga] = useState<{ id: string; liga: string; lineas: { ok: boolean; texto: string }[] } | null>(null);
+  /* §8: si el proveedor exige correo y falta, se captura aquí y se guarda en la ficha del candidato. */
+  const [pedirCorreo, setPedirCorreo] = useState<{ id: string; correo: string } | null>(null);
+  async function enviarPsico(e: EvaluacionCandidato, correo = "") {
+    setOcupado(e.id);
+    setError("");
+    setAviso("");
+    const r = await enviarEvaluacion(e.id, correo);
+    setOcupado("");
+    if (!r.ok) {
+      if (/correo/i.test(r.error)) setPedirCorreo({ id: e.id, correo });
+      return setError(r.error);
+    }
+    setPedirCorreo(null);
+    const l = lineasEnvios(r.data.envios);
+    setAviso(l.length ? l.map((x) => `${x.estado === "enviado" ? "✓" : "✗"} ${x.texto}`).join(" · ") : `«${e.nombre}» enviada.`);
+    void cargar();
+  }
+  const psicos = (lista ?? []).filter((x) => x.tipo === "psicometrica" && x.estado !== "fallida");
+  const psicosHechas = psicos.filter((x) => x.estadoPsicometria === "completada").length;
 
   const cargar = useCallback(async () => setLista((await fetchEvaluacionesCandidato(codigo)) ?? []), [codigo]);
   useEffect(() => {
@@ -207,6 +233,7 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
         <div>
           <Eyebrow>Evaluaciones y verificaciones</Eyebrow>
           <p className="mt-1 text-[12px] text-ink-3">Psicométricas, técnicas, referencias, médico y socioeconómico. No mueven la columna del pipeline.</p>
+          {psicos.length > 1 && <p className="mt-1 text-[12px] font-semibold text-ink-2">Psicometría: {psicosHechas} de {psicos.length} completadas</p>}
         </div>
         {live && <Button size="sm" variant="outline" onClick={() => setAgregar(true)}><ClipboardCheck className="h-4 w-4" /> Agregar</Button>}
       </div>
@@ -225,24 +252,25 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
                   <div className="min-w-0 flex-1">
                     <p className="flex items-center gap-1.5 truncate text-sm font-semibold">
                       {e.tipo === "medico" && <Stethoscope className="h-3.5 w-3.5 text-ink-3" />} {e.nombre}
-                      <span className="font-normal text-ink-3">· {e.tipoTexto} · {e.modoTexto}</span>
+                      <span className="font-normal text-ink-3">· {e.tipoTexto}{e.tipo === "psicometrica" || e.modo !== "manual" ? ` · ${e.proveedorTexto || e.modoTexto}` : ""}</span>
                     </p>
                     <p className="truncate text-[11px] text-ink-3">
-                      {e.estadoTexto}
-                      {e.pasoIntegrada ? ` · Integrada: ${PASOS[e.pasoIntegrada] ?? e.pasoIntegrada}` : ""}
+                      {e.tipo === "psicometrica" ? (e.estadoPsicometriaTexto ?? e.estadoTexto) : e.estadoTexto}
+                      {e.pasoIntegrada && e.tipo !== "psicometrica" ? ` · Paso: ${PASOS[e.pasoIntegrada] ?? e.pasoIntegrada}` : ""}
                       {e.resultadoCargadoPor ? ` · Resultado cargado por ${e.resultadoCargadoPor}` : ""}
                       {e.revisadaPor ? ` · revisada por ${e.revisadaPor}` : ""}
                       {e.estado === "fallida" && e.motivoFallida ? ` · Motivo: ${e.motivoFallida}` : ""}
                     </p>
                   </div>
-                  <Badge tone={tonoEstado(e)}>{e.estado === "revisada" && e.dictamenTexto ? `Revisada · ${e.dictamenTexto}` : e.estadoFraicheTexto}</Badge>
+                  <Badge tone={tonoEstado(e)}>{textoEstado(e)}</Badge>
                   {live && e.estado === "pendiente" && (
-                    <Button size="sm" variant="outline" disabled={Boolean(ocupado)} onClick={() => accion(e.id, () => enviarEvaluacion(e.id), `«${e.nombre}» enviada.`)}>
-                      {ocupado === e.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Enviar
+                    <Button size="sm" variant="outline" disabled={Boolean(ocupado)}
+                      onClick={() => (e.tipo === "psicometrica" ? void enviarPsico(e) : accion(e.id, () => enviarEvaluacion(e.id), `«${e.nombre}» enviada.`))}>
+                      {ocupado === e.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} {e.tipo === "psicometrica" ? (e.envioEstado === "fallido" ? "Reintentar envío" : "Enviar al candidato") : "Enviar"}
                     </Button>
                   )}
                   {live && e.estado === "en_proceso" && e.conectadaProveedor && (
-                    <Button size="sm" variant="outline" disabled={Boolean(ocupado)} title="Pregunta a Psicométricas.mx si ya terminó (por si su aviso no llegó)"
+                    <Button size="sm" variant="outline" disabled={Boolean(ocupado)} title="Pregunta al proveedor si ya terminó (por si su aviso no llegó)"
                       onClick={() => accion(e.id, async () => {
                         const r = await sincronizarEvaluacion(e.id);
                         if (r.ok) setAviso(r.data.sincronizacion === "resultado_recibido" ? "Resultado recibido de Psicométricas.mx." : "El candidato aún no termina sus pruebas.");
@@ -266,15 +294,19 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
                         ...((e.estado === "pendiente" || e.estado === "en_proceso" || e.estadoFraiche === "realizada_pendiente") && !cerrada(e) && !(e.tipo === "medico" && e.informeRestringido)
                           ? [{ etiqueta: "Adjuntar resultado / informe…", icono: <FileUp className="h-4 w-4" />, onClick: () => setResultado(e) }]
                           : []),
-                        ...(!cerrada(e)
-                          ? [{ etiqueta: "Enviar liga a la persona externa", icono: <Link2 className="h-4 w-4" />, onClick: () => accion(e.id, async () => {
+                        ...(!cerrada(e) && e.tipo !== "psicometrica"
+                          ? [{ etiqueta: "Enviar liga al responsable", icono: <Link2 className="h-4 w-4" />, onClick: () => accion(e.id, async () => {
                               const r = await ligaExternaEvaluacion(e.id, { enviar: true });
                               if (r.ok) setEnvioLiga({ id: e.id, liga: r.data.liga, lineas: lineasResultados(r.data.resultados) });
                               return r;
                             }) }]
                           : []),
-                        ...(e.ligaExterna
-                          ? [{ etiqueta: "Copiar liga", icono: <Copy className="h-4 w-4" />, onClick: () => copiar(e.ligaExterna!, "Liga de la persona externa copiada.") }]
+                        // §8: «Copiar liga» de una psicometría entrega la liga del CANDIDATO, nunca el formulario del evaluador
+                        ...(e.tipo === "psicometrica" && e.ligaCandidato
+                          ? [{ etiqueta: "Copiar liga del candidato", icono: <Copy className="h-4 w-4" />, onClick: () => copiar(e.ligaCandidato!, "Liga del candidato copiada.") }]
+                          : []),
+                        ...(e.ligaExterna && e.tipo !== "psicometrica"
+                          ? [{ etiqueta: "Copiar liga del responsable", icono: <Copy className="h-4 w-4" />, onClick: () => copiar(e.ligaExterna!, "Liga del responsable copiada.") }]
                           : []),
                         ...(e.estadoFraiche === "pendiente" && !cerrada(e)
                           ? [{ etiqueta: "Marcar realizada (resultado pendiente)", icono: <CheckCircle2 className="h-4 w-4" />, onClick: () => accion(e.id, () => marcarEvaluacionRealizada(e.id), `«${e.nombre}» marcada como realizada; falta el resultado.`) }]
@@ -312,8 +344,8 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
                     )}
                     {e.decision && e.dictamenTexto && <span>{etiquetaDecision(e)}: <Badge tone={tonoDictamen(e)}>{e.dictamenTexto}</Badge></span>}
                     {e.origenResultado && <span className="rounded-full border border-border-soft px-2 py-0.5 text-[11px] text-ink-3">{ORIGEN_TEXTO[e.origenResultado] ?? e.origenResultado}</span>}
-                    {e.tipo === "referencias" && e.referencias && e.referencias.length > 0 && (
-                      <span className="text-ink-3">{e.referencias.length} referencia{e.referencias.length === 1 ? "" : "s"} · {referenciasVerificadas(e.referencias)} verificada{referenciasVerificadas(e.referencias) === 1 ? "" : "s"}</span>
+                    {e.tipo === "referencias" && e.referenciasResumen && (
+                      <span className="text-ink-3">{e.referenciasResumen.total} capturada{e.referenciasResumen.total === 1 ? "" : "s"} · {e.referenciasResumen.texto}</span>
                     )}
                   </div>
                 ) : null}
@@ -331,20 +363,49 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
 
                 {e.claveProveedor && (
                   <p className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-ink-2">
-                    Psicométricas.mx · clave <span className="font-mono">{e.claveProveedor}</span>
-                    {e.urlCandidato ? (
-                      <button type="button" className="font-semibold text-brand hover:underline" onClick={() => copiar(e.urlCandidato!, "Liga del candidato copiada.")}>
-                        Copiar liga del candidato
-                      </button>
-                    ) : (
-                      <span className="text-ink-3">(Psicométricas.mx le manda su liga por correo)</span>
-                    )}
+                    {e.proveedor || "Proveedor"} · clave del candidato <span className="font-mono">{e.claveProveedor}</span>
+                    {!e.ligaCandidato && <span className="text-ink-3">(el proveedor le manda su acceso por correo)</span>}
                   </p>
                 )}
+                {pedirCorreo?.id === e.id && (
+                  <div className="mt-2 flex flex-wrap items-end gap-2 rounded-xl border border-warn/30 bg-warn-soft/40 p-2.5">
+                    <CampoRH label="Correo del candidato (se guarda en su ficha)">
+                      <input type="email" value={pedirCorreo.correo} onChange={(x) => setPedirCorreo({ id: e.id, correo: x.target.value })} className={inputRH} placeholder="nombre@correo.com" />
+                    </CampoRH>
+                    <Button size="sm" disabled={!pedirCorreo.correo.trim() || Boolean(ocupado)} onClick={() => void enviarPsico(e, pedirCorreo.correo.trim())}>
+                      <Send className="h-4 w-4" /> Guardar y enviar
+                    </Button>
+                  </div>
+                )}
+                {/* 2026-10-02 (§9): avisos por destinatario con su estado + Copiar liga / Reenviar */}
+                {live && !cerrada(e) && (e.envios?.length || e.ligaCandidato || e.ligaReferenciasCandidato || e.ligaExterna) ? (
+                  <div className="mt-2">
+                    <EstadoEnvios
+                      compacto
+                      envios={e.envios}
+                      ligas={[
+                        { etiqueta: "Copiar liga del candidato", url: e.tipo === "psicometrica" ? e.ligaCandidato : e.tipo === "referencias" ? e.ligaReferenciasCandidato : e.ligaConsentimiento },
+                        { etiqueta: "Copiar liga del responsable", url: e.tipo !== "psicometrica" ? e.ligaExterna : null },
+                      ]}
+                      reenvios={[
+                        { etiqueta: "Reenviar al candidato", onClick: async () => {
+                          const r = await reenviarAvisosEvaluacion(e.id, "candidato");
+                          if (!r.ok) setError(r.error);
+                          void cargar();
+                        } },
+                        ...(e.responsable ? [{ etiqueta: "Reenviar al responsable", onClick: async () => {
+                          const r = await reenviarAvisosEvaluacion(e.id, "responsable");
+                          if (!r.ok) setError(r.error);
+                          void cargar();
+                        } }] : []),
+                      ]}
+                    />
+                  </div>
+                ) : null}
                 {e.estado === "en_espera_consentimiento" && (
                   <p className="mt-2 text-[12px] text-warn">
                     {e.requiereConsentimientoExpreso
-                      ? "Falta el consentimiento EXPRESO y POR ESCRITO del candidato para el estudio médico. Mándale la liga desde «…»."
+                      ? "En espera del consentimiento EXPRESO y POR ESCRITO del candidato (ya se le envió su liga). El registro del dictamen se habilita al aceptarlo y se avisa al médico."
                       : "Falta el consentimiento de privacidad del candidato. Regístralo en la ficha para poder enviarla."}
                   </p>
                 )}
@@ -371,12 +432,20 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
                         <p className="mt-0.5 text-[12px] leading-relaxed text-ink-2">{e.resumenIa}</p>
                       </div>
                     )}
-                    {e.resultadoResumen && <p className="mt-2 text-[12px] leading-relaxed text-ink-2">{e.resultadoResumen}</p>}
-                    {e.comentarioRevision && <p className="mt-1 text-[12px] text-ink-3">Revisión: {e.comentarioRevision}</p>}
+                    {e.resultadoResumen && (
+                      <p className="mt-2 text-[12px] leading-relaxed text-ink-2">
+                        {e.origenResultado === "webhook" || e.claveProveedor ? <span className="text-ink-3">Resultado original de {e.proveedor || "el proveedor"}{e.resultadoCargadoEn ? ` · ${fechaHora(e.resultadoCargadoEn)}` : ""}: </span> : null}
+                        {e.resultadoResumen}
+                      </p>
+                    )}
+                    {e.comentarioRevision && <p className="mt-1 text-[12px] text-ink-3">Comentarios de RH: {e.comentarioRevision}</p>}
                     {e.tieneInforme && (
-                      <a href={urlInformeEvaluacion(e.id)} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs font-semibold text-brand hover:underline">
-                        Ver informe{e.nombreArchivo ? ` (${e.nombreArchivo})` : ""}
-                      </a>
+                      <span className="mt-1 inline-flex flex-wrap gap-3">
+                        <a href={urlInformeEvaluacion(e.id)} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand hover:underline">
+                          Abrir informe{e.nombreArchivo ? ` (${e.nombreArchivo})` : ""}
+                        </a>
+                        <a href={urlInformeEvaluacion(e.id)} download className="text-xs font-semibold text-brand hover:underline">Descargar</a>
+                      </span>
                     )}
                     {e.adjuntos && e.adjuntos.length > 0 && <ListaAdjuntos codigo={e.id} adjuntos={e.adjuntos} />}
                   </>
@@ -389,7 +458,19 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
         )}
       </div>
 
-      {agregar && <ModalAgregarEvaluacion codigo={codigo} puesto={puesto} contactos={contactos} clienteNombre={clienteNombre} onClose={() => setAgregar(false)} onAgregada={() => { setAgregar(false); void cargar(); }} />}
+      {agregar && (
+        <ModalAgregarEvaluacion
+          codigo={codigo} puesto={puesto} contactos={contactos} clienteNombre={clienteNombre} excluir={excluir}
+          accionesRuta={accionesRuta?.map((x) => ({ ...x, onClick: () => { setAgregar(false); x.onClick(); } }))}
+          onClose={() => setAgregar(false)}
+          onAgregada={(ev) => {
+            setAgregar(false);
+            const l = lineasEnvios((ev as EvaluacionCandidato & { envios?: EvaluacionCandidato["envios"] }).envios);
+            setAviso(`«${ev.nombre}» agregada.${l.length ? ` Avisos: ${l.map((x) => `${x.estado === "enviado" ? "✓" : x.estado === "pendiente" ? "…" : "✗"} ${x.texto}`).join(" · ")}` : ""}`);
+            void cargar();
+          }}
+        />
+      )}
       {resultado && <ModalResultado e={resultado} onClose={() => setResultado(null)} onListo={() => { setResultado(null); void cargar(); }} />}
       {revisar && <ModalRevisar e={revisar} onClose={() => setRevisar(null)} onListo={() => { setRevisar(null); void cargar(); }} />}
       {cancelar && <ModalCancelar e={cancelar} onClose={() => setCancelar(null)} onListo={() => { setCancelar(null); void cargar(); }} />}
@@ -467,7 +548,12 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
 }) {
   const [tipo, setTipo] = useState<TipoEvaluacion | "">(tipoInicial ?? "");
   const [pruebas, setPruebas] = useState<PruebaPsicometrica[] | null>(null);
-  const [pruebaId, setPruebaId] = useState<number | null>(null);
+  /* §7: varias pruebas a la vez; se preseleccionan las sugeridas para el puesto (RH puede cambiarlas) */
+  const [pruebaIds, setPruebaIds] = useState<number[]>([]);
+  const [correoCandidato, setCorreoCandidato] = useState("");
+  const [enviar, setEnviar] = useState(true);
+  const [refModo, setRefModo] = useState<"candidato" | "responsable">("candidato");
+  const [refRequeridas, setRefRequeridas] = useState<string>("");
   const [nombre, setNombre] = useState("");
   const [modo, setModo] = useState<ModoPrueba>("manual");
   const [url, setUrl] = useState("");
@@ -480,23 +566,32 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
   const liga = generarLiga ?? ligaPorDefecto(tipo, nombre.trim());
 
   useEffect(() => {
-    if (tipo === "psicometrica" && pruebas === null) fetchPruebasPsicometricas(false, puesto ?? "").then((p) => setPruebas(p ?? []));
+    if (tipo === "psicometrica" && pruebas === null)
+      fetchPruebasPsicometricas(false, puesto ?? "").then((p) => {
+        setPruebas(p ?? []);
+        setPruebaIds((p ?? []).filter((x) => x.sugerida).map((x) => x.id));
+      });
   }, [tipo, pruebas, puesto]);
 
   async function guardar() {
     if (!tipo) return setError("Elige el tipo.");
     setOcupado(true);
-    const comun = { responsable: responsableDesdeForm(resp), cita: resp.cita || undefined, cita_lugar: resp.lugar.trim() || undefined, generar_liga: liga };
+    const comun = {
+      responsable: responsableDesdeForm(resp), cita: resp.cita || undefined, cita_lugar: resp.lugar.trim() || undefined, generar_liga: liga,
+      enviar, correo_candidato: correoCandidato.trim() || undefined,
+    };
     const r = await agregarEvaluacionCandidato(codigo, tipo === "psicometrica"
-      ? { tipo, prueba_id: pruebaId, ...comun }
-      : { tipo, nombre, modo, url, proveedor, ...comun });
+      ? { tipo, prueba_ids: pruebaIds, ...comun }
+      : tipo === "referencias"
+        ? { tipo, nombre, ...comun, referencias_modo: refModo, referencias_requeridas: refRequeridas ? Number(refRequeridas) : null }
+        : { tipo, nombre, modo, url, proveedor, ...comun });
     setOcupado(false);
     if (!r.ok) return setError(r.error);
     onAgregada(r.data);
   }
 
   return (
-    <ModalMarco titulo="Agregar evaluación" subtitulo="Una entrevista humana mueve al candidato a Filtro humano; las demás evaluaciones y sus resultados no cambian la columna." onClose={onClose}>
+    <ModalMarco titulo="Agregar evaluación" subtitulo="Una entrevista humana desde una etapa anterior mueve al candidato a Filtro humano (nunca lo regresa); las demás evaluaciones y sus resultados no cambian la columna." onClose={onClose}>
       {accionesRuta && accionesRuta.length > 0 && (
         <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
           {accionesRuta.map((a) => (
@@ -522,45 +617,77 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
         ))}
       </div>
       {tipo === "otra" && (
-        <div className="mt-3 flex flex-wrap items-center gap-1.5">
-          <span className="text-[11px] text-ink-3">Entrevistas del proceso:</span>
-          {[NOMBRE_EVALUACION_ENCARGADO, NOMBRE_EVALUACION_FRANQUICIATARIO].map((n) => (
-            <button key={n} type="button" onClick={() => setNombre(n)}
-              className={cn("rounded-full border px-3 py-1.5 text-xs font-medium transition", nombre === n ? "border-brand bg-brand-soft text-brand" : "border-border-soft text-ink-2 hover:border-brand/50")}>
-              {n}
-            </button>
-          ))}
-        </div>
+        <p className="mt-3 text-[12px] text-ink-3">
+          Las entrevistas con encargado de tienda o con franquiciatario se agendan en «Entrevista humana» (misma agenda, avisos y resultado).
+        </p>
       )}
       {tipo === "psicometrica" && (
         <div className="mt-4">
           {pruebas === null ? <Loader2 className="h-5 w-5 animate-spin text-ink-3" /> : pruebas.length === 0 ? (
             <p className="text-sm text-ink-3">No hay pruebas activas. Créalas en Configuración → Pruebas psicométricas.</p>
           ) : (
-            <CampoRH label="Prueba del catálogo">
-              <select value={pruebaId ?? ""} onChange={(e) => setPruebaId(e.target.value ? Number(e.target.value) : null)} className={inputRH}>
-                <option value="">Elige una prueba…</option>
-                {pruebas.map((p) => <option key={p.id} value={p.id}>{p.nombre} · {p.modoTexto}{p.sugerida ? " · sugerida para el puesto" : ""}</option>)}
-              </select>
-            </CampoRH>
+            <div>
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">Pruebas a asignar (puedes elegir varias)</p>
+              <ul className="flex flex-col gap-1.5">
+                {pruebas.map((p) => {
+                  const sel = pruebaIds.includes(p.id);
+                  return (
+                    <li key={p.id}>
+                      <label className={cn("flex cursor-pointer items-start gap-2.5 rounded-xl border px-3 py-2.5 transition", sel ? "border-brand bg-brand-soft/40" : "border-border-soft hover:border-brand/50")}>
+                        <input type="checkbox" checked={sel} onChange={() => setPruebaIds(sel ? pruebaIds.filter((x) => x !== p.id) : [...pruebaIds, p.id])} className="mt-1 h-4 w-4 accent-brand" />
+                        <span className="min-w-0">
+                          <span className="block text-sm font-semibold text-ink">
+                            {p.nombre} {p.sugerida && <Badge tone="brand">Sugerida para el puesto</Badge>}
+                          </span>
+                          <span className="block text-[11px] text-ink-3">
+                            {p.proveedor ? `${p.modo === "integrada" ? "Conectada con" : p.modo === "enlace" ? "Liga de" : "Proveedor:"} ${p.proveedor}` : p.modoTexto}
+                            {(p.incluye?.length ?? 0) > 0 ? ` · Incluye: ${p.incluye!.join(", ")}` : p.descripcion ? ` · ${p.descripcion}` : ""}
+                          </span>
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+              <p className="mt-2 text-[11px] text-ink-3">Cada prueba lleva su estado y resultado; pueden estar disponibles al mismo tiempo. Agregar más después no sustituye las anteriores.</p>
+              <div className="mt-3">
+                <CampoRH label="Correo del candidato (solo si el proveedor lo pide y no está en su ficha)">
+                  <input type="email" value={correoCandidato} onChange={(e) => setCorreoCandidato(e.target.value)} className={inputRH} placeholder="nombre@correo.com" />
+                </CampoRH>
+              </div>
+            </div>
           )}
+        </div>
+      )}
+      {tipo === "referencias" && (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <CampoRH label="¿Quién captura los datos de las referencias?">
+            <select value={refModo} onChange={(e) => setRefModo(e.target.value as "candidato" | "responsable")} className={inputRH}>
+              <option value="candidato">Solicitar datos al candidato (se le envía su liga de captura)</option>
+              <option value="responsable">El responsable los recaba (se le envía su liga)</option>
+            </select>
+          </CampoRH>
+          <CampoRH label="Referencias a validar (vacío = las que pida la vacante)">
+            <input type="number" min={1} max={10} value={refRequeridas} onChange={(e) => setRefRequeridas(e.target.value)} className={inputRH} placeholder="Ej. 2" />
+          </CampoRH>
         </div>
       )}
       {tipo && tipo !== "psicometrica" && (
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           <CampoRH label="Nombre (opcional)"><input value={nombre} onChange={(e) => setNombre(e.target.value)} className={inputRH} placeholder={TIPOS_EVALUACION.find((t) => t.valor === tipo)?.texto} /></CampoRH>
-          <CampoRH label="Modo">
+          {tipo !== "referencias" && (
+          <CampoRH label="¿Cómo se obtiene el resultado?">
             <select value={modo} onChange={(e) => setModo(e.target.value as ModoPrueba)} className={inputRH}>
-              <option value="manual">Carga manual</option>
-              <option value="enlace">Enlace externo</option>
-              <option value="integrada">Integrada</option>
+              {MODOS_PRUEBA.map((m) => <option key={m.valor} value={m.valor}>{m.texto}</option>)}
             </select>
           </CampoRH>
+          )}
           {modo === "enlace" && <CampoRH label="Liga"><input value={url} onChange={(e) => setUrl(e.target.value)} className={inputRH} placeholder="https://…" /></CampoRH>}
           {modo !== "manual" && <CampoRH label="Proveedor (opcional)"><input value={proveedor} onChange={(e) => setProveedor(e.target.value)} className={inputRH} /></CampoRH>}
           {tipo === "medico" && (
             <p className="rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-[12px] text-warn sm:col-span-2">
-              El estudio médico requiere el consentimiento EXPRESO y POR ESCRITO del candidato (liga electrónica). Hasta que lo acepte queda «En espera de consentimiento».
+              Al crearlo se envía automáticamente al candidato la solicitud de consentimiento EXPRESO y POR ESCRITO. Mientras esté pendiente, el registro del
+              dictamen queda bloqueado; al aceptarlo se habilita y se avisa al médico con su liga.
             </p>
           )}
         </div>
@@ -568,16 +695,22 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
       {tipo && (
         <div className="mt-4 border-t border-border-soft pt-4">
           <BloqueResponsable f={resp} onChange={setResp} contactos={contactos} clienteNombre={clienteNombre} />
-          <label className="mt-3 flex items-start gap-2 text-sm text-ink-2">
-            <input type="checkbox" checked={liga} onChange={(x) => setGenerarLiga(x.target.checked)} className="mt-1 h-4 w-4 accent-brand" />
-            <span>Generar liga de acceso para la persona externa<span className="block text-[11px] text-ink-3">Liga limitada para registrar el resultado sin entrar al sistema.</span></span>
+          {tipo !== "psicometrica" && (
+            <label className="mt-3 flex items-start gap-2 text-sm text-ink-2">
+              <input type="checkbox" checked={liga} onChange={(x) => setGenerarLiga(x.target.checked)} className="mt-1 h-4 w-4 accent-brand" />
+              <span>Generar liga de acceso para el responsable<span className="block text-[11px] text-ink-3">Liga limitada para registrar el resultado sin entrar al sistema.</span></span>
+            </label>
+          )}
+          <label className="mt-2 flex items-start gap-2 text-sm text-ink-2">
+            <input type="checkbox" checked={enviar} onChange={(x) => setEnviar(x.target.checked)} className="mt-1 h-4 w-4 accent-brand" />
+            <span>Avisar ahora al candidato y al responsable<span className="block text-[11px] text-ink-3">Cada quien recibe instrucciones y la liga de su función; verás el estado de cada envío.</span></span>
           </label>
         </div>
       )}
       {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
       <div className="mt-5 flex justify-end gap-2">
         <Button variant="outline" size="sm" onClick={onClose} disabled={ocupado}>Cancelar</Button>
-        <Button size="sm" onClick={guardar} disabled={ocupado || !tipo || (tipo === "psicometrica" && !pruebaId)}>
+        <Button size="sm" onClick={guardar} disabled={ocupado || !tipo || (tipo === "psicometrica" && pruebaIds.length === 0)}>
           {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <ClipboardCheck className="h-4 w-4" />} Agregar
         </Button>
       </div>
@@ -746,39 +879,83 @@ function ModalDetalleMedico({ e, onClose }: { e: EvaluacionCandidato; onClose: (
   );
 }
 
-/* ---------- Referencias laborales ---------- */
-const REFERENCIA_VACIA: ReferenciaLaboral = { contacto: "", empresa: "", puesto: "", telefono: "", fecha_verificacion: "", resultado: "", comentarios: "", responsable: "" };
+/* ---------- Referencias laborales (2026-10-02, §10): datos + validación por referencia ---------- */
+const ESTADO_REF_TONO: Record<string, "good" | "warn" | "neutral" | "bad"> = { validada: "good", por_contactar: "warn", no_contactada: "neutral", pendiente_datos: "neutral" };
+
+export function FormReferencia({ f, cambiar, validar }: { f: ReferenciaLaboral; cambiar: (p: Partial<ReferenciaLaboral>) => void; validar: boolean }) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <CampoRH label="Empresa"><input value={f.empresa} onChange={(x) => cambiar({ empresa: x.target.value })} className={inputRH} /></CampoRH>
+      <CampoRH label="Puesto del candidato"><input value={f.puesto_candidato} onChange={(x) => cambiar({ puesto_candidato: x.target.value })} className={inputRH} /></CampoRH>
+      <CampoRH label="Periodo trabajado"><input value={f.periodo} onChange={(x) => cambiar({ periodo: x.target.value })} className={inputRH} placeholder="Ej. 2023-2025" /></CampoRH>
+      <CampoRH label="Relación laboral"><input value={f.relacion} onChange={(x) => cambiar({ relacion: x.target.value })} className={inputRH} placeholder="Jefe directo, gerente…" /></CampoRH>
+      <CampoRH label="Nombre del contacto"><input value={f.contacto_nombre} onChange={(x) => cambiar({ contacto_nombre: x.target.value })} className={inputRH} /></CampoRH>
+      <CampoRH label="Cargo del contacto"><input value={f.contacto_cargo} onChange={(x) => cambiar({ contacto_cargo: x.target.value })} className={inputRH} /></CampoRH>
+      <CampoRH label="Teléfono"><input value={f.telefono} onChange={(x) => cambiar({ telefono: x.target.value })} className={inputRH} /></CampoRH>
+      <CampoRH label="Correo (opcional)"><input type="email" value={f.correo} onChange={(x) => cambiar({ correo: x.target.value })} className={inputRH} /></CampoRH>
+      {validar && (
+        <>
+          <div className="sm:col-span-2 lg:col-span-4 mt-1 border-t border-border-soft pt-2 text-[11px] font-semibold uppercase tracking-wide text-ink-3">Validación</div>
+          <CampoRH label="Quién contestó"><input value={f.contesto_nombre ?? ""} onChange={(x) => cambiar({ contesto_nombre: x.target.value })} className={inputRH} /></CampoRH>
+          <CampoRH label="Cargo"><input value={f.contesto_cargo ?? ""} onChange={(x) => cambiar({ contesto_cargo: x.target.value })} className={inputRH} /></CampoRH>
+          <CampoRH label="Fecha"><input type="date" value={f.fecha_contacto ?? ""} onChange={(x) => cambiar({ fecha_contacto: x.target.value })} className={inputRH} /></CampoRH>
+          <CampoRH label="Medio de contacto"><input value={f.medio ?? ""} onChange={(x) => cambiar({ medio: x.target.value })} className={inputRH} placeholder="Teléfono, correo…" /></CampoRH>
+          <CampoRH label="¿Confirma el puesto?">
+            <select value={f.confirma_puesto ?? ""} onChange={(x) => cambiar({ confirma_puesto: x.target.value as ReferenciaLaboral["confirma_puesto"] })} className={inputRH}>
+              {SI_NO.map((o) => <option key={o.valor} value={o.valor}>{o.texto}</option>)}
+            </select>
+          </CampoRH>
+          <CampoRH label="¿Confirma el periodo?">
+            <select value={f.confirma_periodo ?? ""} onChange={(x) => cambiar({ confirma_periodo: x.target.value as ReferenciaLaboral["confirma_periodo"] })} className={inputRH}>
+              {SI_NO.map((o) => <option key={o.valor} value={o.valor}>{o.texto}</option>)}
+            </select>
+          </CampoRH>
+          <CampoRH label="¿Lo volverían a contratar?">
+            <select value={f.recontrataria ?? ""} onChange={(x) => cambiar({ recontrataria: x.target.value as ReferenciaLaboral["recontrataria"] })} className={inputRH}>
+              {SI_NO.map((o) => <option key={o.valor} value={o.valor}>{o.texto}</option>)}
+            </select>
+          </CampoRH>
+          <CampoRH label="Resultado">
+            <select value={f.resultado ?? ""} onChange={(x) => cambiar({ resultado: x.target.value as ReferenciaLaboral["resultado"] })} className={inputRH}>
+              {RESULTADOS_REFERENCIA.map((r) => <option key={r.valor} value={r.valor}>{r.texto}</option>)}
+            </select>
+          </CampoRH>
+          <div className="sm:col-span-2"><CampoRH label="Desempeño (o «No informado»)"><input value={f.desempeno ?? ""} onChange={(x) => cambiar({ desempeno: x.target.value })} className={inputRH} /></CampoRH></div>
+          <div className="sm:col-span-2"><CampoRH label="Motivo de salida (o «No informado»)"><input value={f.motivo_salida ?? ""} onChange={(x) => cambiar({ motivo_salida: x.target.value })} className={inputRH} /></CampoRH></div>
+          <div className="sm:col-span-2 lg:col-span-4"><CampoRH label="Observaciones"><input value={f.observaciones ?? ""} onChange={(x) => cambiar({ observaciones: x.target.value })} className={inputRH} /></CampoRH></div>
+          <label className="sm:col-span-2 lg:col-span-4 flex items-start gap-2 text-sm text-ink-2">
+            <input type="checkbox" checked={Boolean(f.no_contactada)} onChange={(x) => cambiar({ no_contactada: x.target.checked })} className="mt-1 h-4 w-4 accent-brand" />
+            <span>No contactada (nadie contestó)<span className="block text-[11px] text-ink-3">No contestar no equivale a un resultado desfavorable.</span></span>
+          </label>
+        </>
+      )}
+    </div>
+  );
+}
 
 function ReferenciasEditor({ e, onClose, onListo }: { e: EvaluacionCandidato; onClose: () => void; onListo: () => void }) {
   const [filas, setFilas] = useState<ReferenciaLaboral[]>(() => (e.referencias && e.referencias.length ? e.referencias.map((r) => ({ ...REFERENCIA_VACIA, ...r })) : [{ ...REFERENCIA_VACIA }]));
+  const [requeridas, setRequeridas] = useState<string>(String(e.referenciasResumen?.requeridas ?? 1));
   const [ocupado, setOcupado] = useState(false);
   const [error, setError] = useState("");
   const cambiar = (i: number, p: Partial<ReferenciaLaboral>) => setFilas(filas.map((f, j) => (j === i ? { ...f, ...p } : f)));
   return (
-    <ModalMarco titulo={`Referencias laborales · ${e.nombre}`} subtitulo="Quién verificó cada referencia, cuándo y con qué resultado." onClose={onClose} ancho="max-w-4xl">
+    <ModalMarco titulo={`Referencias laborales · ${e.nombre}`} subtitulo="Datos de cada referencia y su validación. Capturar contactos no es validarlos; para cerrar como Favorable deben estar las referencias verificadas." onClose={onClose} ancho="max-w-4xl">
+      <div className="mb-3 flex flex-wrap items-end gap-3">
+        <CampoRH label="Referencias a validar"><input type="number" min={1} max={10} value={requeridas} onChange={(x) => setRequeridas(x.target.value)} className={inputRH} /></CampoRH>
+        {e.referenciasResumen && <p className="pb-2 text-[12px] text-ink-2">{e.referenciasResumen.texto}</p>}
+      </div>
       <div className="flex flex-col gap-3">
         {filas.map((f, i) => (
           <div key={i} className="rounded-xl border border-border-soft bg-surface-2 p-3">
-            <div className="flex items-center justify-between">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">Referencia {i + 1}</p>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-ink-3">
+                Referencia {i + 1} {f.estadoTexto && <Badge tone={ESTADO_REF_TONO[f.estado ?? ""] ?? "neutral"}>{f.estadoTexto}</Badge>}
+                {f.capturada_por === "candidato" && <span className="normal-case text-ink-3">· datos del candidato</span>}
+              </p>
               <button type="button" className="inline-flex items-center gap-1 text-[11px] text-bad hover:underline" onClick={() => setFilas(filas.filter((_, j) => j !== i))}><Trash2 className="h-3 w-3" /> Quitar</button>
             </div>
-            <div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <CampoRH label="Contacto"><input value={f.contacto} onChange={(x) => cambiar(i, { contacto: x.target.value })} className={inputRH} /></CampoRH>
-              <CampoRH label="Empresa"><input value={f.empresa} onChange={(x) => cambiar(i, { empresa: x.target.value })} className={inputRH} /></CampoRH>
-              <CampoRH label="Puesto"><input value={f.puesto} onChange={(x) => cambiar(i, { puesto: x.target.value })} className={inputRH} /></CampoRH>
-              <CampoRH label="Teléfono"><input value={f.telefono} onChange={(x) => cambiar(i, { telefono: x.target.value })} className={inputRH} /></CampoRH>
-              <CampoRH label="Fecha de verificación"><input type="date" value={f.fecha_verificacion} onChange={(x) => cambiar(i, { fecha_verificacion: x.target.value })} className={inputRH} /></CampoRH>
-              <CampoRH label="Resultado">
-                <select value={f.resultado} onChange={(x) => cambiar(i, { resultado: x.target.value as ReferenciaLaboral["resultado"] })} className={inputRH}>
-                  {RESULTADOS_REFERENCIA.map((r) => <option key={r.valor} value={r.valor}>{r.texto}</option>)}
-                </select>
-              </CampoRH>
-              <CampoRH label="Responsable"><input value={f.responsable} onChange={(x) => cambiar(i, { responsable: x.target.value })} className={inputRH} /></CampoRH>
-              <div className="sm:col-span-2 lg:col-span-4">
-                <CampoRH label="Comentarios"><input value={f.comentarios} onChange={(x) => cambiar(i, { comentarios: x.target.value })} className={inputRH} /></CampoRH>
-              </div>
-            </div>
+            <FormReferencia f={f} cambiar={(p) => cambiar(i, p)} validar />
           </div>
         ))}
         <Button variant="outline" size="sm" className="self-start" onClick={() => setFilas([...filas, { ...REFERENCIA_VACIA }])}><Plus className="h-4 w-4" /> Agregar referencia</Button>
@@ -789,8 +966,8 @@ function ReferenciasEditor({ e, onClose, onListo }: { e: EvaluacionCandidato; on
         <Button size="sm" disabled={ocupado} onClick={async () => {
           setOcupado(true);
           setError("");
-          const limpias = filas.filter((f) => Object.values(f).some((v) => String(v ?? "").trim()));
-          const r = await guardarReferenciasEvaluacion(e.id, limpias);
+          const limpias = filas.filter((f) => Object.values(f).some((v) => String(v ?? "").trim() && v !== false));
+          const r = await guardarReferenciasEvaluacion(e.id, limpias, requeridas ? Number(requeridas) : undefined);
           setOcupado(false);
           if (!r.ok) return setError(r.error);
           onListo();

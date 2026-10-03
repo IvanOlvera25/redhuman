@@ -65,6 +65,9 @@ async def revisar_recordatorios_entrevista() -> int:
                 continue
             db.refresh(eh)
             resultados = await notificaciones.disparar(db, "recordatorio_entrevista", p, "sistema", eh=eh)
+            from ..routers.candidatos import _registrar_envios_eh
+
+            _registrar_envios_eh(eh, "recordatorio_entrevista", resultados, "sistema")
             registrar(db, "sistema", "recordatorio_entrevista_automatico", "postulacion", p.codigo, {"entrevista_humana": eh.id, "fecha": fecha.isoformat(), "notificaciones": resultados})
             db.commit()
             enviados += 1

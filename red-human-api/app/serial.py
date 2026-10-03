@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from .config import settings
-from .models import NIVELES_RECORDATORIO, NOMBRE_DESTINO, estado_documento_onboarding, AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
+from .models import CLASES_ENTREVISTA_HUMANA, NIVELES_RECORDATORIO, NOMBRE_DESTINO, estado_documento_onboarding, AsignacionCurso, Archivo, Candidato, Colaborador, Curso, Documento, Entrevista, Expediente, Postulacion, Vacante
 from .services import fraiche
 from .services.avatar import avatar_activo
 from .services.ia import texto_preguntas, texto_util_candidato
@@ -207,6 +207,15 @@ def _entrevista_humana_dict(eh) -> dict:
         "rubrica": eh.rubrica or None,
         "resultadoIpv": eh.resultado_ipv or None,
         "sugiereNuevaIpv": fraiche.sugiere_nueva_ipv(eh.resultado_ipv) if eh.es_ipv else False,
+        # 2026-10-02 (Fraiche §2/§5/§12): varias entrevistas con agenda, resultado y avisos propios
+        "id": eh.id,
+        "clase": "ipv" if eh.es_ipv else (eh.clase or "reclutamiento"),
+        "claseNombre": "IPV humana" if eh.es_ipv else CLASES_ENTREVISTA_HUMANA.get(eh.clase or "reclutamiento", "Entrevista"),
+        "obligatoria": bool(eh.obligatoria) or (not eh.es_ipv and (eh.clase or "reclutamiento") == "reclutamiento"),
+        "ligaEntrevistador": f"{settings.app_url.rstrip('/')}/entrevista-humana/{eh.token}" if eh.token else "",
+        "envios": list(eh.envios or [])[-12:],
+        "envioEstado": _estado_envios(eh.envios),
+        "recordatorioEnviadoEn": iso(eh.recordatorio_enviado_en),
     }
 
 
@@ -605,6 +614,10 @@ def postulacion_dict(p: Postulacion, detalle: bool = False, n_mensajes: Optional
                 "transcript": list(e.transcript or []),
                 "evaluacionIpv": e.evaluacion_ipv or None,
                 "sugiereNuevaIpv": fraiche.sugiere_nueva_ipv((e.evaluacion_ipv or {}).get("calculo")),
+                # 2026-10-02 (§1): liga del candidato y estado de sus envíos (Copiar liga / Reenviar)
+                "liga": f"{settings.app_url.rstrip('/')}/entrevista/{e.token}" if e.token else "",
+                "envios": list(e.envios or [])[-10:],
+                "envioEstado": _estado_envios(e.envios),
             }
             for e in p.entrevistas
         ],
@@ -664,7 +677,20 @@ def entrevista_dict(e: Entrevista) -> dict:
         # Fraiche (spec §7-8)
         "fase": e.fase or "inicial",
         "evaluacionIpv": e.evaluacion_ipv or None,
+        # 2026-10-02 (Fraiche §1): liga del candidato y estado real de sus envíos (Copiar liga / Reenviar)
+        "liga": f"{settings.app_url.rstrip('/')}/entrevista/{e.token}" if e.token else "",
+        "envios": list(e.envios or [])[-10:],
+        "envioEstado": _estado_envios(e.envios),
     }
+
+
+def _estado_envios(envios) -> str:
+    from .services.avisos import resumen
+
+    if not envios:
+        return ""
+    ultima = (envios[-1] or {}).get("fecha", "")[:16]
+    return resumen([x for x in envios if (x.get("fecha") or "")[:16] == ultima])
 
 
 # ------------------------------------------------------------
@@ -850,9 +876,15 @@ def expediente_dict(e: Expediente) -> dict:
     estado = "alta" if e.estado == "alta" else ("completo" if e.progreso == 100 else "integracion")
     # documentos que la IA aprobó pero que nadie de RH ha confirmado todavía (bloquean el alta)
     sin_confirmar = e.sin_confirmar  # 2026-09-15: incluye digitales en revisión (cuentan para el %)
+    from .routers.contratacion import faltantes_contrato
+    from .services.onboarding import contrato_ya_firmado
+
     return {
         "id": f"N-{500 + e.id}",
         "expedienteId": e.id,
+        # 2026-10-02 (Fraiche §13): el contrato se genera en Contratación u Onboarding; esto dice qué falta y si ya existe firmado
+        "contratoFaltan": faltantes_contrato(e),
+        "contratoFirmado": contrato_ya_firmado(e),
         "postulacionId": p.codigo if p else None,
         "nombre": c.nombre if c else "",
         "puesto": e.puesto,
@@ -1226,6 +1258,8 @@ def prueba_psicometrica_dict(pr) -> dict:
         "proveedor": pr.proveedor or "",
         "idProveedor": pr.id_proveedor or "",
         "url": pr.url or "",
+        "incluye": list(pr.incluye or []),
+        "instrucciones": pr.instrucciones or "",
         "activa": bool(pr.activa),
         "actualizada": iso(pr.actualizada_en),
     }
@@ -1296,6 +1330,18 @@ def evaluacion_candidato_dict(ev, usuario=None) -> dict:
         # Psicométricas.mx (2026-09-29): clave del candidato en el proveedor y su liga (si se configuró)
         "claveProveedor": ev.clave_proveedor or None,
         "urlCandidato": _url_psico(ev.clave_proveedor),
+        # 2026-10-02 (Fraiche §7-10): liga del CANDIDATO (nunca el formulario del evaluador), estado claro de la
+        # psicometría, avisos por destinatario y referencias estructuradas
+        "ligaCandidato": sev.liga_candidato(ev) or None,
+        "estadoPsicometria": sev.estado_psicometria(ev) if ev.tipo == "psicometrica" else None,
+        "estadoPsicometriaTexto": sev.ESTADOS_PSICOMETRIA.get(sev.estado_psicometria(ev)) if ev.tipo == "psicometrica" else None,
+        "proveedorTexto": (f"Conectada con {ev.proveedor}" if ev.modo == "integrada" and ev.proveedor else
+                           f"Liga de {ev.proveedor}" if ev.modo == "enlace" and ev.proveedor else MODOS_PRUEBA.get(ev.modo, ev.modo)),
+        "envios": list(ev.envios or [])[-12:],
+        "envioEstado": _estado_envios(ev.envios),
+        "referenciasModo": ev.referencias_modo or None,
+        "referenciasResumen": sev.resumen_referencias(ev) if ev.tipo == "referencias" else None,
+        "ligaReferenciasCandidato": f"{settings.app_url.rstrip('/')}/referencias/{ev.token_candidato}" if ev.token_candidato else None,
         "conectadaProveedor": bool(ev.clave_proveedor),
         "resultadoCargadoPor": ev.resultado_cargado_por or "",
         "resultadoCargadoEn": iso(ev.resultado_cargado_en),

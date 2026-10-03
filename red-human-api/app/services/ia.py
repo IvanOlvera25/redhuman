@@ -1268,20 +1268,34 @@ def preguntas_ipv_demo() -> List[str]:
     """Situación por competencia (spec §8) como pregunta — modo demo y referencia del prompt."""
     from .fraiche import COMPETENCIAS_IPV
 
-    return [f"{c['situacion']}. Cuéntame un ejemplo concreto de cómo lo manejaste." for c in COMPETENCIAS_IPV]
+    return [c["pregunta"] for c in COMPETENCIAS_IPV]
 
 
 def bloque_ipv_prompt() -> str:
     from .fraiche import COMPETENCIAS_IPV, MARCADOR_IPV, OBSERVACIONES_IPV
 
-    filas = "\n".join(f"- {c['nombre']} ({c['peso']}%): situación «{c['situacion']}» → evidencia esperada: {c['evidencia']}" for c in COMPETENCIAS_IPV)
+    from .fraiche import MAX_REPREGUNTAS_IPV, REPREGUNTAS_IPV
+
+    filas = "\n".join(f"- {c['nombre']}: pregunta inicial «{c['pregunta']}» → evidencia que buscas: {c['evidencia']}" for c in COMPETENCIAS_IPV)
     obs = ", ".join(o["nombre"].lower() for o in OBSERVACIONES_IPV)
+    repreguntas = " · ".join(f"«{r}»" for r in REPREGUNTAS_IPV)
     return (
-        f"ENTREVISTA IPV (rúbrica de competencias): abre la segunda parte diciendo EXACTAMENTE «{MARCADOR_IPV}» y a partir de "
-        "ahí plantea UNA situación por competencia, en este orden, pidiendo SIEMPRE un ejemplo concreto de algo que la "
-        "persona haya vivido; si la respuesta es vaga o no trae evidencia, repregunta UNA vez («¿qué hiciste exactamente?», "
-        "«¿cómo terminó?») antes de pasar a la siguiente. No expliques la rúbrica ni los pesos, no califiques en voz alta.\n"
+        f"ENTREVISTA IPV (rúbrica de competencias): abre la segunda parte diciendo EXACTAMENTE «{MARCADOR_IPV}». Después "
+        "recorre las competencias en este orden, empezando cada una con su pregunta inicial TAL CUAL:\n"
         f"{filas}\n"
+        "Cómo conversar (2026-10-02, reglas de Fraiche):\n"
+        "- Pregunta UNA cosa a la vez, con frases breves y claras. Nunca encadenes dos preguntas en el mismo turno.\n"
+        "- Da tiempo para pensar: respeta las pausas, no completes ni adivines la respuesta, no apures.\n"
+        "- Busca un ejemplo concreto y profundiza SOLO en lo que falte de: contexto, qué hizo la persona, por qué lo "
+        f"hizo así, cómo terminó o qué aprendió. Repreguntas válidas: {repreguntas}. Máximo {MAX_REPREGUNTAS_IPV} "
+        "repreguntas útiles por competencia; en cuanto haya evidencia suficiente, pasa a la siguiente.\n"
+        "- No exijas cifras si ya hay un resultado concreto cualitativo.\n"
+        "- Si no entiende, reformula la pregunta con otras palabras SIN sugerir la respuesta que esperas.\n"
+        "- Acepta experiencias de otros trabajos, de la escuela o de la vida cotidiana. Si la persona responde con un "
+        "supuesto («yo haría…»), pide amablemente un caso real y, si no lo tiene, sigue adelante (queda como hipotético).\n"
+        "- Reutiliza lo que ya contó: si un ejemplo anterior ya muestra una competencia, no repitas la pregunta; confirma "
+        "o pide solo el dato que falte.\n"
+        "- No expliques la rúbrica, los pesos ni califiques en voz alta. Nunca preguntes por sueldo ni datos sensibles.\n"
         f"Observa además, sin preguntar por ellas: {obs}."
     )
 
@@ -1527,6 +1541,8 @@ class ObservacionesIPV(BaseModel):
 class EvaluacionIPV(BaseModel):
     competencias: List[CompetenciaIPV]
     observaciones: ObservacionesIPV = Field(default_factory=ObservacionesIPV)
+    reservas: List[str] = Field(default_factory=list, description="Reservas concretas sustentadas en lo que dijo (máx. 4).")
+    puntos_validar: List[str] = Field(default_factory=list, description="Puntos concretos para validar en la entrevista humana (máx. 5).")
 
 
 def evaluar_ipv(titulo: str, transcript: List[dict], equivalencias: Optional[dict] = None) -> Tuple[dict, bool]:
@@ -1543,15 +1559,32 @@ def evaluar_ipv(titulo: str, transcript: List[dict], equivalencias: Optional[dic
         evidencias: dict = {}
         niveles: dict = {}
         turnos_user = [str(m.get("texto", "")) for m in (transcript or []) if m.get("rol") == "user"]
+        # 2026-10-02 (§6): la longitud NO da nivel. En demo solo cuenta como evidencia una acción propia en pasado
+        # («atendí», «hice», «le ofrecí»…); lo demás queda «Por validar», nunca «Medio» por default.
+        accion = re.compile(r"\b(atend[ií]|hice|ayud[eé]|resolv[ií]|ofrec[ií]|habl[eé]|expliqu[eé]|ped[ií]|propuse|reconoc[ií]|correg[ií]|apoy[eé]|"
+                            r"cambi[eé]|aprend[ií]|logr[eé]|vend[ií]|escuch[eé]|busqu[eé]|cubr[ií]|avis[eé]|me adapt[eé]|me mantuve|mantuve|segu[ií]|"
+                            r"invit[eé]|acerqu[eé]|propuse|organic[eé]|termin[eé]|devolv[ií]|llam[eé]|dije)\w*", re.I)
+        # la respuesta de cada competencia es el turno del candidato que sigue a SU pregunta (no la posición)
+        por_pregunta: dict = {}
+        msgs = list(transcript or [])
+        for j, m in enumerate(msgs):
+            if m.get("rol") != "assistant":
+                continue
+            for c in COMPETENCIAS_IPV:
+                if c["pregunta"].lower() in str(m.get("texto", "")).lower() and c["clave"] not in por_pregunta:
+                    sig = next((x for x in msgs[j + 1:] if x.get("rol") == "user"), None)
+                    por_pregunta[c["clave"]] = str(sig.get("texto", "")) if sig else ""
         for i, c in enumerate(COMPETENCIAS_IPV):
-            r = turnos_user[i] if i < len(turnos_user) else ""
-            r = r if len(" ".join(r.split())) >= 12 else ""
-            respuestas[c["clave"]] = r
+            crudo = por_pregunta[c["clave"]] if por_pregunta else (turnos_user[i] if i < len(turnos_user) else "")
+            r = crudo if accion.search(crudo or "") else ""
+            respuestas[c["clave"]] = crudo
             evidencias[c["clave"]] = f"«{r[:120]}»" if r else ""
             niveles[c["clave"]] = "medio" if r else "sin_evidencia"
         rub = normalizar_rubrica({"niveles": niveles, "respuestas": respuestas, "evidencias": evidencias,
                                   "observaciones": {"comunicacion": "Modo demo: sin observación.", "facilidad_palabra": "", "manejo_objeciones": ""}})
-        return {**rub, "calculo": calcular_ipv(rub["niveles"], equivalencias), "ia": False}, False
+        calc = calcular_ipv(rub["niveles"], equivalencias)
+        por_validar = [f"{d['nombre']}: pedir un ejemplo concreto" for d in calc["detalle"] if d["puntos"] is None]
+        return {**rub, "calculo": calc, "reservas": [], "puntos_validar": por_validar[:5], "ia": False}, False
 
     dialogo = "\n".join(f"{'Entrevistadora' if m['rol'] == 'assistant' else 'Candidato'}: {m['texto']}" for m in transcript or [])
     rubrica_txt = "\n".join(f"- {c['clave']} · {c['nombre']}: situación «{c['situacion']}» → evidencia que se observa: {c['evidencia']}" for c in COMPETENCIAS_IPV)
@@ -1562,8 +1595,15 @@ def evaluar_ipv(titulo: str, transcript: List[dict], equivalencias: Optional[dic
             "registra la respuesta de la persona, la evidencia concreta (cita o paráfrasis) y el nivel Alto / Medio / Bajo. "
             "Nivel alto = ejemplo concreto, propio y con resultado claro que muestra la evidencia esperada; medio = ejemplo "
             "parcial o genérico; bajo = ejemplo que contradice la evidencia esperada. Si NO hubo ejemplo concreto, marca "
-            "'sin_evidencia' (no inventes ni infieras una nota). Registra además observaciones sobre comunicación, facilidad "
-            "de palabra y manejo de objeciones SIN calificarlas. No uses los pesos ni calcules totales.\n"
+            "'sin_evidencia' (Por validar — evidencia insuficiente): NUNCA asignes «medio» por falta de información, no "
+            "inventes acciones ni resultados y no infieras una nota. Reglas: no premies respuestas largas ni penalices las "
+            "breves (lo que cuenta es la evidencia); un resultado cualitativo concreto vale aunque no traiga cifras; acepta "
+            "ejemplos de otros trabajos, escuela o vida cotidiana; un ejemplo hipotético («yo haría…») NO es evidencia de "
+            "conducta: menciónalo en la respuesta como hipotético y nivel sin_evidencia salvo que también haya un caso real; "
+            "usa evidencia de cualquier parte del bloque aunque haya salido en otra competencia. Registra observaciones sobre "
+            "comunicación, facilidad de palabra y manejo de objeciones SIN calificarlas. Termina con `reservas` (concretas, "
+            "sustentadas) y `puntos_validar` (lo que la entrevista humana debe confirmar, incluidas las competencias por "
+            "validar). No uses los pesos ni calcules totales.\n"
             f"Rúbrica:\n{rubrica_txt}\n"
             f"CUMPLIMIENTO (NO NEGOCIABLE): nunca registres ni uses datos sobre {DATOS_SENSIBLES_PROHIBIDOS}."
         ),
@@ -1577,7 +1617,12 @@ def evaluar_ipv(titulo: str, transcript: List[dict], equivalencias: Optional[dic
         "evidencias": {c.clave: c.evidencia for c in out.competencias},
         "observaciones": out.observaciones.model_dump(),
     })
-    return {**rub, "calculo": calcular_ipv(rub["niveles"], equivalencias), "ia": True}, True
+    calc = calcular_ipv(rub["niveles"], equivalencias)
+    puntos = [x.strip()[:300] for x in out.puntos_validar if x and x.strip()][:5]
+    for d in calc["detalle"]:
+        if d["puntos"] is None and not any(d["nombre"].lower() in x.lower() for x in puntos):
+            puntos.append(f"{d['nombre']}: pedir un ejemplo concreto (evidencia insuficiente)")
+    return {**rub, "calculo": calc, "reservas": [x.strip()[:300] for x in out.reservas if x and x.strip()][:4], "puntos_validar": puntos[:8], "ia": True}, True
 
 
 # ---------- Fraiche (spec §10): resumen del estudio socioeconómico — propuesta, sin puntuación ----------

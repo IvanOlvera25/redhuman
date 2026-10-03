@@ -54,6 +54,31 @@ export interface EntrevistaHumana {
   resultadoIpv?: CalculoIPV | null;
   /** «Programar nueva IPV humana» cuando la conclusión es Bajo reserva o No recomendable. */
   sugiereNuevaIpv?: boolean;
+  /* --- 2026-10-02 (Fraiche §2/§5/§12): varias entrevistas, cada una con agenda, resultado y avisos propios --- */
+  id?: number;
+  clase?: "reclutamiento" | "encargado" | "franquiciatario" | "ipv";
+  claseNombre?: string;
+  obligatoria?: boolean;
+  ligaEntrevistador?: string;
+  envios?: EnvioAviso[];
+  envioEstado?: "" | "enviado" | "pendiente" | "fallido";
+  recordatorioEnviadoEn?: string | null;
+}
+
+/** 2026-10-02: un aviso enviado a UN destinatario por UN canal, con su estado real. */
+export interface EnvioAviso {
+  fecha: string;
+  evento?: string;
+  destinatario: string;
+  nombre?: string;
+  canal: string;
+  canalNombre?: string;
+  destino: string;
+  enviado: boolean;
+  estado: "enviado" | "pendiente" | "fallido";
+  detalle: string;
+  ligaVinculo?: string;
+  por?: string;
 }
 
 /** Fraiche (spec §8): niveles por competencia + respuesta/evidencia + observaciones sin peso. */
@@ -66,6 +91,10 @@ export interface RubricaIPV {
 }
 export interface CalculoIPV {
   puntaje: number | null;
+  /** 2026-10-02: resultado provisional con el peso pendiente (sin redistribuir) cuando falta evidencia. */
+  puntaje_provisional?: number;
+  peso_evaluado?: number;
+  peso_pendiente?: number;
   conclusion: "recomendable" | "bajo_reserva" | "no_recomendable" | "";
   requiere_revision: boolean;
   sin_evidencia: string[];
@@ -336,6 +365,9 @@ export interface Candidato {
     transcript?: { rol: "user" | "assistant"; texto: string }[];
     evaluacionIpv?: EvaluacionIPV | null;
     sugiereNuevaIpv?: boolean;
+    liga?: string;
+    envios?: EnvioAviso[];
+    envioEstado?: string;
   }[];
   consentimientoFecha?: string | null;
 }
@@ -579,6 +611,8 @@ export const conversacionDemo = [
 export interface AccionSiguiente {
   tipo: string;
   texto: string;
+  modo?: string;
+  entrevista_id?: number;
   etapa?: string;
   evaluacion?: string;
   codigo?: string;
@@ -598,6 +632,10 @@ export interface ActividadRuta {
   obligatoria: boolean;
   noCumple: boolean;
   accion: AccionSiguiente | null;
+  /** 2026-10-02 (§5): IPV Red Human / IPV humana con responsable, estado y resultado propios. */
+  modalidades?: { modo: "red_human" | "humano"; nombre: string; columna: string; responsable: string; estado: string; resultado: string; conclusion: string; fecha: string | null; codigo?: string; id?: number }[];
+  /** 2026-10-02 (§7): varias pruebas — cada una con su estado («1 de 2 completadas»). */
+  partes?: { nombre: string; estado: string; resultado: string; tono: string }[];
 }
 export interface AvancePostulacion {
   destino: string;

@@ -27,9 +27,13 @@ export interface AccionMenu {
 const ANCHO_MIN = 200;
 const MARGEN = 8;
 
-export function MenuAcciones({ acciones, etiqueta = "Más acciones", className }: { acciones: AccionMenu[]; etiqueta?: string; className?: string }) {
+export function MenuAcciones({ acciones, etiqueta = "Más acciones", className, conTexto = false }: {
+  acciones: AccionMenu[]; etiqueta?: string; className?: string;
+  /** 2026-10-02: botón con texto («Más acciones ⋯») en la barra fija de la ficha. */
+  conTexto?: boolean;
+}) {
   const [abierto, setAbierto] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number; arriba: boolean } | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; arriba: boolean; maxAlto: number } | null>(null);
   const botonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -37,14 +41,19 @@ export function MenuAcciones({ acciones, etiqueta = "Más acciones", className }
   const posicionar = () => {
     const b = botonRef.current?.getBoundingClientRect();
     if (!b) return;
-    const altoMenu = menuRef.current?.offsetHeight ?? Math.min(44 * acciones.length + 8, 360);
+    const altoNatural = menuRef.current?.scrollHeight ?? Math.min(44 * acciones.length + 8, 360);
     const anchoMenu = Math.max(menuRef.current?.offsetWidth ?? ANCHO_MIN, ANCHO_MIN);
-    const espacioAbajo = window.innerHeight - b.bottom - MARGEN;
-    const arriba = espacioAbajo < altoMenu && b.top - MARGEN > altoMenu;
-    const top = arriba ? b.top - altoMenu - 4 : b.bottom + 4;
+    const espacioAbajo = window.innerHeight - b.bottom - MARGEN - 4;
+    const espacioArriba = b.top - MARGEN - 4;
+    // 2026-10-02: abre del lado donde cabe; si no cabe en ninguno, del lado con más espacio y con scroll interno —
+    // nunca se desborda de la pantalla (barra fija al pie de la ficha).
+    const arriba = espacioAbajo < altoNatural && espacioArriba > espacioAbajo;
+    const maxAlto = Math.max(120, arriba ? espacioArriba : espacioAbajo);
+    const alto = Math.min(altoNatural, maxAlto);
+    const top = arriba ? b.top - alto - 4 : b.bottom + 4;
     let left = b.right - anchoMenu; // alineado a la derecha del botón
     left = Math.max(MARGEN, Math.min(left, window.innerWidth - anchoMenu - MARGEN));
-    setPos({ top: Math.max(MARGEN, top), left, arriba });
+    setPos({ top: Math.max(MARGEN, Math.min(top, window.innerHeight - alto - MARGEN)), left, arriba, maxAlto });
   };
 
   useLayoutEffect(() => {
@@ -61,18 +70,22 @@ export function MenuAcciones({ acciones, etiqueta = "Más acciones", className }
     };
     const esc = (e: KeyboardEvent) => e.key === "Escape" && setAbierto(false);
     const cerrar = () => setAbierto(false);
+    const alScroll = (e: Event) => {
+      if (menuRef.current?.contains(e.target as Node)) return; // el scroll interno del menú no lo cierra
+      setAbierto(false);
+    };
     document.addEventListener("mousedown", fuera);
     document.addEventListener("touchstart", fuera);
     document.addEventListener("keydown", esc);
     window.addEventListener("resize", cerrar);
     // scroll en cualquier contenedor (captura): el menú es fijo, así que se cierra en vez de quedar flotando
-    document.addEventListener("scroll", cerrar, true);
+    document.addEventListener("scroll", alScroll, true);
     return () => {
       document.removeEventListener("mousedown", fuera);
       document.removeEventListener("touchstart", fuera);
       document.removeEventListener("keydown", esc);
       window.removeEventListener("resize", cerrar);
-      document.removeEventListener("scroll", cerrar, true);
+      document.removeEventListener("scroll", alScroll, true);
     };
   }, [abierto]);
 
@@ -83,9 +96,9 @@ export function MenuAcciones({ acciones, etiqueta = "Más acciones", className }
       ref={menuRef}
       role="menu"
       aria-label={etiqueta}
-      style={{ position: "fixed", top: pos?.top ?? -9999, left: pos?.left ?? -9999, minWidth: ANCHO_MIN, zIndex: 1000 }}
+      style={{ position: "fixed", top: pos?.top ?? -9999, left: pos?.left ?? -9999, minWidth: ANCHO_MIN, maxWidth: "calc(100vw - 16px)", maxHeight: pos?.maxAlto, zIndex: 1000 }}
       className={cn(
-        "overflow-hidden rounded-xl border border-border-soft bg-bg py-1 shadow-2xl",
+        "overflow-y-auto overflow-x-hidden rounded-xl border border-border-soft bg-bg py-1 shadow-2xl",
         pos ? "animate-in fade-in duration-100" : "invisible",
         pos?.arriba ? "origin-bottom-right" : "origin-top-right",
       )}
@@ -121,7 +134,9 @@ export function MenuAcciones({ acciones, etiqueta = "Más acciones", className }
         type="button"
         onClick={() => setAbierto((a) => !a)}
         className={cn(
-          "grid h-8 w-8 place-items-center rounded-lg text-ink-3 transition hover:bg-surface-2 hover:text-ink",
+          conTexto
+            ? "flex h-10 items-center gap-1.5 rounded-xl border border-border-soft bg-surface px-3 text-sm font-semibold text-ink-2 transition hover:bg-surface-2 hover:text-ink"
+            : "grid h-8 w-8 place-items-center rounded-lg text-ink-3 transition hover:bg-surface-2 hover:text-ink",
           abierto && "bg-surface-2 text-ink",
         )}
         aria-label={etiqueta}
@@ -129,6 +144,7 @@ export function MenuAcciones({ acciones, etiqueta = "Más acciones", className }
         aria-expanded={abierto}
         title={etiqueta}
       >
+        {conTexto && <span>{etiqueta}</span>}
         <MoreHorizontal className="h-4 w-4" />
       </button>
       {menu ? createPortal(menu, document.body) : null}

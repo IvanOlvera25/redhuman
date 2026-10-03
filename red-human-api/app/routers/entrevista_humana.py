@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from ..database import get_db
-from ..models import Archivo, EntrevistaHumana, registrar
+from ..models import CLASES_ENTREVISTA_HUMANA, Archivo, EntrevistaHumana, registrar
 from ..serial import iso, nombre_empresa_candidato
 from ..services import archivos as fs
 from ..services import fraiche, notificaciones
@@ -49,14 +49,19 @@ def _expediente_para_entrevistador(db: Session, eh: EntrevistaHumana) -> dict:
     a = dict((p.analisis or {}) if p else {})
     ultima_ia = None
     for e in reversed(p.entrevistas if p else []):
-        if e.estado == "evaluada" and e.evaluacion:
+        if e.estado == "evaluada" and e.evaluacion and e.fase != "ipv":
             ultima_ia = e.evaluacion
             break
+    # 2026-10-02 (Fraiche §12): resultados disponibles de la IPV con Red Human y puntos concretos por validar
+    ipv_rh = next((e.evaluacion_ipv for e in reversed(p.entrevistas if p else []) if e.evaluacion_ipv), None)
+    calc = (ipv_rh or {}).get("calculo") or {}
+    externo = (eh.tipo or "") == "externo"  # respeta el acceso del destinatario: sin datos de contacto del candidato
     archivos = [{"id": x.id, "tipo": x.tipo, "nombre": x.nombre, "mime": x.mime} for x in (c.archivos if c else [])]
     exp = p.expediente if p else None
     documentos = [{"tipo": d.tipo, "estado": d.estado, "obligatorio": d.obligatorio} for d in (exp.documentos if exp else [])]
     return {
-        "candidato": {"nombre": c.nombre if c else "", "telefono": (c.telefono if c else "") or "", "correo": (c.correo if c else "") or "", "fuente": (c.fuente if c else "") or ""},
+        "candidato": {"nombre": c.nombre if c else "", "telefono": "" if externo else ((c.telefono if c else "") or ""),
+                      "correo": "" if externo else ((c.correo if c else "") or ""), "fuente": (c.fuente if c else "") or ""},
         "vacante": {"titulo": v.titulo if v else "", "requisitos": (v.requisitos if v else "") or "", "perfilIdeal": (v.perfil_ideal if v else "") or "", "empresa": nombre_empresa_candidato(v) if v else ""},
         "etapa": p.etapa if p else "",
         "score": p.score if p else None,
@@ -72,9 +77,16 @@ def _expediente_para_entrevistador(db: Session, eh: EntrevistaHumana) -> dict:
             "matchPerfil": ultima_ia.get("match_perfil"), "recomendacion": ultima_ia.get("recomendacion") or "", "resumen": ultima_ia.get("resumen") or "",
             "fortalezas": ultima_ia.get("fortalezas") or [], "riesgos": ultima_ia.get("riesgos") or [], "faltante": ultima_ia.get("faltante") or [],
         } if ultima_ia else None,
+        "ipvRedHuman": {
+            "puntaje": calc.get("puntaje"), "puntajeProvisional": calc.get("puntaje_provisional"), "pesoPendiente": calc.get("peso_pendiente"),
+            "conclusion": fraiche.CONCLUSIONES_IPV.get(calc.get("conclusion") or "", "Por validar — evidencia insuficiente"),
+            "porValidar": list(calc.get("sin_evidencia") or []), "reservas": list((ipv_rh or {}).get("reservas") or []),
+            "puntosValidar": list((ipv_rh or {}).get("puntos_validar") or []),
+        } if ipv_rh else None,
+        "puntosPorValidar": list(dict.fromkeys(list((ultima_ia or {}).get("riesgos") or []) + list((ipv_rh or {}).get("puntos_validar") or [])))[:8],
         "capacitacion": a.get("capacitacion") or [],
         "archivos": archivos,
-        "documentos": documentos,
+        "documentos": [] if externo else documentos,
     }
 
 
@@ -94,6 +106,7 @@ def publica(token: str, db: Session = Depends(get_db)):
         "expediente": _expediente_para_entrevistador(db, eh),
         # Fraiche (spec §8): Entrevista IPV con rúbrica — misma que usa Red Human
         "esIpv": bool(eh.es_ipv),
+        "tipoEntrevista": "Entrevista IPV" if eh.es_ipv else CLASES_ENTREVISTA_HUMANA.get(eh.clase or "reclutamiento", "Entrevista"),
         "rubricaIpv": {
             "competencias": fraiche.COMPETENCIAS_IPV, "observaciones": fraiche.OBSERVACIONES_IPV,
             "niveles": [{"clave": n, "nombre": fraiche.NOMBRE_NIVEL_IPV[n]} for n in fraiche.NIVELES_IPV],

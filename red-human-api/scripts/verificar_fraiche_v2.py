@@ -138,8 +138,9 @@ with TestClient(app) as client:
     check(not any("sueldo" in str(x).lower() or "salari" in str(x).lower() for x in g.get("preguntas", [])) and "¿Cuándo podrías empezar a trabajar en Fraiche?" in g.get("preguntas", []),
           "guion de la entrevista: sin sueldo y con la disponibilidad exacta")
     f = client.get(f"/candidatos/{PT}").json()
-    check(f["etapa"] == "Entrevista IA" and f["avance"]["siguienteAccion"]["tipo"] == "agregar_evaluacion" and f["avance"]["siguienteAccion"].get("evaluacion") == "entrevista_humana",
-          "con la entrevista del agente hecha, la siguiente acción es «Agregar evaluación: Entrevista humana»")
+    check(f["etapa"] == "Entrevista IA" and f["avance"]["siguienteAccion"]["tipo"] == "agregar_evaluacion" and f["avance"]["siguienteAccion"].get("evaluacion") == "ipv"
+          and f["avance"]["siguienteAccion"].get("modo") == "red_human",
+          "con la entrevista del agente hecha, se RECOMIENDA la IPV con Red Human antes de la entrevista humana (2026-10-02)")
     r = client.patch(f"/candidatos/{PT}/etapa", json={"etapa": "Contratación"})
     check(r.status_code == 409 and "falta" in r.json()["detail"].lower() and "Entrevista inicial" in r.json()["detail"], f"pasar a Contratación antes de tiempo dice EXACTAMENTE qué falta: {r.json()['detail'][:140]}")
 

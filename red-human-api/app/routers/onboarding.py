@@ -375,6 +375,13 @@ def resumen_inicio(exp_id: int, db: Session = Depends(get_db), _: Usuario = Depe
         "cursos": [{"id": c.id, "titulo": c.titulo} for c in cursos],
         # Evaluaciones (2026-09-28): la vacante pidió «Avisar antes de Onboarding» → aviso (nunca bloquea)
         "avisosEvaluaciones": _avisos_evaluaciones(db, p),
+        # 2026-10-02 (Fraiche §14): fecha base para mostrar las fechas calculadas de cada plazo, y lo que sigue
+        # pendiente (iniciar Onboarding NO lo exige: se solicita/genera ahí; se exige al completar el ingreso y el alta)
+        "fechaIngreso": onb.fecha_base(e).isoformat() if onb.fecha_base(e) else None,
+        "documentosPendientes": [d.tipo for d in e.obligatorios if not d.aprobado],
+        "documentosRecibidos": [d.tipo for d in e.obligatorios if d.aprobado or d.archivo],
+        "contratoFaltan": __import__("app.routers.contratacion", fromlist=["faltantes_contrato"]).faltantes_contrato(e),
+        "contratoFirmado": onb.contrato_ya_firmado(e),
     }
 
 
@@ -441,6 +448,9 @@ async def iniciar_onboarding(exp_id: int, datos: IniciarOnboardingIn, db: Sessio
     agregados, no_aplica, conservados = onb.aplicar_seleccion_documentos(db, e, datos.documentos, u.nombre)
     tareas = onb.generar_tareas(db, e, cuenta.id, config, u.nombre)
     onb.sincronizar_legado(db, e)
+    if "documentos" in config["plazos"]:
+        e.plazo_documentos_dias = int(config["plazos"]["documentos"])
+        onb.aplicar_plazo_documentos(e)
     if datos.plantilla_id:
         e.plantilla_onboarding_id = datos.plantilla_id
     registrar(db, u.nombre, "onboarding_iniciado", "expediente", str(e.id), {

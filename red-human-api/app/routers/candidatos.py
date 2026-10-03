@@ -1895,6 +1895,9 @@ async def aplicar_movimiento(
         raise HTTPException(400, "La columna «Evaluación» ya no existe: la evaluación integral es un resultado acumulado en la ficha.")
     prueba_total = modo_prueba_activo(db)
     franquicia = fp.es_franquicia(p) and fp.es_ruta_fraiche(p)
+    # 2026-10-02 (Fraiche §11): retrocesos y saltos son un «Movimiento excepcional» — siempre con motivo.
+    if datos.manual and not datos.omitir_entrevista_ia and fp.es_ruta_fraiche(p) and not datos.comentario.strip() and not desde_iniciar:
+        raise HTTPException(400, "Indica el motivo del movimiento excepcional.")
     # Pipeline v2: avanzar a Contratación/Onboarding exige lo aplicable a la ruta; se dice EXACTAMENTE qué falta.
     # «Mover a otra etapa» (manual) sigue siendo decisión de RH y deja lo saltado como «Omitida manualmente».
     if not datos.manual and not datos.omitir_entrevista_ia and not prueba_total and datos.etapa != p.etapa:
@@ -2046,6 +2049,10 @@ class EntrevistaHumanaIn(BaseModel):
     usar_teams: bool = True
     # Fraiche (spec §8): esta ronda es la Entrevista IPV con entrevistador humano (misma rúbrica que Red Human).
     es_ipv: bool = False
+    # 2026-10-02 (Fraiche §12/§14): reclutamiento | encargado | franquiciatario — mismo flujo de agenda.
+    clase: str = "reclutamiento"
+    obligatoria: bool = False  # una entrevista adicional solo bloquea el avance si RH la define obligatoria
+    enviar_ficha: bool = True  # «Ficha del candidato: se generará y enviará al entrevistador»
 
 
 def _asunto_teams(p: Postulacion) -> str:
@@ -2177,8 +2184,15 @@ async def programar_entrevista_humana(
         elif not liga:
             raise HTTPException(400, "Falta la liga de la videollamada.")
 
+    from ..models import CLASES_ENTREVISTA_HUMANA
+
+    clase = datos.clase if datos.clase in CLASES_ENTREVISTA_HUMANA else "reclutamiento"
     anterior = p.etapa
-    p.etapa = "Entrevista Humana"
+    # 2026-10-02 (Fraiche §5/§12): programar una entrevista humana (normal o IPV) mueve a Filtro humano SOLO desde una
+    # etapa anterior; desde Contratación/Onboarding nunca regresa al candidato.
+    movio = _antes_de_filtro_humano(p.etapa)
+    if movio:
+        p.etapa = "Entrevista Humana"
 
     eh = EntrevistaHumana(
         candidato_id=p.candidato_id,
@@ -2197,6 +2211,9 @@ async def programar_entrevista_humana(
         comentario=datos.comentario.strip(),
         token=secrets.token_urlsafe(24),
         es_ipv=bool(datos.es_ipv),
+        clase="reclutamiento" if datos.es_ipv else clase,
+        obligatoria=bool(datos.obligatoria) if clase != "reclutamiento" and not datos.es_ipv else False,
+        envios=[],
     )
     p.entrevistas_humanas.append(eh)
     db.flush()
@@ -2204,7 +2221,13 @@ async def programar_entrevista_humana(
         fraiche.avanzar_paso(p, "ipv")  # Fraiche (spec §11)
 
     override = override_de(datos.notificar)
-    resultados = await notificaciones.disparar(db, "entrevista_agendada", p, u.nombre, eh=eh, override=override)
+    extra = {}
+    if datos.enviar_ficha:
+        adj = _ficha_para_entrevistador(db, p, eh)
+        if adj:
+            extra["_adjuntos_entrevistador"] = [adj]
+    resultados = await notificaciones.disparar(db, "entrevista_agendada", p, u.nombre, eh=eh, override=override, extra=extra)
+    _registrar_envios_eh(eh, "entrevista_agendada", resultados, u.nombre)
 
     registrar(
         db, u.nombre, "entrevista_humana_programada", "postulacion", p.codigo,
@@ -2213,7 +2236,7 @@ async def programar_entrevista_humana(
             "tipo_entrevistador": datos.tipo_entrevistador, "contacto_id": eh.contacto_id,
             "fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo,
             "notificaciones": resultados, "notificar_override": override,
-            "teams_evento_id": teams_evento_id, "es_ipv": eh.es_ipv,
+            "teams_evento_id": teams_evento_id, "es_ipv": eh.es_ipv, "clase": eh.clase, "movio_a_filtro_humano": movio,
         },
     )
     _actualizar_ultima_actividad(p)
@@ -2221,17 +2244,58 @@ async def programar_entrevista_humana(
     # Fase 7A: el resultado por canal viaja al modal (mismo shape que solicitar_documentos) — un correo
     # que no salió (sin RESEND_API_KEY, sin correo, Meta rechazó…) deja de ser silencioso.
     # 2026-09-18: además `advertencias` (texto listo para el toast amarillo del frontend).
-    return {"resultados": resultados, "advertencias": notificaciones.advertencias_de(resultados), "candidato": postulacion_dict(p, detalle=True)}
+    return {"resultados": resultados, "advertencias": notificaciones.advertencias_de(resultados), "movioAFiltroHumano": movio,
+            "candidato": postulacion_dict(p, detalle=True)}
+
+
+def _antes_de_filtro_humano(etapa: str) -> bool:
+    return etapa in ("Prefiltro", "Entrevista IA")
+
+
+def _registrar_envios_eh(eh: EntrevistaHumana, evento: str, resultados: list, actor: str) -> None:
+    """2026-10-02 (Fraiche §2/§9): estado del envío POR DESTINATARIO en la propia entrevista (Reenviar lo usa)."""
+    from ..services import avisos
+
+    ahora = datetime.now(timezone.utc).isoformat()
+    avisos.registrar_envios(eh, [{
+        "fecha": ahora, "evento": evento, "destinatario": r.get("destinatario", ""), "canal": r.get("canal", ""), "destino": r.get("destino", ""),
+        "enviado": bool(r.get("enviado")), "estado": avisos.estado_de(r), "detalle": str(r.get("detalle") or "")[:300], "por": actor,
+    } for r in resultados or []])
+
+
+def _ficha_para_entrevistador(db: Session, p: Postulacion, eh: EntrevistaHumana) -> Optional[dict]:
+    """PDF de la ficha del candidato (CV, resumen, resultados disponibles y puntos por validar) para el
+    entrevistador. Sin datos de contacto, médico ni socioeconómico. Nunca rompe la agenda."""
+    from ..services.pdf import pdf_ficha_presentacion
+    from ..models import CLASES_ENTREVISTA_HUMANA
+
+    try:
+        cuando = notificaciones._fecha_hora_legible_mx(eh.fecha) if eh.fecha else ""
+        tipo = "Entrevista IPV" if eh.es_ipv else CLASES_ENTREVISTA_HUMANA.get(eh.clase or "reclutamiento", "Entrevista")
+        d = _datos_ficha_presentacion(db, p, SECCIONES_FICHA, "", f"{tipo} con {eh.entrevistador} {('el ' + cuando) if cuando else ''}".strip())
+        return {"filename": f"ficha-{p.codigo}.pdf", "content": pdf_ficha_presentacion(d)}
+    except Exception as ex:  # noqa: BLE001
+        print(f"[ficha] no se pudo generar la ficha para el entrevistador ({p.codigo}): {ex}", flush=True)
+        return None
 
 
 RESULTADOS_ENTREVISTA_HUMANA = ("aprobado", "no_aprobado")
 RECOMENDACIONES_ENTREVISTA_HUMANA = ("avanzar", "no_avanzar", "segunda_entrevista")
 
 
-def _ultima_entrevista_humana(p: Postulacion) -> EntrevistaHumana:
+def _ultima_entrevista_humana(p: Postulacion, entrevista_id: Optional[int] = None) -> EntrevistaHumana:
+    """2026-10-02 (Fraiche §12): puede haber varias entrevistas (reclutamiento, IPV humana, encargado,
+    franquiciatario), cada una con agenda y resultado propios. Con `entrevista_id` se actúa sobre ESA; sin él,
+    la más reciente que siga viva (ni cancelada ni realizada) o, si no hay, la última."""
     if not p.entrevistas_humanas:
         raise HTTPException(409, "La postulación no tiene ninguna Entrevista Humana programada.")
-    return p.entrevistas_humanas[-1]
+    if entrevista_id:
+        eh = next((x for x in p.entrevistas_humanas if x.id == entrevista_id), None)
+        if eh is None:
+            raise HTTPException(404, "Esa entrevista no pertenece a esta postulación.")
+        return eh
+    vivas = [x for x in p.entrevistas_humanas if not x.cancelada and not x.realizada]
+    return vivas[-1] if vivas else p.entrevistas_humanas[-1]
 
 
 class EntrevistaHumanaModificarIn(BaseModel):
@@ -2243,6 +2307,7 @@ class EntrevistaHumanaModificarIn(BaseModel):
     telefono_contacto: str = ""  # opcional si modalidad == Llamada
     comentario: str = ""
     notificar: Optional[NotificarIn] = None
+    entrevista_id: Optional[int] = None  # 2026-10-02: cuál entrevista (hay varias); vacío = la vigente
 
 
 @router.patch("/{codigo}/entrevista-humana")
@@ -2253,7 +2318,7 @@ async def modificar_entrevista_humana(
     """Botón «Modificar» — edita fecha/modalidad/liga/ubicación de la ronda vigente y dispara el
     evento "entrevista_modificada" (Fase D)."""
     p = _por_codigo(db, codigo, cuenta.id)
-    eh = _ultima_entrevista_humana(p)
+    eh = _ultima_entrevista_humana(p, datos.entrevista_id)
     if eh.cancelada:
         raise HTTPException(409, "Esta entrevista fue cancelada; agenda una nueva.")
     if eh.realizada:
@@ -2289,9 +2354,12 @@ async def modificar_entrevista_humana(
     eh.ubicacion = ubicacion if datos.modalidad == "Presencial" else ""
     eh.telefono_contacto = datos.telefono_contacto.strip() if datos.modalidad == "Llamada" else ""
     eh.comentario = datos.comentario.strip()
+    # 2026-10-02 (Fraiche §2): el recordatorio anterior queda sin efecto; el job programa el de la nueva cita.
+    eh.recordatorio_enviado_en = None
 
     override = override_de(datos.notificar)
     resultados = await notificaciones.disparar(db, "entrevista_modificada", p, u.nombre, eh=eh, override=override)
+    _registrar_envios_eh(eh, "entrevista_modificada", resultados, u.nombre)
     registrar(
         db, u.nombre, "entrevista_humana_modificada", "postulacion", p.codigo,
         {"fecha": fecha_hora.isoformat(), "modalidad": datos.modalidad, "correo_rh": u.correo, "notificaciones": resultados,
@@ -2299,19 +2367,20 @@ async def modificar_entrevista_humana(
     )
     _actualizar_ultima_actividad(p)
     db.commit()
-    return {**postulacion_dict(p, detalle=True), "avisoTeams": aviso_teams}
+    return {**postulacion_dict(p, detalle=True), "avisoTeams": aviso_teams, "resultados": resultados,
+            "advertencias": notificaciones.advertencias_de(resultados)}
 
 
 @router.post("/{codigo}/entrevista-humana/cancelar")
 async def cancelar_entrevista_humana(
-    codigo: str, notificar: Optional[NotificarIn] = Body(default=None, embed=True),
+    codigo: str, notificar: Optional[NotificarIn] = Body(default=None, embed=True), entrevista_id: Optional[int] = Body(default=None, embed=True),
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón «Cancelar» — dispara el evento "entrevista_cancelada" (Fase D). No mueve la etapa
     automáticamente: RH decide a mano el siguiente paso (agendar otra ronda o mover la etapa)."""
     p = _por_codigo(db, codigo, cuenta.id)
-    eh = _ultima_entrevista_humana(p)
+    eh = _ultima_entrevista_humana(p, entrevista_id)
     if eh.cancelada:
         raise HTTPException(409, "Esta entrevista ya estaba cancelada.")
     if eh.realizada:
@@ -2321,6 +2390,7 @@ async def cancelar_entrevista_humana(
 
     override = override_de(notificar)
     resultados = await notificaciones.disparar(db, "entrevista_cancelada", p, u.nombre, eh=eh, override=override)
+    _registrar_envios_eh(eh, "entrevista_cancelada", resultados, u.nombre)
     registrar(
         db, u.nombre, "entrevista_humana_cancelada", "postulacion", p.codigo,
         {"correo_rh": u.correo, "notificaciones": resultados, "notificar_override": override,
@@ -2328,12 +2398,50 @@ async def cancelar_entrevista_humana(
     )
     _actualizar_ultima_actividad(p)
     db.commit()
-    return {**postulacion_dict(p, detalle=True), "avisoTeams": aviso_teams}
+    return {**postulacion_dict(p, detalle=True), "avisoTeams": aviso_teams, "resultados": resultados,
+            "advertencias": notificaciones.advertencias_de(resultados)}
+
+
+class ReenviarEntrevistaIn(BaseModel):
+    entrevista_id: Optional[int] = None
+    destinatario: str = ""  # candidato | entrevistador | "" = ambos
+    canal: str = ""  # whatsapp | correo | "" = ambos
+
+
+@router.post("/{codigo}/entrevista-humana/reenviar")
+async def reenviar_aviso_entrevista_humana(
+    codigo: str, datos: ReenviarEntrevistaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+    cuenta: Cuenta = Depends(cuenta_actual),
+):
+    """2026-10-02 (Fraiche §2/§9/§12): «Reenviar» — vuelve a mandar el último aviso de la cita (agendada o
+    reprogramada; cancelada si ya se canceló) al destinatario/canal elegido, y registra el nuevo estado."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    eh = _ultima_entrevista_humana(p, datos.entrevista_id)
+    if eh.realizada:
+        raise HTTPException(409, "Esta entrevista ya se realizó; no hay cita que reenviar.")
+    evento = "entrevista_cancelada" if eh.cancelada else ("entrevista_modificada" if any(x.get("evento") == "entrevista_modificada" for x in eh.envios or []) else "entrevista_agendada")
+    override = {}
+    for dest in ("candidato", "entrevistador"):
+        for can in ("whatsapp", "correo"):
+            override[f"{dest}_{can}"] = (not datos.destinatario or datos.destinatario == dest) and (not datos.canal or datos.canal == can)
+    override.update({"cliente_correo": False, "cliente_whatsapp": False})
+    extra = {}
+    if evento == "entrevista_agendada" and override.get("entrevistador_correo"):
+        adj = _ficha_para_entrevistador(db, p, eh)
+        if adj:
+            extra["_adjuntos_entrevistador"] = [adj]
+    resultados = await notificaciones.disparar(db, evento, p, u.nombre, eh=eh, override=override, extra=extra)
+    _registrar_envios_eh(eh, evento + "_reenvio", resultados, u.nombre)
+    registrar(db, u.nombre, "entrevista_humana_aviso_reenviado", "postulacion", p.codigo, {"entrevista": eh.id, "evento": evento, "notificaciones": resultados, "correo_rh": u.correo})
+    db.commit()
+    return {"resultados": resultados, "advertencias": notificaciones.advertencias_de(resultados), "liga": f"{settings.app_url.rstrip('/')}/entrevista-humana/{eh.token}",
+            "candidato": postulacion_dict(p, detalle=True)}
 
 
 @router.post("/{codigo}/entrevista-humana/realizada")
 async def marcar_entrevista_humana_realizada(
     codigo: str, forzar_prueba: bool = False, notificar: Optional[NotificarIn] = Body(default=None, embed=True),
+    entrevista_id: Optional[int] = Body(default=None, embed=True),
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
@@ -2342,9 +2450,7 @@ async def marcar_entrevista_humana_realizada(
     destinatario Entrevistador de ese evento. RH conserva la opción de capturar/corregir el
     resultado a mano como respaldo — ver POST .../entrevista-humana/resultado."""
     p = _por_codigo(db, codigo, cuenta.id)
-    if p.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
-        raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
-    eh = _ultima_entrevista_humana(p)
+    eh = _ultima_entrevista_humana(p, entrevista_id)
 
     eh.realizada = True
     override = override_de(notificar)
@@ -2364,6 +2470,7 @@ class EntrevistaHumanaResultadoIn(BaseModel):
     comentario: str = ""
     notificar: Optional[NotificarIn] = None  # aplica a "recomendacion_final"; "candidato_apto" (automático) usa la regla
     rubrica: Optional[dict] = None  # Fraiche (spec §8): rúbrica IPV, obligatoria si la ronda es IPV
+    entrevista_id: Optional[int] = None  # 2026-10-02: cuál entrevista (hay varias); vacío = la vigente
 
 
 @router.post("/{codigo}/entrevista-humana/resultado")
@@ -2376,9 +2483,7 @@ async def registrar_resultado_entrevista_humana(
     RH siempre puede usar este mismo endpoint después para corregir — a diferencia de
     POST /entrevista-humana/publica/{token}, que si ya está capturada regresa 409)."""
     p = _por_codigo(db, codigo, cuenta.id)
-    if p.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
-        raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
-    eh = _ultima_entrevista_humana(p)
+    eh = _ultima_entrevista_humana(p, datos.entrevista_id)
     # Fraiche (spec §8): en una ronda IPV la rúbrica es obligatoria y resultado/recomendación se derivan si no vienen
     from .entrevista_humana import aplicar_rubrica_ipv
 
@@ -2742,33 +2847,89 @@ async def programar_ipv_red_human(
     if pendiente is not None:
         pendiente.fase = "inicial_ipv"
         registrar(db, u.nombre, "ipv_incluida_en_entrevista_inicial", "entrevista", pendiente.codigo, {"postulacion": p.codigo, "correo_rh": u.correo})
-        _actualizar_ultima_actividad(p)
-        db.commit()
-        return {"modo": "misma_sesion", "entrevista": entrevista_dict(pendiente), "candidato": postulacion_dict(p, detalle=True)}
-    e, _ = crear_entrevista_para_candidato(db, p, u.nombre, fase="ipv")
-    registrar(db, u.nombre, "ipv_programada_red_human", "entrevista", e.codigo, {"postulacion": p.codigo, "correo_rh": u.correo})
+        e, modo = pendiente, "misma_sesion"
+    else:
+        e, _ = crear_entrevista_para_candidato(db, p, u.nombre, fase="ipv")
+        registrar(db, u.nombre, "ipv_programada_red_human", "entrevista", e.codigo, {"postulacion": p.codigo, "correo_rh": u.correo})
+        modo = "sesion_ipv"
+    # 2026-10-02 (Fraiche §1): la liga sale SOLA al candidato por su canal vinculado (y correo); el estado real del
+    # envío (enviado / pendiente / fallido con motivo) regresa a RH y queda en `Entrevista.envios`.
+    envios = await enviar_liga_ipv(db, p, e, u.nombre, misma_sesion=(modo == "misma_sesion"))
     _actualizar_ultima_actividad(p)
     db.commit()
-    return {"modo": "sesion_ipv", "entrevista": entrevista_dict(e), "candidato": postulacion_dict(p, detalle=True)}
+    return {"modo": modo, "entrevista": entrevista_dict(e), "liga": _liga_entrevista(e), "envios": envios, "candidato": postulacion_dict(p, detalle=True)}
+
+
+def _liga_entrevista(e) -> str:
+    from ..config import settings
+
+    return f"{settings.app_url.rstrip('/')}/entrevista/{e.token}"
+
+
+async def enviar_liga_ipv(db: Session, p: Postulacion, e, actor: str, misma_sesion: bool = False, evento: str = "ipv_programada") -> list:
+    """Manda al candidato la liga de su Entrevista IPV con Red Human (canal vinculado + correo). Nunca truena."""
+    from ..services import avisos
+
+    liga = _liga_entrevista(e)
+    empresa = nombre_empresa_candidato(p.vacante) if p.vacante else ""
+    nombre = (nombre_ficha(p) or "").split(" ")[0]
+    if misma_sesion:
+        texto = (f"Hola {nombre}. Tu entrevista con Red Human para {p.vacante.titulo if p.vacante else 'la vacante'} en {empresa} "
+                 f"incluirá una segunda parte con situaciones de tienda. Entra cuando puedas, desde un lugar tranquilo: {liga}")
+    else:
+        texto = (f"Hola {nombre}. Te invitamos a una entrevista breve con Red Human sobre situaciones reales de tienda para "
+                 f"{p.vacante.titulo if p.vacante else 'la vacante'} en {empresa}. Tómate tu tiempo, no hay respuestas "
+                 f"incorrectas. Entra cuando puedas: {liga}")
+    try:
+        envios = await avisos.avisar(db, rol="candidato", nombre=nombre_ficha(p), telefono=p.telefono or "", correo=p.correo or "",
+                                     asunto="Tu entrevista con Red Human", texto=texto, liga=liga, cta="Iniciar entrevista",
+                                     empresa=empresa, evento=evento, referencia=p.codigo, postulacion=p)
+    except Exception as ex:  # noqa: BLE001
+        envios = [{"fecha": datetime.now(timezone.utc).isoformat(), "evento": evento, "destinatario": "candidato", "canal": "", "destino": "",
+                   "enviado": False, "estado": "fallido", "detalle": str(ex)[:200]}]
+    for x in envios:
+        x["por"] = actor
+    avisos.registrar_envios(e, envios)
+    registrar(db, actor, "ipv_liga_enviada", "entrevista", e.codigo, {"postulacion": p.codigo, "envios": [{k: x.get(k) for k in ("canal", "destino", "estado", "detalle")} for x in envios]})
+    return envios
+
+
+class ReenviarIpvIn(BaseModel):
+    entrevista: str = ""  # ENT-####; vacío = la IPV con Red Human más reciente
+
+
+@router.post("/{codigo}/ipv/reenviar")
+async def reenviar_ipv_red_human(codigo: str, datos: ReenviarIpvIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Reenviar» la liga de la IPV con Red Human: registra canal, fecha y estado de cada envío."""
+    p = _por_codigo(db, codigo, cuenta.id)
+    ipvs = [e for e in p.entrevistas if e.fase in ("ipv", "inicial_ipv")]
+    e = next((x for x in ipvs if x.codigo == datos.entrevista), None) if datos.entrevista else (ipvs[-1] if ipvs else None)
+    if e is None:
+        raise HTTPException(404, "Esta postulación no tiene una IPV con Red Human.")
+    if e.estado in ("evaluada", "cancelada"):
+        raise HTTPException(409, "Esa entrevista ya terminó; si hace falta, reábrela primero.")
+    envios = await enviar_liga_ipv(db, p, e, u.nombre, misma_sesion=(e.fase == "inicial_ipv"), evento="ipv_reenviada")
+    db.commit()
+    return {"liga": _liga_entrevista(e), "envios": envios, "entrevista": entrevista_dict(e), "candidato": postulacion_dict(p, detalle=True)}
 
 
 @router.post("/{codigo}/entrevista-humana/recordatorio")
 async def recordatorio_entrevista_humana(
     codigo: str, forzar_prueba: bool = False, notificar: Optional[NotificarIn] = Body(default=None, embed=True),
+    entrevista_id: Optional[int] = Body(default=None, embed=True),
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
     cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Botón «Enviar recordatorio» — dispara el evento "recordatorio_entrevista" (Fase D): la
     regla configurada de la Cuenta decide el envío completo."""
     p = _por_codigo(db, codigo, cuenta.id)
-    if p.etapa != "Entrevista Humana" and not puede_forzar_prueba(db, forzar_prueba):
-        raise HTTPException(409, "El candidato no está en la etapa de Entrevista Humana.")
-    eh = _ultima_entrevista_humana(p)
+    eh = _ultima_entrevista_humana(p, entrevista_id)
     if eh.realizada and not puede_forzar_prueba(db, forzar_prueba) and not _ambiente_prueba():
         raise HTTPException(409, "Esta entrevista ya se marcó como realizada.")
 
     override = override_de(notificar)
     resultados = await notificaciones.disparar(db, "recordatorio_entrevista", p, u.nombre, eh=eh, override=override)
+    _registrar_envios_eh(eh, "recordatorio_entrevista", resultados, u.nombre)
     registrar(
         db, u.nombre, "recordatorio_entrevista_humana_enviado", "postulacion", p.codigo,
         {"notificaciones": resultados, "correo_rh": u.correo, "notificar_override": override},

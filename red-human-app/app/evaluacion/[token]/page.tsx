@@ -12,7 +12,11 @@ import { AlertTriangle, CalendarClock, CheckCircle2, ClipboardList, Info, Loader
 import { Badge, Button, Card, Logo } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
+import { FormReferencia } from "@/components/dashboard/evaluaciones/panel-evaluaciones";
 import {
+  REFERENCIA_VACIA,
+  guardarReferenciasResponsable,
+  type ReferenciaLaboral,
   fetchEvaluacionExternaPublica,
   marcarEvaluacionExternaNoRealizada,
   registrarResultadoEvaluacionExterna,
@@ -51,6 +55,7 @@ function tituloPor(rol: Rol, d: EvaluacionExternaPublica) {
     case "franquiciatario": return `Candidato presentado: ${d.candidato}`;
     case "socioeconomico": return `Estudio socioeconómico de ${d.candidato}`;
     case "medico": return `Dictamen médico de ${d.candidato}`;
+    case "referencias": return `Referencias laborales de ${d.candidato}`;
     default: return `${d.evaluacion} · ${d.candidato}`;
   }
 }
@@ -219,6 +224,10 @@ export default function EvaluacionExterna() {
               </div>
             )}
 
+            {rol === "referencias" ? (
+              <ReferenciasResponsable token={token} datos={datos} bloqueado={bloqueado} />
+            ) : (
+              <>
             {/* ===== Formulario ===== */}
             <Card className="mt-4 p-6">
               <fieldset disabled={bloqueado || enviando} className="flex flex-col gap-5">
@@ -319,6 +328,8 @@ export default function EvaluacionExterna() {
                 </div>
               )}
             </Card>
+              </>
+            )}
           </>
         )}
 
@@ -355,5 +366,54 @@ export default function EvaluacionExterna() {
         )}
       </div>
     </main>
+  );
+}
+
+/* 2026-10-02 (Fraiche §10): el responsable captura (si faltan) y VALIDA cada referencia. Capturar no es validar; si
+   nadie contesta se marca «No contactada» (no es desfavorable). La conclusión final la registra RH. */
+function ReferenciasResponsable({ token, datos, bloqueado }: { token: string; datos: EvaluacionExternaPublica; bloqueado: boolean }) {
+  const [filas, setFilas] = useState<ReferenciaLaboral[]>(() =>
+    datos.referencias && datos.referencias.length ? datos.referencias.map((r) => ({ ...REFERENCIA_VACIA, ...r })) : [{ ...REFERENCIA_VACIA }],
+  );
+  const [resumen, setResumen] = useState(datos.referenciasResumen ?? null);
+  const [enviando, setEnviando] = useState(false);
+  const [error, setError] = useState("");
+  const [ok, setOk] = useState("");
+  const cambiar = (i: number, p: Partial<ReferenciaLaboral>) => setFilas(filas.map((f, j) => (j === i ? { ...f, ...p } : f)));
+  return (
+    <Card className="mt-4 p-6">
+      {resumen && <p className="mb-3 text-sm font-semibold text-ink-2">{resumen.texto}</p>}
+      <fieldset disabled={bloqueado || enviando} className="flex flex-col gap-4">
+        {filas.map((f, i) => (
+          <div key={i} className="rounded-2xl border border-border-soft bg-surface-2/40 p-4">
+            <p className="mb-2 flex flex-wrap items-center gap-2 text-sm font-semibold text-ink">
+              Referencia {i + 1} {f.estadoTexto && <Badge tone={f.estado === "validada" ? "good" : f.estado === "por_contactar" ? "warn" : "neutral"}>{f.estadoTexto}</Badge>}
+              {f.capturada_por === "candidato" && <span className="text-xs font-normal text-ink-3">datos capturados por el candidato</span>}
+            </p>
+            <FormReferencia f={f} cambiar={(p) => cambiar(i, p)} validar />
+          </div>
+        ))}
+        <Button variant="outline" className="self-start" onClick={() => setFilas([...filas, { ...REFERENCIA_VACIA }])}>Agregar referencia</Button>
+        {error && <p className="text-sm font-semibold text-bad">{error}</p>}
+        {ok && <p className="text-sm font-semibold text-good">{ok}</p>}
+        <Button
+          size="lg"
+          className="w-full totem:min-h-16 totem:text-xl"
+          onClick={async () => {
+            setEnviando(true);
+            setError("");
+            setOk("");
+            const r = await guardarReferenciasResponsable(token, filas.filter((x) => x.empresa.trim() || x.contacto_nombre.trim()));
+            setEnviando(false);
+            if (!r.ok) return setError(r.error);
+            setFilas(r.data.referencias.map((x) => ({ ...REFERENCIA_VACIA, ...x })));
+            setResumen(r.data.resumen);
+            setOk(r.data.resumen.completas ? "Referencias validadas. Se avisó a RH para registrar la conclusión." : "Guardado. Puedes volver a esta liga para completar la validación.");
+          }}
+        >
+          {enviando ? <Loader2 className="h-5 w-5 animate-spin" /> : <CheckCircle2 className="h-5 w-5" />} Guardar referencias
+        </Button>
+      </fieldset>
+    </Card>
   );
 }

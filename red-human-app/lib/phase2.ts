@@ -71,6 +71,9 @@ export interface ResumenTableroOnboarding {
 }
 
 export interface NuevoIngreso {
+  /** 2026-10-02 (Fraiche §13): qué falta para generar el contrato y si ya hay uno firmado. */
+  contratoFaltan?: string[];
+  contratoFirmado?: boolean;
   /** Onboarding v2 (Fase 3): null si las tablas de módulos no están disponibles. */
   onboarding?: ResumenTableroOnboarding | null;
   /** Onboarding v2: obligatorios que aún no están Aprobados (lo que falta para el 100 %). */

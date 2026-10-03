@@ -67,6 +67,8 @@ class PruebaIn(BaseModel):
     id_proveedor: str = ""
     url: str = ""
     activa: bool = True
+    incluye: List[str] = []  # 2026-10-02: pruebas que incluye la batería (se muestran al asignar)
+    instrucciones: str = ""  # se mandan al candidato junto con su liga
 
 
 class EditarPruebaIn(BaseModel):
@@ -79,6 +81,8 @@ class EditarPruebaIn(BaseModel):
     id_proveedor: Optional[str] = None
     url: Optional[str] = None
     activa: Optional[bool] = None
+    incluye: Optional[List[str]] = None
+    instrucciones: Optional[str] = None
 
 
 def _validar_prueba(db: Session, cuenta_id: int, pr: PruebaPsicometrica) -> None:
@@ -201,6 +205,12 @@ class AgregarEvaluacionIn(BaseModel):
     tipo: str
     nombre: str = ""
     prueba_id: Optional[int] = None  # psicométrica del catálogo
+    prueba_ids: List[int] = []  # 2026-10-02 (§7): varias pruebas a la vez (cada una con estado y resultado propios)
+    enviar: bool = True  # 2026-10-02 (§9): avisar automáticamente al candidato y al responsable
+    correo_candidato: str = ""  # §8: si el proveedor exige correo y falta, se captura y guarda desde aquí
+    referencias_modo: str = ""  # §10: candidato (liga de captura) | responsable (el responsable las recaba)
+    referencias_requeridas: Optional[int] = None  # §10: vacío = las que pida la vacante
+    interno: bool = False  # uso interno: alta de UNA prueba dentro de una asignación múltiple
     modo: str = ""  # vacío = el de la prueba o «manual»
     proveedor: str = ""
     id_proveedor: str = ""
@@ -261,9 +271,11 @@ def _aplicar_responsable_y_cita(db: Session, cuenta_id: int, p: Postulacion, ev:
 
 
 @router.post("/postulaciones/{codigo}", status_code=201)
-def agregar_evaluacion(codigo: str, datos: AgregarEvaluacionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+async def agregar_evaluacion(codigo: str, datos: AgregarEvaluacionIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
     """«Agregar evaluación o verificación» desde la ficha. NO toca la etapa de la postulación. Comprueba los
-    consentimientos: si falta alguno queda «En espera de consentimiento» (y no se puede enviar)."""
+    consentimientos: si falta alguno queda «En espera de consentimiento» (y no se puede enviar).
+    2026-10-02: psicometría admite VARIAS pruebas (una evaluación por prueba, sin duplicar las ya asignadas) y, con
+    `enviar`, cada destinatario recibe su aviso con SU liga (candidato / responsable / médico)."""
     p = _postulacion(db, codigo, cuenta.id)
     if not p.activa:
         raise HTTPException(409, "La postulación está cerrada.")
@@ -273,14 +285,35 @@ def agregar_evaluacion(codigo: str, datos: AgregarEvaluacionIn, db: Session = De
 
     if fp.es_franquicia(p) and fp.es_ruta_fraiche(p) and datos.tipo in fp.TIPOS_SOLO_TIENDA:
         raise HTTPException(409, f"«{TIPOS_EVALUACION[datos.tipo]}» no aplica a la ruta Franquicia (sin IPV, psicometría, médico ni socioeconómico de Fraiche).")
+    if datos.tipo == "socioeconomico" and fp.es_ruta_fraiche(p) and not fp.aplica_socioeconomico(p):
+        raise HTTPException(409, "En tienda propia el estudio socioeconómico aplica solo a Cajero y Encargado.")
+    if datos.correo_candidato.strip():
+        _guardar_correo_candidato(p, datos.correo_candidato, u.nombre, db)
+    ids = list(dict.fromkeys([i for i in (datos.prueba_ids or []) if i] + ([datos.prueba_id] if datos.prueba_id else [])))
+    if datos.tipo == "psicometrica" and datos.prueba_ids and not datos.interno:
+        creadas, omitidas, envios = [], [], []
+        for pid in ids:
+            sub = datos.model_copy(update={"prueba_id": pid, "prueba_ids": [pid], "correo_candidato": "", "interno": True})
+            r = await agregar_evaluacion(codigo, sub, db, u, cuenta)
+            if r.get("omitida"):
+                omitidas.append(r["omitida"])
+            else:
+                creadas.append(r)
+                envios += r.get("envios") or []
+        if not creadas:
+            raise HTTPException(409, "Esas pruebas ya están asignadas a esta postulación: " + "; ".join(omitidas))
+        return {**creadas[0], "evaluaciones": creadas, "omitidas": omitidas, "envios": envios}
     nombre, modo, proveedor, id_prov, url = datos.nombre.strip(), datos.modo.strip(), datos.proveedor.strip(), datos.id_proveedor.strip(), datos.url.strip()
     prueba = None
     if datos.tipo == "psicometrica":
-        if not datos.prueba_id:
+        if not ids:
             raise HTTPException(400, "Elige la prueba psicométrica del catálogo (Configuración → Pruebas psicométricas).")
-        prueba = _prueba(db, datos.prueba_id, cuenta.id)
+        prueba = _prueba(db, ids[0], cuenta.id)
         if not prueba.activa:
             raise HTTPException(409, "Esa prueba psicométrica está inactiva.")
+        ya = [e for e in evaluaciones_de(db, p) if e.prueba_id == prueba.id and e.estado != "fallida"]
+        if ya and datos.prueba_ids:  # §7: al asignar VARIAS, las que ya estaban no se duplican (agregar nunca sustituye)
+            return {"omitida": f"«{prueba.nombre}» ya está asignada ({ya[-1].codigo})"}
         nombre = nombre or prueba.nombre
         modo = modo or prueba.modo
         proveedor, id_prov, url = proveedor or prueba.proveedor, id_prov or prueba.id_proveedor, url or prueba.url
@@ -299,8 +332,14 @@ def agregar_evaluacion(codigo: str, datos: AgregarEvaluacionIn, db: Session = De
         ev.consentimiento_token = secrets.token_urlsafe(24)
     # Fraiche (spec §10): responsable, cita y liga de acceso de la persona externa
     _aplicar_responsable_y_cita(db, cuenta.id, p, ev, datos.responsable, datos.cita, datos.cita_lugar)
-    if datos.generar_liga or sev.es_franquiciatario(ev) or sev.es_encargado(ev):
+    if datos.generar_liga or sev.es_franquiciatario(ev) or sev.es_encargado(ev) or (ev.responsable and ev.tipo != "psicometrica"):
         ev.token_externo = secrets.token_urlsafe(24)
+    if ev.tipo == "referencias":
+        ev.referencias_modo = datos.referencias_modo if datos.referencias_modo in ("candidato", "responsable") else ("responsable" if ev.responsable else "candidato")
+        req = datos.referencias_requeridas if datos.referencias_requeridas is not None else (getattr(p.vacante, "referencias_requeridas", None) if p.vacante else None)
+        ev.referencias_requeridas = max(1, min(10, int(req or 1)))
+        if ev.referencias_modo == "candidato":
+            ev.token_candidato = secrets.token_urlsafe(24)
     if ev.es_medico:
         sev.guardar_texto(ev, "notas", ev.notas)  # cifrado desde el primer día
     db.add(ev)
@@ -312,8 +351,217 @@ def agregar_evaluacion(codigo: str, datos: AgregarEvaluacionIn, db: Session = De
     fraiche.avanzar_paso(p, "presentacion" if sev.es_franquiciatario(ev) else "psicometria" if ev.tipo == "psicometrica" else "referencias" if ev.tipo == "referencias" else "evaluaciones_adicionales")
     registrar(db, u.nombre, "evaluacion_asignada", "postulacion", p.codigo,
               {"evaluacion": ev.codigo, "tipo": ev.tipo, "nombre": ev.nombre, "modo": ev.modo, "estado": ev.estado, "responsable": ev.responsable, "correo_rh": u.correo})
+    db.flush()
+    envios = await avisar_asignacion(db, ev, p, u.nombre) if datos.enviar else []
     db.commit()
-    return evaluacion_candidato_dict(ev, u)
+    return {**evaluacion_candidato_dict(ev, u), "envios": envios}
+
+
+# ---------------- Avisos de la actividad (2026-10-02, cambios integrados §8-10) ----------------
+
+INSTRUCCIONES_PSICOMETRIA = ("Hazla desde una computadora o celular con buena conexión, en un lugar tranquilo y en una sola sesión. "
+                             "No hay respuestas correctas ni incorrectas: contesta con sinceridad.")
+
+
+def _guardar_correo_candidato(p: Postulacion, correo: str, actor: str, db: Session) -> None:
+    import re as _re
+
+    correo = (correo or "").strip()
+    if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", correo):
+        raise HTTPException(400, "El correo del candidato no tiene un formato válido.")
+    if p.candidato and (p.candidato.correo or "") != correo:
+        anterior = p.candidato.correo or ""
+        p.candidato.correo = correo
+        registrar(db, actor, "correo_candidato_capturado", "postulacion", p.codigo, {"anterior": anterior, "nuevo": correo})
+
+
+def _empresa(p: Optional[Postulacion]) -> str:
+    return nombre_empresa_candidato(p.vacante) if p and p.vacante else ""
+
+
+def _cita_texto(ev: EvaluacionCandidato) -> str:
+    if not ev.cita_en:
+        return ""
+    from ..services.notificaciones import _fecha_hora_legible_mx
+
+    return f" Cita: {_fecha_hora_legible_mx(ev.cita_en)}" + (f" en {ev.cita_lugar}" if ev.cita_lugar else "") + "."
+
+
+def _rol_responsable(ev: EvaluacionCandidato) -> str:
+    return "medico" if ev.es_medico else "franquiciatario" if sev.es_franquiciatario(ev) else "responsable"
+
+
+async def _activar_psicometria(db: Session, ev: EvaluacionCandidato, p: Postulacion, actor: str) -> str:
+    """Crea la evaluación REAL en el proveedor (una sola vez: un reintento nunca la duplica) y deja la liga del
+    candidato. Regresa el motivo si no se pudo ("" = lista)."""
+    from ..services import psicometricas as psi
+
+    falta = sev.falta_consentimiento(ev, p)
+    if falta:
+        return falta
+    if sev.usa_psicometricas(ev) and psi.configurado():
+        if not ev.clave_proveedor:
+            if not (p and p.correo):
+                return "Psicométricas.mx necesita el correo del candidato: captúralo y vuelve a enviar."
+            try:
+                clave = psi.agregar_candidato(p.nombre, p.correo, p.vacante.titulo if p.vacante else ev.nombre, psi.tests_de(ev.id_proveedor))
+            except psi.PsicometricasError as ex:
+                return str(ex)
+            ev.clave_proveedor = clave
+            ev.liga_candidato = psi.url_candidato(clave) or ""
+            sev.aplicar_paso(ev, "enviada", actor, "Psicométricas.mx")
+    elif ev.modo == "integrada":
+        if (ev.paso_integrada or "asignada") == "asignada":
+            sev.aplicar_paso(ev, "enviada", actor)
+    elif ev.estado == "pendiente":
+        sev.mover(ev, "en_proceso", actor, "Liga enviada al candidato" if sev.liga_candidato(ev) else "Asignada al candidato")
+    return ""
+
+
+def _texto_psicometria(ev: EvaluacionCandidato, p: Postulacion) -> str:
+    from ..models import PruebaPsicometrica
+
+    pr = db_prueba = None
+    try:
+        from sqlalchemy.orm import object_session
+
+        db_prueba = object_session(ev)
+        pr = db_prueba.get(PruebaPsicometrica, ev.prueba_id) if (db_prueba and ev.prueba_id) else None
+    except Exception:  # noqa: BLE001
+        pr = None
+    instr = (pr.instrucciones if pr and pr.instrucciones else INSTRUCCIONES_PSICOMETRIA)
+    nombre = (p.nombre or "").split(" ")[0]
+    vac = p.vacante.titulo if p.vacante else "la vacante"
+    liga = sev.liga_candidato(ev)
+    base = f"Hola {nombre}. Como parte de tu proceso para {vac} en {_empresa(p)}, te asignamos la prueba «{ev.nombre}». {instr}"
+    if liga:
+        return f"{base} Entra aquí: {liga}"
+    if ev.clave_proveedor:
+        return f"{base} Psicométricas.mx te enviará un correo a {p.correo} con tu acceso (tu clave es {ev.clave_proveedor}). Revisa también tu bandeja de spam."
+    return base
+
+
+async def _aviso_candidato(db: Session, ev: EvaluacionCandidato, p: Postulacion, actor: str, evento: str) -> List[dict]:
+    from ..config import settings
+    from ..services import avisos
+
+    nombre = (p.nombre or "").split(" ")[0]
+    vac = p.vacante.titulo if p.vacante else "la vacante"
+    liga, cta, asunto = "", "Abrir", f"{ev.nombre} — {vac}"
+    if ev.tipo == "psicometrica":
+        motivo = await _activar_psicometria(db, ev, p, actor)
+        if motivo:
+            return [{"fecha": datetime.now(timezone.utc).isoformat(), "evento": evento, "destinatario": "candidato", "nombre": p.nombre,
+                     "canal": "", "destino": "", "enviado": False, "estado": "fallido", "detalle": motivo}]
+        texto, liga, cta = _texto_psicometria(ev, p), sev.liga_candidato(ev), "Hacer mi prueba"
+    elif ev.es_medico:
+        if ev.consentimiento_aceptado_en:
+            texto = f"Hola {nombre}. Tu estudio médico para {vac} en {_empresa(p)} quedó programado.{_cita_texto(ev)}"
+        else:
+            liga = f"{settings.app_url.rstrip('/')}/consentimiento/{ev.consentimiento_token}"
+            texto = (f"Hola {nombre}. Para continuar con tu proceso en {_empresa(p)} necesitamos tu consentimiento por escrito para el "
+                     f"estudio médico.{_cita_texto(ev)} Léelo y, si estás de acuerdo, acéptalo aquí: {liga}")
+            cta, asunto = "Leer y aceptar", "Consentimiento para tu estudio médico"
+    elif ev.tipo == "referencias" and ev.referencias_modo == "candidato":
+        if not ev.token_candidato:
+            ev.token_candidato = secrets.token_urlsafe(24)
+        liga = f"{settings.app_url.rstrip('/')}/referencias/{ev.token_candidato}"
+        req = max(1, int(ev.referencias_requeridas or 1))
+        texto = (f"Hola {nombre}. Para continuar con tu proceso para {vac} en {_empresa(p)}, compártenos {req} referencia{'s' if req != 1 else ''} "
+                 f"laboral{'es' if req != 1 else ''} (empresa, puesto, periodo y una persona de contacto). Captúralas aquí: {liga}")
+        cta, asunto = "Capturar referencias", "Tus referencias laborales"
+    elif ev.tipo == "referencias":
+        texto = f"Hola {nombre}. Vamos a validar tus referencias laborales para {vac} en {_empresa(p)}; {ev.responsable or 'nuestro equipo'} podría contactarte para completar datos."
+    else:
+        texto = f"Hola {nombre}. Como parte de tu proceso para {vac} en {_empresa(p)} se programó «{ev.nombre}».{_cita_texto(ev)}" + (f" Te atenderá {ev.responsable}." if ev.responsable else "")
+    if ev.tipo != "medico" and sev.falta_consentimiento(ev, p):
+        return [{"fecha": datetime.now(timezone.utc).isoformat(), "evento": evento, "destinatario": "candidato", "nombre": p.nombre,
+                 "canal": "", "destino": "", "enviado": False, "estado": "pendiente", "detalle": sev.falta_consentimiento(ev, p)}]
+    return await avisos.avisar(db, rol="candidato", nombre=p.nombre, telefono=p.telefono or "", correo=p.correo or "", asunto=asunto, texto=texto,
+                               liga=liga, cta=cta, empresa=_empresa(p), evento=evento, referencia=ev.codigo, postulacion=p,
+                               filas=[("Actividad", ev.nombre), ("Vacante", vac)])
+
+
+async def _aviso_responsable(db: Session, ev: EvaluacionCandidato, p: Postulacion, evento: str, motivo: str = "") -> List[dict]:
+    """El responsable (médico, proveedor, encargado, franquiciatario…) recibe SU liga: la de registrar/validar."""
+    from ..config import settings
+    from ..services import avisos
+
+    if not (ev.responsable_whatsapp or ev.responsable_correo):
+        return []
+    if not ev.token_externo:
+        ev.token_externo = secrets.token_urlsafe(24)
+    liga = f"{settings.app_url.rstrip('/')}/evaluacion/{ev.token_externo}"
+    vac = p.vacante.titulo if p.vacante else "la vacante"
+    if ev.tipo == "referencias":
+        accion = "Captura y valida sus referencias laborales" if ev.referencias_modo != "candidato" else "Valida las referencias laborales que capturó el candidato"
+    elif ev.es_medico:
+        accion = "Registra el dictamen (el candidato ya otorgó su consentimiento)" if ev.consentimiento_aceptado_en else "Podrás registrar el dictamen cuando el candidato otorgue su consentimiento"
+    else:
+        accion = "Registra el resultado"
+    texto = (f"Hola {ev.responsable or ''}. {_empresa(p)} te asignó «{ev.nombre}» de {p.nombre} para {vac}.{_cita_texto(ev)} "
+             f"{motivo + ' ' if motivo else ''}{accion} aquí: {liga}").replace("  ", " ")
+    envios = await avisos.avisar(db, rol=_rol_responsable(ev), nombre=ev.responsable, telefono=ev.responsable_whatsapp or "", correo=ev.responsable_correo or "",
+                                 asunto=f"Evaluación asignada: {ev.nombre}", texto=texto, liga=liga, cta="Abrir evaluación", empresa=_empresa(p),
+                                 evento=evento, referencia=ev.codigo, filas=[("Candidato", p.nombre), ("Vacante", vac)])
+    if any(e.get("enviado") for e in envios):
+        ev.liga_enviada_en = datetime.now(timezone.utc)
+    return envios
+
+
+async def avisar_asignacion(db: Session, ev: EvaluacionCandidato, p: Postulacion, actor: str, evento: str = "evaluacion_asignada",
+                            destinatario: str = "") -> List[dict]:
+    """§9: al asignar (o reenviar) cada destinatario recibe instrucciones y la liga de SU función. Nunca truena."""
+    from ..services import avisos
+
+    envios: List[dict] = []
+    try:
+        if destinatario in ("", "candidato"):
+            envios += await _aviso_candidato(db, ev, p, actor, evento)
+        if destinatario in ("", "responsable") and not (ev.es_medico and not ev.consentimiento_aceptado_en and destinatario == ""):
+            envios += await _aviso_responsable(db, ev, p, evento)
+    except Exception as ex:  # noqa: BLE001
+        envios.append({"fecha": datetime.now(timezone.utc).isoformat(), "evento": evento, "destinatario": destinatario or "candidato", "canal": "",
+                       "destino": "", "enviado": False, "estado": "fallido", "detalle": str(ex)[:200]})
+    for e in envios:
+        e["por"] = actor
+    avisos.registrar_envios(ev, envios)
+    if envios:
+        registrar(db, actor, "evaluacion_avisos", "postulacion", p.codigo,
+                  {"evaluacion": ev.codigo, "evento": evento, "envios": [{k: e.get(k) for k in ("destinatario", "canal", "destino", "estado", "detalle")} for e in envios]})
+    return envios
+
+
+class ReenviarAvisoIn(BaseModel):
+    destinatario: str = ""  # candidato | responsable | "" = ambos
+
+
+@router.post("/{codigo}/avisos")
+async def reenviar_avisos(codigo: str, datos: ReenviarAvisoIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """«Reenviar»: vuelve a mandar el aviso (con su liga) al candidato y/o al responsable y registra el estado."""
+    ev = _evaluacion(db, codigo, cuenta.id)
+    p = _post_de(db, ev)
+    if ev.estado == "fallida":
+        raise HTTPException(409, "La evaluación está cancelada.")
+    envios = await avisar_asignacion(db, ev, p, u.nombre, "evaluacion_reenvio", datos.destinatario if datos.destinatario in ("candidato", "responsable") else "")
+    db.commit()
+    return {**evaluacion_candidato_dict(ev, u), "envios": envios}
+
+
+async def avisar_rh(db: Session, ev: EvaluacionCandidato, p: Postulacion, titulo: str, texto: str) -> List[dict]:
+    """Aviso a RH (quien asignó la evaluación; si no se encuentra, el correo de comunicación de la Cuenta)."""
+    from ..models import Cuenta as _Cuenta
+    from ..services import avisos
+
+    rh = db.query(Usuario).filter(Usuario.nombre == ev.asignada_por, Usuario.activo.is_(True)).first() if ev.asignada_por else None
+    correo = (rh.correo if rh else "") or ((db.get(_Cuenta, ev.cuenta_id).correo_comunicacion or "") if db.get(_Cuenta, ev.cuenta_id) else "")
+    if not correo:
+        return []
+    envios = await avisos.avisar(db, rol="rh", nombre=rh.nombre if rh else "RH", correo=correo, asunto=titulo, texto=texto, empresa=_empresa(p),
+                                 evento="evaluacion_rh", referencia=ev.codigo, canales=("correo",),
+                                 filas=[("Candidato", p.nombre if p else ""), ("Evaluación", ev.nombre)])
+    avisos.registrar_envios(ev, envios)
+    return envios
 
 
 class EditarEvaluacionIn(BaseModel):
@@ -387,29 +635,59 @@ async def liga_externa(codigo: str, datos: LigaIn, db: Session = Depends(get_db)
     return {"liga": liga, "resultados": resultados, "evaluacion": evaluacion_candidato_dict(ev, u)}
 
 
-class ReferenciasIn(BaseModel):
+class ReferenciasConfigIn(BaseModel):
     referencias: List[dict] = []
+    requeridas: Optional[int] = None
+
+
+async def aplicar_referencias(db: Session, ev: EvaluacionCandidato, p: Optional[Postulacion], lista: List[dict], actor: str, validar: bool) -> dict:
+    """Núcleo de RH, del responsable (validar=True) y del candidato (validar=False, solo datos). Al completar las
+    requeridas validadas → «Resultado recibido» y aviso a RH; al capturar el candidato sus datos → aviso al responsable."""
+    antes = sev.resumen_referencias(ev)
+    datos_antes = sum(1 for r in ev.referencias or [] if (r.get("estado") or "") != "pendiente_datos")
+    ev.referencias = sev.normalizar_referencias(lista, ev.referencias or [], validar=validar)
+    for r in ev.referencias:
+        r["capturada_por"] = r.get("capturada_por") or actor
+    res = sev.resumen_referencias(ev)
+    avisos_out: List[dict] = []
+    if res["completas"] and ev.estado in ("pendiente", "en_proceso", "en_espera_consentimiento") and validar:
+        validadas = [r for r in ev.referencias if r["estado"] == "validada"]
+        ev.resultado_cargado_por, ev.resultado_cargado_en, ev.origen_resultado = actor, datetime.now(timezone.utc), "manual" if actor != (ev.responsable or "") else "liga_externa"
+        ev.resultado_resumen = "; ".join(f"{r['empresa']} · {r['contesto_nombre'] or r['contacto_nombre']}: {sev.RESULTADOS_REFERENCIA[r['resultado']]}"
+                                         + (f" (recontrataría: {r['recontrataria'].replace('_', ' ')})" if r.get("recontrataria") else "") for r in validadas)[:5000]
+        sev.mover(ev, "resultado_recibido", actor, f"{len(validadas)} referencia(s) validada(s) de {res['requeridas']}")
+        if p is not None and not antes["completas"]:
+            avisos_out += await avisar_rh(db, ev, p, "Referencias laborales validadas",
+                                          f"{actor} terminó de validar las referencias laborales de {p.nombre} ({res['texto']}). Revisa y registra la conclusión.")
+    elif ev.estado == "pendiente" and any(r["estado"] != "pendiente_datos" for r in ev.referencias):
+        sev.mover(ev, "en_proceso", actor, "Referencias en captura")
+    if not validar and p is not None:
+        datos_ahora = sum(1 for r in ev.referencias if r["estado"] != "pendiente_datos")
+        if datos_ahora >= res["requeridas"] and datos_antes < res["requeridas"]:
+            avisos_out += await _aviso_responsable(db, ev, p, "referencias_capturadas", motivo="El candidato ya capturó los datos de sus referencias.")
+            from ..services import avisos as _av
+
+            _av.registrar_envios(ev, avisos_out)
+    return {"resumen": res, "envios": avisos_out}
 
 
 @router.post("/{codigo}/referencias")
-def guardar_referencias(codigo: str, datos: ReferenciasIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
-    """Fraiche (spec §10): referencias laborales — contactos, fecha de verificación, resultado, comentarios y
-    responsable. Con al menos una referencia verificada la evaluación queda «Con resultado» (RH la revisa después)."""
+async def guardar_referencias(codigo: str, datos: ReferenciasConfigIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Fraiche (2026-10-02, §10): referencias laborales estructuradas — datos de cada referencia y su validación
+    (quién contestó, cargo, fecha, medio, puesto/periodo confirmados, desempeño, motivo de salida, ¿lo volverían a
+    contratar?, observaciones y resultado). Capturar contactos no es validarlos; no contestar no es desfavorable."""
     ev = _evaluacion(db, codigo, cuenta.id)
     p = _post_de(db, ev)
     if ev.tipo != "referencias":
         raise HTTPException(409, "Solo una evaluación de Referencias lleva referencias laborales.")
     _abierta(ev)
     _exigir_consentimiento(ev, p)
-    ev.referencias = sev.normalizar_referencias(datos.referencias)
-    verificadas = [r for r in ev.referencias if r.get("fecha_verificacion") and r.get("resultado")]
-    if verificadas and ev.estado in ("pendiente", "en_proceso"):
-        ev.resultado_cargado_por, ev.resultado_cargado_en, ev.origen_resultado = u.nombre, datetime.now(timezone.utc), "manual"
-        ev.resultado_resumen = "; ".join(f"{r['contacto']} ({r.get('empresa') or 's/e'}): {r['resultado']}" for r in verificadas)[:5000]
-        sev.mover(ev, "resultado_recibido", u.nombre, f"{len(verificadas)} referencia(s) verificada(s)")
-    registrar(db, u.nombre, "evaluacion_referencias", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "referencias": len(ev.referencias), "verificadas": len(verificadas), "correo_rh": u.correo})
+    if datos.requeridas is not None:
+        ev.referencias_requeridas = max(1, min(10, int(datos.requeridas)))
+    r = await aplicar_referencias(db, ev, p, datos.referencias, u.nombre, validar=True)
+    registrar(db, u.nombre, "evaluacion_referencias", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, **{k: r["resumen"][k] for k in ("total", "validadas", "requeridas")}, "correo_rh": u.correo})
     db.commit()
-    return evaluacion_candidato_dict(ev, u)
+    return {**evaluacion_candidato_dict(ev, u), "envios": r["envios"]}
 
 
 @router.get("/{codigo}/detalle-medico")
@@ -467,14 +745,31 @@ def _abierta(ev: EvaluacionCandidato) -> None:
         raise HTTPException(409, f"La evaluación ya está {'revisada' if ev.estado == 'revisada' else 'fallida/cancelada'}.")
 
 
+class EnviarIn(BaseModel):
+    correo: str = ""  # §8: correo del candidato si el proveedor lo exige y no estaba capturado
+
+
 @router.post("/{codigo}/enviar")
-def enviar(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
-    """Envía/asigna la evaluación: Pendiente → En proceso (en modo Integrada: Asignada → Enviada). Bloqueado sin
-    consentimiento. Todavía sin conexión al proveedor: solo registra el envío."""
+async def enviar(codigo: str, datos: Optional[EnviarIn] = None, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Envía la evaluación. Psicometría (2026-10-02, §8): crea la evaluación real en el proveedor (si ya existe NO la
+    duplica: solo reenvía) y manda al candidato el nombre de la prueba, instrucciones y SU liga; un fallo regresa
+    502 con el motivo y se puede reintentar. Resto: Pendiente → En proceso con avisos a candidato y responsable."""
     ev = _evaluacion(db, codigo, cuenta.id)
     p = _post_de(db, ev)
     _abierta(ev)
+    if datos and datos.correo.strip():
+        _guardar_correo_candidato(p, datos.correo, u.nombre, db)
     _exigir_consentimiento(ev, p)
+    if ev.tipo == "psicometrica":
+        motivo = await _activar_psicometria(db, ev, p, u.nombre)
+        if motivo:
+            db.commit()  # el correo capturado se conserva aunque el proveedor falle
+            raise HTTPException(409 if "correo" in motivo.lower() and "necesita" in motivo.lower() else 502, motivo)
+        envios = await avisar_asignacion(db, ev, p, u.nombre, "evaluacion_enviada", "candidato")
+        registrar(db, u.nombre, "evaluacion_enviada", "postulacion", p.codigo if p else "",
+                  {"evaluacion": ev.codigo, "modo": ev.modo, "proveedor": ev.proveedor, "clave_proveedor": ev.clave_proveedor, "correo_rh": u.correo})
+        db.commit()
+        return {**evaluacion_candidato_dict(ev, u), "envios": envios}
     if ev.estado != "pendiente":
         raise HTTPException(409, "Solo se envía una evaluación pendiente.")
     from ..services import psicometricas as psi
@@ -494,10 +789,11 @@ def enviar(codigo: str, db: Session = Depends(get_db), u: Usuario = Depends(usua
         sev.aplicar_paso(ev, "enviada", u.nombre)
     else:
         sev.mover(ev, "en_proceso", u.nombre, "Enviada" + (f" ({ev.url})" if ev.url else ""))
+    envios = await avisar_asignacion(db, ev, p, u.nombre, "evaluacion_enviada")
     registrar(db, u.nombre, "evaluacion_enviada", "postulacion", p.codigo if p else "",
               {"evaluacion": ev.codigo, "modo": ev.modo, "proveedor": ev.proveedor, "clave_proveedor": ev.clave_proveedor, "correo_rh": u.correo})
     db.commit()
-    return evaluacion_candidato_dict(ev, u)
+    return {**evaluacion_candidato_dict(ev, u), "envios": envios}
 
 
 @router.post("/{codigo}/integracion/avanzar")
@@ -576,6 +872,8 @@ async def registrar_resultado(
     if evaluatest is not None and sev.es_evaluatest(ev):
         ev.resultado_json = {**(ev.resultado_json or {}), "evaluatest": sev.evaluatest_normalizado(evaluatest)}
         origen = "liga_proveedor_reporte_anonimizado"
+    if ev.tipo == "referencias" and decision.strip().lower() == "favorable" and not sev.resumen_referencias(ev)["completas"]:
+        raise HTTPException(409, f"Para cerrar como Favorable registra las referencias verificadas ({sev.resumen_referencias(ev)['texto']}).")
     if decision.strip():
         try:
             texto_dec = sev.aplicar_decision(ev, decision)
@@ -642,6 +940,9 @@ def revisar(codigo: str, datos: RevisarIn, db: Session = Depends(get_db), u: Usu
         raise HTTPException(409, "Se revisa cuando ya hay resultado recibido.")
     if ev.es_medico and not u.puede_ver_informe_medico():
         raise HTTPException(403, "Transcribir el dictamen médico requiere el permiso de informes médicos.")
+    if ev.tipo == "referencias" and datos.dictamen.strip().lower() == "favorable" and not sev.resumen_referencias(ev)["completas"]:
+        res = sev.resumen_referencias(ev)
+        raise HTTPException(409, f"Para cerrar como Favorable registra las referencias verificadas ({res['texto']}).")
     # Fraiche (spec §10): médico → Apto / Apto condicionado / No recomendable (se guarda como Favorable / Con
     # observaciones / Desfavorable); franquiciatario → Continuar / No continuar; resto → conclusión general.
     try:
@@ -793,7 +1094,7 @@ class AceptarConsentimientoIn(BaseModel):
 
 
 @router.post("/publica/consentimiento/{token}/aceptar")
-def aceptar_consentimiento(token: str, datos: AceptarConsentimientoIn, request: Request, db: Session = Depends(get_db)):
+async def aceptar_consentimiento(token: str, datos: AceptarConsentimientoIn, request: Request, db: Session = Depends(get_db)):
     """Consentimiento EXPRESO y POR ESCRITO por medio electrónico: la persona escribe su nombre completo como firma y
     marca «Acepto». Se guarda el texto exacto, la aceptación y la evidencia (nombre, IP, navegador, huella SHA-256) y
     queda en la bitácora hash-encadenada. Nunca se acepta en nombre de la persona."""
@@ -823,5 +1124,17 @@ def aceptar_consentimiento(token: str, datos: AceptarConsentimientoIn, request: 
     sev.refrescar_consentimiento(ev, p, "candidato")
     registrar(db, "candidato", "consentimiento_medico_otorgado", "postulacion", p.codigo if p else "",
               {"evaluacion": ev.codigo, "huella_sha256": huella, "nombre_escrito": firma[:200]})
+    db.flush()
+    # 2026-10-02 (§9): con el consentimiento se habilita el registro y se avisa al médico con SU liga
+    if p is not None:
+        try:
+            from ..services import avisos
+
+            envios = await _aviso_responsable(db, ev, p, "consentimiento_otorgado")
+            for e in envios:
+                e["por"] = "sistema"
+            avisos.registrar_envios(ev, envios)
+        except Exception as ex:  # noqa: BLE001
+            print(f"[evaluaciones] no se pudo avisar al médico de {ev.codigo}: {ex}", flush=True)
     db.commit()
     return {"ok": True, "aceptadoEn": ahora.isoformat(), "estado": ev.estado}
