@@ -135,6 +135,14 @@ async def lifespan(app: FastAPI):
         id="clima_cierre", replace_existing=True,
         max_instances=1, coalesce=True, misfire_grace_time=120,
     )
+    # 2026-10-04: resultados de pruebas conectadas a un proveedor (además del webhook, que solo apunta a un ambiente).
+    from .services.psicometria_sync import revisar_resultados_psicometria
+
+    scheduler.add_job(
+        revisar_resultados_psicometria, "interval", minutes=10,
+        id="resultados_psicometria", replace_existing=True,
+        max_instances=1, coalesce=True, misfire_grace_time=300,
+    )
     scheduler.start()
     if whatsapp_proveedor() == "telegram":
         # Telegram (2026-10-01): conocer el @username del bot desde el arranque (las ligas t.me lo necesitan)

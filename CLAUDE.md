@@ -527,3 +527,12 @@ Reemplaza en la rama `demo-fraiche` la vista «Ruta Fraiche / Etapas», la colum
   «Guardar evaluación» → «Evaluación guardada». «Ver expediente» (`/publica/{token}/expediente`: CV, documentos, respuestas,
   evaluaciones previas; sin médico/socioeconómico) y `/archivo/{id}` responden 403 con «Solo ficha», también por acceso directo.
   El correo del entrevistador lleva el botón «Abrir ficha y evaluar».
+- Pruebas psicométricas (2026-10-04): prueba primero, modalidad después (`EvaluacionCandidato.modalidad` = digital, sin
+  cita · presencial: fecha, hora, lugar · videoconferencia: fecha, hora, `liga_videollamada`); responsable por defecto = el
+  reclutador de la vacante (o quien asigna) con su liga de resultados (`token_externo`). El candidato recibe TODO por su canal
+  (`_texto_psicometria`: instrucciones + liga real + clave; nunca «el proveedor te enviará un correo»); presencial = cita y
+  el responsable tiene «Abrir prueba». Ligas: `sev.liga_real` rechaza ejemplos; `liga_candidato` se puede pegar (alta o
+  `PATCH`); sin liga del proveedor → `accesoIncompleto`. Adjuntar la prueba CONTESTADA (`tipo_adjunto=prueba_contestada`) no
+  es resultado. Resultados de proveedor: webhook + job `resultados_psicometria` cada 10 min (`services/psicometria_sync.py`,
+  el webhook de Psicométricas.mx está registrado a UN solo servidor). Momentos (citas, envíos) se serializan con zona
+  explícita (`serial.iso_utc`): SQLite regresa fechas sin zona y la pantalla mostraba 6 h de diferencia contra correo/chat.

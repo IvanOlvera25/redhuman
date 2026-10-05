@@ -211,6 +211,10 @@ class AgregarEvaluacionIn(BaseModel):
     referencias_modo: str = ""  # §10: candidato (liga de captura) | responsable (el responsable las recaba)
     referencias_requeridas: Optional[int] = None  # §10: vacío = las que pida la vacante
     interno: bool = False  # uso interno: alta de UNA prueba dentro de una asignación múltiple
+    # 2026-10-04 (pruebas psicométricas §1-2): modalidad y accesos
+    modalidad: str = "digital"  # digital | presencial | videoconferencia
+    liga_videollamada: str = ""
+    liga_candidato: str = ""  # liga externa del proveedor para el candidato (cuando la conexión no la entrega)
     modo: str = ""  # vacío = el de la prueba o «manual»
     proveedor: str = ""
     id_proveedor: str = ""
@@ -332,6 +336,33 @@ async def agregar_evaluacion(codigo: str, datos: AgregarEvaluacionIn, db: Sessio
         ev.consentimiento_token = secrets.token_urlsafe(24)
     # Fraiche (spec §10): responsable, cita y liga de acceso de la persona externa
     _aplicar_responsable_y_cita(db, cuenta.id, p, ev, datos.responsable, datos.cita, datos.cita_lugar)
+    # 2026-10-04 (§2): prueba primero, modalidad después — digital no lleva cita; presencial pide fecha, hora y lugar;
+    # videoconferencia, fecha, hora y liga de la videollamada. Responsable = el reclutador asignado (se puede cambiar).
+    from ..models import MODALIDADES_EVALUACION
+
+    ev.modalidad = datos.modalidad if datos.modalidad in MODALIDADES_EVALUACION else "digital"
+    if datos.tipo != "psicometrica":
+        ev.modalidad = "presencial" if ev.cita_en else "digital"  # las demás evaluaciones conservan su cita y lugar
+    elif ev.modalidad == "digital":
+        ev.cita_en, ev.cita_lugar = None, ""
+    elif not ev.cita_en:
+        raise HTTPException(400, "Indica la fecha y hora de la prueba.")
+    if datos.tipo == "psicometrica" and ev.modalidad == "presencial" and not ev.cita_lugar:
+        raise HTTPException(400, "Indica el lugar de la prueba presencial.")
+    if datos.tipo == "psicometrica" and ev.modalidad == "videoconferencia":
+        if not sev.liga_real(datos.liga_videollamada):
+            raise HTTPException(400, "Indica la liga de la videollamada (https://…).")
+        ev.liga_videollamada = datos.liga_videollamada.strip()[:500]
+    if datos.liga_candidato.strip():
+        if not sev.liga_real(datos.liga_candidato):
+            raise HTTPException(400, "La liga externa de la prueba debe ser la liga real del proveedor (https://…).")
+        ev.liga_candidato = datos.liga_candidato.strip()[:500]
+    if not ev.responsable and datos.tipo == "psicometrica":
+        resp = (p.vacante.responsable if p.vacante and p.vacante.responsable and p.vacante.responsable.activo else None) or u
+        ev.responsable, ev.responsable_correo, ev.responsable_whatsapp = resp.nombre, resp.correo or "", resp.telefono or ""
+        ev.responsable_usuario_id = resp.id
+    if datos.tipo == "psicometrica" and not ev.token_externo:
+        ev.token_externo = secrets.token_urlsafe(24)  # acceso del RESPONSABLE (consultar / registrar resultados)
     if datos.generar_liga or sev.es_franquiciatario(ev) or sev.es_encargado(ev) or (ev.responsable and ev.tipo != "psicometrica"):
         ev.token_externo = secrets.token_urlsafe(24)
     if ev.tipo == "referencias":
@@ -421,27 +452,34 @@ async def _activar_psicometria(db: Session, ev: EvaluacionCandidato, p: Postulac
     return ""
 
 
-def _texto_psicometria(ev: EvaluacionCandidato, p: Postulacion) -> str:
+def _instrucciones_prueba(ev: EvaluacionCandidato) -> str:
     from ..models import PruebaPsicometrica
+    from sqlalchemy.orm import object_session
 
-    pr = db_prueba = None
     try:
-        from sqlalchemy.orm import object_session
-
-        db_prueba = object_session(ev)
-        pr = db_prueba.get(PruebaPsicometrica, ev.prueba_id) if (db_prueba and ev.prueba_id) else None
+        db_ = object_session(ev)
+        pr = db_.get(PruebaPsicometrica, ev.prueba_id) if (db_ and ev.prueba_id) else None
     except Exception:  # noqa: BLE001
         pr = None
-    instr = (pr.instrucciones if pr and pr.instrucciones else INSTRUCCIONES_PSICOMETRIA)
+    return pr.instrucciones if pr and pr.instrucciones else INSTRUCCIONES_PSICOMETRIA
+
+
+def _texto_psicometria(ev: EvaluacionCandidato, p: Postulacion) -> str:
+    """2026-10-04 (§3): el candidato recibe TODO lo necesario por su canal — instrucciones + liga real + clave (si
+    aplica). Nunca «el proveedor te enviará un correo». Presencial: la cita (contesta en el lugar, con el responsable).
+    Videoconferencia: la cita, la liga de la videollamada y el acceso a la prueba."""
     nombre = (p.nombre or "").split(" ")[0]
     vac = p.vacante.titulo if p.vacante else "la vacante"
     liga = sev.liga_candidato(ev)
-    base = f"Hola {nombre}. Como parte de tu proceso para {vac} en {_empresa(p)}, te asignamos la prueba «{ev.nombre}». {instr}"
-    if liga:
-        return f"{base} Entra aquí: {liga}"
-    if ev.clave_proveedor:
-        return f"{base} Psicométricas.mx te enviará un correo a {p.correo} con tu acceso (tu clave es {ev.clave_proveedor}). Revisa también tu bandeja de spam."
-    return base
+    clave = f" Tu clave de acceso: {ev.clave_proveedor}." if ev.clave_proveedor else ""
+    acceso = (f" Entra aquí: {liga}" if liga else "") + clave
+    base = f"Hola {nombre}. Como parte de tu proceso para {vac} en {_empresa(p)}, te asignamos la prueba «{ev.nombre}»."
+    if ev.modalidad == "presencial":
+        return f"{base}{_cita_texto(ev)} La contestarás en ese lugar; {ev.responsable or 'el equipo de RH'} te dará acceso. Llega 10 minutos antes."
+    if ev.modalidad == "videoconferencia":
+        return (f"{base}{_cita_texto(ev)} Conéctate a la videollamada: {ev.liga_videollamada}. Durante la llamada contestarás la prueba."
+                f"{acceso} {_instrucciones_prueba(ev)}").strip()
+    return f"{base} {_instrucciones_prueba(ev)}{acceso}".strip()
 
 
 async def _aviso_candidato(db: Session, ev: EvaluacionCandidato, p: Postulacion, actor: str, evento: str) -> List[dict]:
@@ -496,7 +534,12 @@ async def _aviso_responsable(db: Session, ev: EvaluacionCandidato, p: Postulacio
         ev.token_externo = secrets.token_urlsafe(24)
     liga = f"{settings.app_url.rstrip('/')}/evaluacion/{ev.token_externo}"
     vac = p.vacante.titulo if p.vacante else "la vacante"
-    if ev.tipo == "referencias":
+    if ev.tipo == "psicometrica":
+        abrir = sev.liga_candidato(ev)
+        accion = ((f"Abrir prueba (para que el candidato la conteste ahí): {abrir}. " if abrir and ev.modalidad != "digital" else "")
+                  + (f"Clave del candidato: {ev.clave_proveedor}. " if ev.clave_proveedor and ev.modalidad != "digital" else "")
+                  + "Consulta o registra el resultado")
+    elif ev.tipo == "referencias":
         accion = "Captura y valida sus referencias laborales" if ev.referencias_modo != "candidato" else "Valida las referencias laborales que capturó el candidato"
     elif ev.es_medico:
         accion = "Registra el dictamen (el candidato ya otorgó su consentimiento)" if ev.consentimiento_aceptado_en else "Podrás registrar el dictamen cuando el candidato otorgue su consentimiento"
@@ -906,7 +949,7 @@ async def registrar_resultado(
 @router.post("/{codigo}/resultado")
 async def cargar_resultado(
     codigo: str, resumen: str = Form(""), archivo: Optional[UploadFile] = File(None), decision: str = Form(""),
-    evaluatest: str = Form(""), comentarios: str = Form(""),
+    evaluatest: str = Form(""), comentarios: str = Form(""), tipo_adjunto: str = Form("resultado"),
     db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual),
 ):
     """Adjuntar el informe/resultado manualmente (quién y cuándo). Exige los consentimientos. Fraiche (spec §9-10):
@@ -918,6 +961,24 @@ async def cargar_resultado(
     p = _post_de(db, ev)
     _abierta(ev)
     _exigir_consentimiento(ev, p)
+    if tipo_adjunto == "prueba_contestada":
+        # 2026-10-04 (§5): adjuntar la prueba contestada NO es tener resultado — se guarda como adjunto y el estado no cambia
+        from ..services import archivos as fs
+
+        if not (archivo and archivo.filename):
+            raise HTTPException(400, "Adjunta la prueba contestada (PDF o imagen).")
+        validado = await fs.validar(archivo, f"archivo de la prueba contestada «{ev.nombre}»")
+        n = len(ev.adjuntos or []) + 1
+        ruta = fs.guardar(validado, f"evaluaciones/{ev.id}", f"contestada_{ev.codigo}_{n}")
+        sev.agregar_adjunto(ev, ruta, validado.nombre, validado.mime, u.nombre)
+        ev.adjuntos[-1]["tipo"] = "prueba_contestada"
+        ev.adjuntos = list(ev.adjuntos)
+        if comentarios.strip():
+            sev.guardar_texto(ev, "comentario_revision", comentarios.strip())
+        sev.mover(ev, ev.estado, u.nombre, "Prueba contestada adjunta (todavía sin resultado)")
+        registrar(db, u.nombre, "evaluacion_prueba_contestada", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "archivo": validado.nombre, "correo_rh": u.correo})
+        db.commit()
+        return {**evaluacion_candidato_dict(ev, u), "avisos": ["Prueba contestada adjunta; la evaluación sigue sin resultado."]}
     if not archivo and not resumen.strip() and not evaluatest.strip() and not decision.strip():
         raise HTTPException(400, "Adjunta el informe o escribe el resultado.")
     if ev.es_medico and not u.puede_ver_informe_medico():

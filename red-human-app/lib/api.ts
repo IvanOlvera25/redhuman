@@ -3737,6 +3737,10 @@ export interface EvaluacionCandidato {
   referenciasModo?: "candidato" | "responsable" | null;
   referenciasResumen?: { total: number; requeridas: number; validadas: number; completas: boolean; texto: string; porEstado: Record<string, number> } | null;
   ligaReferenciasCandidato?: string | null;
+  /** 2026-10-04: modalidad de la prueba y accesos (el candidato contesta en ligaCandidato; el responsable usa ligaExterna). */
+  modalidad?: "digital" | "presencial" | "videoconferencia";
+  ligaVideollamada?: string;
+  accesoIncompleto?: boolean;
 }
 export type EstadoEvaluacionFraiche = "pendiente" | "realizada_pendiente" | "con_resultado" | "no_realizada" | "cancelada";
 export const ESTADOS_EVALUACION_FRAICHE: Record<EstadoEvaluacionFraiche, string> = {
@@ -3853,6 +3857,7 @@ export function agregarEvaluacionCandidato(codigo: string, datos: {
   responsable?: ResponsableEvaluacion; cita?: string; cita_lugar?: string; generar_liga?: boolean;
   /** 2026-10-02: varias pruebas a la vez, avisos automáticos, correo del candidato y referencias. */
   prueba_ids?: number[]; enviar?: boolean; correo_candidato?: string; referencias_modo?: "candidato" | "responsable" | ""; referencias_requeridas?: number | null;
+  modalidad?: "digital" | "presencial" | "videoconferencia"; liga_videollamada?: string; liga_candidato?: string;
 }) {
   return post<EvaluacionCandidato & { evaluaciones?: EvaluacionCandidato[]; omitidas?: string[]; envios?: EnvioAviso[] }>(`/evaluaciones/postulaciones/${codigo}`, datos);
 }
@@ -3864,10 +3869,11 @@ export function avanzarEvaluacionIntegrada(codigo: string) {
 }
 export function cargarResultadoEvaluacion(
   codigo: string, resumen: string, archivo?: File | null,
-  extra: { decision?: string; evaluatest?: Partial<EvaluatestResultado> | null; comentarios?: string } = {},
+  extra: { decision?: string; evaluatest?: Partial<EvaluatestResultado> | null; comentarios?: string; tipoAdjunto?: "resultado" | "prueba_contestada" } = {},
 ) {
   const form = new FormData();
   form.append("resumen", resumen);
+  form.append("tipo_adjunto", extra.tipoAdjunto ?? "resultado");
   if (archivo) form.append("archivo", archivo);
   if (extra.decision) form.append("decision", extra.decision);
   if (extra.evaluatest) form.append("evaluatest", JSON.stringify(extra.evaluatest));

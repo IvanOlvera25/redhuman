@@ -5435,7 +5435,8 @@ function ModalModificarEntrevista({
   onListo: (c: Candidato) => void;
 }) {
   const fechaInicial = eh.fecha ? new Date(eh.fecha) : null;
-  const [fecha, setFecha] = useState(fechaInicial ? fechaInicial.toISOString().slice(0, 10) : "");
+  // 2026-10-04: fecha LOCAL (toISOString daba el día en UTC: una cita en la tarde-noche aparecía al día siguiente)
+  const [fecha, setFecha] = useState(fechaInicial ? `${fechaInicial.getFullYear()}-${String(fechaInicial.getMonth() + 1).padStart(2, "0")}-${String(fechaInicial.getDate()).padStart(2, "0")}` : "");
   const [hora, setHora] = useState(fechaInicial ? fechaInicial.toTimeString().slice(0, 5) : "");
   const [modalidad, setModalidad] = useState<ModalidadEntrevistaHumana>((eh.modalidad || "Videollamada") as ModalidadEntrevistaHumana);
   const [liga, setLiga] = useState(eh.liga || "");

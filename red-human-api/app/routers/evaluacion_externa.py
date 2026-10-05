@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import EvaluacionCandidato, Postulacion, registrar
-from ..serial import iso, nombre_empresa_candidato
+from ..serial import iso, iso_utc, nombre_empresa_candidato
 from ..services import evaluaciones as sev
 from ..services import fraiche
 from ..services.modulos_rh import requiere_modulos_rh
@@ -79,7 +79,7 @@ def ver(token: str, db: Session = Depends(get_db)):
         "sucursal": (v.sucursal if v else "") or "",
         "empresa": nombre_empresa_candidato(v) if v else "",
         "responsable": ev.responsable or "",
-        "citaEn": iso(ev.cita_en),
+        "citaEn": iso_utc(ev.cita_en),
         "citaLugar": ev.cita_lugar or "",
         "estado": sev.estado_fraiche(ev),
         "estadoTexto": sev.etiqueta_estado_fraiche(ev),

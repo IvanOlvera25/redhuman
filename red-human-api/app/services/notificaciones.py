@@ -10,7 +10,7 @@ plantillas) y deja rastro en `NotificacionEnviada`.
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
@@ -39,8 +39,15 @@ _MESES_LARGO = [
 RE_CORREO = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+def _fecha_legible(dt: datetime) -> str:
+    """Fecha de CALENDARIO (ingreso, fecha límite): se guarda como día, sin hora — no se convierte de zona (si no, la
+    medianoche UTC se volvía el día anterior en México)."""
+    return f"{dt.day} de {_MESES_LARGO[dt.month - 1]}"
+
+
 def _fecha_hora_legible_mx(dt: datetime) -> str:
-    local = dt.astimezone(TZ_MEXICO)
+    # 2026-10-04: una fecha sin zona viene de la base y está en UTC (no en la zona del servidor)
+    local = (dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt).astimezone(TZ_MEXICO)
     return f"{local.day} de {_MESES_LARGO[local.month - 1]} a las {local.strftime('%H:%M')}"
 
 
@@ -181,7 +188,7 @@ def texto_recordatorio_documentos(
     nombre = f" {primer_nombre}" if primer_nombre else ""
     que = f"me falta recibir: {', '.join(pendientes)}" if pendientes else "me faltan tu INE y tu comprobante de domicilio"
     donde = f"\n\nSúbelos aquí: {liga}" if liga else "\n\nMándalos por aquí (foto o PDF)."
-    fecha_txt = _fecha_hora_legible_mx(fecha_limite).split(" a las")[0] if fecha_limite else ""
+    fecha_txt = _fecha_legible(fecha_limite) if fecha_limite else ""
     limite = f" La fecha límite es el {fecha_txt}." if fecha_txt else ""
     rechazos = f"\n\nAlgunos necesitan volver a enviarse:{detalle_rechazos}" if detalle_rechazos else ""
     if nivel == 1:
@@ -355,7 +362,7 @@ def _mensaje(evento: str, audiencia: str, canal: str, c: Postulacion, eh: Option
         e = c.expediente
         empresa = extra.get("empresa") or (nombre_empresa_candidato(v) if v else "") or "la empresa"
         fecha = extra.get("fecha_ingreso")
-        fecha_txt = _fecha_hora_legible_mx(fecha).split(" a las")[0] if fecha else "por confirmar"
+        fecha_txt = _fecha_legible(fecha) if fecha else "por confirmar"
         datos = [
             ("Puesto", extra.get("puesto") or (e.puesto if e else "") or puesto),
             ("Empresa", empresa),

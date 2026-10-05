@@ -112,8 +112,8 @@ function responsableDesdeForm(f: FormResponsable): ResponsableEvaluacion | undef
   return { nombre: f.nombre.trim(), correo: f.correo.trim(), whatsapp: f.whatsapp.trim() };
 }
 
-function BloqueResponsable({ f, onChange, contactos, clienteNombre }: {
-  f: FormResponsable; onChange: (f: FormResponsable) => void; contactos?: ContactoEvaluacion[]; clienteNombre?: string;
+function BloqueResponsable({ f, onChange, contactos, clienteNombre, sinCita = false }: {
+  f: FormResponsable; onChange: (f: FormResponsable) => void; contactos?: ContactoEvaluacion[]; clienteNombre?: string; sinCita?: boolean;
 }) {
   const [usuarios, setUsuarios] = useState<Entrevistador[] | null>(null);
   useEffect(() => {
@@ -163,8 +163,12 @@ function BloqueResponsable({ f, onChange, contactos, clienteNombre }: {
           <CampoRH label={CANAL}><input value={f.whatsapp} onChange={(x) => set({ whatsapp: x.target.value })} className={inputRH} placeholder="10 dígitos" /></CampoRH>
         </>
       )}
-      <CampoRH label="Cita (fecha y hora)"><input type="datetime-local" value={f.cita} onChange={(x) => set({ cita: x.target.value })} className={inputRH} /></CampoRH>
-      <CampoRH label="Lugar"><input value={f.lugar} onChange={(x) => set({ lugar: x.target.value })} className={inputRH} placeholder="Sucursal, consultorio, videollamada…" /></CampoRH>
+      {!sinCita && (
+        <>
+          <CampoRH label="Cita (fecha y hora)"><input type="datetime-local" value={f.cita} onChange={(x) => set({ cita: x.target.value })} className={inputRH} /></CampoRH>
+          <CampoRH label="Lugar"><input value={f.lugar} onChange={(x) => set({ lugar: x.target.value })} className={inputRH} placeholder="Sucursal, consultorio, videollamada…" /></CampoRH>
+        </>
+      )}
     </div>
   );
 }
@@ -361,11 +365,21 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
                   </div>
                 )}
 
-                {e.claveProveedor && (
-                  <p className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-ink-2">
-                    {e.proveedor || "Proveedor"} · clave del candidato <span className="font-mono">{e.claveProveedor}</span>
-                    {!e.ligaCandidato && <span className="text-ink-3">(el proveedor le manda su acceso por correo)</span>}
-                  </p>
+                {e.tipo === "psicometrica" && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-ink-2">
+                    <span className="rounded-full border border-border-soft px-2 py-0.5">{e.modalidad === "presencial" ? "Presencial" : e.modalidad === "videoconferencia" ? "Videoconferencia" : "Digital"}</span>
+                    {e.claveProveedor && <span>Clave del candidato <span className="font-mono">{e.claveProveedor}</span></span>}
+                    {e.modalidad === "videoconferencia" && e.ligaVideollamada && (
+                      <a href={e.ligaVideollamada} target="_blank" rel="noreferrer" className="font-semibold text-brand hover:underline">Videollamada</a>
+                    )}
+                    {e.ligaCandidato && !cerrada(e) && (
+                      <a href={e.ligaCandidato} target="_blank" rel="noreferrer"
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-brand px-2.5 text-[12px] font-semibold text-white hover:brightness-110"
+                        title="Acceso del CANDIDATO para contestar la prueba (p. ej. en presencial, ábrelo en el equipo donde la contestará)">
+                        <Eye className="h-3.5 w-3.5" /> Abrir prueba
+                      </a>
+                    )}
+                  </div>
                 )}
                 {/* 2026-10-04: sin liga REAL del proveedor no se manda nada al candidato — RH la pega aquí (p. ej. la del correo de
                     Psicométricas.mx o la de Evaluatest) y se reenvía */}
@@ -389,8 +403,8 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
                       compacto
                       envios={e.envios}
                       ligas={[
-                        { etiqueta: "Copiar liga del candidato", url: e.tipo === "psicometrica" ? e.ligaCandidato : e.tipo === "referencias" ? e.ligaReferenciasCandidato : e.ligaConsentimiento },
-                        { etiqueta: "Copiar liga del responsable", url: e.tipo !== "psicometrica" ? e.ligaExterna : null },
+                        { etiqueta: "Copiar liga del candidato (contesta)", url: e.tipo === "psicometrica" ? e.ligaCandidato : e.tipo === "referencias" ? e.ligaReferenciasCandidato : e.ligaConsentimiento },
+                        { etiqueta: "Copiar liga del responsable (resultados)", url: e.ligaExterna },
                       ]}
                       reenvios={[
                         { etiqueta: "Reenviar al candidato", onClick: async () => {
@@ -541,7 +555,9 @@ function ListaAdjuntos({ codigo, adjuntos }: { codigo: string; adjuntos: Evaluac
     <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
       {adjuntos.map((a) => (
         <li key={a.indice}>
+          <span className="text-ink-2">{(a as { tipo?: string }).tipo === "prueba_contestada" ? "Prueba contestada: " : "Informe: "}</span>
           <a href={urlAdjuntoEvaluacion(codigo, a.indice)} target="_blank" rel="noreferrer" className="font-semibold text-brand hover:underline">{a.nombre || `Adjunto ${a.indice + 1}`}</a>
+          <a href={urlAdjuntoEvaluacion(codigo, a.indice)} download className="ml-2 font-semibold text-brand hover:underline">Descargar</a>
           {a.subido_por && <span className="text-ink-3"> · {a.subido_por}{a.subido_en ? ` · ${fechaHora(a.subido_en)}` : ""}</span>}
         </li>
       ))}
@@ -589,6 +605,13 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
   const [correoCandidato, setCorreoCandidato] = useState("");
   const [enviar, setEnviar] = useState(true);
   const [refModo, setRefModo] = useState<"candidato" | "responsable">("candidato");
+  // 2026-10-04 (§2): prueba primero; modalidad después (digital por defecto, sin cita)
+  const [modalidad, setModalidad] = useState<"digital" | "presencial" | "videoconferencia">("digital");
+  const [citaPrueba, setCitaPrueba] = useState("");
+  const [lugarPrueba, setLugarPrueba] = useState("");
+  const [ligaVideo, setLigaVideo] = useState("");
+  const [ligaExterna, setLigaExterna] = useState("");
+  const [cambiarResponsable, setCambiarResponsable] = useState(false);
   const [refRequeridas, setRefRequeridas] = useState<string>("");
   const [nombre, setNombre] = useState("");
   const [modo, setModo] = useState<ModoPrueba>("manual");
@@ -617,7 +640,12 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
       enviar, correo_candidato: correoCandidato.trim() || undefined,
     };
     const r = await agregarEvaluacionCandidato(codigo, tipo === "psicometrica"
-      ? { tipo, prueba_ids: pruebaIds, ...comun }
+      ? {
+          tipo, prueba_ids: pruebaIds, ...comun,
+          responsable: cambiarResponsable ? responsableDesdeForm(resp) : undefined,
+          modalidad, cita: modalidad !== "digital" ? citaPrueba || undefined : undefined, cita_lugar: modalidad === "presencial" ? lugarPrueba.trim() : undefined,
+          liga_videollamada: modalidad === "videoconferencia" ? ligaVideo.trim() : undefined, liga_candidato: ligaExterna.trim() || undefined,
+        }
       : tipo === "referencias"
         ? { tipo, nombre, ...comun, referencias_modo: refModo, referencias_requeridas: refRequeridas ? Number(refRequeridas) : null }
         : { tipo, nombre, modo, url, proveedor, ...comun });
@@ -632,7 +660,7 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
         <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
           {accionesRuta.map((a) => (
             <button key={a.etiqueta} type="button" onClick={a.onClick}
-              className="rounded-xl border border-brand/30 bg-brand-soft/40 px-3 py-2.5 text-left text-sm font-semibold text-brand transition hover:border-brand">
+              className="rounded-xl border border-border-soft px-3 py-2.5 text-left text-sm font-medium text-ink-2 transition hover:border-brand/50">
               {a.etiqueta}
               {a.descripcion && <span className="mt-0.5 block text-[11px] font-normal text-ink-3">{a.descripcion}</span>}
             </button>
@@ -686,8 +714,36 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
                 })}
               </ul>
               <p className="mt-2 text-[11px] text-ink-3">Cada prueba lleva su estado y resultado; pueden estar disponibles al mismo tiempo. Agregar más después no sustituye las anteriores.</p>
+              {/* §2: modalidad — solo los campos necesarios */}
+              <div className="mt-4">
+                <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">Modalidad</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {([["digital", "Digital"], ["presencial", "Presencial"], ["videoconferencia", "Videoconferencia"]] as const).map(([v, t]) => (
+                    <button key={v} type="button" onClick={() => setModalidad(v)}
+                      className={cn("rounded-xl border px-3 py-2 text-sm font-medium transition", modalidad === v ? "border-brand bg-brand-soft text-brand" : "border-border-soft text-ink-2 hover:border-brand/50")}>
+                      {t}
+                    </button>
+                  ))}
+                </div>
+                {modalidad === "digital" && <p className="mt-1.5 text-[11px] text-ink-3">El candidato recibe instrucciones, su liga y su clave por su canal disponible.</p>}
+                {modalidad !== "digital" && (
+                  <div className="mt-2 grid gap-3 sm:grid-cols-2">
+                    <CampoRH label="Fecha y hora"><input type="datetime-local" value={citaPrueba} onChange={(x) => setCitaPrueba(x.target.value)} className={inputRH} /></CampoRH>
+                    {modalidad === "presencial" ? (
+                      <CampoRH label="Lugar"><input value={lugarPrueba} onChange={(x) => setLugarPrueba(x.target.value)} className={inputRH} placeholder="Sucursal, oficina…" /></CampoRH>
+                    ) : (
+                      <CampoRH label="Liga de la videollamada"><input value={ligaVideo} onChange={(x) => setLigaVideo(x.target.value)} className={inputRH} placeholder="https://…" /></CampoRH>
+                    )}
+                  </div>
+                )}
+              </div>
               <div className="mt-3">
-                <CampoRH label="Correo del candidato (solo si el proveedor lo pide y no está en su ficha)">
+                <CampoRH label="Liga externa de la prueba (opcional — si el proveedor te dio una liga para este candidato)">
+                  <input value={ligaExterna} onChange={(x) => setLigaExterna(x.target.value)} className={inputRH} placeholder="https://…" />
+                </CampoRH>
+              </div>
+              <div className="mt-3">
+                <CampoRH label="Correo del candidato (solo si el proveedor lo exige y falta en su ficha)">
                   <input type="email" value={correoCandidato} onChange={(e) => setCorreoCandidato(e.target.value)} className={inputRH} placeholder="nombre@correo.com" />
                 </CampoRH>
               </div>
@@ -728,15 +784,29 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
           )}
         </div>
       )}
-      {tipo && (
+      {tipo === "psicometrica" && (
+        <div className="mt-4 border-t border-border-soft pt-4">
+          {!cambiarResponsable ? (
+            <p className="flex flex-wrap items-center gap-2 text-sm text-ink-2">
+              Responsable: <b className="text-ink">el reclutador asignado a la vacante</b>
+              <button type="button" className="text-xs font-semibold text-brand hover:underline" onClick={() => setCambiarResponsable(true)}>Cambiar</button>
+            </p>
+          ) : (
+            <BloqueResponsable f={resp} onChange={setResp} contactos={contactos} clienteNombre={clienteNombre} sinCita />
+          )}
+          <label className="mt-2 flex items-start gap-2 text-sm text-ink-2">
+            <input type="checkbox" checked={enviar} onChange={(x) => setEnviar(x.target.checked)} className="mt-1 h-4 w-4 accent-brand" />
+            <span>Enviar ahora el acceso al candidato<span className="block text-[11px] text-ink-3">Verás el estado del envío; si falla, puedes reintentar o reenviar sin duplicar la prueba.</span></span>
+          </label>
+        </div>
+      )}
+      {tipo && tipo !== "psicometrica" && (
         <div className="mt-4 border-t border-border-soft pt-4">
           <BloqueResponsable f={resp} onChange={setResp} contactos={contactos} clienteNombre={clienteNombre} />
-          {tipo !== "psicometrica" && (
-            <label className="mt-3 flex items-start gap-2 text-sm text-ink-2">
-              <input type="checkbox" checked={liga} onChange={(x) => setGenerarLiga(x.target.checked)} className="mt-1 h-4 w-4 accent-brand" />
-              <span>Generar liga de acceso para el responsable<span className="block text-[11px] text-ink-3">Liga limitada para registrar el resultado sin entrar al sistema.</span></span>
-            </label>
-          )}
+          <label className="mt-3 flex items-start gap-2 text-sm text-ink-2">
+            <input type="checkbox" checked={liga} onChange={(x) => setGenerarLiga(x.target.checked)} className="mt-1 h-4 w-4 accent-brand" />
+            <span>Generar liga de acceso para el responsable<span className="block text-[11px] text-ink-3">Liga limitada para registrar el resultado sin entrar al sistema.</span></span>
+          </label>
           <label className="mt-2 flex items-start gap-2 text-sm text-ink-2">
             <input type="checkbox" checked={enviar} onChange={(x) => setEnviar(x.target.checked)} className="mt-1 h-4 w-4 accent-brand" />
             <span>Avisar ahora al candidato y al responsable<span className="block text-[11px] text-ink-3">Cada quien recibe instrucciones y la liga de su función; verás el estado de cada envío.</span></span>
@@ -789,6 +859,8 @@ function ModalResultado({ e, onClose, onListo }: { e: EvaluacionCandidato; onClo
   const [decision, setDecision] = useState("");
   const [evaluatest, setEvaluatest] = useState<Record<string, string>>({});
   const [archivo, setArchivo] = useState<File | null>(null);
+  // 2026-10-04 (§5): adjuntar la prueba CONTESTADA no es tener resultado
+  const [tipoAdjunto, setTipoAdjunto] = useState<"resultado" | "prueba_contestada">("resultado");
   const [avisos, setAvisos] = useState<string[] | null>(null);
   const [ocupado, setOcupado] = useState(false);
   const [error, setError] = useState("");
@@ -809,7 +881,7 @@ function ModalResultado({ e, onClose, onListo }: { e: EvaluacionCandidato; onClo
     }
     return alguno ? out : null;
   }
-  const puedeGuardar = Boolean(resumen.trim() || archivo || decision || evaluatestDesdeForm());
+  const puedeGuardar = tipoAdjunto === "prueba_contestada" ? Boolean(archivo) : Boolean(resumen.trim() || archivo || decision || evaluatestDesdeForm());
 
   if (avisos) {
     return (
@@ -824,7 +896,18 @@ function ModalResultado({ e, onClose, onListo }: { e: EvaluacionCandidato; onClo
 
   return (
     <ModalMarco titulo={`Resultado · ${e.nombre}`} subtitulo="Queda registrado quién lo cargó y cuándo." onClose={onClose}>
-      {e.dictamenesPosibles.length > 0 && (
+      <div className="mb-3 grid grid-cols-2 gap-2">
+        {([["resultado", "Registrar resultado"], ["prueba_contestada", "Adjuntar prueba contestada"]] as const).map(([v, t]) => (
+          <button key={v} type="button" onClick={() => setTipoAdjunto(v)}
+            className={cn("rounded-xl border px-3 py-2 text-sm font-medium transition", tipoAdjunto === v ? "border-brand bg-brand-soft text-brand" : "border-border-soft text-ink-2 hover:border-brand/50")}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {tipoAdjunto === "prueba_contestada" && (
+        <p className="mb-3 text-[12px] text-ink-3">Se guarda la prueba contestada (PDF o imagen) como adjunto; la evaluación sigue sin resultado hasta que registres el resultado o llegue del proveedor.</p>
+      )}
+      {tipoAdjunto === "resultado" && e.dictamenesPosibles.length > 0 && (
         <div className="mb-3">
           <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">{etiquetaDecision(e)}</p>
           <div className="grid gap-2 sm:grid-cols-3">
@@ -837,15 +920,17 @@ function ModalResultado({ e, onClose, onListo }: { e: EvaluacionCandidato; onClo
           </div>
         </div>
       )}
-      <CampoRH label="Resultado (resumen)">
-        <textarea value={resumen} onChange={(x) => setResumen(x.target.value)} rows={4} className={textareaRH} />
-      </CampoRH>
+      {tipoAdjunto === "resultado" && (
+        <CampoRH label="Resultado (resumen)">
+          <textarea value={resumen} onChange={(x) => setResumen(x.target.value)} rows={4} className={textareaRH} />
+        </CampoRH>
+      )}
       <div className="mt-3">
         <CampoRH label="Comentarios (opcional)">
           <textarea value={comentarios} onChange={(x) => setComentarios(x.target.value)} rows={2} className={textareaRH} />
         </CampoRH>
       </div>
-      {e.esEvaluatest && (
+      {e.esEvaluatest && tipoAdjunto === "resultado" && (
         <div className="mt-3 rounded-xl border border-border-soft bg-surface-2 p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">Reporte Evaluatest (anonimizado)</p>
           <div className="mt-2 grid gap-3 sm:grid-cols-2">
@@ -864,20 +949,20 @@ function ModalResultado({ e, onClose, onListo }: { e: EvaluacionCandidato; onClo
         </div>
       )}
       <input ref={ref} type="file" accept="application/pdf,image/*" className="hidden" onChange={(x) => setArchivo(x.target.files?.[0] ?? null)} />
-      <Button variant="outline" size="sm" className="mt-3" onClick={() => ref.current?.click()}><FileUp className="h-4 w-4" /> {archivo ? archivo.name : "Adjuntar informe (PDF o imagen)"}</Button>
+      <Button variant="outline" size="sm" className="mt-3" onClick={() => ref.current?.click()}><FileUp className="h-4 w-4" /> {archivo ? archivo.name : tipoAdjunto === "prueba_contestada" ? "Adjuntar prueba contestada (PDF o imagen)" : "Adjuntar informe (PDF o imagen)"}</Button>
       {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
       <div className="mt-5 flex justify-end gap-2">
         <Button variant="outline" size="sm" onClick={onClose} disabled={ocupado}>Cancelar</Button>
         <Button size="sm" disabled={ocupado || !puedeGuardar} onClick={async () => {
           setOcupado(true);
           setError("");
-          const r = await cargarResultadoEvaluacion(e.id, resumen.trim(), archivo, { decision: decision || undefined, evaluatest: evaluatestDesdeForm(), comentarios: comentarios.trim() || undefined });
+          const r = await cargarResultadoEvaluacion(e.id, resumen.trim(), archivo, { decision: decision || undefined, evaluatest: evaluatestDesdeForm(), comentarios: comentarios.trim() || undefined, tipoAdjunto });
           setOcupado(false);
           if (!r.ok) return setError(r.error);
           if (r.data.avisos && r.data.avisos.length > 0) return setAvisos(r.data.avisos);
           onListo();
         }}>
-          {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileUp className="h-4 w-4" />} Guardar resultado
+          {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileUp className="h-4 w-4" />} {tipoAdjunto === "prueba_contestada" ? "Guardar adjunto" : "Guardar resultado"}
         </Button>
       </div>
     </ModalMarco>

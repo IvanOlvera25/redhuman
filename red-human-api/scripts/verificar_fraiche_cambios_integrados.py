@@ -371,4 +371,68 @@ with TestClient(app) as client:
     check(eh3b["resultado"] == "aprobado" and eh3b["recomendacion"] == "avanzar" and eh3b["comentario"] == "Buena actitud" and eh3b["resultadoCapturadoPor"] == "entrevistador",
           "el resultado queda vinculado a ESA entrevista humana y se ve en Evaluaciones del candidato")
 
+    print("\n=== Pruebas psicométricas: modalidad, accesos y resultados (2026-10-04) ===")
+    from app.services import psicometricas as _psi  # noqa: E402
+
+    P4 = postular(vd, "Paola Prueba Cuatro", "5581110004", "paola4@demo.invalid")
+    prs = pruebas
+    r = client.post(f"/evaluaciones/postulaciones/{P4}", json={"tipo": "psicometrica", "prueba_ids": [prs[0].id], "modalidad": "presencial"})
+    check(r.status_code == 400 and "fecha" in r.json()["detail"].lower(), "presencial exige fecha y hora")
+    cita = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%dT10:00")
+    r = client.post(f"/evaluaciones/postulaciones/{P4}", json={"tipo": "psicometrica", "prueba_ids": [prs[0].id], "modalidad": "presencial", "cita": cita})
+    check(r.status_code == 400 and "lugar" in r.json()["detail"].lower(), "presencial exige lugar")
+    MENSAJES.clear()
+    r = client.post(f"/evaluaciones/postulaciones/{P4}", json={"tipo": "psicometrica", "prueba_ids": [prs[0].id], "modalidad": "presencial", "cita": cita, "cita_lugar": "Sucursal Centro"})
+    evp = r.json()["evaluaciones"][0]
+    check(r.status_code == 201 and evp["responsable"] == recl.nombre and evp["ligaExterna"], "el responsable por defecto es el reclutador asignado (con su liga de resultados)")
+    txt_c = next(x for t, x in MENSAJES if t == "5581110004")
+    check("Sucursal Centro" in txt_c and "10:00" in txt_c and "http" not in txt_c, "presencial: el candidato recibe la cita (sin liga, contesta en el lugar)")
+    check(any(t == recl.telefono and "Abrir prueba" in x and evp["ligaCandidato"] in x for t, x in MENSAJES), "presencial: el responsable recibe «Abrir prueba» con el acceso del candidato")
+    check(evp["citaEn"].endswith("+00:00"), "la cita viaja con zona horaria explícita (misma hora en pantalla, correo y chat)")
+    MENSAJES.clear()
+    r = client.post(f"/evaluaciones/postulaciones/{P4}", json={"tipo": "psicometrica", "prueba_ids": [prs[1].id], "modalidad": "videoconferencia", "cita": cita,
+                                                              "liga_videollamada": "https://meet.google.com/abc-defg-hij"})
+    txt_v = next(x for t, x in MENSAJES if t == "5581110004")
+    check(r.status_code == 201 and "meet.google.com/abc-defg-hij" in txt_v and prs[1].url in txt_v, "videoconferencia: cita + liga de la videollamada + acceso a la prueba")
+    # proveedor conectado (simulado): clave real, sin liga en su API → el candidato recibe su clave; nunca «te enviará un correo»
+    integ = PruebaPsicometrica(cuenta_id=cuenta.id, clave="PSI-MX", nombre="Cleaver (Psicométricas.mx)", modo="integrada", proveedor="Psicométricas.mx", id_proveedor="1", activa=True)
+    db.add(integ); db.commit()
+    llamadas = []
+    _psi.configurado = lambda: True
+    def _agrega(nombre, correo, vacante, tests, lang="Mx"):
+        llamadas.append(tests)
+        if len(llamadas) == 1:
+            raise _psi.PsicometricasError("Psicométricas.mx no respondió a tiempo.", 504)
+        return "9-ABC-1004-001"
+    _psi.agregar_candidato = _agrega
+    MENSAJES.clear()
+    r = client.post(f"/evaluaciones/postulaciones/{P4}", json={"tipo": "psicometrica", "prueba_ids": [integ.id]})
+    evi = r.json()["evaluaciones"][0]
+    check(evi["estado"] == "pendiente" and not evi["claveProveedor"] and any(x["estado"] == "fallido" for x in r.json()["envios"]),
+          "si falla la conexión: la prueba NO queda como enviada (se puede reintentar)")
+    r = client.post(f"/evaluaciones/{evi['id']}/enviar", json={})
+    check(r.status_code == 200 and r.json()["claveProveedor"] == "9-ABC-1004-001" and len(llamadas) == 2, "Reintentar crea la evaluación en el proveedor una sola vez")
+    txt_i = next(x for t, x in MENSAJES if t == "5581110004")
+    check("9-ABC-1004-001" in txt_i and "te enviará un correo" not in txt_i, "el candidato recibe su clave por su canal (sin «el proveedor te enviará un correo»)")
+    r = client.post(f"/evaluaciones/{evi['id']}/avisos", json={"destinatario": "candidato"})
+    check(r.status_code == 200 and len(llamadas) == 2, "Reenviar no vuelve a crear la prueba en el proveedor")
+    check(r.json()["accesoIncompleto"] is True, "sin liga del proveedor se avisa a RH que falta el acceso (para pegar la liga real)")
+    from fpdf import FPDF  # noqa: E402
+
+    _doc = FPDF(); _doc.add_page(); _doc.set_font("Helvetica", size=12); _doc.cell(0, 10, "Prueba contestada"); PDF_OK = bytes(_doc.output())
+    r = client.post(f"/evaluaciones/{evi['id']}/resultado", data={"tipo_adjunto": "prueba_contestada"}, files={"archivo": ("contestada.pdf", PDF_OK, "application/pdf")})
+    check(r.status_code == 200 and r.json()["estado"] == "en_proceso" and r.json()["adjuntos"], "adjuntar la prueba CONTESTADA no equivale a tener resultado")
+    _psi.consultar_candidato = lambda clave: [{"fecha_fin": "2026-10-04 12:00:00"}]
+    _psi.terminado = lambda filas: True
+    _psi.resultado_json = lambda clave: {"cleaver": {"D": 70}}
+    _psi.resultado_pdf = lambda clave: PDF_OK
+    from app.services.psicometria_sync import revisar_resultados_psicometria  # noqa: E402
+
+    n = asyncio.run(revisar_resultados_psicometria())
+    db.expire_all()
+    evr = db.query(EvaluacionCandidato).filter(EvaluacionCandidato.codigo == evi["id"]).first()
+    check(n >= 1 and evr.estado == "resultado_recibido" and evr.archivo, "la consulta automática recupera resultado e informe del proveedor")
+    r = client.post(f"/evaluaciones/{evi['id']}/revisar", json={"dictamen": "con_observaciones", "comentario": "Validar en entrevista"})
+    check(r.status_code == 200 and r.json()["dictamenTexto"] == "Con observaciones" and r.json()["tieneInforme"], "la conclusión de RH queda junto al reporte")
+
 print(f"\n🎉 Cambios integrados Fraiche (2026-10-02): {OK} comprobaciones OK")

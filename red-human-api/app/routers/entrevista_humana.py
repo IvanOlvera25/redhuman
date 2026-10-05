@@ -18,7 +18,7 @@ from typing import Optional
 
 from ..database import get_db
 from ..models import CLASES_ENTREVISTA_HUMANA, Archivo, EntrevistaHumana, registrar
-from ..serial import iso, nombre_empresa_candidato
+from ..serial import iso, iso_utc, nombre_empresa_candidato
 from ..services import archivos as fs
 from ..services import fraiche, notificaciones
 
@@ -61,15 +61,15 @@ def _expediente_para_entrevistador(db: Session, eh: EntrevistaHumana) -> dict:
         if e.estado == "evaluada" and e.evaluacion and e.fase != "ipv":
             ev = e.evaluacion or {}
             previas.append({"nombre": "Entrevista Red Human", "resultado": f"Afinidad {ev.get('match_perfil')}/100" if ev.get("match_perfil") is not None else "Evaluada",
-                            "detalle": ev.get("resumen") or "", "fecha": iso(e.finalizada_en)})
+                            "detalle": ev.get("resumen") or "", "fecha": iso_utc(e.finalizada_en)})
         calc = (e.evaluacion_ipv or {}).get("calculo") or {}
         if e.evaluacion_ipv:
-            previas.append({"nombre": "IPV Red Human", "resultado": fraiche.texto_resultado_ipv(calc), "detalle": "", "fecha": iso(e.finalizada_en)})
+            previas.append({"nombre": "IPV Red Human", "resultado": fraiche.texto_resultado_ipv(calc), "detalle": "", "fecha": iso_utc(e.finalizada_en)})
     for otra in (p.entrevistas_humanas if p else []):
         if otra.id != eh.id and otra.resultado:
             previas.append({"nombre": "IPV humana" if otra.es_ipv else CLASES_ENTREVISTA_HUMANA.get(otra.clase or "reclutamiento", "Entrevista"),
                             "resultado": ("Aprobado" if otra.resultado == "aprobado" else "Rechazado") + (f" · {otra.entrevistador}" if otra.entrevistador else ""),
-                            "detalle": otra.comentario or "", "fecha": iso(otra.evaluada_en or otra.fecha)})
+                            "detalle": otra.comentario or "", "fecha": iso_utc(otra.evaluada_en or otra.fecha)})
     try:
         evs = db.query(EvaluacionCandidato).filter(EvaluacionCandidato.postulacion_id == p.id).all() if p else []
     except Exception:  # noqa: BLE001
@@ -77,7 +77,7 @@ def _expediente_para_entrevistador(db: Session, eh: EntrevistaHumana) -> dict:
     for ev in evs:
         if ev.tipo in ("medico", "socioeconomico") or ev.estado == "fallida":
             continue
-        previas.append({"nombre": ev.nombre, "resultado": sev.texto_dictamen(ev) or sev.etiqueta_estado_fraiche(ev), "detalle": "", "fecha": iso(ev.revisada_en or ev.resultado_cargado_en)})
+        previas.append({"nombre": ev.nombre, "resultado": sev.texto_dictamen(ev) or sev.etiqueta_estado_fraiche(ev), "detalle": "", "fecha": iso_utc(ev.revisada_en or ev.resultado_cargado_en)})
     return {
         "candidato": {"nombre": c.nombre if c else "", "telefono": "" if externo else ((c.telefono if c else "") or ""),
                       "correo": "" if externo else ((c.correo if c else "") or "")},
@@ -110,7 +110,7 @@ def publica(token: str, db: Session = Depends(get_db)):
         "candidato": eh.candidato.nombre if eh.candidato else "",
         "puesto": p.vacante.titulo if p.vacante else "",
         "empresa": nombre_empresa_candidato(p.vacante) if p.vacante else "",
-        "fecha": iso(eh.fecha),
+        "fecha": iso_utc(eh.fecha),
         "entrevistador": eh.entrevistador or "",
         "modalidad": eh.modalidad or "",
         "yaEvaluada": bool(eh.resultado_capturado_por),

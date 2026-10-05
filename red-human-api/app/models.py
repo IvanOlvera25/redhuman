@@ -2127,6 +2127,8 @@ TEXTO_CONSENTIMIENTO_MEDICO = (
 )
 
 
+MODALIDADES_EVALUACION = {"digital": "Digital", "presencial": "Presencial", "videoconferencia": "Videoconferencia"}
+
 COMPARTIR_ENTREVISTADOR = {"ficha": "Solo ficha", "ficha_expediente": "Ficha + expediente"}
 
 CLASES_ENTREVISTA_HUMANA = {
@@ -2253,6 +2255,10 @@ class EvaluacionCandidato(Base):
     token_candidato: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)  # /referencias/{token}
     referencias_modo: Mapped[str] = mapped_column(String(20), default="")  # candidato | responsable
     referencias_requeridas: Mapped[int] = mapped_column(Integer, default=1)
+    # 2026-10-04 (pruebas psicométricas §2): digital (default, sin cita) | presencial (fecha, hora, lugar) |
+    # videoconferencia (fecha, hora y liga de la videollamada).
+    modalidad: Mapped[str] = mapped_column(String(20), default="digital")
+    liga_videollamada: Mapped[str] = mapped_column(String(500), default="")
 
     @property
     def es_medico(self) -> bool:

@@ -33,6 +33,18 @@ def iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 
+def iso_utc(dt: Optional[datetime]) -> Optional[str]:
+    """2026-10-04: un MOMENTO (cita, envío, evaluación) con zona explícita. SQLite regresa las fechas sin zona (guardadas
+    en UTC) y el navegador las tomaba como hora local: la pantalla mostraba 6 h de diferencia contra el correo y el chat."""
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        from datetime import timezone as _tz
+
+        dt = dt.replace(tzinfo=_tz.utc)
+    return dt.isoformat()
+
+
 def fecha_corta(dt: Optional[datetime]) -> str:
     return f"{dt.day} {MESES[dt.month - 1]}" if dt else ""
 
@@ -189,7 +201,7 @@ def _entrevista_humana_dict(eh) -> dict:
         "contactoId": eh.contacto_id,  # Fase 7A
         "teamsEventoId": eh.teams_evento_id or "",  # Fase 7B
         "porTeams": bool(eh.teams_evento_id),
-        "fecha": iso(eh.fecha),
+        "fecha": iso_utc(eh.fecha),
         "modalidad": eh.modalidad,
         "liga": eh.liga,
         "ubicacion": eh.ubicacion,
@@ -200,7 +212,7 @@ def _entrevista_humana_dict(eh) -> dict:
         "resultado": eh.resultado or None,
         "recomendacion": eh.recomendacion or None,
         "resultadoCapturadoPor": eh.resultado_capturado_por or None,
-        "evaluadaEn": iso(eh.evaluada_en),
+        "evaluadaEn": iso_utc(eh.evaluada_en),
         "token": eh.token,
         # Fraiche (spec §8): ronda IPV con rúbrica (misma que Red Human)
         "esIpv": bool(eh.es_ipv),
@@ -216,7 +228,7 @@ def _entrevista_humana_dict(eh) -> dict:
         "compartir": eh.compartir or "ficha",
         "envios": list(eh.envios or [])[-12:],
         "envioEstado": _estado_envios(eh.envios),
-        "recordatorioEnviadoEn": iso(eh.recordatorio_enviado_en),
+        "recordatorioEnviadoEn": iso_utc(eh.recordatorio_enviado_en),
     }
 
 
@@ -660,7 +672,7 @@ def entrevista_dict(e: Entrevista) -> dict:
         "estado": e.estado,
         "token": e.token,
         "consentimiento": e.consentimiento,
-        "programada": iso(e.programada_para),
+        "programada": iso_utc(e.programada_para),
         "creada": hace(e.creada_en),
         "guion": e.guion or {},
         "mensajes": len(e.transcript or []),
@@ -669,9 +681,9 @@ def entrevista_dict(e: Entrevista) -> dict:
         # Fase 4: cómo cerró y cuándo; intentos previos si RH la reabrió.
         "cierre": e.cierre or "",
         "motivo": e.motivo or "",  # sin_respuestas | desconexion | parcial | "" (ver MOTIVOS_ENTREVISTA)
-        "iniciadaEn": iso(e.iniciada_en),
-        "finalizadaEn": iso(e.finalizada_en),
-        "ultimaActividadEn": iso(e.ultima_actividad_en),
+        "iniciadaEn": iso_utc(e.iniciada_en),
+        "finalizadaEn": iso_utc(e.finalizada_en),
+        "ultimaActividadEn": iso_utc(e.ultima_actividad_en),
         "intentosPrevios": len(e.intentos_previos or []),
         "tono": (c.id if c else 0) % 4,
         "ligaMeet": e.liga_meet or "",
@@ -1301,11 +1313,11 @@ def evaluacion_candidato_dict(ev, usuario=None) -> dict:
         "responsableWhatsapp": ev.responsable_whatsapp or "",
         "responsableUsuarioId": ev.responsable_usuario_id,
         "responsableContactoId": ev.responsable_contacto_id,
-        "citaEn": iso(ev.cita_en),
+        "citaEn": iso_utc(ev.cita_en),
         "citaLugar": ev.cita_lugar or "",
         "ligaExterna": f"{settings.app_url}/evaluacion/{ev.token_externo}" if ev.token_externo else None,
-        "ligaEnviadaEn": iso(ev.liga_enviada_en),
-        "realizadaEn": iso(ev.realizada_en),
+        "ligaEnviadaEn": iso_utc(ev.liga_enviada_en),
+        "realizadaEn": iso_utc(ev.realizada_en),
         "noRealizada": bool(ev.no_realizada),
         "adjuntos": [{**a, "ruta": None, "indice": i} for i, a in enumerate(ev.adjuntos or [])] if not restringido else [],
         "decision": ev.decision_externa or None,
@@ -1323,9 +1335,9 @@ def evaluacion_candidato_dict(ev, usuario=None) -> dict:
         "dictamenTexto": sev.texto_dictamen(ev),
         "dictamenesPosibles": [{"valor": k, "texto": t} for k, t in dictamenes.items()],
         "revisadaPor": ev.revisada_por or "",
-        "revisadaEn": iso(ev.revisada_en),
+        "revisadaEn": iso_utc(ev.revisada_en),
         "requiereConsentimientoExpreso": bool(ev.requiere_consentimiento_expreso),
-        "consentimientoAceptadoEn": iso(ev.consentimiento_aceptado_en),
+        "consentimientoAceptadoEn": iso_utc(ev.consentimiento_aceptado_en),
         "ligaConsentimiento": f"{settings.app_url}/consentimiento/{ev.consentimiento_token}" if ev.consentimiento_token and not ev.consentimiento_aceptado_en else None,
         "tieneInforme": bool(ev.archivo),
         # Psicométricas.mx (2026-09-29): clave del candidato en el proveedor y su liga (si se configuró)
@@ -1343,12 +1355,17 @@ def evaluacion_candidato_dict(ev, usuario=None) -> dict:
         "referenciasModo": ev.referencias_modo or None,
         "referenciasResumen": sev.resumen_referencias(ev) if ev.tipo == "referencias" else None,
         "ligaReferenciasCandidato": f"{settings.app_url.rstrip('/')}/referencias/{ev.token_candidato}" if ev.token_candidato else None,
+        # 2026-10-04 (pruebas §2-4): modalidad y accesos — el candidato CONTESTA (ligaCandidato); el responsable
+        # consulta o registra resultados (ligaExterna)
+        "modalidad": ev.modalidad or "digital",
+        "ligaVideollamada": ev.liga_videollamada or "",
+        "accesoIncompleto": ev.tipo == "psicometrica" and ev.modo != "manual" and not sev.liga_candidato(ev) and ev.estado not in ("resultado_recibido", "revisada", "fallida"),
         "conectadaProveedor": bool(ev.clave_proveedor),
         "resultadoCargadoPor": ev.resultado_cargado_por or "",
-        "resultadoCargadoEn": iso(ev.resultado_cargado_en),
+        "resultadoCargadoEn": iso_utc(ev.resultado_cargado_en),
         "informeRestringido": restringido,
         "asignadaPor": ev.asignada_por or "",
-        "creada": iso(ev.creada_en),
+        "creada": iso_utc(ev.creada_en),
         "historial": list(ev.historial or []),
     }
     if not restringido:
