@@ -217,6 +217,21 @@ with TestClient(app) as client:
     pruebas = db.query(PruebaPsicometrica).filter(PruebaPsicometrica.cuenta_id == cuenta.id, PruebaPsicometrica.proveedor == fraiche.PROVEEDOR_EVALUATEST).all()
     check(all(p.incluye for p in pruebas), "cada batería dice qué pruebas incluye")
     ids = [p.id for p in pruebas[:2]]
+    # 2026-10-04: sin liga real (los datos demo no inventan una) → no se manda nada al candidato y RH ve el motivo
+    r = client.post(f"/evaluaciones/postulaciones/{P2}", json={"tipo": "psicometrica", "prueba_ids": [ids[0]]})
+    ev0 = r.json()["evaluaciones"][0]
+    check(ev0["ligaCandidato"] is None and any(x["estado"] == "fallido" and "liga real" in x["detalle"] for x in r.json()["envios"]),
+          "prueba sin liga real del proveedor: no se envía una liga que no abre y RH ve el motivo")
+    r = client.patch(f"/evaluaciones/{ev0['id']}", json={"liga_candidato": "https://evaluatest.example.invalid/x"})
+    check(r.status_code == 400, "una liga de ejemplo se rechaza")
+    r = client.patch(f"/evaluaciones/{ev0['id']}", json={"liga_candidato": "https://app.evaluatest.com/acceso/ABC123"})
+    check(r.status_code == 200 and r.json()["ligaCandidato"] == "https://app.evaluatest.com/acceso/ABC123", "RH pega la liga real en la evaluación")
+    r = client.post(f"/evaluaciones/{ev0['id']}/avisos", json={"destinatario": "candidato"})
+    check(any(t == "5581110002" and "app.evaluatest.com/acceso/ABC123" in x for t, x in MENSAJES), "…y se le envía al candidato")
+    client.post(f"/evaluaciones/{ev0['id']}/cancelar", json={"motivo": "prueba"})
+    for pr in pruebas:
+        pr.url = f"https://app.evaluatest.com/bateria/{pr.id}"
+    db.commit()
     MENSAJES.clear()
     r = client.post(f"/evaluaciones/postulaciones/{P2}", json={"tipo": "psicometrica", "prueba_ids": ids})
     d = r.json()

@@ -3744,7 +3744,7 @@ export const CAMPOS_EVALUATEST: { clave: keyof EvaluatestResultado; nombre: stri
   { clave: "riesgo", nombre: "Riesgo", tipo: "texto" },
 ];
 
-export function editarEvaluacion(codigo: string, datos: { responsable?: ResponsableEvaluacion; cita?: string; cita_lugar?: string; notas?: string }) {
+export function editarEvaluacion(codigo: string, datos: { responsable?: ResponsableEvaluacion; cita?: string; cita_lugar?: string; notas?: string; liga_candidato?: string }) {
   return patch<EvaluacionCandidato>(`/evaluaciones/${codigo}`, datos);
 }
 /** Liga limitada para la persona externa (/evaluacion/{token}); `enviar` la manda al responsable por correo/WhatsApp. */

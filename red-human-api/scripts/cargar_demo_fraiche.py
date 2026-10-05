@@ -231,7 +231,11 @@ def pruebas_evaluatest(db, cuenta: Cuenta, reclutador: Usuario) -> dict:
             MK.existe("prueba")
         pr.descripcion = "Índice Evaluatest de Afinidad + Etegrity / Índice General de Integridad. Hasta tener la conexión técnica: liga del proveedor y carga de reporte anonimizado."
         pr.puestos = [puesto]
-        pr.modo, pr.proveedor, pr.url, pr.activa = "enlace", fraiche.PROVEEDOR_EVALUATEST, "https://evaluatest.example.invalid/bateria/" + slugificar(puesto), True
+        # 2026-10-04: SIN liga inventada — la liga real la da Evaluatest y se captura en Configuración → Pruebas psicométricas
+        # (una liga de ejemplo llegaba al candidato y no abría). Lo ya capturado en una base existente se conserva.
+        pr.modo, pr.proveedor, pr.activa = "enlace", fraiche.PROVEEDOR_EVALUATEST, True
+        if not pr.url or ".invalid" in (pr.url or ""):
+            pr.url = ""
         # 2026-10-02 (cambios integrados §7): qué incluye cada batería (se muestra al asignar para evitar duplicidades)
         pr.incluye = ["Índice Evaluatest de Afinidad", "Etegrity (Índice General de Integridad)"]
         salida[puesto] = pr

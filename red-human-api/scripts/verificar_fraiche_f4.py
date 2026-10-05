@@ -212,7 +212,7 @@ with TestClient(app) as client:
     print("\n--- Evaluatest: liga del proveedor + carga de reporte anonimizado ---")
     v.destino = "tienda_propia"
     db.commit()
-    r = client.post("/evaluaciones/pruebas", json={"clave": "evaluatest-demostrador", "nombre": "Batería Demostrador", "modo": "enlace", "proveedor": "Evaluatest", "url": "https://evaluatest.example/bateria", "puestos": ["Demostrador"]})
+    r = client.post("/evaluaciones/pruebas", json={"clave": "evaluatest-demostrador", "nombre": "Batería Demostrador", "modo": "enlace", "proveedor": "Evaluatest", "url": "https://app.evaluatest.com/bateria", "puestos": ["Demostrador"]})
     check(r.status_code == 201, "prueba Evaluatest en el catálogo (modo enlace)")
     r = client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "psicometrica", "prueba_id": r.json()["id"]})
     PSI = r.json()

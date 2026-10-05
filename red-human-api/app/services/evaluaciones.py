@@ -328,16 +328,33 @@ def resumen_referencias(ev: EvaluacionCandidato) -> dict:
 
 # ---------- Psicometría conectada (2026-10-02, cambios integrados §7-8) ----------
 
+def liga_real(url: str) -> bool:
+    """2026-10-04: una liga de prueba solo sirve si es http(s) y apunta a un dominio real — nunca los marcadores de
+    ejemplo (`*.invalid`, `example.*`, `localhost`) que traían los datos demo."""
+    from urllib.parse import urlparse
+
+    try:
+        u = urlparse((url or "").strip())
+    except ValueError:
+        return False
+    host = (u.hostname or "").lower()
+    if u.scheme not in ("http", "https") or not host or "." not in host:
+        return False
+    return not (host.endswith(".invalid") or host.endswith(".example") or host.endswith(".test") or host.endswith(".localhost")
+                or host.startswith("example.") or ".example." in host or host in ("localhost", "example.com"))
+
+
 def liga_candidato(ev: EvaluacionCandidato) -> str:
-    """La liga que el CANDIDATO usa para hacer su prueba (nunca el formulario del evaluador)."""
-    if ev.liga_candidato:
+    """La liga que el CANDIDATO usa para hacer su prueba (nunca el formulario del evaluador). Una liga de ejemplo no
+    cuenta como liga: mejor ninguna que una que no abre."""
+    if ev.liga_candidato and liga_real(ev.liga_candidato):
         return ev.liga_candidato
     if ev.clave_proveedor:
         from . import psicometricas as psi
 
         return psi.url_candidato(ev.clave_proveedor) or ""
-    if ev.tipo == "psicometrica" and ev.modo == "enlace":
-        return ev.url or ""
+    if ev.tipo == "psicometrica" and ev.modo == "enlace" and liga_real(ev.url):
+        return ev.url
     return ""
 
 

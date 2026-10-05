@@ -83,7 +83,7 @@ with TestClient(app) as client:
     check(client.post("/evaluaciones/pruebas", json={"clave": "X", "nombre": "X", "modo": "enlace"}).status_code == 400, "«Enlace externo» exige la liga")
     check(client.post("/evaluaciones/pruebas", json={"clave": "Y", "nombre": "Y", "modo": "integrada"}).status_code == 400, "«Integrada» exige proveedor")
     check(client.post("/evaluaciones/pruebas", json={"clave": "Z", "nombre": "Z", "modo": "telepatia"}).status_code == 400, "modo inválido → 400")
-    r = client.post("/evaluaciones/pruebas", json={"clave": "PSI-TERMAN", "nombre": "Terman", "modo": "enlace", "url": "https://pruebas.example/terman"})
+    r = client.post("/evaluaciones/pruebas", json={"clave": "PSI-TERMAN", "nombre": "Terman", "modo": "enlace", "url": "https://pruebas-terman.mx/terman"})
     TERMAN = r.json()["id"]
     r = client.post("/evaluaciones/pruebas", json={"clave": "PSI-VIEJA", "nombre": "Vieja", "modo": "manual"})
     VIEJA = r.json()["id"]

@@ -367,6 +367,11 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
                     {!e.ligaCandidato && <span className="text-ink-3">(el proveedor le manda su acceso por correo)</span>}
                   </p>
                 )}
+                {/* 2026-10-04: sin liga REAL del proveedor no se manda nada al candidato — RH la pega aquí (p. ej. la del correo de
+                    Psicométricas.mx o la de Evaluatest) y se reenvía */}
+                {live && e.tipo === "psicometrica" && !e.ligaCandidato && !cerrada(e) && (
+                  <LigaCandidatoFaltante e={e} onListo={(m) => { setAviso(m); void cargar(); }} onError={setError} />
+                )}
                 {pedirCorreo?.id === e.id && (
                   <div className="mt-2 flex flex-wrap items-end gap-2 rounded-xl border border-warn/30 bg-warn-soft/40 p-2.5">
                     <CampoRH label="Correo del candidato (se guarda en su ficha)">
@@ -482,6 +487,37 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
 }
 
 /* ---------- Piezas de la fila ---------- */
+function LigaCandidatoFaltante({ e, onListo, onError }: { e: EvaluacionCandidato; onListo: (m: string) => void; onError: (m: string) => void }) {
+  const [liga, setLiga] = useState("");
+  const [ocupado, setOcupado] = useState(false);
+  return (
+    <div className="mt-2 rounded-xl border border-warn/30 bg-warn-soft/40 p-2.5">
+      <p className="text-[12px] text-warn">
+        {e.claveProveedor
+          ? `${e.proveedor || "El proveedor"} no regresa la liga del candidato por su API (le llega por correo con su clave). Si la tienes, pégala aquí para enviársela también por ${CANAL}.`
+          : "Esta prueba no tiene una liga real del proveedor: el candidato no puede entrar. Pega la liga que te dio el proveedor."}
+      </p>
+      <div className="mt-2 flex flex-wrap items-end gap-2">
+        <input value={liga} onChange={(x) => setLiga(x.target.value)} className={cn(inputRH, "min-w-0 flex-1")} placeholder="https://…" />
+        <Button size="sm" disabled={!liga.trim() || ocupado} onClick={async () => {
+          setOcupado(true);
+          const r = await editarEvaluacion(e.id, { liga_candidato: liga.trim() });
+          if (!r.ok) {
+            setOcupado(false);
+            return onError(r.error);
+          }
+          const env = await reenviarAvisosEvaluacion(e.id, "candidato");
+          setOcupado(false);
+          if (!env.ok) return onError(env.error);
+          onListo(`Liga guardada y enviada al candidato. ${lineasEnvios(env.data.envios).map((l) => `${l.estado === "enviado" ? "✓" : "✗"} ${l.texto}`).join(" · ")}`);
+        }}>
+          {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Guardar y enviar
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function BloqueEvaluatest({ datos }: { datos: EvaluatestResultado }) {
   const pct = (n: number | null) => (n === null || n === undefined ? "—" : `${n} %`);
   const lista = (l: string[]) => (l && l.length ? l.join(", ") : "—");

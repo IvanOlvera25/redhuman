@@ -94,8 +94,8 @@ def _validar_prueba(db: Session, cuenta_id: int, pr: PruebaPsicometrica) -> None
         raise HTTPException(400, "Captura el nombre visible de la prueba.")
     if pr.modo not in MODOS_PRUEBA:
         raise HTTPException(400, "Modo inválido: usa integrada, enlace o manual.")
-    if pr.modo == "enlace" and not (pr.url or "").strip().lower().startswith(("http://", "https://")):
-        raise HTTPException(400, "El modo «Enlace externo» necesita la liga de la prueba (https://…).")
+    if pr.modo == "enlace" and not sev.liga_real(pr.url):
+        raise HTTPException(400, "La prueba con «Liga del proveedor» necesita la liga REAL que te dio el proveedor (https://…); una liga de ejemplo no abre.")
     if pr.modo == "integrada" and not (pr.proveedor or "").strip():
         raise HTTPException(400, "El modo «Integrada» necesita el proveedor.")
     pr.puestos = [p.strip()[:200] for p in (pr.puestos or []) if p and p.strip()]
@@ -321,7 +321,7 @@ async def agregar_evaluacion(codigo: str, datos: AgregarEvaluacionIn, db: Sessio
     modo = modo or "manual"
     if modo not in MODOS_PRUEBA:
         raise HTTPException(400, "Modo inválido: usa integrada, enlace o manual.")
-    if modo == "enlace" and not url.lower().startswith(("http://", "https://")):
+    if modo == "enlace" and datos.tipo != "psicometrica" and not sev.liga_real(url):
         raise HTTPException(400, "El modo «Enlace externo» necesita la liga (https://…).")
     ev = EvaluacionCandidato(
         codigo="TMP", cuenta_id=cuenta.id, postulacion_id=p.id, tipo=datos.tipo, nombre=nombre, prueba_id=prueba.id if prueba else None,
@@ -413,6 +413,9 @@ async def _activar_psicometria(db: Session, ev: EvaluacionCandidato, p: Postulac
     elif ev.modo == "integrada":
         if (ev.paso_integrada or "asignada") == "asignada":
             sev.aplicar_paso(ev, "enviada", actor)
+    elif ev.modo == "enlace" and not sev.liga_candidato(ev):
+        return (f"«{ev.nombre}» no tiene una liga real del proveedor para el candidato. Captúrala en Configuración → Pruebas "
+                "psicométricas (o en la evaluación) y vuelve a enviar.")
     elif ev.estado == "pendiente":
         sev.mover(ev, "en_proceso", actor, "Liga enviada al candidato" if sev.liga_candidato(ev) else "Asignada al candidato")
     return ""
@@ -566,6 +569,7 @@ async def avisar_rh(db: Session, ev: EvaluacionCandidato, p: Postulacion, titulo
 
 class EditarEvaluacionIn(BaseModel):
     responsable: Optional[ResponsableIn] = None
+    liga_candidato: Optional[str] = None  # 2026-10-04: liga REAL del proveedor para el candidato ("" = quitar)
     cita: Optional[str] = None  # "" = quitar
     cita_lugar: Optional[str] = None
     notas: Optional[str] = None
@@ -580,6 +584,12 @@ def editar_evaluacion(codigo: str, datos: EditarEvaluacionIn, db: Session = Depe
     _aplicar_responsable_y_cita(db, cuenta.id, p, ev, datos.responsable, datos.cita, datos.cita_lugar)
     if datos.notas is not None:
         sev.guardar_texto(ev, "notas", datos.notas.strip()[:2000])
+    if datos.liga_candidato is not None:
+        liga = datos.liga_candidato.strip()
+        if liga and not sev.liga_real(liga):
+            raise HTTPException(400, "Pega la liga real del proveedor (https://…).")
+        ev.liga_candidato = liga[:500]
+        sev.mover(ev, ev.estado, u.nombre, "Liga del candidato " + ("actualizada" if liga else "quitada"))
     registrar(db, u.nombre, "evaluacion_editada", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "responsable": ev.responsable, "cita": ev.cita_en.isoformat() if ev.cita_en else None, "correo_rh": u.correo})
     db.commit()
     return evaluacion_candidato_dict(ev, u)
