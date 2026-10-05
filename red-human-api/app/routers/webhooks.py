@@ -50,7 +50,7 @@ from ..deps import cuenta_actual, usuario_actual
 from ..models import CONTEXTO_WHATSAPP_HORAS, ETAPAS_CONTEXTO_LARGO, Bitacora, Candidato, Cuenta, Postulacion, Usuario, Vacante, registrar
 from ..serial import nombre_empresa_candidato
 from ..services.configuracion import modo_prueba_activo, ventana_modo_prueba_min
-from ..services.whatsapp import descargar_media, enviar_mensaje, enviar_lista_interactiva, parsear_webhook
+from ..services.whatsapp import descargar_media, enviar_mensaje, firma_valida, enviar_lista_interactiva, parsear_webhook
 from .candidatos import (
     _actualizar_ultima_actividad,
     _crear_candidato,
@@ -644,8 +644,14 @@ def verificar_webhook(
 @router.post("/webhooks/whatsapp")
 async def whatsapp_entrante(request: Request, db: Session = Depends(get_db)):
     """Agente de reclutamiento IA — recibe webhook de Meta / WAHA / Evolution."""
+    # 2026-10-05: el webhook es público — sin firma X-Hub-Signature-256 válida (META_APP_SECRET) se rechaza con 403.
+    # Antes no se validaba y cualquiera podía inyectar mensajes «del candidato».
+    cuerpo = await request.body()
+    if not firma_valida(cuerpo, request.headers.get("X-Hub-Signature-256", "")):
+        print("[webhook-post] Firma X-Hub-Signature-256 ausente o inválida: se rechaza.")
+        raise HTTPException(status_code=403, detail="Firma inválida.")
     try:
-        payload = await request.json()
+        payload = json.loads(cuerpo or b"{}")
     except Exception as e:
         print(f"[webhook-post-error] No se pudo parsear JSON: {e}")
         return {"ok": False, "error": "JSON no válido"}

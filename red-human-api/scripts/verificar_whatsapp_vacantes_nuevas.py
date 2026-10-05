@@ -83,6 +83,8 @@ def nueva_vacante(client, titulo, publicar=True):
 
 
 with TestClient(app) as client:
+    from _webhook_firmado import instalar as _firmar_webhook  # noqa: E402
+    _firmar_webhook(client)
     db = SessionLocal()
     admin = db.query(Usuario).filter(Usuario.rol == "Administrador").first()
     ca = Cuenta(nombre="Cuenta original", nombre_comercial="Original", estado="Activa")

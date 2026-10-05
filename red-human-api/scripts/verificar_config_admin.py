@@ -55,6 +55,8 @@ def meta_texto(tel, texto, nombre="Persona Prueba"):
 
 
 with TestClient(app) as client:
+    from _webhook_firmado import instalar as _firmar_webhook  # noqa: E402
+    _firmar_webhook(client)
     db = SessionLocal()
     admin = db.query(Usuario).filter(Usuario.rol == "Administrador").first()
     cuenta_a = Cuenta(nombre="Cuenta A", nombre_comercial="Empresa A", estado="Activa")

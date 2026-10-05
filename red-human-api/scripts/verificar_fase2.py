@@ -76,6 +76,8 @@ def meta_lista(tel: str, id_opcion: str, titulo: str = "") -> dict:
 
 
 with TestClient(app) as client:
+    from _webhook_firmado import instalar as _firmar_webhook  # noqa: E402
+    _firmar_webhook(client)
     db = SessionLocal()
 
     # ---------- 1. Migración: la semilla legado quedó convertida a Postulaciones ----------

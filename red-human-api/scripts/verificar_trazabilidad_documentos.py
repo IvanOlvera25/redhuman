@@ -93,6 +93,8 @@ whatsapp.enviar_mensaje = _fake_enviar_mensaje
 TEL = "5215577778888"
 
 with TestClient(app) as client:
+    from _webhook_firmado import instalar as _firmar_webhook  # noqa: E402
+    _firmar_webhook(client)
     db = SessionLocal()
     admin = db.query(Usuario).filter(Usuario.rol == "Administrador").first()
     cuenta = Cuenta(nombre="Cuenta Demo", nombre_comercial="Demo RH", estado="Activa", whatsapp_comunicacion="5500000000", whatsapp_exclusivo=True)

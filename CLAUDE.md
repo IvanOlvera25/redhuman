@@ -21,7 +21,7 @@ Plataforma SaaS de agente de IA de RH para México. `red-human-app` (Next.js 15)
 ## WhatsApp (Meta Cloud API)
 
 - `WHATSAPP_PROVIDER=meta`. El token (`META_WHATSAPP_TOKEN`) vive solo en el servidor; nunca al navegador.
-- El webhook `POST /webhooks/whatsapp` es público: valida siempre la firma `X-Hub-Signature-256` con `META_APP_SECRET`.
+- El webhook `POST /webhooks/whatsapp` es público: valida siempre la firma `X-Hub-Signature-256` con `META_APP_SECRET`. Sin firma válida → 403 (2026-10-05: antes NO se validaba; `whatsapp.firma_valida`). Las verificaciones firman sus llamadas con `scripts/_webhook_firmado.instalar(client)`, nunca se salta la validación.
 - El webhook contesta 200 de inmediato y corre el prefiltro en segundo plano — Meta reintenta si tardas, y se deduplica por `wamid`.
 - Teléfonos: en la base se guardan a 10 dígitos; hacia la API salen como `52` + 10 (sin el `1`, que Meta ya no usa).
 - Ventana de 24 h: fuera de ella Meta rechaza el texto libre (error 131047) y hay que usar plantilla aprobada (`META_PLANTILLA_AVISO`).
@@ -561,3 +561,6 @@ Reemplaza en la rama `demo-fraiche` la vista «Ruta Fraiche / Etapas», la colum
   demo o sin `SAP_API_URL`+credenciales → «Listo para SAP · Conexión pendiente» sin envío; con conexión se mandan los
   datos confirmados al alta/confirmación (`POST …/sap/enviar` reintenta) y «Alta confirmada en SAP» SOLO con respuesta
   2xx con identificador. Regresión: `scripts/verificar_alta_referencias.py`.
+- Arranque con 2 workers (2026-10-05): `migraciones.sincronizar` agrega cada columna en su PROPIA transacción y tolera
+  «duplicate column / already exists» (`_ya_existe`): antes el segundo worker tumbaba el arranque de la API al desplegar
+  columnas nuevas.

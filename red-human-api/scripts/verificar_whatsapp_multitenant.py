@@ -92,6 +92,8 @@ def nueva_vacante(client, titulo):
 
 
 with TestClient(app) as client:
+    from _webhook_firmado import instalar as _firmar_webhook  # noqa: E402
+    _firmar_webhook(client)
     db = SessionLocal()
     admin = db.query(Usuario).filter(Usuario.rol == "Administrador").first()
     carbe = Cuenta(nombre="Grupo CARBE", nombre_comercial="Grupo CARBE", estado="Activa")

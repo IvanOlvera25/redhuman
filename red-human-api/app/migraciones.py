@@ -96,19 +96,31 @@ def sincronizar(engine: Engine, omitir: Optional[set] = None) -> List[str]:
     cambios: List[str] = []
     omitir = omitir or set()
 
-    with engine.begin() as con:
-        for tabla in Base.metadata.sorted_tables:
-            if tabla.name not in tablas or tabla.name in omitir:
-                continue  # create_all ya la creó completa (o está deshabilitada)
-            existentes = {c["name"] for c in insp.get_columns(tabla.name)}
-            for col in tabla.columns:
-                if col.name in existentes:
-                    continue
-                tipo = col.type.compile(engine.dialect)
-                con.execute(text(f"ALTER TABLE {tabla.name} ADD COLUMN {col.name} {tipo}{_default_sql(col)}"))
+    for tabla in Base.metadata.sorted_tables:
+        if tabla.name not in tablas or tabla.name in omitir:
+            continue  # create_all ya la creó completa (o está deshabilitada)
+        existentes = {c["name"] for c in insp.get_columns(tabla.name)}
+        for col in tabla.columns:
+            if col.name in existentes:
+                continue
+            tipo = col.type.compile(engine.dialect)
+            # 2026-10-05: una transacción POR columna y tolerar «ya existe». Con 2 workers de uvicorn arrancando a la vez
+            # ambos ven la columna faltante; el segundo recibía «duplicate column» y tumbaba el arranque de toda la API.
+            try:
+                with engine.begin() as con:
+                    con.execute(text(f"ALTER TABLE {tabla.name} ADD COLUMN {col.name} {tipo}{_default_sql(col)}"))
                 cambios.append(f"{tabla.name}.{col.name}")
+            except Exception as ex:  # noqa: BLE001
+                if _ya_existe(ex):
+                    continue  # la agregó el otro worker
+                raise
 
     return cambios
+
+
+def _ya_existe(ex: Exception) -> bool:
+    m = str(ex).lower()
+    return "duplicate column" in m or "already exists" in m
 
 
 def relajar_not_null(engine: Engine, omitir: Optional[set] = None) -> List[str]:

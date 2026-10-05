@@ -118,6 +118,20 @@ with TestClient(app) as client:
     from app.models import Colaborador, Documento, Expediente  # noqa: E402
     from app.services import ia, sap  # noqa: E402
 
+    print("\n=== 0. Webhook de WhatsApp: sin firma válida → 403 ===")
+    from app.config import settings as _s0  # noqa: E402
+
+    _s0.meta_app_secret = "secreto-de-pruebas-webhook"
+    check(client.post("/webhooks/whatsapp", json={"entry": []}).status_code == 403, "POST sin X-Hub-Signature-256 → 403")
+    check(client.post("/webhooks/whatsapp", content=b'{"entry":[]}', headers={"X-Hub-Signature-256": "sha256=falsa"}).status_code == 403,
+          "firma falsa → 403")
+    import hashlib as _h, hmac as _hm  # noqa: E401,E402
+
+    _b = b'{"entry":[]}'
+    _f = _hm.new(b"secreto-de-pruebas-webhook", _b, _h.sha256).hexdigest()
+    check(client.post("/webhooks/whatsapp", content=_b, headers={"X-Hub-Signature-256": f"sha256={_f}", "Content-Type": "application/json"}).status_code == 200,
+          "firma correcta → 200")
+
     vc = vacante("Cajero")
     PDF = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n" + b"x" * 2048 + b"\n%%EOF"
 

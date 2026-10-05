@@ -69,6 +69,8 @@ def webhook(client, tel, texto):
 
 
 with TestClient(app) as client:
+    from _webhook_firmado import instalar as _firmar_webhook  # noqa: E402
+    _firmar_webhook(client)
     db = SessionLocal()
     admin = db.query(Usuario).filter(Usuario.rol == "Administrador").first()
     cuenta = Cuenta(nombre="Cuenta F3", nombre_comercial="F3", estado="Activa")
