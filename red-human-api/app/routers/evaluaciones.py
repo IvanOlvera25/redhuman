@@ -12,6 +12,7 @@
 """
 
 import hashlib
+import re
 import secrets
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -291,9 +292,21 @@ async def agregar_evaluacion(codigo: str, datos: AgregarEvaluacionIn, db: Sessio
         raise HTTPException(409, f"«{TIPOS_EVALUACION[datos.tipo]}» no aplica a la ruta Franquicia (sin IPV, psicometría, médico ni socioeconómico de Fraiche).")
     if datos.tipo == "socioeconomico" and fp.es_ruta_fraiche(p) and not fp.aplica_socioeconomico(p):
         raise HTTPException(409, "En tienda propia el estudio socioeconómico aplica solo a Cajero y Encargado.")
-    if datos.correo_candidato.strip():
-        _guardar_correo_candidato(p, datos.correo_candidato, u.nombre, db)
     ids = list(dict.fromkeys([i for i in (datos.prueba_ids or []) if i] + ([datos.prueba_id] if datos.prueba_id else [])))
+    if datos.correo_candidato.strip():
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", datos.correo_candidato.strip()):
+            raise HTTPException(400, "El correo del candidato no tiene un formato válido.")
+        _guardar_correo_candidato(p, datos.correo_candidato, u.nombre, db)
+    elif datos.tipo == "psicometrica" and datos.enviar and not datos.interno and not (p.correo or "").strip():
+        # 2026-10-05: Psicométricas.mx exige correo para crear la clave del candidato. Se pide ANTES de asignar:
+        # antes se creaba la evaluación y el envío fallaba en silencio («no me llega la liga»).
+        from ..services import psicometricas as psi
+
+        if psi.configurado():
+            pruebas = db.query(PruebaPsicometrica).filter(PruebaPsicometrica.id.in_(ids), PruebaPsicometrica.cuenta_id == cuenta.id).all() if ids else []
+            exigen = [x.nombre for x in pruebas if x.modo == "integrada" and psi.es_psicometricas(x.proveedor)]
+            if exigen:
+                raise HTTPException(409, f"Captura el correo del candidato: Psicométricas.mx lo exige para crear su clave y mandarle la liga ({', '.join(exigen)}).")
     if datos.tipo == "psicometrica" and datos.prueba_ids and not datos.interno:
         creadas, omitidas, envios = [], [], []
         for pid in ids:

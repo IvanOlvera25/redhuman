@@ -2193,6 +2193,7 @@ function ModalCandidato({
         <ModalAgregarEvaluacion
           codigo={c.id}
           puesto={c.puesto}
+          correoActual={c.correo}
           tipoInicial={(tipoEvalInicial || "") as never}
           excluir={esRutaFranquicia ? ["psicometrica", "medico", "socioeconomico"] : []}
           accionesRuta={accionesRutaEval}
@@ -3491,7 +3492,7 @@ function PestanaEvaluaciones({
       )}
 
       {/* ===== Evaluaciones y verificaciones (2026-09-28): no mueven la columna del pipeline ===== */}
-      <div id="eval-validaciones"><PanelEvaluaciones codigo={c.id} puesto={c.puesto} live={Boolean(live) && puedeDecidir} version={versionEval} accionesRuta={accionesRuta} excluir={(c.avance?.destino || "") === "franquicia" ? ["psicometrica", "medico", "socioeconomico"] : []} /></div>
+      <div id="eval-validaciones"><PanelEvaluaciones codigo={c.id} puesto={c.puesto} correo={c.correo} live={Boolean(live) && puedeDecidir} version={versionEval} accionesRuta={accionesRuta} excluir={(c.avance?.destino || "") === "franquicia" ? ["psicometrica", "medico", "socioeconomico"] : []} /></div>
     </div>
   );
 }

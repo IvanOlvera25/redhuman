@@ -135,6 +135,27 @@ with TestClient(app) as client:
     vc = vacante("Cajero")
     PDF = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n" + b"x" * 2048 + b"\n%%EOF"
 
+    print("\n=== 0b. Psicométricas.mx: el correo se pide ANTES de asignar ===")
+    from app.models import PruebaPsicometrica  # noqa: E402
+    from app.services import psicometricas as _psi  # noqa: E402
+
+    _conf_orig = _psi.configurado
+    _psi.configurado = lambda: True  # simulado: NO se llama a la API real (no se gastan peticiones)
+    pr = PruebaPsicometrica(cuenta_id=cuenta.id, clave="psi-correo-test", nombre="Batería Psicométricas prueba", modo="integrada",
+                            proveedor="Psicométricas.mx", id_proveedor="1,7", activa=True)
+    db.add(pr)
+    db.commit()
+    Pc = postular(vc, "Sin Correo Prueba", "5582220099")
+    antes = db.query(EvaluacionCandidato).count()
+    r = client.post(f"/evaluaciones/postulaciones/{Pc}", json={"tipo": "psicometrica", "prueba_ids": [pr.id], "enviar": True})
+    check(r.status_code == 409 and "correo" in r.json()["detail"].lower() and db.query(EvaluacionCandidato).count() == antes,
+          "sin correo en la ficha → 409 que lo pide y NO se crea la evaluación")
+    r = client.post(f"/evaluaciones/postulaciones/{Pc}", json={"tipo": "psicometrica", "prueba_ids": [pr.id], "enviar": True, "correo_candidato": "malo"})
+    check(r.status_code == 400 and db.query(EvaluacionCandidato).count() == antes, "un correo mal escrito se rechaza")
+    _psi.configurado = _conf_orig
+    pr.activa = False
+    db.commit()
+
     print("\n=== 1. Referencias: validar dentro del sistema → Completado ===")
     P = postular(vc, "Rocío Alta Prueba", "5582220001", "rocio@demo.invalid")
     r = client.post(f"/evaluaciones/postulaciones/{P}", json={"tipo": "referencias", "referencias_modo": "responsable", "referencias_requeridas": 1,

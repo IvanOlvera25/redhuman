@@ -564,3 +564,7 @@ Reemplaza en la rama `demo-fraiche` la vista «Ruta Fraiche / Etapas», la colum
 - Arranque con 2 workers (2026-10-05): `migraciones.sincronizar` agrega cada columna en su PROPIA transacción y tolera
   «duplicate column / already exists» (`_ya_existe`): antes el segundo worker tumbaba el arranque de la API al desplegar
   columnas nuevas.
+- Psicométricas.mx sin correo (2026-10-05): `POST /evaluaciones/postulaciones/{c}` con `enviar` y una prueba integrada de
+  Psicométricas.mx responde 409 ANTES de crear nada si la ficha no tiene correo (`correo_candidato` lo captura y lo guarda en
+  la ficha; formato validado). La ventana «Agregar evaluación» lo pide como obligatorio (`correoActual`) — antes se creaba la
+  evaluación y la liga nunca salía.

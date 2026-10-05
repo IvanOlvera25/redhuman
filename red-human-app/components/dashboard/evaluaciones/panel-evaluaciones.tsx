@@ -180,9 +180,9 @@ function BloqueResponsable({ f, onChange, contactos, clienteNombre, sinCita = fa
 }
 
 /* ---------- Panel ---------- */
-export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, clienteNombre, accionesRuta, excluir }: {
+export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, clienteNombre, accionesRuta, excluir, correo }: {
   codigo: string; puesto?: string; live: boolean; version?: number; contactos?: ContactoEvaluacion[]; clienteNombre?: string;
-  accionesRuta?: { etiqueta: string; descripcion?: string; onClick: () => void }[]; excluir?: string[];
+  accionesRuta?: { etiqueta: string; descripcion?: string; onClick: () => void }[]; excluir?: string[]; correo?: string;
 }) {
   const [lista, setLista] = useState<EvaluacionCandidato[] | null>(null);
   const [error, setError] = useState("");
@@ -493,7 +493,7 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
 
       {agregar && (
         <ModalAgregarEvaluacion
-          codigo={codigo} puesto={puesto} contactos={contactos} clienteNombre={clienteNombre} excluir={excluir}
+          codigo={codigo} puesto={puesto} contactos={contactos} clienteNombre={clienteNombre} excluir={excluir} correoActual={correo}
           accionesRuta={accionesRuta?.map((x) => ({ ...x, onClick: () => { setAgregar(false); x.onClick(); } }))}
           onClose={() => setAgregar(false)}
           onAgregada={(ev) => {
@@ -607,11 +607,13 @@ function ligaPorDefecto(tipo: TipoEvaluacion | "", nombre: string) {
   return tipo === "socioeconomico" || tipo === "medico" || nombre === NOMBRE_EVALUACION_ENCARGADO || nombre === NOMBRE_EVALUACION_FRANQUICIATARIO;
 }
 
-export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombre, onClose, onAgregada, tipoInicial, excluir, accionesRuta }: {
+export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombre, onClose, onAgregada, tipoInicial, excluir, accionesRuta, correoActual }: {
   codigo: string; puesto?: string; contactos?: ContactoEvaluacion[]; clienteNombre?: string; onClose: () => void; onAgregada: (e: EvaluacionCandidato) => void;
   /** Pipeline Fraiche v2 (2026-10-01): «Agregar evaluación» es la ÚNICA entrada — incluye entrevista humana, IPV y
    * presentación al franquiciatario (`accionesRuta`, abren su propio formulario); `excluir` quita lo que no aplica a la ruta. */
   tipoInicial?: TipoEvaluacion | ""; excluir?: string[]; accionesRuta?: { etiqueta: string; descripcion?: string; onClick: () => void }[];
+  /** 2026-10-05: correo de la ficha; si falta y alguna prueba es de Psicométricas.mx, se pide ANTES de asignar. */
+  correoActual?: string;
 }) {
   const [tipo, setTipo] = useState<TipoEvaluacion | "">(tipoInicial ?? "");
   const [pruebas, setPruebas] = useState<PruebaPsicometrica[] | null>(null);
@@ -638,6 +640,11 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
   const [ocupado, setOcupado] = useState(false);
   const [error, setError] = useState("");
   const liga = generarLiga ?? ligaPorDefecto(tipo, nombre.trim());
+  const exigenCorreo = tipo === "psicometrica" && enviar && !(correoActual ?? "").trim()
+    ? (pruebas ?? []).filter((x) => pruebaIds.includes(x.id) && x.modo === "integrada" && /psicom[eé]tricas/i.test(x.proveedor.replace(/\s/g, "")))
+    : [];
+  const correoValido = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(correoCandidato.trim());
+  const faltaCorreo = exigenCorreo.length > 0 && !correoValido;
 
   useEffect(() => {
     if (tipo === "psicometrica" && pruebas === null)
@@ -757,11 +764,23 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
                   <input value={ligaExterna} onChange={(x) => setLigaExterna(x.target.value)} className={inputRH} placeholder="https://…" />
                 </CampoRH>
               </div>
-              <div className="mt-3">
-                <CampoRH label="Correo del candidato (solo si el proveedor lo exige y falta en su ficha)">
-                  <input type="email" value={correoCandidato} onChange={(e) => setCorreoCandidato(e.target.value)} className={inputRH} placeholder="nombre@correo.com" />
-                </CampoRH>
-              </div>
+              {exigenCorreo.length > 0 ? (
+                <div className="mt-3 rounded-xl border border-warn/40 bg-warn-soft/40 p-3">
+                  <CampoRH label="Correo del candidato (obligatorio)">
+                    <input type="email" value={correoCandidato} onChange={(e) => setCorreoCandidato(e.target.value)} autoFocus
+                      className={cn(inputRH, correoCandidato && !correoValido && "border-bad/50")} placeholder="nombre@correo.com" />
+                  </CampoRH>
+                  <p className="mt-1.5 text-[12px] text-ink-2">
+                    Psicométricas.mx lo exige para crear la clave del candidato y mandarle la liga por {CANAL}. Se guarda en su ficha.
+                  </p>
+                </div>
+              ) : !(correoActual ?? "").trim() ? (
+                <div className="mt-3">
+                  <CampoRH label="Correo del candidato (solo si el proveedor lo exige)">
+                    <input type="email" value={correoCandidato} onChange={(e) => setCorreoCandidato(e.target.value)} className={inputRH} placeholder="nombre@correo.com" />
+                  </CampoRH>
+                </div>
+              ) : null}
             </div>
           )}
         </div>
@@ -831,7 +850,8 @@ export function ModalAgregarEvaluacion({ codigo, puesto, contactos, clienteNombr
       {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
       <div className="mt-5 flex justify-end gap-2">
         <Button variant="outline" size="sm" onClick={onClose} disabled={ocupado}>Cancelar</Button>
-        <Button size="sm" onClick={guardar} disabled={ocupado || !tipo || (tipo === "psicometrica" && pruebaIds.length === 0)}>
+        <Button size="sm" onClick={guardar} disabled={ocupado || !tipo || (tipo === "psicometrica" && pruebaIds.length === 0) || faltaCorreo}
+          title={faltaCorreo ? "Captura el correo del candidato" : undefined}>
           {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <ClipboardCheck className="h-4 w-4" />} Agregar
         </Button>
       </div>
