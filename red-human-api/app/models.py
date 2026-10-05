@@ -499,6 +499,9 @@ class EntrevistaHumana(Base):
     # que cuenta para Filtro humano), encargado de tienda o franquiciatario (MISMO flujo de agenda, nunca «Otra»).
     # Una entrevista adicional solo bloquea el avance si RH la marcó `obligatoria`.
     clase: Mapped[str] = mapped_column(String(20), default="reclutamiento")  # CLASES_ENTREVISTA_HUMANA
+    # 2026-10-04: qué ve el entrevistador en su liga — «ficha» (solo la ficha + evaluación; el expediente queda bloqueado
+    # también por acceso directo) | «ficha_expediente» (además «Ver expediente»: CV, documentos, respuestas, evaluaciones).
+    compartir: Mapped[str] = mapped_column(String(20), default="ficha")
     obligatoria: Mapped[bool] = mapped_column(Boolean, default=False)
     # Historial de avisos por destinatario (agendada/reprogramada/cancelada/reenvío): [{fecha, evento, destinatario,
     # canal, destino, estado: enviado|pendiente|fallido, detalle}]
@@ -2123,6 +2126,8 @@ TEXTO_CONSENTIMIENTO_MEDICO = (
     "restricciones o No apto). Sé que puedo revocar este consentimiento y ejercer mis derechos ARCO en cualquier momento."
 )
 
+
+COMPARTIR_ENTREVISTADOR = {"ficha": "Solo ficha", "ficha_expediente": "Ficha + expediente"}
 
 CLASES_ENTREVISTA_HUMANA = {
     "reclutamiento": "Entrevista de Reclutamiento",

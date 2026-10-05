@@ -213,6 +213,7 @@ def _entrevista_humana_dict(eh) -> dict:
         "claseNombre": "IPV humana" if eh.es_ipv else CLASES_ENTREVISTA_HUMANA.get(eh.clase or "reclutamiento", "Entrevista"),
         "obligatoria": bool(eh.obligatoria) or (not eh.es_ipv and (eh.clase or "reclutamiento") == "reclutamiento"),
         "ligaEntrevistador": f"{settings.app_url.rstrip('/')}/entrevista-humana/{eh.token}" if eh.token else "",
+        "compartir": eh.compartir or "ficha",
         "envios": list(eh.envios or [])[-12:],
         "envioEstado": _estado_envios(eh.envios),
         "recordatorioEnviadoEn": iso(eh.recordatorio_enviado_en),

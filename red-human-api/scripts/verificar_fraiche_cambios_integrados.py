@@ -335,4 +335,40 @@ with TestClient(app) as client:
     r = client.post(f"/evaluaciones/postulaciones/{P2}", json={"tipo": "socioeconomico", "enviar": False})
     check(r.status_code == 409, "agregar socioeconómico a un Demostrador de tienda propia → 409")
 
+    print("\n=== Envío de ficha al entrevistador (2026-10-04) ===")
+    P3 = postular(vc, "Fernanda Ficha Tres", "5581110003", "fer3@demo.invalid")
+    CORREOS.clear()
+    r = client.post(f"/candidatos/{P3}/entrevista-humana", json={**base_eh, "tipo_entrevistador": "externo", "entrevistador_nombre": "Encargada Ext",
+                                                                "entrevistador_correo": "ext@demo.invalid", "entrevistador_whatsapp": "5581117777"})
+    eh3 = r.json()["candidato"]["entrevistasHumanas"][-1]
+    check(r.status_code == 201 and eh3["compartir"] == "ficha", "«Solo ficha» es la opción por defecto")
+    html_ent = next(c for c in CORREOS if c[0] == "ext@demo.invalid")
+    check("Abrir ficha y evaluar" in html_ent[2] and html_ent[3] and html_ent[3][0]["content"][:4] == b"%PDF", "el correo trae datos de la entrevista, la ficha en PDF y «Abrir ficha y evaluar»")
+    tok3 = db.query(EntrevistaHumana).get(eh3["id"]).token
+    pub = client.get(f"/entrevista-humana/publica/{tok3}").json()
+    check(pub["ficha"]["candidato"]["nombre"] == "Fernanda Ficha Tres" and "expediente" not in pub and pub["puedeVerExpediente"] is False,
+          "la liga muestra la ficha y no trae expediente ni análisis adicional")
+    from app.routers.candidatos import datos_ficha_entrevistador  # noqa: E402
+
+    p3 = db.query(Postulacion).filter(Postulacion.codigo == P3).first()
+    db.refresh(p3)
+    misma = datos_ficha_entrevistador(db, p3, db.query(EntrevistaHumana).get(eh3["id"]))
+    check({k: v for k, v in pub["ficha"].items() if k != "generada"} == {k: v for k, v in misma.items() if k != "generada"}, "la ficha de la liga es la misma que genera el PDF")
+    check(client.get(f"/entrevista-humana/publica/{tok3}/ficha.pdf").content[:4] == b"%PDF", "la liga ofrece el mismo PDF")
+    check(client.get(f"/entrevista-humana/publica/{tok3}/expediente").status_code == 403, "«Solo ficha»: el expediente se niega también por acceso directo")
+    check(client.get(f"/entrevista-humana/publica/{tok3}/archivo/1").status_code == 403, "…y los archivos del candidato también")
+    r = client.post(f"/candidatos/{P3}/entrevista-humana/reenviar", json={"entrevista_id": eh3["id"], "destinatario": "entrevistador", "compartir": "ficha_expediente"})
+    check(r.status_code == 200 and client.get(f"/entrevista-humana/publica/{tok3}").json()["puedeVerExpediente"] is True, "Reenviar con «Ficha + expediente» habilita «Ver expediente»")
+    ex = client.get(f"/entrevista-humana/publica/{tok3}/expediente").json()
+    check({"cv", "documentos", "respuestas", "evaluacionesPrevias"} <= set(ex) and ex["respuestas"] and ex["candidato"]["telefono"] == "",
+          "expediente: CV, documentos, respuestas y evaluaciones previas (externo sin datos de contacto)")
+    r = client.patch(f"/candidatos/{P3}/entrevista-humana/compartir", json={"entrevista_id": eh3["id"], "compartir": "ficha"})
+    check(r.status_code == 200 and client.get(f"/entrevista-humana/publica/{tok3}/expediente").status_code == 403, "volver a «Solo ficha» bloquea de nuevo el expediente")
+    r = client.post(f"/entrevista-humana/publica/{tok3}", json={"resultado": "aprobado", "recomendacion": "avanzar", "comentario": "Buena actitud"})
+    check(r.status_code == 200 and r.json()["mensaje"] == "Evaluación guardada", "«Guardar evaluación» confirma «Evaluación guardada»")
+    f3 = client.get(f"/candidatos/{P3}").json()
+    eh3b = next(x for x in f3["entrevistasHumanas"] if x["id"] == eh3["id"])
+    check(eh3b["resultado"] == "aprobado" and eh3b["recomendacion"] == "avanzar" and eh3b["comentario"] == "Buena actitud" and eh3b["resultadoCapturadoPor"] == "entrevistador",
+          "el resultado queda vinculado a ESA entrevista humana y se ve en Evaluaciones del candidato")
+
 print(f"\n🎉 Cambios integrados Fraiche (2026-10-02): {OK} comprobaciones OK")

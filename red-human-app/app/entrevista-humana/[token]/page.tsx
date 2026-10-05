@@ -1,17 +1,16 @@
 "use client";
 
-/* Liga pública del entrevistador (Lote 3 · mejorada 2026-09-19). Primero el EXPEDIENTE completo del
-   candidato (CV extraído y archivo, análisis de Luna, Entrevista Red Human, capacitación, documentos)
-   para que el entrevistador vea el proceso antes de evaluar; abajo, el formulario de un solo envío
-   (Resultado, Recomendación, Comentarios opcionales). Al enviar, la entrevista queda realizada y
-   confirmada y se cierra el ciclo (autocierre en el backend).
+/* Liga pública del entrevistador. 2026-10-04: abre la FICHA del candidato (el mismo contenido que el PDF adjunto en el
+   correo, sin análisis adicional) y al final el formulario de evaluación (Resultado aprobado/rechazado, Recomendación,
+   Comentarios, «Guardar evaluación»). Si RH eligió «Ficha + expediente» aparece «Ver expediente» (CV, documentos,
+   respuestas y evaluaciones previas); con «Solo ficha» la API niega el expediente también por acceso directo.
    Fraiche (spec §8): si la ronda es IPV (`esIpv`), el formulario es la rúbrica por competencias (misma que
    Red Human): nivel Alto/Medio/Bajo/Sin evidencia + respuesta + evidencia, observaciones sin peso y vista
    previa con `calcularIpv`. La puntuación nunca mueve de etapa por sí sola. */
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { AlertTriangle, Award, Bot, Briefcase, CheckCircle2, ChevronDown, FileText, GraduationCap, Loader2, Sparkles, User } from "lucide-react";
+import { AlertTriangle, Briefcase, CheckCircle2, ChevronDown, ClipboardList, FileText, FolderOpen, Loader2, MessageSquare, User } from "lucide-react";
 import { Logo, Button, Card, Badge } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
@@ -19,7 +18,11 @@ import {
   calcularIpv,
   enviarEvaluacionEntrevistaHumana,
   fetchEntrevistaHumanaPublica,
+  fetchExpedienteEntrevistador,
   urlArchivoEntrevistaHumanaPublica,
+  urlFichaEntrevistadorPdf,
+  type ExpedienteEntrevistador,
+  type FichaCandidato,
   COMPETENCIAS_IPV,
   CONCLUSIONES_IPV,
   EQUIVALENCIAS_IPV_DEFAULT,
@@ -104,7 +107,13 @@ export default function EvaluacionEntrevistaHumana() {
     return `${c.puntaje} / 100 · ${conclusiones[c.conclusion] || c.conclusion}`;
   }
 
-  const exp = info?.expediente;
+  // «Ver expediente» (solo «Ficha + expediente»): se pide aparte y la API lo niega con «Solo ficha»
+  const [expAbierto, setExpAbierto] = useState(false);
+  const [expediente, setExpediente] = useState<ExpedienteEntrevistador | null | undefined>(undefined);
+  function verExpediente() {
+    setExpAbierto((x) => !x);
+    if (expediente === undefined) fetchExpedienteEntrevistador(token).then((e) => setExpediente(e ?? null));
+  }
 
   return (
     <main className="min-h-svh bg-bg">
@@ -132,114 +141,39 @@ export default function EvaluacionEntrevistaHumana() {
         {fase === "formulario" && info && (
           <>
             <div className="text-center">
-              <Badge tone="brand" dot>{info.expediente?.vacante.empresa || "Red Human"} · {info.tipoEntrevista || (esIpv ? "Entrevista IPV" : "Entrevista humana")}</Badge>
-              <h1 className="font-display mt-3 text-2xl font-bold sm:text-3xl">Expediente de {info.candidato}</h1>
+              <Badge tone="brand" dot>{info.empresa || "Red Human"} · {info.tipoEntrevista || (esIpv ? "Entrevista IPV" : "Entrevista humana")}</Badge>
+              <h1 className="font-display mt-3 text-2xl font-bold sm:text-3xl">Ficha de {info.candidato}</h1>
               <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">
                 {info.puesto && `Vacante: ${info.puesto}. `}
                 {info.fecha ? `Entrevista el ${new Date(info.fecha).toLocaleString("es-MX", { dateStyle: "long", timeStyle: "short" })}. ` : ""}
-                Revisa el proceso y registra tu evaluación al final.
+                Revisa la ficha y registra tu evaluación al final.
               </p>
+              <div className="mt-3 flex flex-wrap justify-center gap-2">
+                <a href={urlFichaEntrevistadorPdf(token)} target="_blank" rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-border-soft bg-surface px-3 py-2 text-xs font-semibold text-brand hover:border-brand/40">
+                  <FileText className="h-3.5 w-3.5" /> Descargar ficha (PDF)
+                </a>
+                {info.puedeVerExpediente && (
+                  <button type="button" onClick={verExpediente}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-brand/40 bg-brand-soft px-3 py-2 text-xs font-semibold text-brand hover:brightness-105">
+                    <FolderOpen className="h-3.5 w-3.5" /> {expAbierto ? "Ocultar expediente" : "Ver expediente"}
+                  </button>
+                )}
+              </div>
             </div>
 
-            {/* ===== EXPEDIENTE ===== */}
-            {exp && (
-              <div className="mt-6 flex flex-col gap-3">
-                <Seccion icono={User} titulo="Candidato y vacante" abierto>
-                  <dl className="grid gap-2 text-sm sm:grid-cols-2">
-                    <Dato k="Nombre" v={exp.candidato.nombre} />
-                    <Dato k="Teléfono" v={exp.candidato.telefono || "—"} />
-                    <Dato k="Correo" v={exp.candidato.correo || "—"} />
-                    <Dato k="Etapa" v={exp.etapa || "—"} />
-                    <Dato k="Vacante" v={exp.vacante.titulo} />
-                    <Dato k="Afinidad de CV (Luna)" v={exp.score != null ? `${exp.score}/100` : "Sin CV analizado"} />
-                  </dl>
-                  {exp.vacante.requisitos && <p className="mt-3 text-xs leading-relaxed text-ink-3"><b className="text-ink-2">Requisitos:</b> {exp.vacante.requisitos}</p>}
-                  {exp.vacante.perfilIdeal && <p className="mt-1 text-xs leading-relaxed text-ink-3"><b className="text-ink-2">Perfil ideal:</b> {exp.vacante.perfilIdeal}</p>}
-                </Seccion>
+            {/* ===== FICHA: el mismo contenido que el PDF adjunto ===== */}
+            <FichaVista f={info.ficha} />
 
-                <Seccion icono={FileText} titulo="CV" abierto>
-                  {exp.archivos.length > 0 && (
-                    <div className="mb-3 flex flex-wrap gap-2">
-                      {exp.archivos.map((a) => (
-                        <a key={a.id} href={urlArchivoEntrevistaHumanaPublica(token, a.id)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-xl border border-border-soft bg-surface px-3 py-1.5 text-xs font-semibold text-brand transition hover:border-brand/40">
-                          <FileText className="h-3.5 w-3.5" /> {a.tipo === "cv" ? "Abrir CV" : a.nombre || a.tipo}
-                        </a>
-                      ))}
-                    </div>
-                  )}
-                  {exp.cv.resumen ? <p className="text-sm leading-relaxed text-ink-2">{exp.cv.resumen}</p> : <p className="text-sm text-ink-3">Sin datos extraídos del CV.</p>}
-                  <Lista titulo="Habilidades" items={exp.cv.habilidades} />
-                  <Lista titulo="Experiencia" items={exp.cv.experiencia.map((e) => (typeof e === "string" ? e : [e.puesto, e.empresa, e.periodo].filter(Boolean).join(" · ")))} />
-                  <Lista titulo="Estudios" items={exp.cv.estudios} />
-                  <Lista titulo="Idiomas" items={exp.cv.idiomas} />
-                </Seccion>
-
-                <Seccion icono={Sparkles} titulo="Análisis del CV (Luna)">
-                  {exp.analisis.resumen && <p className="text-sm leading-relaxed text-ink-2">{exp.analisis.resumen}</p>}
-                  <Lista titulo="Requisitos cumplidos" items={exp.analisis.requisitosCumplidos} tono="good" />
-                  <Lista titulo="Brechas" items={exp.analisis.brechas} tono="warn" />
-                  <Lista titulo="Fortalezas" items={exp.analisis.fortalezas} />
-                  <Lista titulo="Alertas" items={exp.analisis.alertas} tono="bad" />
-                  {!exp.analisis.resumen && !exp.analisis.requisitosCumplidos.length && !exp.analisis.brechas.length && <p className="text-sm text-ink-3">Sin análisis todavía.</p>}
-                </Seccion>
-
-                <Seccion icono={Bot} titulo="Entrevista Red Human (IA)" abierto={Boolean(exp.entrevistaIA)}>
-                  {exp.entrevistaIA ? (
-                    <>
-                      <div className="mb-2 flex flex-wrap items-center gap-2">
-                        {exp.entrevistaIA.matchPerfil != null && <Badge tone="brand">Afinidad {exp.entrevistaIA.matchPerfil}/100</Badge>}
-                        {exp.entrevistaIA.recomendacion && (
-                          <Badge tone={exp.entrevistaIA.recomendacion === "avanzar" ? "good" : exp.entrevistaIA.recomendacion === "no_avanzar" ? "bad" : "warn"}>
-                            Recomendación IA: {exp.entrevistaIA.recomendacion.replace("_", " ")}
-                          </Badge>
-                        )}
-                      </div>
-                      {exp.entrevistaIA.resumen && <p className="text-sm leading-relaxed text-ink-2">{exp.entrevistaIA.resumen}</p>}
-                      <Lista titulo="Fortalezas observadas" items={exp.entrevistaIA.fortalezas} tono="good" />
-                      <Lista titulo="Puntos por validar en tu entrevista" items={exp.entrevistaIA.riesgos} tono="warn" />
-                      <Lista titulo="No se cubrió" items={exp.entrevistaIA.faltante} tono="bad" />
-                    </>
-                  ) : (
-                    <p className="text-sm text-ink-3">Sin Entrevista Red Human evaluada.</p>
-                  )}
-                </Seccion>
-
-                {(exp.ipvRedHuman || (exp.puntosPorValidar?.length ?? 0) > 0) && (
-                  <Seccion icono={Bot} titulo="IPV Red Human y puntos por validar" abierto>
-                    {exp.ipvRedHuman && (
-                      <p className="text-sm text-ink-2">
-                        IPV Red Human:{" "}
-                        <b className="text-ink">
-                          {exp.ipvRedHuman.puntaje != null
-                            ? `${exp.ipvRedHuman.puntaje}/100 · ${exp.ipvRedHuman.conclusion}`
-                            : exp.ipvRedHuman.pesoPendiente
-                              ? `provisional ${exp.ipvRedHuman.puntajeProvisional} pts · ${exp.ipvRedHuman.pesoPendiente} % por validar`
-                              : exp.ipvRedHuman.conclusion}
-                        </b>
-                      </p>
-                    )}
-                    <Lista titulo="Reservas" items={exp.ipvRedHuman?.reservas ?? []} tono="warn" />
-                    <Lista titulo="Valida en tu entrevista" items={exp.puntosPorValidar ?? []} tono="warn" />
-                  </Seccion>
-                )}
-
-                {(exp.capacitacion.length > 0 || exp.documentos.length > 0) && (
-                  <Seccion icono={GraduationCap} titulo="Capacitación y documentos">
-                    {exp.capacitacion.map((k, i) => (
-                      <p key={i} className="text-sm text-ink-2">
-                        <Award className="mr-1 inline h-3.5 w-3.5 text-brand" /> {k.curso}: {k.aprobado ? "Aprobado" : "No aprobado"} ({k.calificacion}%)
-                      </p>
-                    ))}
-                    {exp.documentos.length > 0 && (
-                      <ul className="mt-2 grid gap-1 text-xs text-ink-2 sm:grid-cols-2">
-                        {exp.documentos.map((d) => (
-                          <li key={d.tipo} className="flex items-center gap-1.5">
-                            {d.estado === "recibido" ? <CheckCircle2 className="h-3.5 w-3.5 text-good" /> : <AlertTriangle className="h-3.5 w-3.5 text-warn" />} {d.tipo} · {d.estado}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </Seccion>
+            {/* ===== EXPEDIENTE: solo si RH eligió «Ficha + expediente» ===== */}
+            {info.puedeVerExpediente && expAbierto && (
+              <div className="mt-4">
+                {expediente === undefined ? (
+                  <div className="grid place-items-center py-8 text-ink-3"><Loader2 className="h-5 w-5 animate-spin" /></div>
+                ) : expediente === null ? (
+                  <Card className="p-5 text-sm text-ink-3">El expediente no está disponible para esta liga.</Card>
+                ) : (
+                  <ExpedienteVista exp={expediente} token={token} />
                 )}
               </div>
             )}
@@ -252,8 +186,8 @@ export default function EvaluacionEntrevistaHumana() {
               </div>
               {info.yaEvaluada ? (
                 <div className="mt-3 rounded-xl border border-good/30 bg-good-soft/40 p-4 text-sm text-ink-2">
-                  <CheckCircle2 className="mr-1 inline h-4 w-4 text-good" /> Esta entrevista ya fue evaluada
-                  {esIpv && info.resultadoIpv ? ` (IPV: ${textoIpv(info.resultadoIpv)})` : info.resultado ? ` (${info.resultado === "aprobado" ? "Aprobado" : "No aprobado"})` : ""}. Si necesitas corregirla, contacta al equipo de RH.
+                  <CheckCircle2 className="mr-1 inline h-4 w-4 text-good" /> Evaluación guardada
+                  {esIpv && info.resultadoIpv ? ` (IPV: ${textoIpv(info.resultadoIpv)})` : info.resultado ? ` (${info.resultado === "aprobado" ? "Aprobado" : "Rechazado"})` : ""}. Si necesitas corregirla, contacta al equipo de RH.
                 </div>
               ) : esIpv ? (
                 <div className="mt-4 flex flex-col gap-5">
@@ -354,7 +288,7 @@ export default function EvaluacionEntrevistaHumana() {
                   {error && <p className="text-sm text-bad">{error}</p>}
 
                   <Button className="w-full" disabled={!listo || enviando} onClick={enviar}>
-                    {enviando ? "Guardando…" : "Guardar evaluación IPV"}
+                    {enviando ? "Guardando…" : "Guardar evaluación"}
                   </Button>
                   {!listoIpv && <p className="text-center text-xs text-ink-3">Marca un nivel en las {competencias.length} competencias para guardar.</p>}
                 </div>
@@ -403,9 +337,9 @@ export default function EvaluacionEntrevistaHumana() {
             <span className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-good/10">
               <CheckCircle2 className="h-7 w-7 text-good" />
             </span>
-            <h1 className="font-display mt-4 text-2xl font-bold">¡Gracias por tu evaluación!</h1>
+            <h1 className="font-display mt-4 text-2xl font-bold">Evaluación guardada</h1>
             <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-ink-2">
-              La entrevista quedó confirmada como realizada y tu evaluación registrada. El equipo de RH ya fue notificado y tomará la decisión final.
+              Gracias. Tu evaluación quedó vinculada a esta entrevista y el equipo de RH ya fue notificado; la decisión final la toma RH.
             </p>
             {esIpv && (
               <>
@@ -466,6 +400,163 @@ function Lista({ titulo, items, tono }: { titulo: string; items: string[]; tono?
       <ul className="mt-1 space-y-0.5 text-sm text-ink-2">
         {items.slice(0, 12).map((x, i) => <li key={i}>• {x}</li>)}
       </ul>
+    </div>
+  );
+}
+
+/* ---------- Ficha (mismas secciones y textos que services/pdf.pdf_ficha_presentacion) ---------- */
+function Par({ k, v }: { k: string; v?: string | null }) {
+  if (!v) return null;
+  return (
+    <p className="text-sm leading-relaxed text-ink-2"><b className="text-ink">{k}:</b> {v}</p>
+  );
+}
+function BloqueFicha({ titulo, children }: { titulo: string; children: React.ReactNode }) {
+  return (
+    <div className="border-t border-border-faint py-3 first:border-t-0">
+      <p className="mb-1.5 font-mono text-[11px] font-bold uppercase tracking-wider text-brand">{titulo}</p>
+      <div className="flex flex-col gap-1">{children}</div>
+    </div>
+  );
+}
+const REC_INICIAL: Record<string, string> = { avanzar: "Avanzar", revision: "Revisión", no_avanzar: "No avanzar" };
+
+function FichaVista({ f }: { f: FichaCandidato }) {
+  const s = new Set(f.secciones ?? []);
+  return (
+    <Card className="mt-6 p-5">
+      <p className="text-[11px] text-ink-3">{f.vacante.titulo} · generada el {f.generada} · {f.candidato.codigo}</p>
+      {s.has("vacante") && (
+        <BloqueFicha titulo="Vacante">
+          <Par k="Puesto" v={f.vacante.titulo} /><Par k="Destino" v={f.vacante.destino} /><Par k="Sucursal" v={f.vacante.sucursal} />
+          <Par k="Cliente" v={f.vacante.cliente} /><Par k="Zona" v={f.vacante.zona} />
+        </BloqueFicha>
+      )}
+      {s.has("candidato") && (
+        <BloqueFicha titulo="Candidato">
+          <Par k="Nombre" v={f.candidato.nombre} /><Par k="Ubicación" v={f.candidato.ubicacion} /><Par k="Fuente" v={f.candidato.fuente} />
+        </BloqueFicha>
+      )}
+      {s.has("experiencia") && (
+        <BloqueFicha titulo="Experiencia">
+          <Par k="Resumen" v={f.experiencia.resumen || "Sin resumen de experiencia."} />
+          <Lista titulo="Trayectoria" items={f.experiencia.detalle} />
+        </BloqueFicha>
+      )}
+      {s.has("cv") && (
+        <BloqueFicha titulo="CV">
+          <Par k="Perfil" v={f.cv.resumen || (f.cv.adjunto ? "CV adjunto disponible en la plataforma." : "Sin CV.")} />
+          <Lista titulo="Habilidades" items={f.cv.habilidades} />
+          <Lista titulo="Estudios" items={f.cv.estudios} />
+        </BloqueFicha>
+      )}
+      {s.has("entrevista_inicial") && (
+        <BloqueFicha titulo="Resumen de la entrevista inicial (Red Human)">
+          {f.entrevista_inicial ? (
+            <>
+              <Par k="Resumen" v={f.entrevista_inicial.resumen} />
+              <Lista titulo="Fortalezas" items={f.entrevista_inicial.fortalezas} tono="good" />
+              <Lista titulo="Alertas / puntos por validar" items={f.entrevista_inicial.alertas} tono="warn" />
+              <Par k="Recomendación" v={REC_INICIAL[f.entrevista_inicial.recomendacion] ?? f.entrevista_inicial.recomendacion} />
+            </>
+          ) : <Par k="Estado" v="Sin entrevista inicial evaluada." />}
+        </BloqueFicha>
+      )}
+      {s.has("ipv") && (
+        <BloqueFicha titulo="Entrevista IPV">
+          {f.ipv ? (
+            <>
+              <Par k="Resultado" v={f.ipv.puntaje != null ? `${f.ipv.puntaje} / 100 - ${f.ipv.conclusion}` : f.ipv.conclusion} />
+              <Par k="Evaluó" v={f.ipv.evaluador} />
+              <Lista titulo="Competencias" items={f.ipv.detalle.map((x) => `${x.nombre} (${x.peso}%): ${x.nivel}`)} />
+            </>
+          ) : <Par k="Estado" v="Sin Entrevista IPV registrada." />}
+        </BloqueFicha>
+      )}
+      {s.has("psicometria") && (
+        <BloqueFicha titulo="Psicometría disponible">
+          {f.psicometria.length ? f.psicometria.map((p, i) => {
+            const ev = (p.evaluatest ?? {}) as Record<string, unknown>;
+            const lista = (k: string) => (Array.isArray(ev[k]) ? (ev[k] as string[]).join(", ") : "");
+            return (
+              <div key={i}>
+                <Par k={p.nombre} v={`${p.estado}${p.dictamen ? ` - ${p.dictamen}` : ""}`} />
+                {p.evaluatest && (
+                  <Lista titulo="Evaluatest" items={[
+                    ev.indice_afinidad != null ? `Índice de Afinidad: ${ev.indice_afinidad}%` : "",
+                    ev.igi != null ? `Etegrity / IGI: ${ev.igi}%` : "",
+                    lista("competencias") ? `Competencias: ${lista("competencias")}` : "",
+                    lista("fortalezas") ? `Fortalezas: ${lista("fortalezas")}` : "",
+                    lista("areas_oportunidad") ? `Áreas de oportunidad: ${lista("areas_oportunidad")}` : "",
+                    ev.riesgo ? `Riesgo: ${String(ev.riesgo)}` : "",
+                  ].filter(Boolean)} />
+                )}
+              </div>
+            );
+          }) : <Par k="Estado" v="Sin psicometría registrada." />}
+        </BloqueFicha>
+      )}
+      {s.has("observaciones") && f.observaciones && <BloqueFicha titulo="Observaciones"><p className="text-sm text-ink-2">{f.observaciones}</p></BloqueFicha>}
+      {s.has("siguiente_accion") && f.siguiente_accion && <BloqueFicha titulo="Siguiente acción"><p className="text-sm text-ink-2">{f.siguiente_accion}</p></BloqueFicha>}
+    </Card>
+  );
+}
+
+/* ---------- Expediente (solo «Ficha + expediente») ---------- */
+function ExpedienteVista({ exp, token }: { exp: ExpedienteEntrevistador; token: string }) {
+  return (
+    <div className="flex flex-col gap-3">
+      <Seccion icono={FileText} titulo="CV" abierto>
+        {exp.archivos.length > 0 && (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {exp.archivos.map((a) => (
+              <a key={a.id} href={urlArchivoEntrevistaHumanaPublica(token, a.id)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-xl border border-border-soft bg-surface px-3 py-1.5 text-xs font-semibold text-brand transition hover:border-brand/40">
+                <FileText className="h-3.5 w-3.5" /> {a.tipo === "cv" ? "Abrir CV" : a.nombre || a.tipo}
+              </a>
+            ))}
+          </div>
+        )}
+        {(exp.candidato.telefono || exp.candidato.correo) && (
+          <dl className="mb-2 grid gap-2 text-sm sm:grid-cols-2"><Dato k="Teléfono" v={exp.candidato.telefono || "—"} /><Dato k="Correo" v={exp.candidato.correo || "—"} /></dl>
+        )}
+        {exp.cv.resumen ? <p className="text-sm leading-relaxed text-ink-2">{exp.cv.resumen}</p> : <p className="text-sm text-ink-3">Sin datos extraídos del CV.</p>}
+        <Lista titulo="Experiencia" items={exp.cv.experiencia.map((e) => (typeof e === "string" ? e : [e.puesto, e.empresa, e.periodo].filter(Boolean).join(" · ")))} />
+        <Lista titulo="Habilidades" items={exp.cv.habilidades} />
+        <Lista titulo="Estudios" items={exp.cv.estudios} />
+        <Lista titulo="Idiomas" items={exp.cv.idiomas} />
+      </Seccion>
+      <Seccion icono={ClipboardList} titulo={`Documentos (${exp.documentos.length})`}>
+        {exp.documentos.length ? (
+          <ul className="grid gap-1 text-xs text-ink-2 sm:grid-cols-2">
+            {exp.documentos.map((d) => (
+              <li key={d.tipo} className="flex items-center gap-1.5">
+                {d.estado === "recibido" ? <CheckCircle2 className="h-3.5 w-3.5 text-good" /> : <AlertTriangle className="h-3.5 w-3.5 text-warn" />} {d.tipo} · {d.estado}
+              </li>
+            ))}
+          </ul>
+        ) : <p className="text-sm text-ink-3">Sin documentos en el expediente.</p>}
+      </Seccion>
+      <Seccion icono={MessageSquare} titulo={`Respuestas del candidato (${exp.respuestas.length})`}>
+        {exp.respuestas.length ? (
+          <ul className="flex flex-col gap-2 text-sm">
+            {exp.respuestas.map((r, i) => (
+              <li key={i}><p className="text-ink-3">{r.pregunta} <span className="text-[10px] uppercase">· {r.origen}</span></p><p className="text-ink">{r.respuesta}</p></li>
+            ))}
+          </ul>
+        ) : <p className="text-sm text-ink-3">Sin respuestas registradas.</p>}
+      </Seccion>
+      <Seccion icono={Briefcase} titulo={`Evaluaciones previas (${exp.evaluacionesPrevias.length})`}>
+        {exp.evaluacionesPrevias.length ? (
+          <ul className="flex flex-col gap-2 text-sm">
+            {exp.evaluacionesPrevias.map((e, i) => (
+              <li key={i}>
+                <p><b className="text-ink">{e.nombre}:</b> <span className="text-ink-2">{e.resultado}</span>{e.fecha ? <span className="text-[11px] text-ink-3"> · {new Date(e.fecha).toLocaleDateString("es-MX")}</span> : null}</p>
+                {e.detalle && <p className="text-xs leading-relaxed text-ink-3">{e.detalle}</p>}
+              </li>
+            ))}
+          </ul>
+        ) : <p className="text-sm text-ink-3">Sin evaluaciones previas.</p>}
+      </Seccion>
     </div>
   );
 }

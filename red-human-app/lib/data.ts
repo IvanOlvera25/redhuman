@@ -60,6 +60,8 @@ export interface EntrevistaHumana {
   claseNombre?: string;
   obligatoria?: boolean;
   ligaEntrevistador?: string;
+  /** 2026-10-04: lo que abre la liga del entrevistador. */
+  compartir?: "ficha" | "ficha_expediente";
   envios?: EnvioAviso[];
   envioEstado?: "" | "enviado" | "pendiente" | "fallido";
   recordatorioEnviadoEn?: string | null;

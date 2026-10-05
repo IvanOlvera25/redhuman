@@ -120,21 +120,21 @@ _TEXTOS_ENTREVISTADOR = {
         "titulo": "Hola {nombre}, tienes una nueva entrevista",
         "intro": "Se te asignó la entrevista de <strong style=\"color:{ink};\">{candidato}</strong> para la vacante <strong style=\"color:{ink};\">{vacante}</strong> en {empresa}. Red Human ya hizo el prefiltro y la primera entrevista: en el expediente encontrarás su CV, la evaluación integral y los puntos por validar.",
         "asunto": "Nueva entrevista asignada: {candidato} · {vacante}",
-        "cta": "Ver expediente del candidato",
+        "cta": "Abrir ficha y evaluar",
     },
     "modificada": {
         "eyebrow": "Entrevista modificada",
         "titulo": "Hola {nombre}, cambió tu entrevista con {candidato}",
         "intro": "La entrevista de <strong style=\"color:{ink};\">{candidato}</strong> para la vacante <strong style=\"color:{ink};\">{vacante}</strong> en {empresa} fue reprogramada. Estos son los datos vigentes:",
         "asunto": "Entrevista modificada: {candidato} · {vacante}",
-        "cta": "Ver expediente del candidato",
+        "cta": "Abrir ficha y evaluar",
     },
     "recordatorio": {
         "eyebrow": "Recordatorio",
         "titulo": "Hola {nombre}, tu entrevista con {candidato} se acerca",
         "intro": "Te recordamos la entrevista de <strong style=\"color:{ink};\">{candidato}</strong> para la vacante <strong style=\"color:{ink};\">{vacante}</strong> en {empresa}. En el expediente tienes su CV, la evaluación integral y los puntos por validar.",
         "asunto": "Recordatorio: entrevista con {candidato} · {vacante}",
-        "cta": "Ver expediente del candidato",
+        "cta": "Abrir ficha y evaluar",
     },
     "cancelada": {
         "eyebrow": "Entrevista cancelada",
@@ -209,7 +209,7 @@ def html_entrevistador(d: dict, evento: str = "agendada") -> tuple[str, str]:
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fafafb;border:1px solid #eceef1;border-radius:14px;padding:6px 18px;{"opacity:.6;" if cancelada else ""}">{filas}</table>'
         + (f'<p style="margin:18px 0 0;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:{INK2};"><strong>Nota de RH:</strong> {escape(d["comentario"])}</p>' if d.get("comentario") and not cancelada else "")
         + (_boton(t["cta"], d.get("liga_expediente") or settings.app_url) if t["cta"] else "")
-        + (f'<p style="margin:6px 0 0;text-align:center;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;color:#8a8d91;">Desde ahí también registras tu evaluación al terminar.</p>' if t["cta"] else "")
+        + (f'<p style="margin:6px 0 0;text-align:center;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;font-size:12px;color:#8a8d91;">Ahí ves la ficha del candidato (también va adjunta en PDF) y registras tu evaluación al terminar.</p>' if t["cta"] else "")
     )
     pie = f"Recibes este aviso porque {escape(empresa)} te asignó como entrevistador(a) en Red Human AI. Si no te corresponde, responde a Recursos Humanos."
     return asunto, _base(asunto, f"{t['eyebrow']} · {d.get('candidato', '')} · {d.get('fecha', '')} {d.get('hora', '')}", empresa, d.get("logo_url", ""), contenido, pie)

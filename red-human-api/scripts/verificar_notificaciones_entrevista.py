@@ -90,7 +90,7 @@ with TestClient(app) as client:
     # ================= 1. Vistas previas =================
     print("\n--- 1. Vistas previas de correo ---")
     r = client.get("/api/emails/preview/entrevistador")
-    check(r.status_code == 200 and r.headers["content-type"].startswith("text/html") and "Ver expediente del candidato" in r.text, "GET /api/emails/preview/entrevistador renderiza HTML con el CTA")
+    check(r.status_code == 200 and r.headers["content-type"].startswith("text/html") and "Abrir ficha y evaluar" in r.text, "GET /api/emails/preview/entrevistador renderiza HTML con el CTA")
     check("Red</span><span" in r.text and "Human</span>" in r.text and 'max-width: 620px' in r.text, "logo Red Human + CSS responsivo")
     r = client.get("/api/emails/preview/candidato")
     check(r.status_code == 200 and "Unirme a la entrevista" in r.text and "10:30 h" in r.text and "teams.microsoft.com" in r.text, "GET /api/emails/preview/candidato con fecha, hora y liga de conexión")
@@ -124,7 +124,7 @@ with TestClient(app) as client:
     correos = {c[0]: c for c in CORREOS}
     check(admin.correo in correos and "carlos@correo.mx" in correos, "salen los dos correos: entrevistador y candidato")
     asunto_e, html_e = correos[admin.correo][1], correos[admin.correo][2]
-    check(asunto_e.startswith("Nueva entrevista asignada: Carlos Hernández") and "Ver expediente del candidato" in html_e and params[5] in html_e, "correo del entrevistador: plantilla corporativa con CTA al expediente")
+    check(asunto_e.startswith("Nueva entrevista asignada: Carlos Hernández") and "Abrir ficha y evaluar" in html_e and params[5] in html_e, "correo del entrevistador: plantilla corporativa con CTA al expediente")
     check("Validar experiencia" in html_e and "Red</span>" in html_e and "<!doctype html>" in html_e.lower(), "…con nota de RH y logo Red Human")
     asunto_c, html_c = correos["carlos@correo.mx"][1], correos["carlos@correo.mx"][2]
     check("quedó agendada" in asunto_c and "https://teams.microsoft.com/l/meetup-join/abc" in html_c and "10:30 h" in html_c and "septiembre" in html_c, "correo del candidato: fecha, hora y liga de conexión (Teams)")
@@ -136,7 +136,7 @@ with TestClient(app) as client:
     r = client.patch(f"/candidatos/{P}/entrevista-humana", json={"fecha": "2026-09-25", "hora": "12:00", "modalidad": "Videollamada", "liga": "https://teams.microsoft.com/l/meetup-join/abc", "notificar": {"candidato_correo": True, "entrevistador_correo": True, "cliente_correo": False, "cliente_whatsapp": False}})
     check(r.status_code == 200, f"modificar entrevista ({r.status_code})")
     cm = {c[0]: c for c in CORREOS}
-    check("modificada" in cm[admin.correo][1].lower() and "<!doctype html>" in cm[admin.correo][2].lower() and "Ver expediente del candidato" in cm[admin.correo][2] and "25 de septiembre" in cm[admin.correo][2], "entrevistador · modificada: HTML corporativo con la nueva fecha y CTA")
+    check("modificada" in cm[admin.correo][1].lower() and "<!doctype html>" in cm[admin.correo][2].lower() and "Abrir ficha y evaluar" in cm[admin.correo][2] and "25 de septiembre" in cm[admin.correo][2], "entrevistador · modificada: HTML corporativo con la nueva fecha y CTA")
     check("modificada" in cm["carlos@correo.mx"][1].lower() and "12:00 h" in cm["carlos@correo.mx"][2] and "Unirme a la entrevista" in cm["carlos@correo.mx"][2], "candidato · modificada: HTML con nueva hora y liga")
     CORREOS.clear()
     r = client.post(f"/candidatos/{P}/entrevista-humana/recordatorio", json={"notificar": {"candidato_correo": True, "entrevistador_correo": True, "cliente_correo": False, "cliente_whatsapp": False}})

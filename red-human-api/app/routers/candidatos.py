@@ -2053,6 +2053,7 @@ class EntrevistaHumanaIn(BaseModel):
     clase: str = "reclutamiento"
     obligatoria: bool = False  # una entrevista adicional solo bloquea el avance si RH la define obligatoria
     enviar_ficha: bool = True  # «Ficha del candidato: se generará y enviará al entrevistador»
+    compartir: str = "ficha"  # 2026-10-04: ficha | ficha_expediente (qué abre la liga del entrevistador)
 
 
 def _asunto_teams(p: Postulacion) -> str:
@@ -2214,6 +2215,7 @@ async def programar_entrevista_humana(
         clase="reclutamiento" if datos.es_ipv else clase,
         obligatoria=bool(datos.obligatoria) if clase != "reclutamiento" and not datos.es_ipv else False,
         envios=[],
+        compartir=datos.compartir if datos.compartir in ("ficha", "ficha_expediente") else "ficha",
     )
     p.entrevistas_humanas.append(eh)
     db.flush()
@@ -2263,16 +2265,22 @@ def _registrar_envios_eh(eh: EntrevistaHumana, evento: str, resultados: list, ac
     } for r in resultados or []])
 
 
-def _ficha_para_entrevistador(db: Session, p: Postulacion, eh: EntrevistaHumana) -> Optional[dict]:
-    """PDF de la ficha del candidato (CV, resumen, resultados disponibles y puntos por validar) para el
-    entrevistador. Sin datos de contacto, médico ni socioeconómico. Nunca rompe la agenda."""
-    from ..services.pdf import pdf_ficha_presentacion
+def datos_ficha_entrevistador(db: Session, p: Postulacion, eh: EntrevistaHumana) -> dict:
+    """2026-10-04: la ficha que ve el entrevistador — la MISMA que va en el PDF adjunto y la que muestra su liga
+    (una sola fuente, mismo contenido). Sin datos de contacto, médico ni socioeconómico."""
     from ..models import CLASES_ENTREVISTA_HUMANA
 
+    cuando = notificaciones._fecha_hora_legible_mx(eh.fecha) if eh.fecha else ""
+    tipo = "Entrevista IPV" if eh.es_ipv else CLASES_ENTREVISTA_HUMANA.get(eh.clase or "reclutamiento", "Entrevista")
+    return _datos_ficha_presentacion(db, p, SECCIONES_FICHA, "", f"{tipo} con {eh.entrevistador} {('el ' + cuando) if cuando else ''}".strip())
+
+
+def _ficha_para_entrevistador(db: Session, p: Postulacion, eh: EntrevistaHumana) -> Optional[dict]:
+    """PDF de la ficha del candidato para el entrevistador (mismo contenido que su liga). Nunca rompe la agenda."""
+    from ..services.pdf import pdf_ficha_presentacion
+
     try:
-        cuando = notificaciones._fecha_hora_legible_mx(eh.fecha) if eh.fecha else ""
-        tipo = "Entrevista IPV" if eh.es_ipv else CLASES_ENTREVISTA_HUMANA.get(eh.clase or "reclutamiento", "Entrevista")
-        d = _datos_ficha_presentacion(db, p, SECCIONES_FICHA, "", f"{tipo} con {eh.entrevistador} {('el ' + cuando) if cuando else ''}".strip())
+        d = datos_ficha_entrevistador(db, p, eh)
         return {"filename": f"ficha-{p.codigo}.pdf", "content": pdf_ficha_presentacion(d)}
     except Exception as ex:  # noqa: BLE001
         print(f"[ficha] no se pudo generar la ficha para el entrevistador ({p.codigo}): {ex}", flush=True)
@@ -2404,6 +2412,7 @@ async def cancelar_entrevista_humana(
 
 class ReenviarEntrevistaIn(BaseModel):
     entrevista_id: Optional[int] = None
+    compartir: Optional[str] = None  # 2026-10-04: cambia lo que abre la liga antes de reenviar
     destinatario: str = ""  # candidato | entrevistador | "" = ambos
     canal: str = ""  # whatsapp | correo | "" = ambos
 
@@ -2419,6 +2428,8 @@ async def reenviar_aviso_entrevista_humana(
     eh = _ultima_entrevista_humana(p, datos.entrevista_id)
     if eh.realizada:
         raise HTTPException(409, "Esta entrevista ya se realizó; no hay cita que reenviar.")
+    if datos.compartir in ("ficha", "ficha_expediente"):
+        eh.compartir = datos.compartir
     evento = "entrevista_cancelada" if eh.cancelada else ("entrevista_modificada" if any(x.get("evento") == "entrevista_modificada" for x in eh.envios or []) else "entrevista_agendada")
     override = {}
     for dest in ("candidato", "entrevistador"):
@@ -2436,6 +2447,26 @@ async def reenviar_aviso_entrevista_humana(
     db.commit()
     return {"resultados": resultados, "advertencias": notificaciones.advertencias_de(resultados), "liga": f"{settings.app_url.rstrip('/')}/entrevista-humana/{eh.token}",
             "candidato": postulacion_dict(p, detalle=True)}
+
+
+class CompartirEntrevistaIn(BaseModel):
+    entrevista_id: Optional[int] = None
+    compartir: str  # ficha | ficha_expediente
+
+
+@router.patch("/{codigo}/entrevista-humana/compartir")
+def cambiar_compartir_entrevista(codigo: str, datos: CompartirEntrevistaIn, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor),
+                                 cuenta: Cuenta = Depends(cuenta_actual)):
+    """2026-10-04: «Información a compartir» con el entrevistador. La MISMA liga respeta lo elegido al momento de abrirla
+    (con «Solo ficha» el expediente queda bloqueado, también por acceso directo)."""
+    if datos.compartir not in ("ficha", "ficha_expediente"):
+        raise HTTPException(400, "Usa «ficha» o «ficha_expediente».")
+    p = _por_codigo(db, codigo, cuenta.id)
+    eh = _ultima_entrevista_humana(p, datos.entrevista_id)
+    anterior, eh.compartir = eh.compartir, datos.compartir
+    registrar(db, u.nombre, "entrevista_humana_compartir", "postulacion", p.codigo, {"entrevista": eh.id, "de": anterior, "a": datos.compartir, "correo_rh": u.correo})
+    db.commit()
+    return postulacion_dict(p, detalle=True)
 
 
 @router.post("/{codigo}/entrevista-humana/realizada")

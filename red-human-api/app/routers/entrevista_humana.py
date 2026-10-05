@@ -39,71 +39,87 @@ def _por_token(db: Session, token: str, permitir_evaluada: bool = False) -> Entr
 
 
 def _expediente_para_entrevistador(db: Session, eh: EntrevistaHumana) -> dict:
-    """2026-09-19: el entrevistador ve el proceso ANTES de evaluar — CV (datos extraídos y archivo),
-    análisis de Luna, evaluación de la Entrevista Red Human y documentos del expediente. Solo lectura;
-    nada de datos sensibles (ia.DATOS_SENSIBLES_PROHIBIDOS ya los excluye de todo lo generado)."""
+    """2026-10-04 («Ficha + expediente»): CV (datos y archivos), documentos, respuestas del candidato y evaluaciones
+    previas. Solo lectura y respetando el acceso: sin datos médicos ni socioeconómicos; un entrevistador externo no ve
+    el teléfono ni el correo del candidato."""
+    from ..models import EvaluacionCandidato
+    from ..services import evaluaciones as sev
+
     p = eh.postulacion
     c = eh.candidato
-    v = p.vacante if p else None
     cv = dict((c.cv_datos or {}) if c else {})
     a = dict((p.analisis or {}) if p else {})
-    ultima_ia = None
-    for e in reversed(p.entrevistas if p else []):
-        if e.estado == "evaluada" and e.evaluacion and e.fase != "ipv":
-            ultima_ia = e.evaluacion
-            break
-    # 2026-10-02 (Fraiche §12): resultados disponibles de la IPV con Red Human y puntos concretos por validar
-    ipv_rh = next((e.evaluacion_ipv for e in reversed(p.entrevistas if p else []) if e.evaluacion_ipv), None)
-    calc = (ipv_rh or {}).get("calculo") or {}
-    externo = (eh.tipo or "") == "externo"  # respeta el acceso del destinatario: sin datos de contacto del candidato
+    externo = (eh.tipo or "") == "externo"
     archivos = [{"id": x.id, "tipo": x.tipo, "nombre": x.nombre, "mime": x.mime} for x in (c.archivos if c else [])]
     exp = p.expediente if p else None
-    documentos = [{"tipo": d.tipo, "estado": d.estado, "obligatorio": d.obligatorio} for d in (exp.documentos if exp else [])]
+    documentos = [{"tipo": d.tipo, "estado": d.estado, "obligatorio": d.obligatorio} for d in (exp.documentos if exp else []) if not getattr(d, "interno", False)]
+    respuestas = [{"pregunta": r.get("pregunta", ""), "respuesta": r.get("respuesta", ""), "origen": "Formulario web"} for r in (a.get("respuestas_web") or []) if r.get("pregunta")]
+    respuestas += [{"pregunta": r.get("pregunta", ""), "respuesta": r.get("respuesta", ""), "origen": "Conversación"}
+                   for r in (a.get("respuestas_prefiltro") or []) if r.get("pregunta") and "bbva" not in f"{r.get('criterio', '')} {r.get('pregunta', '')}".lower()]
+    previas = []
+    for e in (p.entrevistas if p else []):
+        if e.estado == "evaluada" and e.evaluacion and e.fase != "ipv":
+            ev = e.evaluacion or {}
+            previas.append({"nombre": "Entrevista Red Human", "resultado": f"Afinidad {ev.get('match_perfil')}/100" if ev.get("match_perfil") is not None else "Evaluada",
+                            "detalle": ev.get("resumen") or "", "fecha": iso(e.finalizada_en)})
+        calc = (e.evaluacion_ipv or {}).get("calculo") or {}
+        if e.evaluacion_ipv:
+            previas.append({"nombre": "IPV Red Human", "resultado": fraiche.texto_resultado_ipv(calc), "detalle": "", "fecha": iso(e.finalizada_en)})
+    for otra in (p.entrevistas_humanas if p else []):
+        if otra.id != eh.id and otra.resultado:
+            previas.append({"nombre": "IPV humana" if otra.es_ipv else CLASES_ENTREVISTA_HUMANA.get(otra.clase or "reclutamiento", "Entrevista"),
+                            "resultado": ("Aprobado" if otra.resultado == "aprobado" else "Rechazado") + (f" · {otra.entrevistador}" if otra.entrevistador else ""),
+                            "detalle": otra.comentario or "", "fecha": iso(otra.evaluada_en or otra.fecha)})
+    try:
+        evs = db.query(EvaluacionCandidato).filter(EvaluacionCandidato.postulacion_id == p.id).all() if p else []
+    except Exception:  # noqa: BLE001
+        evs = []
+    for ev in evs:
+        if ev.tipo in ("medico", "socioeconomico") or ev.estado == "fallida":
+            continue
+        previas.append({"nombre": ev.nombre, "resultado": sev.texto_dictamen(ev) or sev.etiqueta_estado_fraiche(ev), "detalle": "", "fecha": iso(ev.revisada_en or ev.resultado_cargado_en)})
     return {
         "candidato": {"nombre": c.nombre if c else "", "telefono": "" if externo else ((c.telefono if c else "") or ""),
-                      "correo": "" if externo else ((c.correo if c else "") or ""), "fuente": (c.fuente if c else "") or ""},
-        "vacante": {"titulo": v.titulo if v else "", "requisitos": (v.requisitos if v else "") or "", "perfilIdeal": (v.perfil_ideal if v else "") or "", "empresa": nombre_empresa_candidato(v) if v else ""},
-        "etapa": p.etapa if p else "",
-        "score": p.score if p else None,
+                      "correo": "" if externo else ((c.correo if c else "") or "")},
         "cv": {
             "resumen": cv.get("resumen_profesional") or "", "habilidades": cv.get("habilidades") or [], "estudios": cv.get("estudios") or [],
             "idiomas": cv.get("idiomas") or [], "experiencia": cv.get("experiencia") or cv.get("experiencia_laboral") or [], "anosExperiencia": cv.get("anos_experiencia"),
         },
-        "analisis": {
-            "requisitosCumplidos": a.get("requisitos_cumplidos") or [], "brechas": a.get("brechas") or [], "fortalezas": a.get("fortalezas_cv") or [],
-            "alertas": a.get("alertas") or [], "resumen": a.get("resumen") or "",
-        },
-        "entrevistaIA": {
-            "matchPerfil": ultima_ia.get("match_perfil"), "recomendacion": ultima_ia.get("recomendacion") or "", "resumen": ultima_ia.get("resumen") or "",
-            "fortalezas": ultima_ia.get("fortalezas") or [], "riesgos": ultima_ia.get("riesgos") or [], "faltante": ultima_ia.get("faltante") or [],
-        } if ultima_ia else None,
-        "ipvRedHuman": {
-            "puntaje": calc.get("puntaje"), "puntajeProvisional": calc.get("puntaje_provisional"), "pesoPendiente": calc.get("peso_pendiente"),
-            "conclusion": fraiche.CONCLUSIONES_IPV.get(calc.get("conclusion") or "", "Por validar — evidencia insuficiente"),
-            "porValidar": list(calc.get("sin_evidencia") or []), "reservas": list((ipv_rh or {}).get("reservas") or []),
-            "puntosValidar": list((ipv_rh or {}).get("puntos_validar") or []),
-        } if ipv_rh else None,
-        "puntosPorValidar": list(dict.fromkeys(list((ultima_ia or {}).get("riesgos") or []) + list((ipv_rh or {}).get("puntos_validar") or [])))[:8],
-        "capacitacion": a.get("capacitacion") or [],
         "archivos": archivos,
-        "documentos": [] if externo else documentos,
+        "documentos": documentos,
+        "respuestas": respuestas[:40],
+        "evaluacionesPrevias": previas,
     }
+
+
+def _ficha(db: Session, eh: EntrevistaHumana) -> dict:
+    from .candidatos import datos_ficha_entrevistador
+
+    return datos_ficha_entrevistador(db, eh.postulacion, eh)
 
 
 @router.get("/publica/{token}")
 def publica(token: str, db: Session = Depends(get_db)):
+    """La liga del entrevistador abre la FICHA (el mismo contenido que el PDF adjunto) y el formulario de evaluación.
+    El expediente solo existe si RH eligió «Ficha + expediente» (se pide aparte, ver /expediente)."""
     eh = _por_token(db, token, permitir_evaluada=True)
     p = eh.postulacion
+    if not p:
+        raise HTTPException(404, "Esta liga ya no está disponible.")
     return {
         "candidato": eh.candidato.nombre if eh.candidato else "",
-        "puesto": p.vacante.titulo if p and p.vacante else "",
+        "puesto": p.vacante.titulo if p.vacante else "",
+        "empresa": nombre_empresa_candidato(p.vacante) if p.vacante else "",
         "fecha": iso(eh.fecha),
         "entrevistador": eh.entrevistador or "",
         "modalidad": eh.modalidad or "",
         "yaEvaluada": bool(eh.resultado_capturado_por),
         "resultado": eh.resultado or "",
         "recomendacion": eh.recomendacion or "",
-        "expediente": _expediente_para_entrevistador(db, eh),
+        "comentario": eh.comentario if eh.resultado_capturado_por else "",
+        "ficha": _ficha(db, eh),
+        "compartir": eh.compartir or "ficha",
+        "puedeVerExpediente": (eh.compartir or "ficha") == "ficha_expediente",
         # Fraiche (spec §8): Entrevista IPV con rúbrica — misma que usa Red Human
         "esIpv": bool(eh.es_ipv),
         "tipoEntrevista": "Entrevista IPV" if eh.es_ipv else CLASES_ENTREVISTA_HUMANA.get(eh.clase or "reclutamiento", "Entrevista"),
@@ -116,10 +132,40 @@ def publica(token: str, db: Session = Depends(get_db)):
     }
 
 
+def _exigir_expediente(eh: EntrevistaHumana) -> None:
+    if (eh.compartir or "ficha") != "ficha_expediente":
+        raise HTTPException(403, "Esta liga solo comparte la ficha del candidato.")
+
+
+@router.get("/publica/{token}/expediente")
+def expediente_publico(token: str, db: Session = Depends(get_db)):
+    """«Ver expediente»: SOLO si RH eligió «Ficha + expediente»; con «Solo ficha» → 403 (también por acceso directo)."""
+    eh = _por_token(db, token, permitir_evaluada=True)
+    _exigir_expediente(eh)
+    registrar(db, eh.entrevistador or "entrevistador", "expediente_consultado_por_entrevistador", "postulacion", eh.postulacion.codigo if eh.postulacion else "", {"entrevista": eh.id})
+    db.commit()
+    return _expediente_para_entrevistador(db, eh)
+
+
+@router.get("/publica/{token}/ficha.pdf")
+def ficha_pdf(token: str, db: Session = Depends(get_db)):
+    """El MISMO PDF que se adjuntó en el correo (generado de la misma ficha)."""
+    from fastapi.responses import Response
+
+    from ..services.pdf import pdf_ficha_presentacion
+
+    eh = _por_token(db, token, permitir_evaluada=True)
+    if not eh.postulacion:
+        raise HTTPException(404, "Esta liga ya no está disponible.")
+    pdf = pdf_ficha_presentacion(_ficha(db, eh))
+    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="ficha-{eh.postulacion.codigo}.pdf"'})
+
+
 @router.get("/publica/{token}/archivo/{archivo_id}")
 def archivo_publico(token: str, archivo_id: int, db: Session = Depends(get_db)):
     """CV u otro archivo del candidato para el entrevistador (la liga es la credencial)."""
     eh = _por_token(db, token, permitir_evaluada=True)
+    _exigir_expediente(eh)  # los archivos son parte del expediente
     arch = db.query(Archivo).filter(Archivo.id == archivo_id, Archivo.candidato_id == eh.candidato_id).first()
     if not arch or not arch.ruta or not fs.existe(arch.ruta):
         raise HTTPException(404, "Archivo no disponible.")
@@ -188,4 +234,4 @@ async def enviar_resultado(token: str, datos: ResultadoEntrevistaHumanaPublicaIn
          **({"ipv": {"puntaje": eh.resultado_ipv.get("puntaje"), "conclusion": eh.resultado_ipv.get("conclusion")}} if eh.es_ipv else {})},
     )
     db.commit()
-    return {"ok": True, "estatus": "realizada", "notificaciones": resultados, "resultadoIpv": eh.resultado_ipv or None}
+    return {"ok": True, "estatus": "realizada", "mensaje": "Evaluación guardada", "notificaciones": resultados, "resultadoIpv": eh.resultado_ipv or None}

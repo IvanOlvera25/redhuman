@@ -87,6 +87,7 @@ import {
   lineasEnvios,
   type EvaluacionCandidato,
   reenviarAvisoEntrevistaHumana,
+  cambiarCompartirEntrevista,
   reabrirEntrevista,
   agendarEntrevista,
   urlCartaIntencionPdf,
@@ -3436,7 +3437,7 @@ function PestanaEvaluaciones({
               <Card key={i} className="border-[color:var(--brand-2)]/30 bg-surface-2/40 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-ink">
-                    {eh.esIpv && <Badge tone="human">IPV</Badge>}
+                    {eh.esIpv ? <Badge tone="human">IPV humana</Badge> : eh.claseNombre ? <Badge tone="neutral">{eh.claseNombre}</Badge> : null}
                     {eh.entrevistador || "Sin asignar"}
                     {eh.fecha && (
                       <span className="font-normal text-ink-3">
@@ -3455,7 +3456,7 @@ function PestanaEvaluaciones({
                       {eh.resultadoIpv?.requiere_revision && <Badge tone="warn">Requiere revisión</Badge>}
                       {!eh.resultadoIpv && (
                         <Badge tone={eh.resultado === "aprobado" ? "good" : "bad"} dot>
-                          {eh.resultado === "aprobado" ? "Aprobado" : "No aprobado"}
+                          {eh.resultado === "aprobado" ? "Aprobado" : "Rechazado"}
                         </Badge>
                       )}
                       {eh.recomendacion && <Badge tone="brand">{RECOMENDACION_LABEL[eh.recomendacion]}</Badge>}
@@ -4330,6 +4331,7 @@ function PanelEntrevistaHumana({
   const modoPrueba = useModoPrueba();
   const eh = ehProp ?? c.entrevistaHumana;
   const ehId = eh?.id;
+  const [cambiandoCompartir, setCambiandoCompartir] = useState(false);
   const [modalResultado, setModalResultado] = useState(false);
   const [modalModificar, setModalModificar] = useState(false);
   const [marcando, setMarcando] = useState(false);
@@ -4470,6 +4472,28 @@ function PanelEntrevistaHumana({
         {detalleModalidad && <Info icon={Mail} v={detalleModalidad} />}
       </div>
       {eh.comentario && <p className="mt-2.5 text-[13px] leading-relaxed text-ink-2">{eh.comentario}</p>}
+
+      {/* 2026-10-04: qué abre la liga del entrevistador (Enviar / Reenviar / Copiar liga respetan esta opción) */}
+      {live && !eh.resultado && !eh.cancelada && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-[12px] text-ink-2">
+          <span className="font-semibold">Información a compartir:</span>
+          {(["ficha", "ficha_expediente"] as const).map((v) => (
+            <button key={v} type="button" disabled={cambiandoCompartir}
+              onClick={async () => {
+                if ((eh.compartir ?? "ficha") === v) return;
+                setCambiandoCompartir(true);
+                const r = await cambiarCompartirEntrevista(c.id, v, ehId);
+                setCambiandoCompartir(false);
+                if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+                onCambio(r.data);
+                setAviso({ tono: "ok", texto: v === "ficha" ? "La liga del entrevistador ahora solo muestra la ficha." : "La liga del entrevistador ahora incluye «Ver expediente»." });
+              }}
+              className={`rounded-full border px-3 py-1 font-medium transition ${(eh.compartir ?? "ficha") === v ? "border-brand bg-brand-soft text-brand" : "border-border-soft hover:border-brand/40"}`}>
+              {v === "ficha" ? "Solo ficha" : "Ficha + expediente"}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* 2026-10-02 (§2/§12): estado del envío por destinatario + Copiar liga / Reenviar */}
       {live && !eh.resultado && (
@@ -4971,7 +4995,9 @@ function ModalProgramarEntrevista({
   // 2026-10-02 (§12/§14): entrevistas con encargado y franquiciatario usan ESTE mismo flujo (nunca «Otra»)
   const [clase, setClase] = useState<"reclutamiento" | "encargado" | "franquiciatario">("reclutamiento");
   const [obligatoria, setObligatoria] = useState(false);
-  const [enviarFicha, setEnviarFicha] = useState(true);
+  const [enviarFicha] = useState(true);
+  // 2026-10-04: «Información a compartir» con el entrevistador (la liga y el correo respetan lo elegido)
+  const [compartir, setCompartir] = useState<"ficha" | "ficha_expediente">("ficha");
   const etapaAnterior = c.etapa === "Prefiltro" || c.etapa === "Entrevista IA";
   // Fase 7B: con Teams conectado en la Cuenta la videollamada se crea sola; «Usar otra liga» = excepción
   const [teamsConectado, setTeamsConectado] = useState(false);
@@ -5038,6 +5064,7 @@ function ModalProgramarEntrevista({
       clase: esIpv ? "reclutamiento" : clase,
       obligatoria: !esIpv && clase !== "reclutamiento" ? obligatoria : false,
       enviarFicha,
+      compartir,
       tipoEntrevistador,
       entrevistadorUsuarioId: tipoEntrevistador === "interno" ? entrevistadorUsuarioId : null,
       entrevistadorContactoId: tipoEntrevistador === "externo" && typeof contactoSel === "number" ? contactoSel : null,
@@ -5137,11 +5164,9 @@ function ModalProgramarEntrevista({
             </div>
           )}
           {/* §12: ficha del candidato para el entrevistador (respeta su acceso: sin datos de contacto, médico ni socioeconómico) */}
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border-soft bg-surface-2/50 px-3 py-2.5">
-            <label className="flex items-center gap-2 text-[13px] text-ink-2">
-              <input type="checkbox" checked={enviarFicha} onChange={(e) => setEnviarFicha(e.target.checked)} className="h-4 w-4 accent-[var(--brand)]" />
-              Ficha del candidato: se generará y enviará al entrevistador
-            </label>
+          <div className="rounded-xl border border-border-soft bg-surface-2/50 px-3 py-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm font-medium text-ink-2">Información a compartir</span>
             <a
               href={urlFichaPresentacion(c.id, { siguienteAccion: `${esIpv ? "Entrevista IPV" : "Entrevista"} ${fecha ? `el ${fecha} ${hora}` : ""}`.trim() })}
               target="_blank"
@@ -5150,6 +5175,20 @@ function ModalProgramarEntrevista({
             >
               Ver ficha
             </a>
+            </div>
+            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {([
+                ["ficha", "Solo ficha", "Ficha del candidato + formulario de evaluación. El expediente no se puede consultar."],
+                ["ficha_expediente", "Ficha + expediente", "Además «Ver expediente»: CV, documentos, respuestas y evaluaciones previas."],
+              ] as const).map(([v, t, d]) => (
+                <button key={v} type="button" onClick={() => setCompartir(v)}
+                  className={`rounded-xl border px-3 py-2 text-left transition ${compartir === v ? "border-brand/40 bg-brand-soft" : "border-border-soft hover:border-brand/30"}`}>
+                  <span className={`block text-sm font-semibold ${compartir === v ? "text-brand" : "text-ink"}`}>{t}</span>
+                  <span className="block text-[11px] leading-snug text-ink-3">{d}</span>
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] text-ink-3">El correo lleva los datos de la entrevista, la ficha en PDF y el botón «Abrir ficha y evaluar».</p>
           </div>
           <div>
             <span className="text-sm font-medium text-ink-2">Entrevistador</span>

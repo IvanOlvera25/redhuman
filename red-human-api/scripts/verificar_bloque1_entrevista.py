@@ -114,16 +114,16 @@ with TestClient(app) as client:
     db.commit()
     client.patch(f"/candidatos/{P}/etapa", json={"etapa": "Entrevista IA", "manual": True})
     CORREOS.clear()
-    r = client.post(f"/candidatos/{P}/entrevista-humana", json={"tipo_entrevistador": "interno", "entrevistador_usuario_id": admin.id, "fecha": _cita_en_5h[0], "hora": _cita_en_5h[1], "modalidad": "Llamada", "notificar": {"cliente_correo": False, "cliente_whatsapp": False}})
+    r = client.post(f"/candidatos/{P}/entrevista-humana", json={"tipo_entrevistador": "interno", "entrevistador_usuario_id": admin.id, "fecha": _cita_en_5h[0], "hora": _cita_en_5h[1], "modalidad": "Llamada", "compartir": "ficha_expediente", "notificar": {"cliente_correo": False, "cliente_whatsapp": False}})
     check(r.status_code == 201, "entrevista humana programada")
     db.expire_all()
     eh = db.query(EntrevistaHumana).order_by(EntrevistaHumana.id.desc()).first()
     r = client.get(f"/entrevista-humana/publica/{eh.token}")
-    check(r.status_code == 200 and r.json()["expediente"], "GET público trae el expediente")
-    exp = r.json()["expediente"]
-    check(exp["candidato"]["nombre"] == "Carlos Hernández" and exp["score"] == 78 and exp["cv"]["resumen"].startswith("Abogado") and exp["cv"]["habilidades"] == ["Fiscal", "Litigio"], "CV extraído y afinidad de Luna")
-    check(exp["analisis"]["brechas"] == ["Sin experiencia en SAT"] and exp["analisis"]["requisitosCumplidos"] == ["Título en Derecho"], "análisis de Luna (requisitos, brechas)")
-    check(exp["archivos"] and exp["archivos"][0]["tipo"] == "cv" and exp["vacante"]["titulo"] == "Abogado Fiscalista" and exp["vacante"]["empresa"], "archivos del candidato y vacante/empresa")
+    # 2026-10-04: la liga muestra la FICHA (mismo contenido que el PDF); el expediente va aparte y solo con «Ficha + expediente»
+    check(r.status_code == 200 and r.json()["ficha"]["candidato"]["nombre"] == "Carlos Hernández" and r.json()["puedeVerExpediente"], "GET público trae la ficha y permite «Ver expediente»")
+    exp = client.get(f"/entrevista-humana/publica/{eh.token}/expediente").json()
+    check(exp["candidato"]["nombre"] == "Carlos Hernández" and exp["cv"]["resumen"].startswith("Abogado") and exp["cv"]["habilidades"] == ["Fiscal", "Litigio"], "expediente: CV extraído")
+    check(exp["archivos"] and exp["archivos"][0]["tipo"] == "cv" and r.json()["puesto"] == "Abogado Fiscalista" and r.json()["empresa"], "archivos del candidato y vacante/empresa")
     check(r.json()["yaEvaluada"] is False, "todavía sin evaluar")
 
     # ================= 3. Recordatorio automático =================
@@ -157,7 +157,7 @@ with TestClient(app) as client:
     check(any(c[0] == admin.correo and "Entrevista completada" in c[1] and "No aprobado" in c[2] for c in CORREOS), "RH (responsable): correo HTML con el resultado")
     check(any(c[0] == "paola@sol.mx" and "Entrevista completada" in c[1] for c in CORREOS), "Cliente: correo HTML del cierre")
     r = client.get(f"/entrevista-humana/publica/{eh.token}")
-    check(r.status_code == 200 and r.json()["yaEvaluada"] is True and r.json()["expediente"], "la liga sigue mostrando el expediente ya evaluada (solo lectura)")
+    check(r.status_code == 200 and r.json()["yaEvaluada"] is True and r.json()["ficha"], "la liga sigue mostrando la ficha ya evaluada (solo lectura)")
     check(client.post(f"/entrevista-humana/publica/{eh.token}", json={"resultado": "aprobado", "recomendacion": "avanzar"}).status_code == 404, "…pero no acepta una segunda evaluación")
     check(all("<!doctype html>" in c[2].lower() for c in CORREOS), "cero texto plano en los correos")
 

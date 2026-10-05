@@ -1309,12 +1309,15 @@ export function programarEntrevistaHumana(
     clase?: "reclutamiento" | "encargado" | "franquiciatario";
     obligatoria?: boolean;
     enviarFicha?: boolean;
+    /** 2026-10-04: qué abre la liga del entrevistador. */
+    compartir?: "ficha" | "ficha_expediente";
   },
 ) {
   return post<{ resultados: ResultadoNotificacion[]; advertencias?: string[]; movioAFiltroHumano?: boolean; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana`, {
     clase: datos.clase ?? "reclutamiento",
     obligatoria: datos.obligatoria ?? false,
     enviar_ficha: datos.enviarFicha ?? true,
+    compartir: datos.compartir ?? "ficha",
     tipo_entrevistador: datos.tipoEntrevistador,
     entrevistador_usuario_id: datos.entrevistadorUsuarioId ?? null,
     entrevistador_contacto_id: datos.entrevistadorContactoId ?? null,
@@ -1372,9 +1375,9 @@ export function cancelarEntrevistaHumana(codigo: string, notificar?: NotificarAc
 }
 
 /** 2026-10-02: «Reenviar» el aviso de la cita (al candidato, al entrevistador o a ambos) y registrar su estado. */
-export function reenviarAvisoEntrevistaHumana(codigo: string, datos: { entrevistaId?: number; destinatario?: "candidato" | "entrevistador" | ""; canal?: "whatsapp" | "correo" | "" }) {
+export function reenviarAvisoEntrevistaHumana(codigo: string, datos: { entrevistaId?: number; destinatario?: "candidato" | "entrevistador" | ""; canal?: "whatsapp" | "correo" | ""; compartir?: "ficha" | "ficha_expediente" }) {
   return post<{ resultados: ResultadoNotificacion[]; advertencias?: string[]; liga: string; candidato: Candidato }>(`/candidatos/${codigo}/entrevista-humana/reenviar`, {
-    entrevista_id: datos.entrevistaId ?? null, destinatario: datos.destinatario ?? "", canal: datos.canal ?? "",
+    entrevista_id: datos.entrevistaId ?? null, destinatario: datos.destinatario ?? "", canal: datos.canal ?? "", compartir: datos.compartir ?? null,
   });
 }
 
@@ -1612,31 +1615,43 @@ export function lineasEnvios(envios: EnvioAviso[] | undefined): { estado: EnvioA
 
 /* Liga pública del entrevistador (sin sesión, un solo submit) */
 
+/** 2026-10-04: la ficha del candidato — el MISMO contenido que el PDF adjunto al entrevistador. */
+export interface FichaCandidato {
+  secciones: string[];
+  vacante: { titulo: string; destino: string; sucursal: string; cliente: string; zona: string };
+  candidato: { nombre: string; ubicacion: string; fuente: string; codigo: string };
+  experiencia: { resumen: string; detalle: string[] };
+  cv: { resumen: string; habilidades: string[]; estudios: string[]; adjunto: boolean };
+  entrevista_inicial: { resumen: string; fortalezas: string[]; alertas: string[]; recomendacion: string } | null;
+  ipv: { puntaje: number | null; conclusion: string; detalle: { nombre: string; peso: number; nivel: string }[]; evaluador: string } | null;
+  psicometria: { nombre: string; estado: string; dictamen: string; evaluatest: Record<string, unknown> | null }[];
+  observaciones: string;
+  siguiente_accion: string;
+  generada: string;
+}
+/** «Ficha + expediente»: CV, documentos, respuestas y evaluaciones previas (sin datos médicos ni socioeconómicos). */
+export interface ExpedienteEntrevistador {
+  candidato: { nombre: string; telefono: string; correo: string };
+  cv: { resumen: string; habilidades: string[]; estudios: string[]; idiomas: string[]; experiencia: (string | { puesto?: string; empresa?: string; periodo?: string })[]; anosExperiencia?: number | null };
+  archivos: { id: number; tipo: string; nombre: string; mime: string }[];
+  documentos: { tipo: string; estado: string; obligatorio: boolean }[];
+  respuestas: { pregunta: string; respuesta: string; origen: string }[];
+  evaluacionesPrevias: { nombre: string; resultado: string; detalle: string; fecha: string | null }[];
+}
 export interface EntrevistaHumanaPublica {
   candidato: string;
   puesto: string;
+  empresa?: string;
   fecha: string | null;
   entrevistador?: string;
   modalidad?: string;
-  /** 2026-09-19: la liga sigue mostrando el expediente aunque ya se haya evaluado. */
   yaEvaluada?: boolean;
   resultado?: string;
   recomendacion?: string;
-  expediente?: {
-    candidato: { nombre: string; telefono: string; correo: string; fuente: string };
-    vacante: { titulo: string; requisitos: string; perfilIdeal: string; empresa: string };
-    etapa: string;
-    score: number | null;
-    cv: { resumen: string; habilidades: string[]; estudios: string[]; idiomas: string[]; experiencia: (string | { puesto?: string; empresa?: string; periodo?: string })[]; anosExperiencia?: number | null };
-    analisis: { requisitosCumplidos: string[]; brechas: string[]; fortalezas: string[]; alertas: string[]; resumen: string };
-    entrevistaIA: { matchPerfil: number | null; recomendacion: string; resumen: string; fortalezas: string[]; riesgos: string[]; faltante: string[] } | null;
-    capacitacion: { curso: string; aprobado: boolean; calificacion: number }[];
-    archivos: { id: number; tipo: string; nombre: string; mime: string }[];
-    documentos: { tipo: string; estado: string; obligatorio: boolean }[];
-    /** 2026-10-02 (§12): resultado de la IPV Red Human y puntos concretos por validar en esta entrevista. */
-    ipvRedHuman?: { puntaje: number | null; puntajeProvisional?: number | null; pesoPendiente?: number | null; conclusion: string; porValidar: string[]; reservas: string[]; puntosValidar: string[] } | null;
-    puntosPorValidar?: string[];
-  };
+  comentario?: string;
+  ficha: FichaCandidato;
+  compartir: "ficha" | "ficha_expediente";
+  puedeVerExpediente: boolean;
   tipoEntrevista?: string;
   /* --- Fraiche (spec §8): ronda IPV — rúbrica y equivalencias vigentes --- */
   esIpv?: boolean;
@@ -1656,6 +1671,17 @@ export function urlArchivoEntrevistaHumanaPublica(token: string, archivoId: numb
 
 export function fetchEntrevistaHumanaPublica(token: string) {
   return get<EntrevistaHumanaPublica>(`/entrevista-humana/publica/${token}`);
+}
+/** Solo con «Ficha + expediente»; con «Solo ficha» la API responde 403. */
+export function fetchExpedienteEntrevistador(token: string) {
+  return get<ExpedienteEntrevistador>(`/entrevista-humana/publica/${token}/expediente`);
+}
+export function urlFichaEntrevistadorPdf(token: string) {
+  return urlArchivo(`/entrevista-humana/publica/${token}/ficha.pdf`);
+}
+export type CompartirEntrevistador = "ficha" | "ficha_expediente";
+export function cambiarCompartirEntrevista(codigo: string, compartir: CompartirEntrevistador, entrevistaId?: number) {
+  return patch<Candidato>(`/candidatos/${codigo}/entrevista-humana/compartir`, { compartir, entrevista_id: entrevistaId ?? null });
 }
 
 export function enviarEvaluacionEntrevistaHumana(

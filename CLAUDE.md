@@ -520,3 +520,10 @@ Reemplaza en la rama `demo-fraiche` la vista «Ruta Fraiche / Etapas», la colum
   Movimiento excepcional, Generar ficha, Descartar); `MenuAcciones` nunca se desborda (alto máximo + scroll). Movimiento
   excepcional exige motivo en rutas de Fraiche. Socioeconómico de tienda propia: solo Cajero y Encargado.
 - Regresión: `scripts/verificar_fraiche_cambios_integrados.py`.
+- Ficha al entrevistador (2026-10-04): «Información a compartir» por entrevista (`EntrevistaHumana.compartir` = ficha |
+  ficha_expediente, default «Solo ficha»; al programar, `PATCH …/entrevista-humana/compartir` o `reenviar {compartir}`). La
+  liga `/entrevista-humana/{token}` muestra la FICHA = `candidatos.datos_ficha_entrevistador` (la MISMA fuente que el PDF
+  adjunto y `/publica/{token}/ficha.pdf`, sin análisis adicional) y al final Resultado / Recomendación / Comentarios /
+  «Guardar evaluación» → «Evaluación guardada». «Ver expediente» (`/publica/{token}/expediente`: CV, documentos, respuestas,
+  evaluaciones previas; sin médico/socioeconómico) y `/archivo/{id}` responden 403 con «Solo ficha», también por acceso directo.
+  El correo del entrevistador lleva el botón «Abrir ficha y evaluar».
