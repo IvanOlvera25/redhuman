@@ -7,7 +7,7 @@ set -uo pipefail
 
 APP=/opt/redhuman/app
 CONFIG=/opt/redhuman/config
-DOMINIO="https://srv1893825.hstgr.cloud"
+DOMINIO="${DOMINIO:-https://srv2020737.hstgr.cloud}"  # rama demo-fraiche: revisa el servidor de Fraiche
 fallos=0
 
 ok()   { printf "  \033[32m✓\033[0m %s\n" "$1"; }
