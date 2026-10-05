@@ -142,7 +142,9 @@ class Settings(BaseSettings):
     psicometricas_webhook_secret: str = ""
     # La API no devuelve la liga del candidato (Psicométricas se la manda por correo con su clave). Si se conoce la
     # liga de acceso, se puede configurar con {clave}, p. ej. https://…/{clave}; vacío = solo se muestra la clave.
-    psicometricas_url_candidato: str = ""
+    # 2026-10-05: la página REAL donde el candidato contesta (su panel: «Comparte la clave … para que respondan en
+    # evaluacion.psicometrica.mx» — sin «s»). No acepta la clave en la URL: el candidato la escribe al entrar.
+    psicometricas_url_candidato: str = "https://evaluacion.psicometrica.mx/login"
 
     cors_origins: str = "http://localhost:3000"
 

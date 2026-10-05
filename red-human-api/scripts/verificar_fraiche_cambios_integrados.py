@@ -413,10 +413,12 @@ with TestClient(app) as client:
     r = client.post(f"/evaluaciones/{evi['id']}/enviar", json={})
     check(r.status_code == 200 and r.json()["claveProveedor"] == "9-ABC-1004-001" and len(llamadas) == 2, "Reintentar crea la evaluación en el proveedor una sola vez")
     txt_i = next(x for t, x in MENSAJES if t == "5581110004")
-    check("9-ABC-1004-001" in txt_i and "te enviará un correo" not in txt_i, "el candidato recibe su clave por su canal (sin «el proveedor te enviará un correo»)")
+    check("https://evaluacion.psicometrica.mx/login" in txt_i and "9-ABC-1004-001" in txt_i and "te enviará un correo" not in txt_i,
+          "el candidato recibe la liga EXACTA de Psicométricas.mx y su clave por su canal")
     r = client.post(f"/evaluaciones/{evi['id']}/avisos", json={"destinatario": "candidato"})
     check(r.status_code == 200 and len(llamadas) == 2, "Reenviar no vuelve a crear la prueba en el proveedor")
-    check(r.json()["accesoIncompleto"] is True, "sin liga del proveedor se avisa a RH que falta el acceso (para pegar la liga real)")
+    check(r.json()["accesoIncompleto"] is False and r.json()["ligaCandidato"] == "https://evaluacion.psicometrica.mx/login",
+          "«Abrir prueba» / «Copiar liga» entregan la página real del candidato de Psicométricas.mx")
     from fpdf import FPDF  # noqa: E402
 
     _doc = FPDF(); _doc.add_page(); _doc.set_font("Helvetica", size=12); _doc.cell(0, 10, "Prueba contestada"); PDF_OK = bytes(_doc.output())

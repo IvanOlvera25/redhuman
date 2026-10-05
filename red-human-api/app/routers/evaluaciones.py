@@ -471,8 +471,13 @@ def _texto_psicometria(ev: EvaluacionCandidato, p: Postulacion) -> str:
     nombre = (p.nombre or "").split(" ")[0]
     vac = p.vacante.titulo if p.vacante else "la vacante"
     liga = sev.liga_candidato(ev)
-    clave = f" Tu clave de acceso: {ev.clave_proveedor}." if ev.clave_proveedor else ""
-    acceso = (f" Entra aquí: {liga}" if liga else "") + clave
+    if liga and ev.clave_proveedor:
+        acceso = (f" Para contestarla entra a {liga} , escribe tu clave de acceso {ev.clave_proveedor} , acepta el aviso de "
+                  "privacidad y da clic en Ingresar.")
+    elif liga:
+        acceso = f" Entra aquí: {liga}"
+    else:
+        acceso = f" Tu clave de acceso: {ev.clave_proveedor}." if ev.clave_proveedor else ""
     base = f"Hola {nombre}. Como parte de tu proceso para {vac} en {_empresa(p)}, te asignamos la prueba «{ev.nombre}»."
     if ev.modalidad == "presencial":
         return f"{base}{_cita_texto(ev)} La contestarás en ese lugar; {ev.responsable or 'el equipo de RH'} te dará acceso. Llega 10 minutos antes."
