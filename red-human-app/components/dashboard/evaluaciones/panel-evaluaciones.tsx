@@ -274,7 +274,7 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
                     </Button>
                   )}
                   {live && e.estado === "en_proceso" && e.conectadaProveedor && (
-                    <Button size="sm" variant="outline" disabled={Boolean(ocupado)} title="Pregunta al proveedor si ya terminó (por si su aviso no llegó)"
+                    <Button size="sm" variant="outline" disabled={Boolean(ocupado)} title="Pregunta al proveedor si ya terminó. Usa 1 petición de tu paquete de API (3 si ya hay resultado e informe)."
                       onClick={() => accion(e.id, async () => {
                         const r = await sincronizarEvaluacion(e.id);
                         if (r.ok) setAviso(r.data.sincronizacion === "resultado_recibido" ? "Resultado recibido de Psicométricas.mx." : "El candidato aún no termina sus pruebas.");

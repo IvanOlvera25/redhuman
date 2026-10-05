@@ -437,6 +437,12 @@ with TestClient(app) as client:
 
     if os.path.exists(_sync._ESTADO):
         os.remove(_sync._ESTADO)
+    antes_off = len(CONSULTAS)
+    asyncio.run(revisar_resultados_psicometria())
+    check(len(CONSULTAS) == antes_off, "por defecto la consulta automática está APAGADA: cero llamadas al proveedor")
+    from app.config import settings as _st  # noqa: E402
+
+    _st.psicometricas_consultas_dia = 8
     n = asyncio.run(revisar_resultados_psicometria())
     db.expire_all()
     evr = db.query(EvaluacionCandidato).filter(EvaluacionCandidato.codigo == evi["id"]).first()

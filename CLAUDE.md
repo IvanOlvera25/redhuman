@@ -536,5 +536,6 @@ Reemplaza en la rama `demo-fraiche` la vista «Ruta Fraiche / Etapas», la colum
   es resultado. Resultados de proveedor: webhook + job `resultados_psicometria` (`services/psicometria_sync.py`; el webhook de
   Psicométricas.mx está registrado a UN solo servidor). 2026-10-05: CADA llamada gasta una «petición» de su paquete de API
   (100): el job corre en UN proceso (candado), consulta cada evaluación máx. cada 6 h, tope diario `PSICOMETRICAS_CONSULTAS_DIA`
-  (8) y pausa 12 h ante 1001/1002/1003 — la versión cada 10 min en 2 workers agotó el paquete. Momentos (citas, envíos) se serializan con zona
+  (DEFAULT 0 = APAGADA, decisión del usuario) y pausa 12 h ante 1001/1002/1003 — la versión cada 10 min en 2 workers agotó
+  el paquete. Resultados: webhook del proveedor o «Consultar resultado» (1 petición; 3 con resultado e informe). Momentos (citas, envíos) se serializan con zona
   explícita (`serial.iso_utc`): SQLite regresa fechas sin zona y la pantalla mostraba 6 h de diferencia contra correo/chat.

@@ -47,8 +47,8 @@ async def revisar_resultados_psicometria() -> int:
     from . import evaluaciones as sev
     from . import psicometricas as psi
 
-    if not psi.configurado():
-        return 0
+    if not psi.configurado() or int(settings.psicometricas_consultas_dia) <= 0:
+        return 0  # apagada por defecto: ninguna llamada al proveedor que nadie haya pedido
     try:
         candado = open(_CANDADO, "w")
         fcntl.flock(candado, fcntl.LOCK_EX | fcntl.LOCK_NB)  # otro worker ya la está corriendo

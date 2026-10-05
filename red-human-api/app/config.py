@@ -147,7 +147,7 @@ class Settings(BaseSettings):
     psicometricas_url_candidato: str = "https://evaluacion.psicometrica.mx/login"
     # 2026-10-05: cada llamada a su API gasta una «petición» del paquete de API (100 por paquete). La consulta automática
     # de resultados respeta un tope diario y espacia cada evaluación; el webhook y «Consultar resultado» siguen disponibles.
-    psicometricas_consultas_dia: int = 8
+    psicometricas_consultas_dia: int = 0  # 0 = consulta automática APAGADA (decisión del usuario 2026-10-05: cuidar las peticiones)
     psicometricas_horas_entre_consultas: int = 6
 
     cors_origins: str = "http://localhost:3000"
