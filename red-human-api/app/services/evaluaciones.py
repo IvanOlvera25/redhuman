@@ -142,7 +142,11 @@ CAMPOS_MEDICOS_CIFRADOS = ("resultado_resumen", "comentario_revision", "notas", 
 
 def estado_fraiche(ev: EvaluacionCandidato) -> str:
     """Estados del spec §10 sobre el seguimiento interno: Pendiente / Realizada con resultado pendiente /
-    Con resultado / No realizada / Cancelada."""
+    Con resultado / No realizada / Cancelada. Referencias (2026-10-05): «Completado» o «En proceso»."""
+    if ev.tipo == "referencias" and ev.estado != "fallida":
+        if referencias_completas(ev) or (ev.estado == "revisada" and ev.dictamen):  # legado: ya concluidas por RH
+            return "completado"
+        return "en_proceso" if ev.referencias else "pendiente"
     if ev.estado == "fallida":
         return "no_realizada" if ev.no_realizada else "cancelada"
     if ev.estado in ("resultado_recibido", "revisada"):
@@ -297,7 +301,9 @@ def normalizar_referencias(lista: List[dict], previas: Optional[List[dict]] = No
             resultado = _txt(r, "resultado", 30).lower()
             v = {
                 "contesto_nombre": _txt(r, "contesto_nombre", 150), "contesto_cargo": _txt(r, "contesto_cargo", 120),
-                "fecha_contacto": _txt(r, "fecha_contacto", 10) or _txt(r, "fecha_verificacion", 10), "medio": _txt(r, "medio", 60),
+                # sin fecha capturada, una referencia con resultado se fecha HOY (validación dentro del sistema)
+                "fecha_contacto": _txt(r, "fecha_contacto", 10) or _txt(r, "fecha_verificacion", 10)
+                or (datetime.now(timezone.utc).date().isoformat() if resultado in RESULTADOS_REFERENCIA else ""), "medio": _txt(r, "medio", 60),
                 "confirma_puesto": _txt(r, "confirma_puesto", 15) if _txt(r, "confirma_puesto", 15) in SI_NO_NI else "",
                 "confirma_periodo": _txt(r, "confirma_periodo", 15) if _txt(r, "confirma_periodo", 15) in SI_NO_NI else "",
                 "desempeno": _txt(r, "desempeno", 1000) or "", "motivo_salida": _txt(r, "motivo_salida", 500),
@@ -313,8 +319,31 @@ def normalizar_referencias(lista: List[dict], previas: Optional[List[dict]] = No
         ref = {**d, **v, "capturada_por": _txt(r, "capturada_por", 60) or ant.get("capturada_por") or ""}
         ref["estado"] = estado_referencia(ref)
         ref["estadoTexto"] = ESTADOS_REFERENCIA[ref["estado"]]
+        # 2026-10-05: quién registró la validación y cuándo (se conserva mientras siga validada)
+        ref["validada_por"] = ant.get("validada_por") or ""
+        ref["validada_en"] = ant.get("validada_en") or ""
+        if ref["estado"] != "validada":
+            ref["validada_por"], ref["validada_en"] = "", ""
         salida.append(ref)
     return salida[:10]
+
+
+def sellar_validadas(refs: List[dict], actor: str) -> None:
+    """Marca quién/cuándo en las referencias que acaban de quedar validadas."""
+    ahora = datetime.now(timezone.utc).isoformat()
+    for r in refs:
+        if r.get("estado") == "validada" and not r.get("validada_por"):
+            r["validada_por"], r["validada_en"] = actor, ahora
+
+
+def dictamen_referencias(refs: List[dict]) -> str:
+    """Conclusión que se desprende de lo que registró quien validó (no es una segunda calificación de RH)."""
+    res = [r.get("resultado") for r in refs if r.get("estado") == "validada"]
+    return "desfavorable" if "desfavorable" in res else "con_observaciones" if "con_observaciones" in res else "favorable"
+
+
+def referencias_completas(ev: EvaluacionCandidato) -> bool:
+    return ev.tipo == "referencias" and resumen_referencias(ev)["completas"]
 
 
 def resumen_referencias(ev: EvaluacionCandidato) -> dict:

@@ -1498,7 +1498,7 @@ export function actualizarFranquicia(codigo: string, estado: Exclude<EstadoFranq
   return patch<Candidato>(`/candidatos/${codigo}/franquicia`, { estado, comentario });
 }
 
-export interface CampoAltaSap { clave: string; nombre: string; valor: string; origen: string; faltante: boolean }
+export interface CampoAltaSap { clave: string; nombre: string; valor: string; origen: string; faltante: boolean; opcional?: boolean }
 export interface DatosAltaSap {
   bloques: { clave: string; nombre: string; campos: CampoAltaSap[] }[];
   faltantes: string[];
@@ -1508,6 +1508,24 @@ export interface DatosAltaSap {
   mensaje: string;
   confirmadoPor: string;
   confirmadoEn: string | null;
+  /** 2026-10-05: alta en Colaboradores y estado en SAP son DOS cosas distintas. */
+  demo?: boolean;
+  colaborador?: { codigo: string; nombre: string; altaEn: string | null; altaPor: string } | null;
+  sapEnvio?: "" | "conexion_pendiente" | "enviado" | "confirmado" | "error";
+  sapEnvioTexto?: string;
+  sapConfirmado?: boolean;
+  sapIdEmpleado?: string;
+  sapEnviadoEn?: string | null;
+  sapConfigurado?: boolean;
+  llenados?: string[];
+}
+/** Solo demo: llena ÚNICAMENTE los datos vacíos con datos de prueba (nunca sobrescribe). */
+export function completarDatosAltaPrueba(expedienteId: number) {
+  return post<DatosAltaSap>(`/contratacion/expedientes/${expedienteId}/datos-alta/prueba`, {});
+}
+/** Reintenta el envío a SAP (requiere alta + datos confirmados; en demo nunca envía). */
+export function enviarAltaSap(expedienteId: number) {
+  return post<DatosAltaSap>(`/contratacion/expedientes/${expedienteId}/sap/enviar`, {});
 }
 export function fetchDatosAltaSap(expedienteId: number) {
   return get<DatosAltaSap>(`/contratacion/expedientes/${expedienteId}/datos-alta`);
@@ -2349,7 +2367,9 @@ export function enviarRecordatorio(expedienteId: number, notificar?: NotificarAc
 /** `forzarPrueba` (Lote 4): inerte salvo que Modo Prueba esté activo en el servidor — el
  * bloqueo de "expediente ya dado de alta" NUNCA se salta, ni con este flag. */
 export function autorizarAlta(expedienteId: number, fechaIngreso?: string, forzarPrueba = false, notificar?: NotificarAccion) {
-  return post<{ ok: boolean; expediente: NuevoIngreso; notificaciones?: { destinatario: string; canal: string; destino: string; enviado: boolean; detalle?: string }[] }>(
+  return post<{ ok: boolean; expediente: NuevoIngreso; yaExistia?: boolean; mensaje?: string; colaborador?: { id: string; nombre: string } | null;
+    sap?: { enviado: boolean; estado: string; texto: string } | null;
+    notificaciones?: { destinatario: string; canal: string; destino: string; enviado: boolean; detalle?: string }[] }>(
     `/contratacion/expedientes/${expedienteId}/alta${forzarPrueba ? "?forzar_prueba=true" : ""}`,
     { fecha_ingreso: fechaIngreso ?? null, notificar: notificarSnake(notificar) },
   );
@@ -3716,7 +3736,7 @@ export interface EvaluacionCandidato {
   responsable: string; responsableCorreo: string; responsableWhatsapp: string; responsableUsuarioId: number | null; responsableContactoId: number | null;
   citaEn: string | null; citaLugar: string;
   ligaExterna: string | null; ligaEnviadaEn: string | null; realizadaEn: string | null; noRealizada: boolean;
-  adjuntos: { indice: number; nombre: string; mime: string; subido_por: string; subido_en: string }[];
+  adjuntos: { indice: number; nombre: string; mime: string; subido_por: string; subido_en: string; tipo?: string }[];
   /** Tal como la eligió quien evaluó (médico: apto|apto_condicionado|no_recomendable; franquiciatario: continuar|no_continuar). */
   decision: string | null;
   origenResultado: "" | "manual" | "liga_externa" | "webhook" | "liga_proveedor_reporte_anonimizado";
@@ -3742,9 +3762,9 @@ export interface EvaluacionCandidato {
   ligaVideollamada?: string;
   accesoIncompleto?: boolean;
 }
-export type EstadoEvaluacionFraiche = "pendiente" | "realizada_pendiente" | "con_resultado" | "no_realizada" | "cancelada";
+export type EstadoEvaluacionFraiche = "pendiente" | "realizada_pendiente" | "con_resultado" | "no_realizada" | "cancelada" | "en_proceso" | "completado";
 export const ESTADOS_EVALUACION_FRAICHE: Record<EstadoEvaluacionFraiche, string> = {
-  pendiente: "Pendiente", realizada_pendiente: "Realizada con resultado pendiente", con_resultado: "Con resultado", no_realizada: "No realizada", cancelada: "Cancelada",
+  pendiente: "Pendiente", realizada_pendiente: "Realizada con resultado pendiente", con_resultado: "Con resultado", no_realizada: "No realizada", cancelada: "Cancelada", en_proceso: "En proceso", completado: "Completado",
 };
 export interface EvaluatestResultado {
   indice_afinidad: number | null; igi: number | null; competencias: string[]; fortalezas: string[]; areas_oportunidad: string[]; riesgo: string;
@@ -3757,6 +3777,8 @@ export interface ReferenciaLaboral {
   desempeno?: string; motivo_salida?: string; recontrataria?: "si" | "no" | "no_informado" | "";
   observaciones?: string; resultado?: "favorable" | "con_observaciones" | "desfavorable" | ""; no_contactada?: boolean; intentos?: number;
   estado?: "pendiente_datos" | "por_contactar" | "no_contactada" | "validada"; estadoTexto?: string; capturada_por?: string;
+  /** 2026-10-05: quién registró la validación y cuándo (ISO). */
+  validada_por?: string; validada_en?: string;
 }
 export const REFERENCIA_VACIA: ReferenciaLaboral = {
   empresa: "", puesto_candidato: "", periodo: "", contacto_nombre: "", contacto_cargo: "", relacion: "", telefono: "", correo: "",

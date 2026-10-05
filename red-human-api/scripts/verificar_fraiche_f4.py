@@ -207,7 +207,7 @@ with TestClient(app) as client:
         {"contacto": "Juan Jefe", "empresa": "Tienda X", "telefono": "5500001111", "fecha_verificacion": "2026-10-01", "resultado": "favorable", "comentarios": "Puntual", "responsable": admin.nombre},
         {"contacto": "Sin verificar", "empresa": "Y"},
     ]})
-    check(r.status_code == 200 and len(r.json()["referencias"]) == 2 and r.json()["estadoFraiche"] == "con_resultado", "referencias guardadas; una verificada → Con resultado")
+    check(r.status_code == 200 and len(r.json()["referencias"]) == 2 and r.json()["estadoFraiche"] == "completado", "referencias guardadas; la requerida verificada → Completado")
 
     print("\n--- Evaluatest: liga del proveedor + carga de reporte anonimizado ---")
     v.destino = "tienda_propia"

@@ -707,6 +707,8 @@ async def aplicar_referencias(db: Session, ev: EvaluacionCandidato, p: Optional[
     ev.referencias = sev.normalizar_referencias(lista, ev.referencias or [], validar=validar)
     for r in ev.referencias:
         r["capturada_por"] = r.get("capturada_por") or actor
+    if validar:
+        sev.sellar_validadas(ev.referencias, actor)
     res = sev.resumen_referencias(ev)
     avisos_out: List[dict] = []
     if res["completas"] and ev.estado in ("pendiente", "en_proceso", "en_espera_consentimiento") and validar:
@@ -714,10 +716,13 @@ async def aplicar_referencias(db: Session, ev: EvaluacionCandidato, p: Optional[
         ev.resultado_cargado_por, ev.resultado_cargado_en, ev.origen_resultado = actor, datetime.now(timezone.utc), "manual" if actor != (ev.responsable or "") else "liga_externa"
         ev.resultado_resumen = "; ".join(f"{r['empresa']} · {r['contesto_nombre'] or r['contacto_nombre']}: {sev.RESULTADOS_REFERENCIA[r['resultado']]}"
                                          + (f" (recontrataría: {r['recontrataria'].replace('_', ' ')})" if r.get("recontrataria") else "") for r in validadas)[:5000]
-        sev.mover(ev, "resultado_recibido", actor, f"{len(validadas)} referencia(s) validada(s) de {res['requeridas']}")
+        # 2026-10-05: validar las requeridas COMPLETA la evaluación; no hay una segunda calificación de RH.
+        ev.dictamen = sev.dictamen_referencias(ev.referencias)
+        ev.revisada_por, ev.revisada_en = actor, datetime.now(timezone.utc)
+        sev.mover(ev, "revisada", actor, f"Completado: {len(validadas)} referencia(s) validada(s) de {res['requeridas']}")
         if p is not None and not antes["completas"]:
-            avisos_out += await avisar_rh(db, ev, p, "Referencias laborales validadas",
-                                          f"{actor} terminó de validar las referencias laborales de {p.nombre} ({res['texto']}). Revisa y registra la conclusión.")
+            avisos_out += await avisar_rh(db, ev, p, "Referencias laborales completadas",
+                                          f"{actor} terminó de validar las referencias laborales de {p.nombre} ({res['texto']}). Consulta el resultado en la ficha.")
     elif ev.estado == "pendiente" and any(r["estado"] != "pendiente_datos" for r in ev.referencias):
         sev.mover(ev, "en_proceso", actor, "Referencias en captura")
     if not validar and p is not None:
@@ -965,6 +970,23 @@ async def cargar_resultado(
 
     ev = _evaluacion(db, codigo, cuenta.id)
     p = _post_de(db, ev)
+    if ev.tipo == "referencias":
+        if ev.estado == "fallida":
+            raise HTTPException(409, "La evaluación está cancelada.")
+        # 2026-10-05: en referencias el informe es solo RESPALDO; adjuntarlo nunca valida ni completa la evaluación
+        from ..services import archivos as fs
+
+        if not (archivo and archivo.filename):
+            raise HTTPException(400, "Las referencias se validan con «Validar referencias»; aquí solo se adjunta el informe de respaldo.")
+        validado = await fs.validar(archivo, f"informe de referencias «{ev.nombre}»")
+        ruta = fs.guardar(validado, f"evaluaciones/{ev.id}", f"respaldo_{ev.codigo}_{len(ev.adjuntos or []) + 1}")
+        sev.agregar_adjunto(ev, ruta, validado.nombre, validado.mime, u.nombre)
+        ev.adjuntos[-1]["tipo"] = "respaldo"
+        ev.adjuntos = list(ev.adjuntos)
+        sev.mover(ev, ev.estado, u.nombre, "Informe de respaldo adjunto (no valida referencias)")
+        registrar(db, u.nombre, "evaluacion_respaldo_referencias", "postulacion", p.codigo if p else "", {"evaluacion": ev.codigo, "archivo": validado.nombre, "correo_rh": u.correo})
+        db.commit()
+        return {**evaluacion_candidato_dict(ev, u), "avisos": ["Informe adjunto como respaldo; las referencias se completan al validarlas."]}
     _abierta(ev)
     _exigir_consentimiento(ev, p)
     if tipo_adjunto == "prueba_contestada":

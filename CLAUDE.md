@@ -539,3 +539,25 @@ Reemplaza en la rama `demo-fraiche` la vista «Ruta Fraiche / Etapas», la colum
   (DEFAULT 0 = APAGADA, decisión del usuario) y pausa 12 h ante 1001/1002/1003 — la versión cada 10 min en 2 workers agotó
   el paquete. Resultados: webhook del proveedor o «Consultar resultado» (1 petición; 3 con resultado e informe). Momentos (citas, envíos) se serializan con zona
   explícita (`serial.iso_utc`): SQLite regresa fechas sin zona y la pantalla mostraba 6 h de diferencia contra correo/chat.
+
+## Fraiche — referencias, documentos demo, datos de alta y SAP (2026-10-05)
+
+- Referencias: la acción principal es «Validar referencias» (formulario `FormReferencia` dentro del sistema, con los datos
+  del candidato a la vista); «Enviar liga a responsable externo» es la alternativa y ambos escriben el MISMO registro
+  (`evaluaciones.aplicar_referencias`). Al validar las requeridas la evaluación queda «Completado» (`estado_fraiche`
+  → `completado`, `estado=revisada`, `dictamen` = `sev.dictamen_referencias`, lo que registró quien validó) — NO hay
+  segunda calificación de RH. Cada referencia guarda `validada_por/validada_en`; «Ver resultado» muestra respuestas,
+  observaciones, adjuntos y quién/cuándo. Sin respuesta = «En proceso»; «No contactada» ≠ «Desfavorable». Adjuntar un
+  informe a referencias es SOLO respaldo (`tipo="respaldo"`), nunca valida.
+- Documentos: en el ambiente demo (`AMBIENTE_PRUEBA`) la subida se guarda al instante como «Recibido · Demo»
+  (`revisado_por="Demo"`, `documento_dict.demo`), sin IA ni rechazo; formato/tamaño se siguen validando. Producción
+  valida con IA; el rechazo trae motivo concreto + qué corregir (`contratacion._con_correccion`). La UI usa
+  `lib/phase2.estadoDocVisible` y `MENSAJE_VERIFICANDO_DOCUMENTO` en «CV y documentos» y «Expediente» (Ver documento + fecha).
+- Datos para alta: todo se completa/corrige en el modal; nombre/correo/teléfono se escriben en la FICHA (`Candidato`),
+  los personales en `datos_personales`; formato de CURP/RFC/NSS/teléfono/correo/fecha validado (`_validar_datos_alta`);
+  opcionales (`fraiche.CAMPOS_ALTA_OPCIONALES`) no bloquean. Solo demo: `POST …/datos-alta/prueba` llena ÚNICAMENTE vacíos.
+- Alta: `contratacion.alta` es IDEMPOTENTE (repetir regresa el mismo colaborador, `yaExistia`); `Colaborador.datos_alta`
+  guarda los datos de la ficha. SAP va APARTE (`services/sap.py`, `Expediente.sap_envio/sap_respuesta/sap_id_empleado`):
+  demo o sin `SAP_API_URL`+credenciales → «Listo para SAP · Conexión pendiente» sin envío; con conexión se mandan los
+  datos confirmados al alta/confirmación (`POST …/sap/enviar` reintenta) y «Alta confirmada en SAP» SOLO con respuesta
+  2xx con identificador. Regresión: `scripts/verificar_alta_referencias.py`.

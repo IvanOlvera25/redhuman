@@ -42,6 +42,7 @@ import {
   Pencil,
   XCircle,
   RefreshCw,
+  Wand2,
   Trash2,
   ArrowRightLeft,
   Route,
@@ -70,6 +71,7 @@ import {
   type ActividadRuta,
 } from "@/lib/data";
 import type { DocExpediente, NuevoIngreso } from "@/lib/phase2";
+import { MENSAJE_VERIFICANDO_DOCUMENTO, estadoDocVisible } from "@/lib/phase2";
 import {
   autorizarAlta,
   eliminarCandidato,
@@ -155,6 +157,8 @@ import {
   fetchDatosAltaSap,
   capturarDatosAltaSap,
   confirmarDatosAltaSap,
+  completarDatosAltaPrueba,
+  enviarAltaSap,
   urlFichaPresentacion,
   generarFichaPresentacion,
 } from "@/lib/api";
@@ -1632,6 +1636,8 @@ function ModalCandidato({
         return setAgregarEval(true);
       case "revisar_evaluacion":
       case "esperar_resultado":
+      case "validar_referencias":
+      case "ver_referencias":
       case "registrar_decision_franquiciatario":
         return setTab("evaluaciones");
       case "confirmar_contratacion_franquicia":
@@ -1785,10 +1791,12 @@ function ModalCandidato({
     const envios = r.data.notificaciones ?? [];
     const ok = envios.filter((x) => x.enviado).map((x) => `${x.destinatario} por ${x.canal}`);
     const fallidos = envios.filter((x) => !x.enviado).map((x) => `${x.destinatario} por ${x.canal}${x.detalle ? ` (${x.detalle})` : ""}`);
+    if (r.data.yaExistia) return setAviso({ tono: "ok", texto: r.data.mensaje || "Ya estaba dado de alta; no se creó un duplicado." });
     setAviso({
       tono: fallidos.length && !ok.length ? "warn" : "ok",
       texto:
-        "Alta registrada — el candidato se movió a Colaboradores." +
+        `Alta registrada — ${r.data.colaborador?.id ? `colaborador ${r.data.colaborador.id} creado en Colaboradores` : "el candidato se movió a Colaboradores"}.` +
+        (r.data.sap ? ` SAP: ${r.data.sap.texto}.` : "") +
         (ok.length ? ` Bienvenida enviada: ${ok.join(", ")}.` : "") +
         (fallidos.length ? ` No salió: ${fallidos.join("; ")}.` : ""),
     });
@@ -3867,6 +3875,7 @@ function PestanaDocumentos({
                 <tbody>
                   {(expediente.documentos ?? []).map((d) => {
                     const estado = d.estadoSimple ?? (d.estado === "recibido" || (d.estado === "revision" && d.tieneArchivo) ? "Recibido" : d.estado === "rechazado" ? "Rechazado" : "Pendiente");
+                    const visible = estadoDocVisible(d);
                     const solicitudes = d.solicitudes ?? [];
                     return (
                       <tr key={d.nombre} className="border-t border-border-soft align-top">
@@ -3894,6 +3903,9 @@ function PestanaDocumentos({
                             <>
                               <p>{fechaHoraCorta(d.recibidoEn)}</p>
                               <p className="text-[11px] text-ink-3">por {canalLegible(d.recibidoCanal || "")}{d.archivo ? ` · ${d.archivo}` : ""}</p>
+                              {d.tieneArchivo && c.expedienteId != null && (
+                                <a href={urlDocumento(c.expedienteId, d.nombre)} target="_blank" rel="noreferrer" className="text-[11px] font-semibold text-brand hover:underline">Ver documento</a>
+                              )}
                             </>
                           ) : (
                             <span className="text-ink-3">—</span>
@@ -3906,9 +3918,10 @@ function PestanaDocumentos({
                               estado === "Recibido" ? "bg-good-soft text-good" : estado === "Rechazado" ? "bg-bad-soft text-bad" : "bg-warn-soft text-warn",
                             )}
                           >
-                            {estado}
+                            {d.demo && estado === "Recibido" ? visible.texto : estado}
                           </span>
                           {estado === "Recibido" && d.estado === "revision" && <p className="mt-0.5 text-[11px] text-ink-3">En revisión de RH</p>}
+                          {estado === "Rechazado" && visible.motivo && <p className="mt-0.5 max-w-[16rem] text-[11px] text-bad">{visible.motivo}</p>}
                         </td>
                       </tr>
                     );
@@ -5645,7 +5658,8 @@ function CampoSelect({
   );
 }
 
-/** Fila de documento: Pendiente -> Subir documento -> Cargado -> Ver. */
+/** Fila de documento: Pendiente -> Subir documento -> Recibido -> Ver documento (2026-10-05: fecha de recepción,
+ *  «Recibido · Demo», mensaje de verificación en producción y motivo concreto del rechazo). */
 function FilaDocumentoSimple({
   d,
   expedienteId,
@@ -5659,54 +5673,60 @@ function FilaDocumentoSimple({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [subiendo, setSubiendo] = useState(false);
+  const [error, setError] = useState("");
   const cargado = Boolean(d.tieneArchivo);
+  const est = estadoDocVisible(d);
+  const recibido = d.recibidoEn || d.subido;
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file || !expedienteId) return;
     setSubiendo(true);
+    setError("");
     const r = await subirDocumento(expedienteId, d.nombre, file);
     setSubiendo(false);
     if (r.ok) onActualizado(r.data.expediente);
+    else setError(r.error);
   }
 
   return (
-    <div className="flex items-center justify-between gap-2 rounded-xl border border-border-soft bg-surface px-3.5 py-2.5">
-      <span className="min-w-0 truncate text-sm">{d.nombre}</span>
-      <div className="flex shrink-0 items-center gap-2">
-        {d.estadoOnboarding ? (
-          <Badge tone={d.estadoOnboarding === "Aprobado" ? "good" : d.estadoOnboarding === "Rechazado" ? "bad" : d.estadoOnboarding === "Por revisar" ? "warn" : "neutral"}>
-            {d.estadoOnboarding}
-          </Badge>
-        ) : (
-          <Badge tone={cargado ? "good" : "neutral"}>{cargado ? "Cargado" : "Pendiente"}</Badge>
-        )}
-        {cargado && expedienteId ? (
-          <a
-            href={urlDocumento(expedienteId, d.nombre)}
-            target="_blank"
-            rel="noreferrer"
-            className="text-xs font-semibold text-brand hover:underline"
-          >
-            Ver
-          </a>
-        ) : live && expedienteId ? (
-          <>
-            <input ref={inputRef} type="file" accept="image/*,application/pdf" className="hidden" onChange={onFile} />
-            <button
-              onClick={() => inputRef.current?.click()}
-              disabled={subiendo}
-              className="text-xs font-semibold text-brand hover:underline disabled:opacity-50"
-            >
-              {subiendo ? "Subiendo…" : "Subir documento"}
-            </button>
-          </>
-        ) : null}
+    <div className="rounded-xl border border-border-soft bg-surface px-3.5 py-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-sm">{d.nombre}</span>
+        <div className="flex shrink-0 items-center gap-2">
+          <Badge tone={est.tono}>{est.texto}</Badge>
+          {cargado && expedienteId && (
+            <a href={urlDocumento(expedienteId, d.nombre)} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand hover:underline">
+              Ver documento
+            </a>
+          )}
+          {live && expedienteId && (!cargado || d.estado === "rechazado") && d.estado !== "no_aplica" && (
+            <>
+              <input ref={inputRef} type="file" accept="image/*,application/pdf" className="hidden" onChange={onFile} />
+              <button
+                onClick={() => inputRef.current?.click()}
+                disabled={subiendo}
+                className="text-xs font-semibold text-brand hover:underline disabled:opacity-50"
+              >
+                {subiendo ? "Subiendo…" : d.estado === "rechazado" ? "Subir de nuevo" : "Subir documento"}
+              </button>
+            </>
+          )}
+        </div>
       </div>
+      {subiendo && <p className="mt-1 text-[11px] text-ink-2">{MENSAJE_VERIFICANDO_DOCUMENTO}</p>}
+      {cargado && recibido && !subiendo && <p className="mt-1 text-[11px] text-ink-3">Recibido el {fechaHoraCorta(recibido)}</p>}
+      {est.motivo && !subiendo && <p className={cn("mt-1 text-[11px]", est.tono === "bad" ? "text-bad" : "text-ink-3")}>{est.motivo}</p>}
+      {error && <p className="mt-1 text-[11px] font-semibold text-bad">{error}</p>}
     </div>
   );
 }
+
+type EstadoSapPanel = { estado: DatosAltaSap["estadoSap"]; texto: string; confirmadoPor: string; confirmadoEn: string | null;
+  colaborador: string; sapEnvio: string; sapTexto: string; sapConfigurado: boolean };
+const aEstadoSap = (d: DatosAltaSap): EstadoSapPanel => ({ estado: d.estadoSap, texto: d.estadoSapTexto, confirmadoPor: d.confirmadoPor, confirmadoEn: d.confirmadoEn,
+  colaborador: d.colaborador?.codigo ?? "", sapEnvio: d.sapEnvio ?? "", sapTexto: d.sapEnvioTexto ?? "", sapConfigurado: Boolean(d.sapConfigurado) });
 
 function PanelContratacion({
   c,
@@ -5740,12 +5760,12 @@ function PanelContratacion({
   const esFranquicia = c.destino === "franquicia";
   // Fraiche (spec §11): «Preparar alta de colaborador» (datos para SAP SuccessFactors) y su estado
   const [sapAbierto, setSapAbierto] = useState(false);
-  const [estadoSap, setEstadoSap] = useState<{ estado: DatosAltaSap["estadoSap"]; texto: string; confirmadoPor: string; confirmadoEn: string | null } | null>(null);
+  const [estadoSap, setEstadoSap] = useState<EstadoSapPanel | null>(null);
   useEffect(() => {
     if (!live || c.expedienteId == null || esFranquicia) return;
     let vivo = true;
     fetchDatosAltaSap(c.expedienteId).then((d) => {
-      if (vivo && d) setEstadoSap({ estado: d.estadoSap, texto: d.estadoSapTexto, confirmadoPor: d.confirmadoPor, confirmadoEn: d.confirmadoEn });
+      if (vivo && d) setEstadoSap(aEstadoSap(d));
     });
     return () => {
       vivo = false;
@@ -6125,13 +6145,18 @@ function PanelContratacion({
           <div className="min-w-0">
             <p className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-2"><Database className="h-3.5 w-3.5" /> Alta en SAP SuccessFactors</p>
             <p className="text-[11px] text-ink-3">
-              {estadoSap?.estado === "listo_para_enviar_sap"
-                ? `${estadoSap.texto || "Listo para enviar a SAP"}${estadoSap.confirmadoPor ? ` · confirmado por ${estadoSap.confirmadoPor}` : ""} · Conexión con SAP pendiente de configurar`
-                : estadoSap?.texto || "Revisa y confirma los datos que se enviarán a SAP (no se envía nada todavía)."}
+              {estadoSap?.colaborador ? `Colaborador ${estadoSap.colaborador} dado de alta · ` : ""}
+              {estadoSap?.sapEnvio
+                ? `SAP: ${estadoSap.sapTexto}`
+                : estadoSap?.estado === "listo_para_enviar_sap"
+                  ? `Datos confirmados${estadoSap.confirmadoPor ? ` por ${estadoSap.confirmadoPor}` : ""} · ${estadoSap.sapConfigurado ? "se envían a SAP al confirmar el alta" : "Listo para SAP · Conexión pendiente"}`
+                  : "Completa y confirma los datos para el alta."}
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {estadoSap?.estado === "listo_para_enviar_sap" && <Badge tone="good">Listo para enviar a SAP</Badge>}
+            {estadoSap?.sapEnvio === "confirmado" ? <Badge tone="good">Alta confirmada en SAP</Badge>
+              : estadoSap?.sapEnvio === "error" ? <Badge tone="bad">Error al enviar a SAP</Badge>
+              : estadoSap?.estado === "listo_para_enviar_sap" ? <Badge tone="warn">{estadoSap.sapConfigurado ? "Listo para SAP" : "Listo para SAP · Conexión pendiente"}</Badge> : null}
             <Button size="sm" variant={estadoSap?.estado === "listo_para_enviar_sap" ? "outline" : "primary"} onClick={() => setSapAbierto(true)} disabled={Boolean(ocupado)}>
               <Database className="h-4 w-4" /> Preparar alta de colaborador
             </Button>
@@ -6212,7 +6237,7 @@ function PanelContratacion({
         <ModalDatosAltaSap
           expedienteId={c.expedienteId}
           onClose={() => setSapAbierto(false)}
-          onCambio={(d) => setEstadoSap({ estado: d.estadoSap, texto: d.estadoSapTexto, confirmadoPor: d.confirmadoPor, confirmadoEn: d.confirmadoEn })}
+          onCambio={(d) => setEstadoSap(aEstadoSap(d))}
         />
       )}
 
@@ -6725,15 +6750,18 @@ function ModalPresentarFranquiciatario({
 }
 
 /** Campos editables del alta en SAP: personales (bloque `personales`) y del puesto (`campos`). */
-const SAP_EDITABLES_PERSONALES = ["curp", "rfc", "nss", "domicilio", "fecha_nacimiento", "genero"];
-const SAP_EDITABLES_CAMPOS = ["empresa", "sucursal", "puesto", "jefe", "fecha_ingreso", "tipo_contratacion", "sueldo", "horario", "periodicidad"];
+const SAP_PERSONALES = ["curp", "rfc", "nss", "domicilio", "fecha_nacimiento", "genero"];
+const SAP_TIPO_INPUT: Record<string, string> = { fecha_nacimiento: "date", fecha_ingreso: "date", correo: "email", telefono: "tel" };
+const SAP_AYUDA: Record<string, string> = { curp: "18 caracteres", rfc: "12 o 13 caracteres", nss: "11 dígitos", telefono: "10 dígitos" };
 
-/** «Datos para alta en SAP SuccessFactors»: revisar, completar y confirmar. No envía nada a SAP ni muestra número de empleado. */
+/** 2026-10-05: «Datos para alta en SAP SuccessFactors» — todo se puede completar y corregir (lo de la persona se guarda
+ *  en su ficha); lo opcional no bloquea; en demo «Completar con datos de prueba» llena SOLO lo vacío. El alta en
+ *  Colaboradores y el estado en SAP se muestran por separado; «Alta confirmada en SAP» solo si SAP la confirma. */
 function ModalDatosAltaSap({ expedienteId, onClose, onCambio }: { expedienteId: number; onClose: () => void; onCambio: (d: DatosAltaSap) => void }) {
   const [datos, setDatos] = useState<DatosAltaSap | null>(null);
   const [error, setError] = useState("");
   const [cambios, setCambios] = useState<Record<string, string>>({});
-  const [ocupado, setOcupado] = useState<"" | "guardar" | "confirmar">("");
+  const [ocupado, setOcupado] = useState<"" | "guardar" | "confirmar" | "prueba" | "sap">("");
   const [aviso, setAviso] = useState<AvisoEstado>(null);
 
   // `onCambio` llega como arrow inline del panel: se guarda en ref para que la carga no se repita en cada render
@@ -6750,10 +6778,15 @@ function ModalDatosAltaSap({ expedienteId, onClose, onCambio }: { expedienteId: 
   }, [cargar]);
 
   const confirmado = datos?.estadoSap === "listo_para_enviar_sap";
+  const bloqueado = Boolean(datos?.sapConfirmado); // ya confirmado POR SAP: no se corrige desde aquí
   const hayCambios = Object.keys(cambios).length > 0;
-  function editable(bloque: string, campo: string): boolean {
-    if (confirmado) return false;
-    return bloque === "personales" ? SAP_EDITABLES_PERSONALES.includes(campo) : SAP_EDITABLES_CAMPOS.includes(campo);
+  const vacios = datos ? datos.bloques.flatMap((b) => b.campos).filter((x) => !x.valor.trim()).length : 0;
+
+  function aplicar(d: DatosAltaSap, texto: string) {
+    setCambios({});
+    setDatos(d);
+    onCambio(d);
+    setAviso({ tono: "ok", texto });
   }
 
   async function guardar() {
@@ -6761,17 +6794,20 @@ function ModalDatosAltaSap({ expedienteId, onClose, onCambio }: { expedienteId: 
     setOcupado("guardar");
     const personales: Record<string, string> = {};
     const campos: Record<string, string> = {};
-    for (const [k, v] of Object.entries(cambios)) {
-      const [bloque, campo] = k.split(":");
-      (bloque === "personales" ? personales : campos)[campo] = v;
-    }
+    for (const [campo, v] of Object.entries(cambios)) (SAP_PERSONALES.includes(campo) ? personales : campos)[campo] = v;
     const r = await capturarDatosAltaSap(expedienteId, { personales, campos });
     setOcupado("");
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
-    setCambios({});
-    setDatos(r.data);
-    onCambio(r.data);
-    setAviso({ tono: "ok", texto: "Cambios guardados en el expediente." });
+    aplicar(r.data, confirmado ? "Cambios guardados en la ficha. Vuelve a confirmar los datos para alta." : "Cambios guardados en la ficha del candidato.");
+  }
+
+  async function completarPrueba() {
+    setOcupado("prueba");
+    const r = await completarDatosAltaPrueba(expedienteId);
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    const n = r.data.llenados?.length ?? 0;
+    aplicar(r.data, n ? `Se completaron ${n} dato(s) vacíos con datos de prueba. Lo que ya existía no se tocó.` : "No había datos vacíos que completar.");
   }
 
   async function confirmar() {
@@ -6779,9 +6815,15 @@ function ModalDatosAltaSap({ expedienteId, onClose, onCambio }: { expedienteId: 
     const r = await confirmarDatosAltaSap(expedienteId);
     setOcupado("");
     if (!r.ok) return setAviso({ tono: "error", texto: r.error });
-    setDatos(r.data);
-    onCambio(r.data);
-    setAviso({ tono: "ok", texto: `${r.data.estadoSapTexto || "Listo para enviar a SAP"}. ${r.data.mensaje}` });
+    aplicar(r.data, r.data.colaborador ? `Datos confirmados. SAP: ${r.data.sapEnvioTexto}.` : "Datos confirmados. Se enviarán a SAP al confirmar el alta del colaborador.");
+  }
+
+  async function reintentarSap() {
+    setOcupado("sap");
+    const r = await enviarAltaSap(expedienteId);
+    setOcupado("");
+    if (!r.ok) return setAviso({ tono: "error", texto: r.error });
+    aplicar(r.data, `SAP: ${r.data.sapEnvioTexto}.`);
   }
 
   return (
@@ -6790,7 +6832,7 @@ function ModalDatosAltaSap({ expedienteId, onClose, onCambio }: { expedienteId: 
         <div className="flex items-start justify-between gap-3 border-b border-border-soft px-6 py-4">
           <div>
             <h3 className="font-display text-lg font-bold">Datos para alta en SAP SuccessFactors</h3>
-            <p className="mt-1 text-[12px] text-ink-3">Se toman del expediente y del CV; completa lo faltante y confirma. Aquí no se envía nada a SAP.</p>
+            <p className="mt-1 text-[12px] text-ink-3">Se toman del expediente, del CV y de los documentos. Completa o corrige lo que haga falta: los cambios se guardan en la ficha del candidato.</p>
           </div>
           <button onClick={onClose} className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-ink-3 hover:bg-surface-2" aria-label="Cerrar"><X className="h-4 w-4" /></button>
         </div>
@@ -6800,39 +6842,81 @@ function ModalDatosAltaSap({ expedienteId, onClose, onCambio }: { expedienteId: 
           {datos && (
             <div className="flex flex-col gap-3">
               {aviso && <Aviso tono={aviso.tono} onCerrar={() => setAviso(null)}>{aviso.texto}</Aviso>}
-              {confirmado && (
+              {/* Dos estados SEPARADOS: alta en Colaboradores · SAP */}
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div className="rounded-xl border border-border-soft bg-surface p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">Alta en Colaboradores</p>
+                  {datos.colaborador ? (
+                    <p className="mt-1 text-sm"><Badge tone="good">Dado de alta</Badge> <span className="font-mono text-[12px]">{datos.colaborador.codigo}</span>
+                      <span className="block text-[11px] text-ink-3">{datos.colaborador.altaPor ? `por ${datos.colaborador.altaPor}` : ""}{datos.colaborador.altaEn ? ` · ${fechaHoraCorta(datos.colaborador.altaEn)}` : ""}</span></p>
+                  ) : (
+                    <p className="mt-1 text-sm text-ink-2">Pendiente <span className="block text-[11px] text-ink-3">Se crea al confirmar el alta del colaborador.</span></p>
+                  )}
+                </div>
+                <div className="rounded-xl border border-border-soft bg-surface p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">SAP SuccessFactors</p>
+                  <p className="mt-1 text-sm">
+                    <Badge tone={datos.sapEnvio === "confirmado" ? "good" : datos.sapEnvio === "error" ? "bad" : confirmado ? "warn" : "neutral"}>
+                      {datos.sapEnvio ? datos.sapEnvioTexto : confirmado ? (datos.sapConfigurado ? "Listo para SAP" : "Listo para SAP · Conexión pendiente") : "Por preparar"}
+                    </Badge>
+                    {datos.sapIdEmpleado && <span className="ml-1 font-mono text-[12px]">{datos.sapIdEmpleado}</span>}
+                    <span className="block text-[11px] text-ink-3">
+                      {datos.sapConfirmado ? `Confirmado por SAP${datos.sapEnviadoEn ? ` · ${fechaHoraCorta(datos.sapEnviadoEn)}` : ""}`
+                        : datos.demo ? "Demo: no se envía nada a SAP."
+                        : !datos.sapConfigurado ? "Conexión con SAP pendiente de configurar."
+                        : confirmado ? "Se envía al confirmar el alta del colaborador." : "Confirma los datos para alta primero."}
+                    </span>
+                  </p>
+                  {datos.colaborador && confirmado && datos.sapConfigurado && (datos.sapEnvio === "error" || datos.sapEnvio === "enviado") && (
+                    <Button size="sm" variant="outline" className="mt-2" onClick={reintentarSap} disabled={Boolean(ocupado)}>
+                      {ocupado === "sap" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Reintentar envío a SAP
+                    </Button>
+                  )}
+                </div>
+              </div>
+              {confirmado && !bloqueado && (
                 <Aviso tono="ok">
-                  <b>{datos.estadoSapTexto || "Listo para enviar a SAP"}</b>
-                  {datos.confirmadoPor ? ` · confirmado por ${datos.confirmadoPor}${datos.confirmadoEn ? ` el ${fechaHoraCorta(datos.confirmadoEn)}` : ""}` : ""}. {datos.mensaje}
+                  Datos confirmados{datos.confirmadoPor ? ` por ${datos.confirmadoPor}${datos.confirmadoEn ? ` el ${fechaHoraCorta(datos.confirmadoEn)}` : ""}` : ""}. Si corriges algo, tendrás que volver a confirmarlos.
                 </Aviso>
               )}
               {!confirmado && datos.faltantes.length > 0 && (
-                <Aviso tono="warn">Faltan {datos.faltantes.length} dato(s) para confirmar: {datos.faltantes.join(", ")}.</Aviso>
+                <Aviso tono="warn">Faltan {datos.faltantes.length} dato(s) obligatorios para confirmar: {datos.faltantes.join(", ")}. Los opcionales no bloquean.</Aviso>
+              )}
+              {datos.demo && !bloqueado && vacios > 0 && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-dashed border-brand/40 bg-brand-soft/30 px-3 py-2">
+                  <p className="text-[12px] text-ink-2">Demo: llena solo los {vacios} dato(s) vacíos con datos de prueba. No sobrescribe lo que ya existe.</p>
+                  <Button size="sm" variant="outline" onClick={completarPrueba} disabled={Boolean(ocupado) || hayCambios} title={hayCambios ? "Guarda tus cambios primero" : ""}>
+                    {ocupado === "prueba" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />} Completar con datos de prueba
+                  </Button>
+                </div>
               )}
               {datos.bloques.map((b) => (
                 <Card key={b.clave} className="p-3">
                   <Eyebrow>{b.nombre}</Eyebrow>
                   <div className="mt-2 divide-y divide-border-faint">
                     {b.campos.map((campo) => {
-                      const k = `${b.clave}:${campo.clave}`;
-                      const valor = cambios[k] ?? campo.valor;
-                      const puede = editable(b.clave, campo.clave);
+                      const valor = cambios[campo.clave] ?? campo.valor;
+                      const tipo = SAP_TIPO_INPUT[campo.clave] ?? "text";
                       return (
                         <div key={campo.clave} className="grid items-center gap-1 py-1.5 sm:grid-cols-[11rem_1fr_auto] sm:gap-3">
-                          <span className="text-[12px] font-medium text-ink-2">{campo.nombre}</span>
-                          {puede ? (
+                          <span className="text-[12px] font-medium text-ink-2">
+                            {campo.nombre.replace(" (opcional)", "")}
+                            {campo.opcional && <span className="ml-1 text-[10px] font-normal text-ink-3">opcional</span>}
+                          </span>
+                          {!bloqueado ? (
                             <input
-                              value={valor}
-                              onChange={(e) => setCambios({ ...cambios, [k]: e.target.value })}
-                              placeholder={campo.faltante ? "Captura este dato" : ""}
-                              className={cn("h-9 rounded-lg border bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20", campo.faltante && !valor ? "border-bad/40" : "border-border-soft")}
+                              type={tipo}
+                              value={tipo === "date" ? valor.slice(0, 10) : valor}
+                              onChange={(e) => setCambios({ ...cambios, [campo.clave]: e.target.value })}
+                              placeholder={campo.faltante ? `Captura este dato${SAP_AYUDA[campo.clave] ? ` (${SAP_AYUDA[campo.clave]})` : ""}` : SAP_AYUDA[campo.clave] ?? ""}
+                              className={cn("h-9 rounded-lg border bg-surface px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20", campo.faltante && !campo.opcional && !valor ? "border-bad/40" : "border-border-soft")}
                             />
                           ) : (
                             <span className={cn("text-sm", valor ? "text-ink" : "text-ink-3")}>{valor || "—"}</span>
                           )}
                           <span className="flex items-center gap-1.5">
-                            {campo.faltante && !valor && <Badge tone="bad">Faltante</Badge>}
-                            {campo.origen && <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-ink-3">{campo.origen}</span>}
+                            {campo.faltante && !campo.opcional && !valor && <Badge tone="bad">Faltante</Badge>}
+                            {campo.origen && valor && <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-ink-3">{campo.origen}</span>}
                           </span>
                         </div>
                       );
@@ -6846,19 +6930,21 @@ function ModalDatosAltaSap({ expedienteId, onClose, onCambio }: { expedienteId: 
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border-soft px-6 py-4">
           <Button variant="outline" size="sm" onClick={onClose} disabled={Boolean(ocupado)}>Cerrar</Button>
-          {datos && !confirmado && (
+          {datos && !bloqueado && (
             <>
-              <Button variant="outline" size="sm" onClick={guardar} disabled={!hayCambios || Boolean(ocupado)}>
+              <Button variant={confirmado && !hayCambios ? "primary" : "outline"} size="sm" onClick={guardar} disabled={!hayCambios || Boolean(ocupado)}>
                 {ocupado === "guardar" ? "Guardando…" : "Guardar cambios"}
               </Button>
-              <Button
-                size="sm"
-                onClick={confirmar}
-                disabled={datos.faltantes.length > 0 || hayCambios || Boolean(ocupado)}
-                title={datos.faltantes.length ? "Completa los datos faltantes primero" : hayCambios ? "Guarda los cambios antes de confirmar" : "Deja los datos listos para enviar a SAP (no envía nada)"}
-              >
-                <Database className="h-4 w-4" /> {ocupado === "confirmar" ? "Confirmando…" : "Confirmar datos para alta"}
-              </Button>
+              {!confirmado && (
+                <Button
+                  size="sm"
+                  onClick={confirmar}
+                  disabled={datos.faltantes.length > 0 || hayCambios || Boolean(ocupado)}
+                  title={datos.faltantes.length ? "Completa los datos obligatorios primero" : hayCambios ? "Guarda los cambios antes de confirmar" : "Confirma los datos que se usarán para el alta"}
+                >
+                  <Database className="h-4 w-4" /> {ocupado === "confirmar" ? "Confirmando…" : "Confirmar datos para alta"}
+                </Button>
+              )}
             </>
           )}
         </div>

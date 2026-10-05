@@ -32,7 +32,7 @@ from ..services import plantillas_correo
 from ..services.correo import enviar_correo
 from ..services.whatsapp import enviar_mensaje
 from ..services.notificaciones import TZ_MEXICO, NotificarIn, override_de
-from ..services.configuracion import modo_prueba_activo, puede_forzar_prueba
+from ..services.configuracion import ambiente_prueba, modo_prueba_activo, puede_forzar_prueba
 from ..services import canal as _canal
 
 router = APIRouter(prefix="/contratacion", tags=["contratacion"])
@@ -261,22 +261,32 @@ def _preparacion_por_tareas(db: Session, e: Expediente, tareas: list, datos: "Pr
 # ------------------------------------------------------------
 
 
+def _con_correccion(motivo: str, correccion: str) -> str:
+    motivo = (motivo or "").strip()
+    if not motivo.endswith((".", "!", "?")):
+        motivo += "."
+    return motivo if correccion.lower()[:12] in motivo.lower() or "sube" in motivo.lower() else f"{motivo} {correccion}"
+
+
 def _resolver_estado(v: ia.DocumentoValidado, con_ia: bool) -> tuple[str, str]:
     """Traduce la validación de la IA a un estado y un motivo legible para RH."""
     if not con_ia:
         return "revision", "Modo demo: se requiere revisión humana."
     # 2026-09-18 (validación estricta): un archivo que no es claramente el documento oficial solicitado
     # (tarea, foto casual, captura, otro trámite) se RECHAZA automáticamente — nunca cuenta como válido.
+    # 2026-10-05: el rechazo dice el motivo concreto Y qué corregir
     if not v.coincide_tipo or not getattr(v, "es_documento_oficial", True) or (v.tipo_detectado or "").strip().lower() in ("otro", "desconocido", "ninguno", ""):
         detectado = (v.tipo_detectado or "").strip()
         que = f"El archivo parece ser {detectado}" if detectado and detectado.lower() not in ("otro", "desconocido", "ninguno") else "El archivo no es el documento solicitado"
-        return "rechazado", v.motivo_rechazo or f"{que}; sube el documento oficial correcto (foto clara o PDF)."
+        return "rechazado", _con_correccion(v.motivo_rechazo or f"{que}.", "Sube el documento oficial correcto (foto clara o PDF).")
     if not v.legible:
-        return "rechazado", v.motivo_rechazo or "El documento no se lee con claridad."
+        return "rechazado", _con_correccion(v.motivo_rechazo or "El documento no se lee con claridad.",
+                                            "Sube una foto nítida, con buena luz y sin reflejos, o el PDF original.")
     if not v.completo:
-        return "rechazado", v.motivo_rechazo or "Falta parte del documento (por ejemplo, el reverso)."
+        return "rechazado", _con_correccion(v.motivo_rechazo or "Falta parte del documento (por ejemplo, el reverso).",
+                                            "Sube el documento completo, con todas sus caras o páginas.")
     if v.vigente is False:
-        return "rechazado", v.motivo_rechazo or "El documento está vencido."
+        return "rechazado", _con_correccion(v.motivo_rechazo or "El documento está vencido.", "Sube uno vigente.")
     if v.coincide_titular is False:
         return "revision", "El nombre del documento no coincide con el del candidato: verifícalo."
     return "recibido", v.observaciones
@@ -368,7 +378,16 @@ def _registrar_documento(db: Session, e: Expediente, doc: Documento, validado, s
     """Registra el archivo recibido (validación IA/Modo Prueba) y su trazabilidad (B3: `recibido_en`, `recibido_canal`).
     B5: NUNCA toca `postulacion.etapa` — el candidato sigue en Contratación/Onboarding hasta que RH lo mueva."""
     titular = e.candidato.nombre if e.candidato else ""
-    if modo_prueba_activo(db):
+    demo = ambiente_prueba() and not modo_prueba_activo(db)
+    if demo:
+        # 2026-10-05 (demo): se guarda de inmediato como «Recibido · Demo», sin IA ni rechazo automático.
+        v = ia.DocumentoValidado(
+            tipo_detectado=doc.tipo, es_documento_oficial=True, coincide_tipo=True, legible=True, completo=True, vigente=None,
+            nombre_detectado=None, coincide_titular=None, motivo_rechazo=None,
+            observaciones="Recibido · Demo: sin validación automática.",
+        )
+        con_ia = True
+    elif modo_prueba_activo(db):
         # 2026-09-18 (Modo Prueba TOTAL): se salta el OCR/IA y cualquier PDF o imagen queda válido de inmediato.
         v = ia.DocumentoValidado(
             tipo_detectado=doc.tipo, es_documento_oficial=True, coincide_tipo=True, legible=True, completo=True, vigente=None,
@@ -387,7 +406,7 @@ def _registrar_documento(db: Session, e: Expediente, doc: Documento, validado, s
     doc.validacion = v.model_dump()
     doc.estado, doc.notas_ia = _resolver_estado(v, con_ia)
     # vuelve a quedar pendiente de revisión humana («Por revisar»); en Modo Prueba queda «Aprobado» (Onboarding v2)
-    doc.revisado_por = "Modo Prueba" if (modo_prueba_activo(db) and doc.estado == "recibido") else ""
+    doc.revisado_por = ("Demo" if demo else "Modo Prueba") if ((demo or modo_prueba_activo(db)) and doc.estado == "recibido") else ""
     if doc.entregado:  # B3: recibido (o digital en revisión) → fecha/hora y canal de recepción
         doc.recibido_en = doc.subido_en
         doc.recibido_canal = _canal_recepcion(subido_por)
@@ -595,6 +614,9 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
     c = e.candidato
     if not c:
         return None
+    existente = _colaborador_de(db, e)
+    if existente:
+        return existente  # 2026-10-05: idempotente — nunca un segundo colaborador del mismo expediente
     # Fase 2: la vacante es la de la POSTULACIÓN de este expediente (decisión P5).
     vac = e.postulacion.vacante if e.postulacion else None
 
@@ -633,6 +655,10 @@ def _crear_colaborador(db: Session, e: Expediente, u: Usuario) -> Optional[Colab
         "condiciones_guardadas_en": e.condiciones_guardadas_en.isoformat() if e.condiciones_guardadas_en else None,
         "alta_por": u.nombre, "alta_en": datetime.now(timezone.utc).isoformat(),
     }
+    try:
+        col.datos_alta = _snapshot_datos_alta(e.postulacion, e, None)  # CURP, RFC, NSS, nacimiento, domicilio… de la ficha
+    except Exception:  # noqa: BLE001 — los datos de alta nunca bloquean la creación del colaborador
+        col.datos_alta = {}
     db.add(col)
     db.flush()
     col.codigo = f"COL-{100 + col.id}"
@@ -676,6 +702,8 @@ def capturar_datos_alta(exp_id: int, datos: DatosAltaIn, db: Session = Depends(g
         raise HTTPException(409, "El expediente no está ligado a una postulación.")
     if e.estado_sap == fraiche.ESTADO_LISTO_SAP:
         e.estado_sap = ""  # una corrección vuelve a exigir confirmación
+    _validar_datos_alta(datos)
+    _guardar_en_ficha(db, c, datos.campos, u.nombre)
     dp = dict(c.datos_personales or {})
     origen = dict(dp.get("origen") or {})
     for k in fraiche.CAMPOS_PERSONALES_SAP:
@@ -694,6 +722,10 @@ def capturar_datos_alta(exp_id: int, datos: DatosAltaIn, db: Session = Depends(g
     da = dict(e.datos_alta or {})
     da_origen = dict(da.get("origen") or {})
     for k in fraiche.CAMPOS_ALTA_EDITABLES:
+        if k in CAMPOS_EN_FICHA:
+            da.pop(k, None)  # 2026-10-05: nombre/correo/teléfono se corrigen en la FICHA, no como sobreescritura
+            da_origen.pop(k, None)
+            continue
         if k in datos.campos:
             val = str(datos.campos.get(k) or "").strip()[:300]
             if val:
@@ -704,13 +736,161 @@ def capturar_datos_alta(exp_id: int, datos: DatosAltaIn, db: Session = Depends(g
                 da_origen.pop(k, None)
     da["origen"] = da_origen
     e.datos_alta = da
+    _refrescar_colaborador(db, e, c, p, cuenta)
     registrar(db, u.nombre, "datos_alta_capturados", "expediente", str(e.id), {"personales": [k for k in fraiche.CAMPOS_PERSONALES_SAP if k in datos.personales], "campos": list(datos.campos.keys()), "correo_rh": u.correo})
     db.commit()
     return fraiche.datos_alta_sap(p, e, cuenta)
 
 
+@router.post("/expedientes/{exp_id}/datos-alta/prueba")
+def completar_datos_prueba(exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """2026-10-05, SOLO demo: «Completar con datos de prueba» llena ÚNICAMENTE lo vacío (formato válido, ficticio);
+    nunca sobrescribe un dato existente."""
+    from ..services.configuracion import es_prueba
+
+    if not es_prueba(db):
+        raise HTTPException(403, "«Completar con datos de prueba» solo existe en el ambiente demo.")
+    e = _expediente(db, exp_id, cuenta.id)
+    p, c = e.postulacion, e.candidato
+    if not (p and c):
+        raise HTTPException(409, "El expediente no está ligado a una postulación.")
+    vista = fraiche.datos_alta_sap(p, e, cuenta)
+    vacios = {x["clave"] for b in vista["bloques"] for x in b["campos"] if not str(x["valor"]).strip()}
+    prueba = _valores_prueba(c)
+    llenados: List[str] = []
+    dp = dict(c.datos_personales or {})
+    origen = dict(dp.get("origen") or {})
+    da = dict(e.datos_alta or {})
+    da_origen = dict(da.get("origen") or {})
+    for k in vacios:
+        val = prueba.get(k)
+        if not val:
+            continue
+        if k == "correo":
+            c.correo = val
+        elif k == "telefono":
+            c.telefono = val
+        elif k == "domicilio":
+            fraiche.cambiar_domicilio(dp, c, val, u.nombre, "Datos de prueba (demo)")
+            origen[k] = fraiche.ORIGEN_DATOS_PRUEBA
+        elif k in fraiche.CAMPOS_PERSONALES_SAP:
+            dp[k], origen[k] = val, fraiche.ORIGEN_DATOS_PRUEBA
+        elif k in fraiche.CAMPOS_ALTA_EDITABLES:
+            da[k], da_origen[k] = val, fraiche.ORIGEN_DATOS_PRUEBA
+        else:
+            continue
+        llenados.append(k)
+    dp["origen"], da["origen"] = origen, da_origen
+    c.datos_personales, e.datos_alta = dp, da
+    if llenados and e.estado_sap == fraiche.ESTADO_LISTO_SAP:
+        e.estado_sap = ""
+    _refrescar_colaborador(db, e, c, p, cuenta)
+    registrar(db, u.nombre, "datos_alta_prueba", "expediente", str(e.id), {"campos": sorted(llenados), "correo_rh": u.correo})
+    db.commit()
+    return {**fraiche.datos_alta_sap(p, e, cuenta), "llenados": sorted(llenados)}
+
+
+CAMPOS_EN_FICHA = ("nombre", "correo", "telefono")
+_RE_CURP = re.compile(r"^[A-Z]{4}\d{6}[HMX][A-Z]{5}[A-Z0-9]\d$")
+_RE_RFC = re.compile(r"^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$")
+_RE_CORREO = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validar_datos_alta(datos: "DatosAltaIn") -> None:
+    """Formato de lo que RH corrige (solo lo que trae valor; vacío = pendiente, nunca error)."""
+    pe, ca = datos.personales or {}, datos.campos or {}
+    curp = str(pe.get("curp") or "").strip().upper()
+    if curp and not _RE_CURP.match(curp):
+        raise HTTPException(400, "La CURP debe tener 18 caracteres con el formato oficial (ej. GOMA950515HDFRRN09).")
+    rfc = str(pe.get("rfc") or "").strip().upper()
+    if rfc and not _RE_RFC.match(rfc):
+        raise HTTPException(400, "El RFC debe tener 12 o 13 caracteres (ej. GOMA950515AB1).")
+    nss = re.sub(r"\D", "", str(pe.get("nss") or ""))
+    if str(pe.get("nss") or "").strip() and len(nss) != 11:
+        raise HTTPException(400, "El NSS debe tener 11 dígitos.")
+    if pe.get("nss"):
+        pe["nss"] = nss
+    fn = str(pe.get("fecha_nacimiento") or "").strip()
+    if fn:
+        try:
+            nacimiento = datetime.fromisoformat(fn[:10])
+        except ValueError:
+            raise HTTPException(400, "Fecha de nacimiento inválida (usa AAAA-MM-DD).")
+        if not (1930 <= nacimiento.year <= datetime.now().year - 15):
+            raise HTTPException(400, "Revisa la fecha de nacimiento.")
+    correo = str(ca.get("correo") or "").strip()
+    if correo and not _RE_CORREO.match(correo):
+        raise HTTPException(400, "El correo no tiene un formato válido.")
+    tel = re.sub(r"\D", "", str(ca.get("telefono") or ""))
+    if str(ca.get("telefono") or "").strip():
+        if len(tel) == 12 and tel.startswith("52"):
+            tel = tel[2:]
+        if len(tel) != 10:
+            raise HTTPException(400, "El teléfono debe tener 10 dígitos.")
+        ca["telefono"] = tel
+    if "nombre" in ca and not str(ca.get("nombre") or "").strip():
+        raise HTTPException(400, "El nombre completo no puede quedar vacío.")
+
+
+def _guardar_en_ficha(db: Session, c: Candidato, campos: dict, actor: str) -> None:
+    """Nombre, correo y teléfono corregidos en el alta se guardan en la FICHA de la persona (una sola fuente)."""
+    cambios = {}
+    for k in CAMPOS_EN_FICHA:
+        if k not in campos:
+            continue
+        val = str(campos.get(k) or "").strip()[:200]
+        if k == "nombre" and not val:
+            continue
+        if val != (getattr(c, k) or ""):
+            cambios[k] = {"antes": getattr(c, k) or "", "despues": val}
+            setattr(c, k, val)
+    if cambios:
+        registrar(db, actor, "ficha_corregida_en_alta", "candidato", c.codigo, cambios)
+
+
+def _valores_prueba(c: Candidato) -> dict:
+    """Valores ficticios con formato válido para el ambiente demo."""
+    partes = [x for x in re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ ]", "", c.nombre or "").upper().split() if x] or ["PRUEBA"]
+    sin_acento = str.maketrans("ÁÉÍÓÚÑ", "AEIOUX")
+    pa = (partes[1] if len(partes) > 1 else partes[0]).translate(sin_acento)
+    sa = (partes[2] if len(partes) > 2 else "X").translate(sin_acento)
+    no = partes[0].translate(sin_acento)
+    vocal = next((ch for ch in pa[1:] if ch in "AEIOU"), "X")
+    base = f"{pa[0]}{vocal}{sa[0]}{no[0]}950515"
+    return {
+        "fecha_nacimiento": "1995-05-15", "curp": f"{base}HDFXXX09", "rfc": f"{base}AB1", "nss": "12345678901",
+        "domicilio": "Calle de Prueba 123, Col. Centro, Cuauhtémoc, Ciudad de México, C.P. 06000",
+        "correo": f"{no.lower()}.{pa.lower()}@ejemplo.com", "telefono": "5500000000",
+        "jefe": "Jefe de prueba", "horario": "Lunes a sábado, 9:00 a 18:00", "periodicidad": "Quincenal",
+        "sucursal": "Sucursal de prueba", "genero": "Prefiero no decir",
+    }
+
+
+def _refrescar_colaborador(db: Session, e: Expediente, c: Candidato, p: Postulacion, cuenta: Cuenta) -> None:
+    """Si ya hay colaborador, sus datos de contacto y de alta siguen a la ficha corregida (misma persona)."""
+    col = _colaborador_de(db, e)
+    if not col:
+        return
+    col.nombre, col.correo, col.telefono = c.nombre, c.correo or "", c.telefono or ""
+    col.datos_alta = _snapshot_datos_alta(p, e, cuenta)
+
+
+def _colaborador_de(db: Session, e: Expediente) -> Optional[Colaborador]:
+    return (db.query(Colaborador).filter(Colaborador.expediente_id == e.id, Colaborador.eliminado_en.is_(None))
+            .order_by(Colaborador.id.asc()).first())
+
+
+def _snapshot_datos_alta(p: Optional[Postulacion], e: Expediente, cuenta: Optional[Cuenta]) -> dict:
+    if not p:
+        return {}
+    from ..services import sap as _sap
+
+    vista = fraiche.datos_alta_sap(p, e, cuenta)
+    return {**_sap.carga(vista), "actualizado_en": datetime.now(timezone.utc).isoformat()}
+
+
 @router.post("/expedientes/{exp_id}/confirmar-datos-alta")
-def confirmar_datos_alta(exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+async def confirmar_datos_alta(exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
     """«Confirmar datos para alta» → estado «Listo para enviar a SAP» y mensaje «Conexión con SAP pendiente de
     configurar». NO envía información, NO asigna número de empleado ni afirma que el alta en SAP ocurrió."""
     e = _expediente(db, exp_id, cuenta.id)
@@ -727,9 +907,16 @@ def confirmar_datos_alta(exp_id: int, db: Session = Depends(get_db), u: Usuario 
         "evento": "listo_para_sap", "texto": "Datos para alta confirmados — Listo para enviar a SAP (conexión pendiente de configurar)",
         "usuario": u.nombre, "fecha": e.sap_confirmado_en.isoformat(),
     }]
+    sap_r = None
+    if e.estado == "alta":
+        # 2026-10-05: con el colaborador ya dado de alta, los datos confirmados van a SAP (o quedan en «Conexión pendiente»)
+        from ..services import sap as _sap
+
+        sap_r = await _sap.enviar(e, vista, u.nombre)
+        registrar(db, u.nombre, "sap_envio", "expediente", str(e.id), {"estado": e.sap_envio, "respuesta": e.sap_respuesta})
     registrar(db, u.nombre, "datos_alta_confirmados", "expediente", str(e.id), {"postulacion": p.codigo, "estado_sap": e.estado_sap, "correo_rh": u.correo})
     db.commit()
-    return {**fraiche.datos_alta_sap(p, e, cuenta), "expediente": expediente_dict(e)}
+    return {**fraiche.datos_alta_sap(p, e, cuenta), "expediente": expediente_dict(e), "sap": sap_r}
 
 
 class AltaIn(BaseModel):
@@ -748,7 +935,12 @@ async def alta(
     crearía un Colaborador duplicado, así que se queda tan duro como el gate de consentimiento."""
     e = _expediente(db, exp_id, cuenta.id)
     if e.estado == "alta":
-        raise HTTPException(409, f"El expediente ya fue dado de alta por {e.alta_autorizada_por}.")
+        # 2026-10-05: repetir la acción NO duplica ni pide recaptura — regresa al colaborador existente
+        col = _colaborador_de(db, e) or _crear_colaborador(db, e, u)
+        db.commit()
+        return {"ok": True, "yaExistia": True, "notificaciones": [], "expediente": expediente_dict(e),
+                "colaborador": colaborador_dict(col) if col else None,
+                "mensaje": f"Ya estaba dado de alta por {e.alta_autorizada_por}; no se creó un duplicado."}
     # 2026-09-18 (Modo Prueba TOTAL, pedido del cliente): con modo_prueba activo se omite POR COMPLETO la
     # validación de integridad del expediente (documentos adjuntos, 100 %, confirmación de RH) — el flag
     # forzar_prueba ya no es necesario. Con Modo Prueba apagado todo sigue exigiéndose.
@@ -795,6 +987,14 @@ async def alta(
     )
 
     colaborador = _crear_colaborador(db, e, u)
+    # 2026-10-05: SAP va APARTE del alta en Colaboradores. Con los datos ya confirmados se envían (o, en demo / sin
+    # conexión, quedan «Listo para SAP · Conexión pendiente»); sin confirmar, SAP sigue «Por preparar».
+    sap_r = None
+    if e.postulacion and e.estado_sap == fraiche.ESTADO_LISTO_SAP:
+        from ..services import sap as _sap
+
+        sap_r = await _sap.enviar(e, fraiche.datos_alta_sap(e.postulacion, e, cuenta), u.nombre)
+        registrar(db, u.nombre, "sap_envio", "expediente", str(e.id), {"estado": e.sap_envio, "respuesta": e.sap_respuesta})
 
     p = e.postulacion
     resultados: List[dict] = []
@@ -831,7 +1031,26 @@ async def alta(
         "notificaciones": resultados,
         "expediente": expediente_dict(e),
         "colaborador": colaborador_dict(colaborador) if colaborador else None,
+        "sap": sap_r,
     }
+
+
+@router.post("/expedientes/{exp_id}/sap/enviar")
+async def enviar_sap(exp_id: int, db: Session = Depends(get_db), u: Usuario = Depends(usuario_decisor), cuenta: Cuenta = Depends(cuenta_actual)):
+    """Reintento explícito del envío a SAP (requiere alta y datos confirmados). En demo nunca envía."""
+    from ..services import sap as _sap
+
+    e = _expediente(db, exp_id, cuenta.id)
+    if e.estado != "alta" or not e.postulacion:
+        raise HTTPException(409, "Primero confirma el alta del colaborador.")
+    if e.estado_sap != fraiche.ESTADO_LISTO_SAP:
+        raise HTTPException(409, "Primero confirma los datos para alta.")
+    if e.sap_envio == "confirmado":
+        return {**fraiche.datos_alta_sap(e.postulacion, e, cuenta), "sap": {"enviado": False, "estado": "confirmado", "texto": _sap.texto_estado(e)}}
+    r = await _sap.enviar(e, fraiche.datos_alta_sap(e.postulacion, e, cuenta), u.nombre)
+    registrar(db, u.nombre, "sap_envio", "expediente", str(e.id), {"estado": e.sap_envio, "respuesta": e.sap_respuesta})
+    db.commit()
+    return {**fraiche.datos_alta_sap(e.postulacion, e, cuenta), "sap": r}
 
 
 _MESES_LARGO = [

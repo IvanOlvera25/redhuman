@@ -121,6 +121,16 @@ def _ev_validacion(ev, nombre: str, etapa: str, clave: str) -> dict:
 
     est = sev.estado_fraiche(ev)
     revisor = ev.revisada_por or ev.resultado_cargado_por or ev.responsable or ""
+    if ev.tipo == "referencias" and est in ("completado", "en_proceso", "pendiente"):
+        r = sev.resumen_referencias(ev)
+        if est == "completado":
+            dic = ev.dictamen or sev.dictamen_referencias(ev.referencias or [])
+            return _act(clave, nombre, etapa, "hecha", resultado=f"Completado · {sev.DICTAMENES_GENERALES.get(dic, dic)}",
+                        tono="bad" if dic == "desfavorable" else "warn" if dic == "con_observaciones" else "good",
+                        revisado_por=revisor, fecha=ev.revisada_en or ev.resultado_cargado_en, no_cumple=dic == "desfavorable",
+                        accion={"tipo": "ver_referencias", "codigo": ev.codigo})
+        return _act(clave, nombre, etapa, "en_curso", resultado=f"En proceso · {r['texto']}", tono="neutral", revisado_por=ev.responsable or "",
+                    accion={"tipo": "validar_referencias", "codigo": ev.codigo})
     if est in ("cancelada", "no_realizada"):
         return _act(clave, nombre, etapa, "pendiente", resultado=sev.etiqueta_estado_fraiche(ev), tono="warn",
                     detalle=ev.motivo_fallida or "", accion={"tipo": "agregar_evaluacion", "evaluacion": ev.tipo})

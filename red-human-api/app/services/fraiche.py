@@ -571,6 +571,9 @@ ESTADOS_EVALUACION_EXTERNA = {
     "con_resultado": "Con resultado",
     "no_realizada": "No realizada",
     "cancelada": "Cancelada",
+    # Referencias laborales (2026-10-05): se completan al validar las requeridas, sin dictamen aparte de RH.
+    "en_proceso": "En proceso",
+    "completado": "Completado",
 }
 # Dictamen médico (spec §10): el médico elige Apto / Apto condicionado / No recomendable; se guarda
 # internamente como Favorable / Con observaciones / Desfavorable.
@@ -730,8 +733,31 @@ def datos_alta_sap(p, e, cuenta=None) -> dict:
             x["nombre"] = nombre
             campos.append(x)
         bloques.append({"clave": b["clave"], "nombre": b["nombre"], "campos": campos})
-    faltantes = [x["nombre"] for b in bloques for x in b["campos"] if x["faltante"] and x["clave"] not in ("genero", "horario", "periodicidad", "jefe", "domicilio", "correo")]
+    for b in bloques:
+        for x in b["campos"]:
+            x["opcional"] = x["clave"] in CAMPOS_ALTA_OPCIONALES  # 2026-10-05: lo opcional nunca bloquea
+    faltantes = [x["nombre"] for b in bloques for x in b["campos"] if x["faltante"] and not x["opcional"]]
+    from . import sap as _sap
+    from .configuracion import ambiente_prueba as _demo
+
+    col = None
+    if e is not None and e.estado == "alta":
+        from ..models import Colaborador
+        from sqlalchemy.orm import object_session
+
+        ses = object_session(e)
+        col = ses.query(Colaborador).filter(Colaborador.expediente_id == e.id, Colaborador.eliminado_en.is_(None)).first() if ses else None
     return {
+        "demo": _demo(),
+        # Alta en Colaboradores y estado en SAP son DOS cosas distintas (2026-10-05)
+        "colaborador": {"codigo": col.codigo, "nombre": col.nombre, "altaEn": col.creado_en.isoformat() if col.creado_en else None,
+                        "altaPor": col.dado_de_alta_por} if col else None,
+        "sapEnvio": (e.sap_envio if e else "") or "",
+        "sapEnvioTexto": _sap.texto_estado(e) if e else "Por preparar",
+        "sapConfirmado": bool(e and e.sap_envio == "confirmado"),
+        "sapIdEmpleado": (e.sap_id_empleado if e else "") or "",
+        "sapEnviadoEn": e.sap_enviado_en.isoformat() if e and e.sap_enviado_en else None,
+        "sapConfigurado": _sap.configurado(),
         "bloques": bloques,
         "faltantes": faltantes,
         "excluye": ["Información médica", "Información socioeconómica"],
@@ -744,6 +770,8 @@ def datos_alta_sap(p, e, cuenta=None) -> dict:
 
 
 CAMPOS_PERSONALES_SAP = ("curp", "rfc", "nss", "domicilio", "fecha_nacimiento", "genero")
+CAMPOS_ALTA_OPCIONALES = ("genero", "horario", "periodicidad", "jefe", "domicilio", "correo")
+ORIGEN_DATOS_PRUEBA = "Datos de prueba (demo)"
 CAMPOS_ALTA_EDITABLES = ("nombre", "correo", "telefono", "empresa", "sucursal", "puesto", "jefe", "fecha_ingreso", "tipo_contratacion", "sueldo", "horario", "periodicidad")
 
 

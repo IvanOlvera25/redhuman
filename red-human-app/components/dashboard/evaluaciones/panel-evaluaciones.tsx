@@ -72,7 +72,12 @@ function tonoDictamen(e: EvaluacionCandidato): "good" | "warn" | "bad" {
       ? "warn"
       : "good";
 }
+/** 2026-10-05: referencias completas (todas las requeridas validadas) — sin segunda calificación de RH. */
+function refsCompletas(e: EvaluacionCandidato) {
+  return e.tipo === "referencias" && e.estadoFraiche === "completado";
+}
 function tonoEstado(e: EvaluacionCandidato): "good" | "warn" | "bad" | "neutral" | "brand" {
+  if (refsCompletas(e)) return e.dictamen === "desfavorable" ? "bad" : e.dictamen === "con_observaciones" ? "warn" : "good";
   if (e.estado === "revisada") return tonoDictamen(e);
   if (e.estadoFraiche === "realizada_pendiente") return "warn";
   if (e.estadoFraiche === "con_resultado") return "brand";
@@ -83,6 +88,7 @@ function cerrada(e: EvaluacionCandidato) {
 }
 /** 2026-10-02 (§8): estado CLARO de la psicometría (Pendiente / En curso / Esperando resultado / Completada). */
 function textoEstado(e: EvaluacionCandidato) {
+  if (e.tipo === "referencias") return e.estadoFraicheTexto;
   if (e.estado === "revisada" && e.dictamenTexto) return `Revisada · ${e.dictamenTexto}`;
   if (e.tipo === "psicometrica" && e.estadoPsicometriaTexto) return e.estadoPsicometriaTexto;
   return e.estadoFraicheTexto;
@@ -187,6 +193,7 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
   const [cancelar, setCancelar] = useState<EvaluacionCandidato | null>(null);
   const [responsable, setResponsable] = useState<EvaluacionCandidato | null>(null);
   const [referencias, setReferencias] = useState<EvaluacionCandidato | null>(null);
+  const [verRefs, setVerRefs] = useState<EvaluacionCandidato | null>(null);
   const [detalleMedico, setDetalleMedico] = useState<EvaluacionCandidato | null>(null);
   const [agregar, setAgregar] = useState(false);
   /* Resultado del último envío de liga externa (líneas por canal + liga para copiar). */
@@ -289,17 +296,27 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
                       <SkipForward className="h-4 w-4" /> Simular: {PASOS[e.siguientePaso]}
                     </Button>
                   )}
-                  {live && e.estado === "resultado_recibido" && (
+                  {live && e.estado === "resultado_recibido" && e.tipo !== "referencias" && (
                     <Button size="sm" onClick={() => setRevisar(e)}><CheckCircle2 className="h-4 w-4" /> Revisar</Button>
+                  )}
+                  {/* 2026-10-05: referencias se validan DENTRO del sistema; completas → «Ver resultado» */}
+                  {e.tipo === "referencias" && refsCompletas(e) && (
+                    <Button size="sm" variant="outline" onClick={() => setVerRefs(e)}><Eye className="h-4 w-4" /> Ver resultado</Button>
+                  )}
+                  {live && e.tipo === "referencias" && !refsCompletas(e) && !cerrada(e) && e.estado !== "en_espera_consentimiento" && (
+                    <Button size="sm" onClick={() => setReferencias(e)}><Users className="h-4 w-4" /> Validar referencias</Button>
                   )}
                   {live && (
                     <MenuAcciones
                       acciones={[
-                        ...((e.estado === "pendiente" || e.estado === "en_proceso" || e.estadoFraiche === "realizada_pendiente") && !cerrada(e) && !(e.tipo === "medico" && e.informeRestringido)
+                        ...(e.tipo === "referencias" && e.estado !== "fallida"
+                          ? [{ etiqueta: "Adjuntar informe de respaldo…", icono: <FileUp className="h-4 w-4" />, onClick: () => setResultado(e) }]
+                          : []),
+                        ...((e.estado === "pendiente" || e.estado === "en_proceso" || e.estadoFraiche === "realizada_pendiente") && !cerrada(e) && !(e.tipo === "medico" && e.informeRestringido) && e.tipo !== "referencias"
                           ? [{ etiqueta: "Adjuntar resultado / informe…", icono: <FileUp className="h-4 w-4" />, onClick: () => setResultado(e) }]
                           : []),
-                        ...(!cerrada(e) && e.tipo !== "psicometrica"
-                          ? [{ etiqueta: "Enviar liga al responsable", icono: <Link2 className="h-4 w-4" />, onClick: () => accion(e.id, async () => {
+                        ...(!cerrada(e) && e.tipo !== "psicometrica" && !refsCompletas(e)
+                          ? [{ etiqueta: e.tipo === "referencias" ? "Enviar liga a responsable externo" : "Enviar liga al responsable", icono: <Link2 className="h-4 w-4" />, onClick: () => accion(e.id, async () => {
                               const r = await ligaExternaEvaluacion(e.id, { enviar: true });
                               if (r.ok) setEnvioLiga({ id: e.id, liga: r.data.liga, lineas: lineasResultados(r.data.resultados) });
                               return r;
@@ -317,9 +334,6 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
                           : []),
                         ...(!cerrada(e)
                           ? [{ etiqueta: "Editar responsable / cita", icono: <UserCog className="h-4 w-4" />, onClick: () => setResponsable(e) }]
-                          : []),
-                        ...(e.tipo === "referencias"
-                          ? [{ etiqueta: "Referencias laborales…", icono: <Users className="h-4 w-4" />, onClick: () => setReferencias(e) }]
                           : []),
                         ...(e.estado === "en_espera_consentimiento" && e.ligaConsentimiento
                           ? [
@@ -494,6 +508,7 @@ export function PanelEvaluaciones({ codigo, puesto, live, version, contactos, cl
       {revisar && <ModalRevisar e={revisar} onClose={() => setRevisar(null)} onListo={() => { setRevisar(null); void cargar(); }} />}
       {cancelar && <ModalCancelar e={cancelar} onClose={() => setCancelar(null)} onListo={() => { setCancelar(null); void cargar(); }} />}
       {responsable && <ModalResponsable e={responsable} contactos={contactos} clienteNombre={clienteNombre} onClose={() => setResponsable(null)} onListo={() => { setResponsable(null); void cargar(); }} />}
+      {verRefs && <ResultadoReferencias e={verRefs} onClose={() => setVerRefs(null)} />}
       {referencias && <ReferenciasEditor e={referencias} onClose={() => setReferencias(null)} onListo={() => { setReferencias(null); void cargar(); }} />}
       {detalleMedico && <ModalDetalleMedico e={detalleMedico} onClose={() => setDetalleMedico(null)} />}
     </Card>
@@ -894,6 +909,30 @@ function ModalResultado({ e, onClose, onListo }: { e: EvaluacionCandidato; onClo
     );
   }
 
+  if (e.tipo === "referencias") {
+    // 2026-10-05: el informe de referencias es solo RESPALDO; adjuntarlo nunca valida ni completa
+    return (
+      <ModalMarco titulo={`Informe de respaldo · ${e.nombre}`} subtitulo="Se guarda como respaldo. Las referencias se completan al validarlas con «Validar referencias»." onClose={onClose}>
+        <input ref={ref} type="file" accept="application/pdf,image/*" className="hidden" onChange={(x) => setArchivo(x.target.files?.[0] ?? null)} />
+        <Button variant="outline" size="sm" onClick={() => ref.current?.click()}><FileUp className="h-4 w-4" /> {archivo ? archivo.name : "Elegir informe (PDF o imagen)"}</Button>
+        {error && <p className="mt-3 text-sm font-semibold text-bad">{error}</p>}
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={onClose} disabled={ocupado}>Cancelar</Button>
+          <Button size="sm" disabled={ocupado || !archivo} onClick={async () => {
+            setOcupado(true);
+            setError("");
+            const r = await cargarResultadoEvaluacion(e.id, "", archivo, {});
+            setOcupado(false);
+            if (!r.ok) return setError(r.error);
+            onListo();
+          }}>
+            {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileUp className="h-4 w-4" />} Guardar respaldo
+          </Button>
+        </div>
+      </ModalMarco>
+    );
+  }
+
   return (
     <ModalMarco titulo={`Resultado · ${e.nombre}`} subtitulo="Queda registrado quién lo cargó y cuándo." onClose={onClose}>
       <div className="mb-3 grid grid-cols-2 gap-2">
@@ -1061,7 +1100,7 @@ function ReferenciasEditor({ e, onClose, onListo }: { e: EvaluacionCandidato; on
   const [error, setError] = useState("");
   const cambiar = (i: number, p: Partial<ReferenciaLaboral>) => setFilas(filas.map((f, j) => (j === i ? { ...f, ...p } : f)));
   return (
-    <ModalMarco titulo={`Referencias laborales · ${e.nombre}`} subtitulo="Datos de cada referencia y su validación. Capturar contactos no es validarlos; para cerrar como Favorable deben estar las referencias verificadas." onClose={onClose} ancho="max-w-4xl">
+    <ModalMarco titulo={`Validar referencias · ${e.nombre}`} subtitulo="Contacta a cada referencia y registra aquí lo que respondió. Al validar las requeridas la evaluación queda «Completado». Si nadie contesta, márcala «No contactada» (no es desfavorable)." onClose={onClose} ancho="max-w-4xl">
       <div className="mb-3 flex flex-wrap items-end gap-3">
         <CampoRH label="Referencias a validar"><input type="number" min={1} max={10} value={requeridas} onChange={(x) => setRequeridas(x.target.value)} className={inputRH} /></CampoRH>
         {e.referenciasResumen && <p className="pb-2 text-[12px] text-ink-2">{e.referenciasResumen.texto}</p>}
@@ -1076,6 +1115,7 @@ function ReferenciasEditor({ e, onClose, onListo }: { e: EvaluacionCandidato; on
               </p>
               <button type="button" className="inline-flex items-center gap-1 text-[11px] text-bad hover:underline" onClick={() => setFilas(filas.filter((_, j) => j !== i))}><Trash2 className="h-3 w-3" /> Quitar</button>
             </div>
+            {(f.empresa || f.contacto_nombre || f.telefono) && <DatosReferencia f={f} />}
             <FormReferencia f={f} cambiar={(p) => cambiar(i, p)} validar />
           </div>
         ))}
@@ -1093,8 +1133,77 @@ function ReferenciasEditor({ e, onClose, onListo }: { e: EvaluacionCandidato; on
           if (!r.ok) return setError(r.error);
           onListo();
         }}>
-          {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <Users className="h-4 w-4" />} Guardar referencias
+          {ocupado ? <Loader2 className="h-4 w-4 animate-spin" /> : <Users className="h-4 w-4" />} Guardar validación
         </Button>
+      </div>
+    </ModalMarco>
+  );
+}
+
+/** Datos que dio el candidato (o RH) para contactar a la referencia: a la vista antes de llamar. */
+function DatosReferencia({ f }: { f: ReferenciaLaboral }) {
+  const filas: [string, string][] = [
+    ["Empresa", f.empresa], ["Puesto", f.puesto_candidato], ["Periodo", f.periodo], ["Contacto", f.contacto_nombre],
+    ["Cargo", f.contacto_cargo], ["Teléfono", f.telefono], ["Correo", f.correo],
+  ];
+  return (
+    <dl className="mb-3 grid gap-x-4 gap-y-1 rounded-lg border border-border-soft bg-surface px-3 py-2 text-[12px] sm:grid-cols-2 lg:grid-cols-4">
+      {filas.map(([k, v]) => (
+        <div key={k} className="min-w-0">
+          <dt className="text-[10px] font-semibold uppercase tracking-wide text-ink-3">{k}</dt>
+          <dd className="truncate text-ink">{k === "Teléfono" && v ? <a href={`tel:${v}`} className="text-brand hover:underline">{v}</a> : v || "—"}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+const SI_NO_TEXTO: Record<string, string> = { si: "Sí", no: "No", no_informado: "No informado" };
+
+/** «Ver resultado» de referencias completas: respuestas, observaciones, adjuntos y quién/cuándo registró. */
+function ResultadoReferencias({ e, onClose }: { e: EvaluacionCandidato; onClose: () => void }) {
+  const refs = e.referencias ?? [];
+  const respaldo = (e.adjuntos ?? []).filter((a) => a.tipo === "respaldo" || !a.tipo);
+  return (
+    <ModalMarco titulo={`Resultado de referencias · ${e.nombre}`} subtitulo={`${e.referenciasResumen?.texto ?? ""}${e.dictamenTexto ? ` · ${e.dictamenTexto}` : ""}`} onClose={onClose} ancho="max-w-3xl">
+      <div className="flex flex-col gap-3">
+        {refs.map((r, i) => (
+          <div key={i} className="rounded-xl border border-border-soft bg-surface-2 p-3">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <p className="text-sm font-semibold">{r.empresa || `Referencia ${i + 1}`}</p>
+              <Badge tone={ESTADO_REF_TONO[r.estado ?? ""] ?? "neutral"}>{r.estadoTexto ?? r.estado}</Badge>
+              {r.resultado && <Badge tone={r.resultado === "desfavorable" ? "bad" : r.resultado === "con_observaciones" ? "warn" : "good"}>{RESULTADOS_REFERENCIA.find((x) => x.valor === r.resultado)?.texto ?? r.resultado}</Badge>}
+            </div>
+            <DatosReferencia f={{ ...REFERENCIA_VACIA, ...r }} />
+            <dl className="grid gap-x-4 gap-y-1.5 text-[12px] sm:grid-cols-2">
+              {([
+                ["Quién contestó", [r.contesto_nombre, r.contesto_cargo].filter(Boolean).join(" · ")],
+                ["Fecha y medio", [r.fecha_contacto, r.medio].filter(Boolean).join(" · ")],
+                ["¿Confirma el puesto?", SI_NO_TEXTO[r.confirma_puesto ?? ""] ?? ""],
+                ["¿Confirma el periodo?", SI_NO_TEXTO[r.confirma_periodo ?? ""] ?? ""],
+                ["¿Lo volverían a contratar?", SI_NO_TEXTO[r.recontrataria ?? ""] ?? ""],
+                ["Motivo de salida", r.motivo_salida ?? ""],
+                ["Desempeño", r.desempeno ?? ""],
+                ["Observaciones", r.observaciones ?? ""],
+              ] as [string, string][]).map(([k, v]) => (
+                <div key={k}><dt className="text-[10px] font-semibold uppercase tracking-wide text-ink-3">{k}</dt><dd className="text-ink">{v || "—"}</dd></div>
+              ))}
+            </dl>
+            {r.validada_por && (
+              <p className="mt-2 text-[11px] text-ink-3">Registrada por {r.validada_por}{r.validada_en ? ` · ${fechaHora(r.validada_en)}` : ""}</p>
+            )}
+          </div>
+        ))}
+        {respaldo.length > 0 && (
+          <div className="rounded-xl border border-border-soft p-3">
+            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-3">Adjuntos de respaldo</p>
+            {respaldo.map((a) => (
+              <a key={a.indice} href={urlAdjuntoEvaluacion(e.id, a.indice)} target="_blank" rel="noreferrer" className="block text-[12px] font-semibold text-brand hover:underline">
+                {a.nombre} <span className="font-normal text-ink-3">· {a.subido_por} · {fechaHora(a.subido_en)}</span>
+              </a>
+            ))}
+          </div>
+        )}
       </div>
     </ModalMarco>
   );

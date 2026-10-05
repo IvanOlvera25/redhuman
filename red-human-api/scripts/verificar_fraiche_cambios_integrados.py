@@ -290,8 +290,8 @@ with TestClient(app) as client:
                    "recontrataria": "no_informado"})
     CORREOS.clear()
     r = client.post(f"/evaluaciones-externas/publica/{tok_e}/referencias", json={"referencias": val})
-    check(r.json()["resumen"]["completas"] and r.json()["estadoTexto"] == "Con resultado", "con las requeridas validadas → resultado recibido")
-    check(any("Referencias laborales validadas" in c[1] for c in CORREOS), "se avisa a RH al terminar la validación")
+    check(r.json()["resumen"]["completas"] and r.json()["estadoTexto"] == "Completado", "con las requeridas validadas → Completado (sin segunda calificación de RH)")
+    check(any("Referencias laborales completadas" in c[1] for c in CORREOS), "se avisa a RH al terminar la validación")
 
     print("\n=== §13 Contrato en Contratación y Onboarding ===")
     p2 = db.query(Postulacion).filter(Postulacion.codigo == P2).first()

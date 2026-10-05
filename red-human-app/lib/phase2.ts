@@ -45,7 +45,22 @@ export interface DocExpediente {
   /** Fase 2: documento interno de RH (contrato firmado) — fuera del porcentaje y de lo que se pide al candidato. */
   interno?: boolean;
   aprobado?: boolean;
+  /** 2026-10-05: recibido en el ambiente demo (sin IA ni rechazo automático). */
+  demo?: boolean;
 }
+
+/** 2026-10-05: estado visible ÚNICO de un documento (pestañas «CV y documentos» y «Expediente»). */
+export function estadoDocVisible(d: DocExpediente): { texto: string; tono: "good" | "warn" | "bad" | "neutral"; motivo: string } {
+  if (d.estado === "rechazado") return { texto: "Rechazado", tono: "bad", motivo: d.notas || "El documento no corresponde a lo solicitado." };
+  if (d.estado === "no_aplica") return { texto: "No aplica", tono: "neutral", motivo: d.motivoNoAplica || "" };
+  if (d.demo && d.tieneArchivo) return { texto: "Recibido · Demo", tono: "good", motivo: "" };
+  const eo = d.estadoOnboarding;
+  if (eo) return { texto: eo, tono: eo === "Aprobado" ? "good" : eo === "Por revisar" ? "warn" : "neutral", motivo: eo === "Por revisar" ? d.notas || "" : "" };
+  return { texto: d.tieneArchivo ? "Recibido" : "Pendiente", tono: d.tieneArchivo ? "good" : "neutral", motivo: "" };
+}
+
+/** Mensaje mientras la validación automática (producción) revisa el archivo. */
+export const MENSAJE_VERIFICANDO_DOCUMENTO = "Documento recibido. Estamos verificando que corresponda a lo solicitado y sea legible.";
 
 /** Onboarding v2 (Fase 3): resumen del tablero. «No aplica» y «Cancelada» NO cuentan en el total (se muestran aparte). */
 export interface ResumenTableroOnboarding {

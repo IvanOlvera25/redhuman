@@ -108,6 +108,11 @@ class Settings(BaseSettings):
     # de sandbox (onboarding@resend.dev) solo entrega al correo con el que se creó la cuenta;
     # al verificar un dominio propio en Resend basta con cambiar RESEND_FROM, sin tocar código.
     resend_api_key: str = ""
+    # SAP SuccessFactors (2026-10-05): sin URL + credenciales no se envía nada («Conexión pendiente»).
+    sap_api_url: str = ""
+    sap_usuario: str = ""
+    sap_password: str = ""
+    sap_token: str = ""
     # 2026-09-18: el remitente SIEMPRE es del dominio redhuman.mx (correo.remitente() lo garantiza aunque
     # el .env traiga otro). El dominio debe estar verificado en Resend.
     resend_from: str = "Red Human AI <notificaciones@redhuman.mx>"

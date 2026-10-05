@@ -855,6 +855,8 @@ def documento_dict(d: Documento) -> dict:
         "tamano": d.tamano or 0,
         "subido": hace(d.subido_en) if d.subido_en else "",
         "revisadoPor": d.revisado_por or "",
+        # 2026-10-05: recibido en el ambiente demo (sin IA ni rechazo automático) → «Recibido · Demo»
+        "demo": (d.revisado_por or "") == "Demo",
         # 2026-09-20 (B3): trazabilidad — solicitud (fecha/hora + canal), recepción (fecha/hora + canal), historial
         "solicitadoEn": iso(d.solicitado_en),
         "solicitadoCanal": d.solicitado_canal or "",
@@ -989,6 +991,7 @@ def colaborador_dict(col: Colaborador) -> dict:
         "empresa": col.empresa,
         "tipoContratacion": col.tipo_contratacion or "",  # 2026-09-19
         "condicionesIngreso": col.condiciones_ingreso or {},
+        "datosAlta": col.datos_alta or {},  # 2026-10-05
         "ubicacion": col.ubicacion,
         "jefeDirecto": col.jefe_directo,
         "jefeId": _jefe_codigo(col),  # 2026-09-27: jefe como otro colaborador del roster

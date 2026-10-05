@@ -889,6 +889,12 @@ class Expediente(Base):
     estado_sap: Mapped[str] = mapped_column(String(30), default="")  # "" | listo_para_enviar_sap
     sap_confirmado_por: Mapped[str] = mapped_column(String(150), default="")
     sap_confirmado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 2026-10-05: envío a SAP SEPARADO del alta en Colaboradores (services/sap.py). sap_envio ∈ "" | conexion_pendiente |
+    # enviado (sin confirmación) | confirmado | error. «Alta confirmada en SAP» SOLO con `confirmado`.
+    sap_envio: Mapped[str] = mapped_column(String(30), default="")
+    sap_enviado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    sap_respuesta: Mapped[dict] = mapped_column(JSON, default=dict)
+    sap_id_empleado: Mapped[str] = mapped_column(String(60), default="")
 
     candidato: Mapped[Optional[Candidato]] = relationship(foreign_keys=[candidato_id])
     postulacion: Mapped[Optional["Postulacion"]] = relationship(back_populates="expediente")
@@ -1018,6 +1024,8 @@ class Colaborador(Base):
     # snapshot inmutable de ingreso (nunca se edita después del alta; es el registro histórico).
     tipo_contratacion: Mapped[str] = mapped_column(String(60), default="")
     condiciones_ingreso: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 2026-10-05: datos para el alta (fecha de nacimiento, CURP, RFC, NSS, domicilio…) tomados de la ficha al dar de alta
+    datos_alta: Mapped[dict] = mapped_column(JSON, default=dict)
     ubicacion: Mapped[str] = mapped_column(String(150), default="")
     jefe_directo: Mapped[str] = mapped_column(String(150), default="")  # nombre a mostrar
     # 2026-09-27 (Desempeño v2): el jefe como otro colaborador del roster (para proponer evaluador).
