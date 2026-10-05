@@ -473,4 +473,22 @@ with TestClient(app) as client:
     r = client.post(f"/evaluaciones/{evi['id']}/revisar", json={"dictamen": "con_observaciones", "comentario": "Validar en entrevista"})
     check(r.status_code == 200 and r.json()["dictamenTexto"] == "Con observaciones" and r.json()["tieneInforme"], "la conclusión de RH queda junto al reporte")
 
+    print("\n=== Telegram: el acceso a la prueba llega con botón (2026-10-05) ===")
+    from app.config import settings as _cfg  # noqa: E402
+    from app.services import telegram as _tg  # noqa: E402
+
+    BOTONES = []
+    async def _tg_envia(tel, texto, teclado=None):
+        BOTONES.append((tel, texto, teclado))
+        return {"enviado": True, "detalle": "ok"}
+    _prov, _cfg.whatsapp_provider, _tg.enviar_a_telefono = _cfg.whatsapp_provider, "telegram", _tg_envia
+    r = client.post(f"/evaluaciones/{evi['id']}/avisos", json={"destinatario": "candidato"})
+    _cfg.whatsapp_provider = _prov
+    tel, txt_tg, teclado = next(b for b in BOTONES if b[0] == "5581110004")
+    boton = (teclado or {}).get("inline_keyboard", [[{}]])[0][0]
+    check(boton.get("url") == "https://evaluacion.psicometrica.mx/login" and "Abrir prueba" in boton.get("text", ""),
+          "en Telegram el mensaje trae el botón «Abrir prueba» con la liga exacta")
+    check("\nhttps://evaluacion.psicometrica.mx/login\n" in txt_tg and "Tu clave de acceso: 9-ABC-1004-001" in txt_tg,
+          "y el texto lleva la liga y la clave cada una en su línea")
+
 print(f"\n🎉 Cambios integrados Fraiche (2026-10-02): {OK} comprobaciones OK")

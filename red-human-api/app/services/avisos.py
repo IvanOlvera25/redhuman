@@ -41,10 +41,15 @@ def _encabezado(rol: str, texto: str) -> str:
     return f"📋 Aviso para {ROLES.get(rol, rol).lower()}:\n{texto}"
 
 
-async def _mensaje(telefono: str, texto: str) -> dict:
+async def _mensaje(telefono: str, texto: str, liga: str = "", cta: str = "") -> dict:
+    """2026-10-05: en Telegram, si el aviso trae liga, además del texto va un BOTÓN con la liga (no se pierde en el texto)."""
     from .whatsapp import enviar_mensaje
 
     try:
+        if liga and settings.whatsapp_provider == "telegram" and liga.startswith("https://"):
+            from . import telegram as tg
+
+            return await tg.enviar_a_telefono(telefono, texto, {"inline_keyboard": [[{"text": f"👉 {cta or 'Abrir'}", "url": liga}]]})
         return await enviar_mensaje(telefono, texto)
     except Exception as ex:  # noqa: BLE001
         return {"enviado": False, "detalle": str(ex)[:200]}
@@ -105,7 +110,7 @@ async def avisar(
     if "whatsapp" in canales:
         if telefono:
             cuerpo = _encabezado(rol, texto)
-            r = await _mensaje(telefono, cuerpo)
+            r = await _mensaje(telefono, cuerpo, liga, cta)
             if r.get("sin_vinculo"):
                 from .telegram import liga_vinculo
 

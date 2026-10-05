@@ -472,10 +472,11 @@ def _texto_psicometria(ev: EvaluacionCandidato, p: Postulacion) -> str:
     vac = p.vacante.titulo if p.vacante else "la vacante"
     liga = sev.liga_candidato(ev)
     if liga and ev.clave_proveedor:
-        acceso = (f" Para contestarla entra a {liga} , escribe tu clave de acceso {ev.clave_proveedor} , acepta el aviso de "
-                  "privacidad y da clic en Ingresar.")
+        # 2026-10-05: la liga y la clave en su propia línea (en Telegram además va el botón «Abrir prueba»)
+        acceso = (f"\n\n👉 Entra aquí para contestarla:\n{liga}\n\n🔑 Tu clave de acceso: {ev.clave_proveedor}\n\n"
+                  "Escribe la clave, acepta el aviso de privacidad y da clic en «Ingresar».")
     elif liga:
-        acceso = f" Entra aquí: {liga}"
+        acceso = f"\n\n👉 Entra aquí para contestarla:\n{liga}"
     else:
         acceso = f" Tu clave de acceso: {ev.clave_proveedor}." if ev.clave_proveedor else ""
     base = f"Hola {nombre}. Como parte de tu proceso para {vac} en {_empresa(p)}, te asignamos la prueba «{ev.nombre}»."
@@ -499,7 +500,7 @@ async def _aviso_candidato(db: Session, ev: EvaluacionCandidato, p: Postulacion,
         if motivo:
             return [{"fecha": datetime.now(timezone.utc).isoformat(), "evento": evento, "destinatario": "candidato", "nombre": p.nombre,
                      "canal": "", "destino": "", "enviado": False, "estado": "fallido", "detalle": motivo}]
-        texto, liga, cta = _texto_psicometria(ev, p), sev.liga_candidato(ev), "Hacer mi prueba"
+        texto, liga, cta = _texto_psicometria(ev, p), sev.liga_candidato(ev), "Abrir prueba"
     elif ev.es_medico:
         if ev.consentimiento_aceptado_en:
             texto = f"Hola {nombre}. Tu estudio médico para {vac} en {_empresa(p)} quedó programado.{_cita_texto(ev)}"
