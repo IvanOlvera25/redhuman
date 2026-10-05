@@ -2259,6 +2259,9 @@ class EvaluacionCandidato(Base):
     # videoconferencia (fecha, hora y liga de la videollamada).
     modalidad: Mapped[str] = mapped_column(String(20), default="digital")
     liga_videollamada: Mapped[str] = mapped_column(String(500), default="")
+    # 2026-10-05: última vez que la consulta AUTOMÁTICA preguntó al proveedor (cada consulta gasta una «petición» de su
+    # paquete de API; se espacian por evaluación — ver services/psicometria_sync.py)
+    proveedor_consultado_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     @property
     def es_medico(self) -> bool:

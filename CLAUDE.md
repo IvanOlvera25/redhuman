@@ -533,6 +533,8 @@ Reemplaza en la rama `demo-fraiche` la vista «Ruta Fraiche / Etapas», la colum
   (`_texto_psicometria`: instrucciones + liga real + clave; nunca «el proveedor te enviará un correo»); presencial = cita y
   el responsable tiene «Abrir prueba». Ligas: `sev.liga_real` rechaza ejemplos; `liga_candidato` se puede pegar (alta o
   `PATCH`); sin liga del proveedor → `accesoIncompleto`. Adjuntar la prueba CONTESTADA (`tipo_adjunto=prueba_contestada`) no
-  es resultado. Resultados de proveedor: webhook + job `resultados_psicometria` cada 10 min (`services/psicometria_sync.py`,
-  el webhook de Psicométricas.mx está registrado a UN solo servidor). Momentos (citas, envíos) se serializan con zona
+  es resultado. Resultados de proveedor: webhook + job `resultados_psicometria` (`services/psicometria_sync.py`; el webhook de
+  Psicométricas.mx está registrado a UN solo servidor). 2026-10-05: CADA llamada gasta una «petición» de su paquete de API
+  (100): el job corre en UN proceso (candado), consulta cada evaluación máx. cada 6 h, tope diario `PSICOMETRICAS_CONSULTAS_DIA`
+  (8) y pausa 12 h ante 1001/1002/1003 — la versión cada 10 min en 2 workers agotó el paquete. Momentos (citas, envíos) se serializan con zona
   explícita (`serial.iso_utc`): SQLite regresa fechas sin zona y la pantalla mostraba 6 h de diferencia contra correo/chat.

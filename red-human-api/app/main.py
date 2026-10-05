@@ -139,7 +139,7 @@ async def lifespan(app: FastAPI):
     from .services.psicometria_sync import revisar_resultados_psicometria
 
     scheduler.add_job(
-        revisar_resultados_psicometria, "interval", minutes=10,
+        revisar_resultados_psicometria, "interval", minutes=30,
         id="resultados_psicometria", replace_existing=True,
         max_instances=1, coalesce=True, misfire_grace_time=300,
     )

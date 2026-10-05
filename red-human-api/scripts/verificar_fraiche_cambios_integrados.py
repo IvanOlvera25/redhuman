@@ -424,16 +424,46 @@ with TestClient(app) as client:
     _doc = FPDF(); _doc.add_page(); _doc.set_font("Helvetica", size=12); _doc.cell(0, 10, "Prueba contestada"); PDF_OK = bytes(_doc.output())
     r = client.post(f"/evaluaciones/{evi['id']}/resultado", data={"tipo_adjunto": "prueba_contestada"}, files={"archivo": ("contestada.pdf", PDF_OK, "application/pdf")})
     check(r.status_code == 200 and r.json()["estado"] == "en_proceso" and r.json()["adjuntos"], "adjuntar la prueba CONTESTADA no equivale a tener resultado")
-    _psi.consultar_candidato = lambda clave: [{"fecha_fin": "2026-10-04 12:00:00"}]
+    CONSULTAS = []
+    def _consulta(clave):
+        CONSULTAS.append(clave)
+        return [{"fecha_fin": "2026-10-04 12:00:00"}]
+    _psi.consultar_candidato = _consulta
     _psi.terminado = lambda filas: True
     _psi.resultado_json = lambda clave: {"cleaver": {"D": 70}}
     _psi.resultado_pdf = lambda clave: PDF_OK
+    from app.services import psicometria_sync as _sync  # noqa: E402
     from app.services.psicometria_sync import revisar_resultados_psicometria  # noqa: E402
 
+    if os.path.exists(_sync._ESTADO):
+        os.remove(_sync._ESTADO)
     n = asyncio.run(revisar_resultados_psicometria())
     db.expire_all()
     evr = db.query(EvaluacionCandidato).filter(EvaluacionCandidato.codigo == evi["id"]).first()
     check(n >= 1 and evr.estado == "resultado_recibido" and evr.archivo, "la consulta automática recupera resultado e informe del proveedor")
+    # 2026-10-05: cada consulta gasta una «petición» del paquete de API — nunca repetir sin espaciar, y pausar sin paquete
+    ev_otra = EvaluacionCandidato(codigo="EVA-99901", cuenta_id=cuenta.id, postulacion_id=evr.postulacion_id, tipo="psicometrica", nombre="Otra",
+                                  modo="integrada", proveedor="Psicométricas.mx", clave_proveedor="9-XYZ", estado="en_proceso", historial=[])
+    db.add(ev_otra); db.commit()
+    _psi.consultar_candidato = lambda clave: (CONSULTAS.append(clave), [{"fecha_fin": None}])[1]
+    _psi.terminado = lambda filas: False
+    antes = len(CONSULTAS)
+    asyncio.run(revisar_resultados_psicometria()); asyncio.run(revisar_resultados_psicometria())
+    check(len(CONSULTAS) - antes == 1, "la consulta automática no vuelve a preguntar por la misma prueba antes de 6 h (no agota las peticiones)")
+    def _sin_paquete(clave):
+        CONSULTAS.append(clave)
+        raise _psi.PsicometricasError("La cuenta de Psicométricas.mx no tiene un paquete activo (1002).", 402)
+    _psi.consultar_candidato = _sin_paquete
+    ev_otra.proveedor_consultado_en = None
+    db.commit()
+    os.remove(_sync._ESTADO)
+    antes = len(CONSULTAS)
+    asyncio.run(revisar_resultados_psicometria())
+    ev_otra.proveedor_consultado_en = None
+    db.commit()
+    asyncio.run(revisar_resultados_psicometria())
+    check(len(CONSULTAS) - antes == 1 and "pausa_hasta" in _sync._leer_estado(), "sin paquete activo (1002) se pausa: no insiste contra el proveedor")
+    os.remove(_sync._ESTADO)
     r = client.post(f"/evaluaciones/{evi['id']}/revisar", json={"dictamen": "con_observaciones", "comentario": "Validar en entrevista"})
     check(r.status_code == 200 and r.json()["dictamenTexto"] == "Con observaciones" and r.json()["tieneInforme"], "la conclusión de RH queda junto al reporte")
 
