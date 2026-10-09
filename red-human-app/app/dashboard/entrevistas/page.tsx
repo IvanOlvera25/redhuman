@@ -18,12 +18,14 @@ import {
   Zap,
   AlertTriangle,
   RotateCcw,
+  MonitorPlay,
 } from "lucide-react";
 import { Card, Badge, Button, Eyebrow } from "@/components/ui";
 import { PageHeader } from "@/components/dashboard/parts";
 import { PerfilProfundoVista } from "@/components/dashboard/perfil-profundo";
 import { usePuedeDecidir } from "@/components/sesion";
 import { cn } from "@/lib/utils";
+import { ligaStand85 } from "@/lib/use-totem";
 import {
   fetchEntrevistas,
   fetchCandidatos,
@@ -393,6 +395,18 @@ function FilaEntrevista({
         </p>
       </div>
       <Badge tone={est.tone}>{est.label}</Badge>
+      {e.tipo === "avatar" && (e.estado === "programada" || e.estado === "en_curso") && (
+        <a
+          href={ligaStand85(liga)}
+          target="_blank"
+          rel="noreferrer"
+          onClick={(ev) => ev.stopPropagation()}
+          title="Abrir en tele de 85"
+          className="flex h-8 shrink-0 items-center gap-1 rounded-lg px-2 text-xs font-medium text-ink-2 transition hover:bg-surface-2 hover:text-brand"
+        >
+          <MonitorPlay className="h-4 w-4" /> <span className="hidden sm:inline">Tele 85&quot;</span>
+        </a>
+      )}
       {(e.estado === "interrumpida" || e.estado === "parcial") && onReabrir ? (
         <button
           onClick={(ev) => {
@@ -642,6 +656,16 @@ function NuevaEntrevistaModal({ onClose, onCreada }: { onClose: () => void; onCr
                     <ExternalLink className="h-4 w-4" />
                   </Button>
                 </div>
+                {resultado.tipo === "avatar" && (
+                  <a
+                    href={ligaStand85(resultado.liga)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-2 inline-flex items-center gap-1.5 text-sm font-semibold text-brand hover:underline"
+                  >
+                    <MonitorPlay className="h-4 w-4" /> Abrir en tele de 85&quot;
+                  </a>
+                )}
                 <p className="mt-1.5 text-xs text-ink-3">
                   Compártela por WhatsApp, correo o QR. Cuando termine, la evaluación aparece sola en este tablero.
                 </p>

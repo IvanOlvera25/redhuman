@@ -145,11 +145,11 @@ html:has(main.sala-publica.totem) {
   font-size: 20px;
 }
 /* 2026-10-08 — Pantalla de stand 85" (`?display=stand85` → `main.sala-publica.layout-pantalla-85`). La base rem
-   sigue al ANCHO del viewport (24 px en 1920, 48 px en 3840): 1080p y 4K se ven idénticos aunque el navegador
-   esté al 100 %, y todo lo que usa rem (consentimiento, avisos, fin) se lee a varios metros. Sin scrollbars:
-   nadie va a desplazar una pantalla colgada del plafón. */
+   sigue al ANCHO del viewport (≈19 px en 1920, ≈38 px en 3840): 1080p y 4K se ven idénticos aunque el navegador
+   esté al 100 %, y las pantallas previas (consentimiento, avisos, fin) se leen a distancia sin verse toscas. La
+   sala en video mide en `cqw` sobre su escenario 16:9. Sin scrollbars: nadie desplaza una pantalla en el plafón. */
 html:has(main.sala-publica.layout-pantalla-85) {
-  font-size: clamp(16px, 1.25vw, 48px);
+  font-size: clamp(16px, 1vw, 40px);
   scrollbar-width: none;
 }
 html:has(main.sala-publica.layout-pantalla-85)::-webkit-scrollbar,
@@ -159,11 +159,12 @@ main.sala-publica.layout-pantalla-85 *::-webkit-scrollbar {
 main.sala-publica.layout-pantalla-85 * {
   scrollbar-width: none;
 }
-/* Subtítulos: contraste garantizado sobre cualquier fondo del avatar (además de la banda translúcida). */
+/* Subtítulos del stand: sombra suave en capas (contraste sobre cualquier fondo del avatar sin caja negra);
+   en `cqw` para escalar con el escenario 16:9. */
 .subtitulo-stand {
   text-shadow:
-    0 0.12vw 0.5vw rgba(0, 0, 0, 0.95),
-    0 0 1.2vw rgba(0, 0, 0, 0.6);
+    0 0.08cqw 0.25cqw rgba(0, 0, 0, 0.85),
+    0 0.2cqw 1.2cqw rgba(0, 0, 0, 0.55);
 }
 
 /* Kiosco táctil: sin ratón no hay hover — los controles se ven siempre y el toque da feedback por escala. */

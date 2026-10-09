@@ -78,8 +78,8 @@ const MAX_AVISOS_SILENCIO = 2;
    "marcador" del cierre automático; el servidor la verifica de todos modos). */
 const DESPEDIDA = "con esto terminamos la entrevista";
 
-/** Pantalla de stand: subtítulo en vivo = la COLA del texto (lo más reciente), cortada en palabra. A 4vw caben
- * ~45 caracteres por renglón; con 3 renglones el final de la frase nunca se sale de la banda. */
+/** Pantalla de stand: subtítulo en vivo = la COLA del texto (lo más reciente), cortada en palabra. A 2.2cqw caben
+ * ~60 caracteres por renglón junto a la ficha; con 3 renglones el final de la frase nunca se sale. */
 function colaSubtitulo(t: string, max: number): string {
   const s = t.trim();
   if (s.length <= max) return s;
@@ -101,10 +101,10 @@ export default function SalaEntrevista() {
      pantalla completa, video llenando el área superior/central sin deformarse (object-cover) y
      controles enormes abajo (Hablar/Silenciar micrófono · Sonido · Terminar). */
   const [totem, setTotem] = useState(false);
-  /* Pantalla de STAND (2026-10-08): 85" horizontal montada en alto, NO táctil (`?display=stand85`). Layout
-     panorámico: avatar inmenso a la izquierda/centro, ficha del candidato a la derecha y subtítulos de 4vw en
-     una banda translúcida a todo lo ancho. Sin controles visibles: el operador usa ratón (franja que aparece
-     al moverlo) o teclado (M micrófono · S sonido · F pantalla completa). */
+  /* Pantalla de STAND (2026-10-08, rediseño cinemático): 85" horizontal montada en alto, NO táctil
+     (`?display=stand85`). Avatar a pantalla completa en un escenario 16:9, ficha flotante translúcida abajo a la
+     izquierda y subtítulos refinados (2.2cqw) sobre un gradiente suave. Sin controles visibles: el operador usa
+     ratón (franja que aparece al moverlo) o teclado (M micrófono · S sonido · F pantalla completa). */
   const [stand, setStand] = useState(false);
   const [hablaCandidato, setHablaCandidato] = useState(false);
   const [cursorStand, setCursorStand] = useState(false);
@@ -800,65 +800,68 @@ export default function SalaEntrevista() {
         )}
 
         {salaStand && (
-          /* Grid panorámico: el video ocupa la columna izquierda a TODA la altura; la ficha va arriba a la derecha y
-             la banda de subtítulos se superpone abajo a todo lo ancho (misma fila inferior, z-10). */
-          <div className="grid h-full grid-cols-[minmax(0,7fr)_minmax(0,3fr)] grid-rows-[minmax(0,1fr)_auto] bg-[#0b0b0d] text-white">
-            <div className="relative col-start-1 row-span-2 row-start-1 min-h-0 bg-black">
+          /* Escenario 16:9 REAL: ocupa el máximo que cabe (letterbox si el navegador no es 16:9) y es contenedor de
+             consulta → toda medida va en `cqw` (1cqw = 1 % del ancho del escenario), así 1080p, 4K o una ventana
+             con barras escalan igual. El avatar es el protagonista a pantalla completa; la información flota encima. */
+          <div className="grid h-full w-full place-items-center bg-black text-white">
+            <div className="relative aspect-video w-[min(100vw,177.78svh)] overflow-hidden [container-type:inline-size]">
               <video id="avatar-video" autoPlay playsInline muted={!sonido} className="absolute inset-0 h-full w-full object-cover object-center" />
-              <span className="absolute left-[2vw] top-[2vw] flex items-center gap-[0.6vw] rounded-full bg-black/55 px-[1.2vw] py-[0.5vw] text-[1.3vw] font-semibold tracking-wide backdrop-blur">
-                <span className="h-[0.8vw] w-[0.8vw] animate-pulse rounded-full bg-brand" /> EN VIVO
+
+              {/* Viñeta superior muy sutil + indicador en vivo */}
+              <div className="pointer-events-none absolute inset-x-0 top-0 h-[12cqw] bg-gradient-to-b from-black/45 to-transparent" />
+              <span className="absolute left-[2.5cqw] top-[2.2cqw] flex items-center gap-[0.5cqw] rounded-full border border-white/15 bg-white/10 px-[0.9cqw] py-[0.35cqw] text-[0.85cqw] font-semibold uppercase tracking-[0.2em] text-white/85 backdrop-blur-md">
+                <span className="h-[0.55cqw] w-[0.55cqw] animate-pulse rounded-full bg-brand" /> En vivo
               </span>
-            </div>
 
-            <aside className="col-start-2 row-start-1 flex min-h-0 flex-col gap-[2.2vw] border-l border-white/10 bg-gradient-to-b from-[#151517] to-[#0b0b0d] p-[2.5vw]">
-              <Logo onDark size="lg" />
-              <div>
-                <p className="text-[1.1vw] font-semibold uppercase tracking-[0.2em] text-white/50">Entrevista Red Human</p>
-                <p className="mt-[0.6vw] text-[3.6vw] font-bold leading-[1.05]">{(info?.candidato ?? "").split(" ")[0]}</p>
-                {info?.puesto && <p className="mt-[0.8vw] text-[1.8vw] leading-tight text-white/85">{info.puesto}</p>}
-                {info?.empresa && <p className="mt-[0.3vw] text-[1.4vw] text-white/55">{info.empresa}</p>}
-              </div>
-              <p
-                className={cn(
-                  "flex items-center gap-[0.8vw] text-[1.7vw] font-semibold",
-                  !micActivo ? "text-warn" : hablaCandidato ? "text-good" : "text-white/70",
-                )}
-              >
-                {!micActivo ? <MicOff className="h-[2vw] w-[2vw]" /> : <Mic className={cn("h-[2vw] w-[2vw]", hablaCandidato && "animate-pulse")} />}
-                {!micActivo ? "Micrófono en pausa" : hablaCandidato ? "Te escucho…" : "Puedes hablar cuando quieras"}
-              </p>
-              {/* Contexto: el turno ANTERIOR (el actual va en la banda de subtítulos) */}
-              {mensajes.length > 1 && (
-                <div className="min-h-0 overflow-hidden rounded-[1vw] bg-white/5 p-[1.2vw]">
-                  <p className="text-[1vw] font-semibold uppercase tracking-[0.15em] text-white/45">
-                    {mensajes[mensajes.length - 2].rol === "assistant" ? "Red Human" : "Tú"}
-                  </p>
-                  <p className="mt-[0.4vw] text-[1.5vw] leading-snug text-white/75">{colaSubtitulo(mensajes[mensajes.length - 2].texto, 150)}</p>
+              {/* Gradiente inferior suave (en vez de una caja negra) que da contraste a la ficha y a los subtítulos */}
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[34%] bg-gradient-to-t from-black/80 via-black/40 to-transparent" />
+
+              <div className="absolute inset-x-[2.5cqw] bottom-[2.5cqw] flex items-end gap-[3cqw]">
+                {/* Ficha flotante (glassmorphism): logo → nombre → puesto → estado */}
+                <div className="w-[23cqw] shrink-0 rounded-[1.2cqw] border border-white/15 bg-white/[0.08] p-[1.4cqw] shadow-[0_1cqw_3cqw_rgba(0,0,0,0.35)] backdrop-blur-xl">
+                  <Logo onDark className="text-[length:1.25cqw]" />
+                  <p className="mt-[1cqw] text-[0.75cqw] font-semibold uppercase tracking-[0.22em] text-white/50">Entrevista Red Human</p>
+                  <p className="mt-[0.3cqw] truncate text-[1.9cqw] font-semibold leading-tight">{(info?.candidato ?? "").split(" ")[0]}</p>
+                  {info?.puesto && <p className="mt-[0.2cqw] line-clamp-2 text-[1.05cqw] leading-snug text-white/75">{info.puesto}</p>}
+                  {info?.empresa && <p className="mt-[0.15cqw] truncate text-[0.9cqw] text-white/50">{info.empresa}</p>}
+                  <div className="mt-[1.1cqw] flex items-center gap-[0.6cqw] border-t border-white/10 pt-[0.9cqw] text-[0.95cqw] font-medium">
+                    <span
+                      className={cn(
+                        "h-[0.6cqw] w-[0.6cqw] shrink-0 rounded-full",
+                        !micActivo ? "bg-warn" : hablaCandidato ? "animate-pulse bg-good" : "bg-white/60",
+                      )}
+                    />
+                    <span className={cn(!micActivo ? "text-warn" : hablaCandidato ? "text-white" : "text-white/75")}>
+                      {!micActivo ? "Micrófono en pausa" : hablaCandidato ? "Te escucho…" : "Puedes hablar cuando quieras"}
+                    </span>
+                  </div>
                 </div>
-              )}
-            </aside>
 
-            {/* Subtítulos en vivo: 4vw, banda translúcida oscura + text-shadow; recorta por ARRIBA (lo nuevo siempre visible) */}
-            <div className="z-10 col-span-2 col-start-1 row-start-2 bg-black/75 px-[3vw] pb-[2.2vw] pt-[1.8vw] backdrop-blur-md">
-              <div className="flex max-h-[15.5vw] flex-col justify-end overflow-hidden">
-                {(() => {
-                  const actual = mensajes[mensajes.length - 1];
-                  if (!actual) return <p className="subtitulo-stand text-[4vw] font-semibold leading-[1.2] text-white/60">Red Human se está conectando…</p>;
-                  const ia = actual.rol === "assistant";
-                  return (
-                    <p className={cn("subtitulo-stand text-[4vw] font-semibold leading-[1.2]", ia ? "text-white" : "text-[#ffe08a]")}>
-                      <span className={cn("mr-[1vw]", ia ? "text-brand" : "text-white/70")}>{ia ? "Red Human:" : "Tú:"}</span>
-                      {colaSubtitulo(actual.texto, 130)}
-                    </p>
-                  );
-                })()}
+                {/* Subtítulos en vivo: 2.2cqw, solo el turno actual (su final), con sombra suave — sin caja */}
+                <div className="flex min-w-0 flex-1 flex-col justify-end pb-[0.3cqw]">
+                  {(() => {
+                    const actual = mensajes[mensajes.length - 1];
+                    if (!actual) return <p className="subtitulo-stand text-[2.2cqw] font-medium leading-[1.3] text-white/60">Red Human se está conectando…</p>;
+                    const ia = actual.rol === "assistant";
+                    return (
+                      <>
+                        <p className={cn("subtitulo-stand text-[0.9cqw] font-semibold uppercase tracking-[0.2em]", ia ? "text-brand" : "text-white/60")}>
+                          {ia ? "Red Human" : "Tú"}
+                        </p>
+                        <p className={cn("subtitulo-stand mt-[0.4cqw] line-clamp-3 text-[2.2cqw] font-medium leading-[1.3]", ia ? "text-white" : "text-white/85")}>
+                          {colaSubtitulo(actual.texto, 170)}
+                        </p>
+                      </>
+                    );
+                  })()}
+                </div>
               </div>
             </div>
 
             {/* Franja del operador: invisible salvo al mover el ratón (el público nunca la ve) */}
             <div
               className={cn(
-                "fixed right-[1.5vw] top-[1.5vw] z-20 flex gap-2 rounded-2xl bg-black/70 p-2 backdrop-blur transition-opacity duration-300",
+                "fixed right-4 top-4 z-20 flex gap-2 rounded-2xl bg-black/70 p-2 backdrop-blur transition-opacity duration-300",
                 cursorStand ? "opacity-100" : "pointer-events-none opacity-0",
               )}
             >
