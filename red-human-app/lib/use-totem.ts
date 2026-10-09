@@ -28,6 +28,14 @@ export function esPantallaStand(): boolean {
   return new URLSearchParams(window.location.search).get("display") === "stand85";
 }
 
+/** Liga de la sala para proyectarla en el stand (botón «Abrir en tele de 85» del tablero de RH). */
+export function ligaStand85(liga: string): string {
+  const url = new URL(liga, typeof window === "undefined" ? "http://localhost" : window.location.origin);
+  url.searchParams.set("display", "stand85");
+  url.searchParams.delete("totem");
+  return url.toString();
+}
+
 export function useTotem(): boolean {
   const [totem, setTotem] = useState(false);
   useEffect(() => {
