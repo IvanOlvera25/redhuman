@@ -23,7 +23,7 @@ import {
 import { Logo, Button, Card, Badge } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
-import { esTotem, perifericosDisponibles } from "@/lib/use-totem";
+import { esPantallaStand, esTotem, perifericosDisponibles } from "@/lib/use-totem";
 import {
   fetchEntrevistaPublica,
   consentirEntrevista,
@@ -78,6 +78,16 @@ const MAX_AVISOS_SILENCIO = 2;
    "marcador" del cierre automático; el servidor la verifica de todos modos). */
 const DESPEDIDA = "con esto terminamos la entrevista";
 
+/** Pantalla de stand: subtítulo en vivo = la COLA del texto (lo más reciente), cortada en palabra. A 4vw caben
+ * ~45 caracteres por renglón; con 3 renglones el final de la frase nunca se sale de la banda. */
+function colaSubtitulo(t: string, max: number): string {
+  const s = t.trim();
+  if (s.length <= max) return s;
+  const corte = s.slice(-max);
+  const i = corte.indexOf(" ");
+  return "…" + (i > 0 ? corte.slice(i + 1) : corte);
+}
+
 export default function SalaEntrevista() {
   const params = useParams();
   const token = String(params?.token ?? "");
@@ -91,6 +101,13 @@ export default function SalaEntrevista() {
      pantalla completa, video llenando el área superior/central sin deformarse (object-cover) y
      controles enormes abajo (Hablar/Silenciar micrófono · Sonido · Terminar). */
   const [totem, setTotem] = useState(false);
+  /* Pantalla de STAND (2026-10-08): 85" horizontal montada en alto, NO táctil (`?display=stand85`). Layout
+     panorámico: avatar inmenso a la izquierda/centro, ficha del candidato a la derecha y subtítulos de 4vw en
+     una banda translúcida a todo lo ancho. Sin controles visibles: el operador usa ratón (franja que aparece
+     al moverlo) o teclado (M micrófono · S sonido · F pantalla completa). */
+  const [stand, setStand] = useState(false);
+  const [hablaCandidato, setHablaCandidato] = useState(false);
+  const [cursorStand, setCursorStand] = useState(false);
   const [micActivo, setMicActivo] = useState(true);
   const [sonido, setSonido] = useState(true);
   const [mensajes, setMensajes] = useState<Msg[]>([]);
@@ -161,6 +178,7 @@ export default function SalaEntrevista() {
     // Solo al montar (regla compartida en lib/use-totem.ts): si cambiara a mitad de la sesión, el <video>
     // se desmontaría y se perdería el stream.
     setTotem(esTotem());
+    setStand(esPantallaStand());
   }, []);
 
   // 2026-09-21 (Tótem, periféricos USB): antes de iniciar se enumeran los micrófonos para avisar en grande si
@@ -396,10 +414,12 @@ export default function SalaEntrevista() {
         // Silencio: se reprograma cada vez que la persona termina de hablar; se pausa mientras habla.
         anam.addListener(AnamEvent.USER_SPEECH_STARTED, () => {
           silencioRef.current.hablando = true;
+          setHablaCandidato(true);
           if (silencioRef.current.timer) clearTimeout(silencioRef.current.timer);
         });
         anam.addListener(AnamEvent.USER_SPEECH_ENDED, () => {
           silencioRef.current.hablando = false;
+          setHablaCandidato(false);
           silencioRef.current.avisos = 0;
           programarAvisoSilencio();
         });
@@ -495,20 +515,63 @@ export default function SalaEntrevista() {
   const enSala = fase === "sala" || fase === "finalizando";
   // Tótem + sala en video: pantalla completa inmersiva (sin header ni márgenes).
   const salaTotem = totem && enSala && modo === "avatar";
+  // Stand 85" + sala en video: panorámico a pantalla completa, sin controles visibles.
+  const salaStand = stand && enSala && modo === "avatar";
+
+  // Stand: el cursor y la franja del operador solo aparecen al mover el ratón (se ocultan a los 2.5 s).
+  useEffect(() => {
+    if (!salaStand) return;
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const mover = () => {
+      setCursorStand(true);
+      if (t) clearTimeout(t);
+      t = setTimeout(() => setCursorStand(false), 2500);
+    };
+    window.addEventListener("mousemove", mover);
+    return () => {
+      window.removeEventListener("mousemove", mover);
+      if (t) clearTimeout(t);
+    };
+  }, [salaStand]);
+
+  // Stand: atajos del operador (no hay botones táctiles en una pantalla colgada del plafón).
+  useEffect(() => {
+    if (!salaStand) return;
+    const tecla = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || (e.target as HTMLElement | null)?.closest?.("input,textarea")) return;
+      const k = e.key.toLowerCase();
+      if (k === "m") alternarMic();
+      else if (k === "s") alternarSonido();
+      else if (k === "f") {
+        if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+        else void document.documentElement.requestFullscreen?.().catch(() => {});
+      }
+    };
+    window.addEventListener("keydown", tecla);
+    return () => window.removeEventListener("keydown", tecla);
+  }, [salaStand, alternarMic, alternarSonido]);
 
   return (
-    <main className={cn("sala-publica min-h-svh bg-bg", totem && "totem text-lg", salaTotem && "fixed inset-0 overflow-hidden")}>
+    <main
+      className={cn(
+        "sala-publica min-h-svh bg-bg",
+        totem && "totem text-lg",
+        stand && "layout-pantalla-85 overflow-hidden",
+        (salaTotem || salaStand) && "fixed inset-0 overflow-hidden",
+        salaStand && !cursorStand && "cursor-none",
+      )}
+    >
       <link rel="preconnect" href="https://api.anam.ai" />
-      {!salaTotem && (
+      {!salaTotem && !salaStand && (
         <header className="border-b border-border-soft">
-          <div className={cn("mx-auto flex max-w-3xl items-center justify-between px-5 py-4", totem && "max-w-none px-10 py-8")}>
-            <Logo size={totem ? "lg" : "md"} />
-            <ThemeToggle />
+          <div className={cn("mx-auto flex max-w-3xl items-center justify-between px-5 py-4", (totem || stand) && "max-w-none px-10 py-8")}>
+            <Logo size={totem || stand ? "lg" : "md"} />
+            {!stand && <ThemeToggle />}
           </div>
         </header>
       )}
 
-      <div className={cn("mx-auto max-w-3xl px-5 py-8 sm:py-10", totem && !salaTotem && "max-w-4xl px-10 py-14", salaTotem && "h-full max-w-none p-0")}>
+      <div className={cn("mx-auto max-w-3xl px-5 py-8 sm:py-10", totem && !salaTotem && "max-w-4xl px-10 py-14", stand && !salaStand && "max-w-5xl px-10 py-12", (salaTotem || salaStand) && "h-full max-w-none p-0")}>
         {DIAGNOSTICO_AVATAR && seguro === false && (
           <div className="mb-6 rounded-xl border-4 border-red-600 bg-red-600 p-6 text-center text-white">
             <p className="text-2xl font-black tracking-wide sm:text-3xl">HTTPS REQUERIDO PARA EL AVATAR</p>
@@ -608,10 +671,10 @@ export default function SalaEntrevista() {
               <Badge tone="good" dot>
                 Entrevista · {info.empresa}
               </Badge>
-              <h1 className={cn("font-display mt-3 text-2xl font-bold sm:text-3xl", totem && "text-5xl leading-tight sm:text-5xl")}>
+              <h1 className={cn("font-display mt-3 text-2xl font-bold sm:text-3xl", (totem || stand) && "text-5xl leading-tight sm:text-5xl")}>
                 Hola {info.candidato.split(" ")[0]}, tu entrevista para {info.puesto}
               </h1>
-              <p className={cn("mx-auto mt-2 max-w-xl leading-relaxed text-ink-2", totem ? "max-w-3xl text-2xl" : "text-sm")}>
+              <p className={cn("mx-auto mt-2 max-w-xl leading-relaxed text-ink-2", totem || stand ? "max-w-3xl text-2xl" : "text-sm")}>
                 Conversarás con <b className="text-ink">Red Human</b>, nuestra entrevistadora
                 {info.avatar_disponible ? " en video" : " por chat"}. Dura alrededor de 10 minutos y puedes hacerla
                 desde tu celular o computadora.
@@ -621,7 +684,7 @@ export default function SalaEntrevista() {
             <Card className="mt-6 p-6">
               <div className="flex items-start gap-3">
                 <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-human" />
-                <div className={cn("leading-relaxed text-ink-2", totem ? "text-xl" : "text-sm")}>
+                <div className={cn("leading-relaxed text-ink-2", totem || stand ? "text-xl" : "text-sm")}>
                   <p className="font-semibold text-ink">Antes de empezar, es importante que sepas:</p>
                   <ul className="mt-2 list-disc space-y-1.5 pl-4">
                     <li>La entrevista la conduce una <b>inteligencia artificial</b> de Red Human, no una persona.</li>
@@ -640,9 +703,9 @@ export default function SalaEntrevista() {
                   type="checkbox"
                   checked={acepto}
                   onChange={(e) => setAcepto(e.target.checked)}
-                  className={cn("mt-0.5 accent-[var(--brand,#ee4444)]", totem ? "h-8 w-8" : "h-4 w-4")}
+                  className={cn("mt-0.5 accent-[var(--brand,#ee4444)]", totem || stand ? "h-8 w-8" : "h-4 w-4")}
                 />
-                <span className={cn("text-ink-2", totem ? "text-xl leading-relaxed" : "text-sm")}>
+                <span className={cn("text-ink-2", totem || stand ? "text-xl leading-relaxed" : "text-sm")}>
                   Acepto participar en esta entrevista con IA y autorizo la grabación y el tratamiento de mis
                   respuestas para este proceso de selección.
                 </span>
@@ -653,7 +716,7 @@ export default function SalaEntrevista() {
                   <MicOff className="h-7 w-7 shrink-0" /> No se detecta ningún micrófono. Conecta el micrófono USB y espera un momento; esta pantalla se actualiza sola.
                 </p>
               )}
-              <Button className={cn("mt-5 w-full", totem && "min-h-20 rounded-3xl text-2xl")} size={totem ? "lg" : "md"} disabled={!acepto} onClick={empezar}>
+              <Button className={cn("mt-5 w-full", (totem || stand) && "min-h-20 rounded-3xl text-2xl")} size={totem || stand ? "lg" : "md"} disabled={!acepto} onClick={empezar}>
                 {info.avatar_disponible ? <Video className={totem ? "h-7 w-7" : "h-4 w-4"} /> : <MessageCircle className={totem ? "h-7 w-7" : "h-4 w-4"} />}
                 Comenzar entrevista
               </Button>
@@ -736,7 +799,86 @@ export default function SalaEntrevista() {
           </div>
         )}
 
-        {enSala && !salaTotem && (
+        {salaStand && (
+          /* Grid panorámico: el video ocupa la columna izquierda a TODA la altura; la ficha va arriba a la derecha y
+             la banda de subtítulos se superpone abajo a todo lo ancho (misma fila inferior, z-10). */
+          <div className="grid h-full grid-cols-[minmax(0,7fr)_minmax(0,3fr)] grid-rows-[minmax(0,1fr)_auto] bg-[#0b0b0d] text-white">
+            <div className="relative col-start-1 row-span-2 row-start-1 min-h-0 bg-black">
+              <video id="avatar-video" autoPlay playsInline muted={!sonido} className="absolute inset-0 h-full w-full object-cover object-center" />
+              <span className="absolute left-[2vw] top-[2vw] flex items-center gap-[0.6vw] rounded-full bg-black/55 px-[1.2vw] py-[0.5vw] text-[1.3vw] font-semibold tracking-wide backdrop-blur">
+                <span className="h-[0.8vw] w-[0.8vw] animate-pulse rounded-full bg-brand" /> EN VIVO
+              </span>
+            </div>
+
+            <aside className="col-start-2 row-start-1 flex min-h-0 flex-col gap-[2.2vw] border-l border-white/10 bg-gradient-to-b from-[#151517] to-[#0b0b0d] p-[2.5vw]">
+              <Logo onDark size="lg" />
+              <div>
+                <p className="text-[1.1vw] font-semibold uppercase tracking-[0.2em] text-white/50">Entrevista Red Human</p>
+                <p className="mt-[0.6vw] text-[3.6vw] font-bold leading-[1.05]">{(info?.candidato ?? "").split(" ")[0]}</p>
+                {info?.puesto && <p className="mt-[0.8vw] text-[1.8vw] leading-tight text-white/85">{info.puesto}</p>}
+                {info?.empresa && <p className="mt-[0.3vw] text-[1.4vw] text-white/55">{info.empresa}</p>}
+              </div>
+              <p
+                className={cn(
+                  "flex items-center gap-[0.8vw] text-[1.7vw] font-semibold",
+                  !micActivo ? "text-warn" : hablaCandidato ? "text-good" : "text-white/70",
+                )}
+              >
+                {!micActivo ? <MicOff className="h-[2vw] w-[2vw]" /> : <Mic className={cn("h-[2vw] w-[2vw]", hablaCandidato && "animate-pulse")} />}
+                {!micActivo ? "Micrófono en pausa" : hablaCandidato ? "Te escucho…" : "Puedes hablar cuando quieras"}
+              </p>
+              {/* Contexto: el turno ANTERIOR (el actual va en la banda de subtítulos) */}
+              {mensajes.length > 1 && (
+                <div className="min-h-0 overflow-hidden rounded-[1vw] bg-white/5 p-[1.2vw]">
+                  <p className="text-[1vw] font-semibold uppercase tracking-[0.15em] text-white/45">
+                    {mensajes[mensajes.length - 2].rol === "assistant" ? "Red Human" : "Tú"}
+                  </p>
+                  <p className="mt-[0.4vw] text-[1.5vw] leading-snug text-white/75">{colaSubtitulo(mensajes[mensajes.length - 2].texto, 150)}</p>
+                </div>
+              )}
+            </aside>
+
+            {/* Subtítulos en vivo: 4vw, banda translúcida oscura + text-shadow; recorta por ARRIBA (lo nuevo siempre visible) */}
+            <div className="z-10 col-span-2 col-start-1 row-start-2 bg-black/75 px-[3vw] pb-[2.2vw] pt-[1.8vw] backdrop-blur-md">
+              <div className="flex max-h-[15.5vw] flex-col justify-end overflow-hidden">
+                {(() => {
+                  const actual = mensajes[mensajes.length - 1];
+                  if (!actual) return <p className="subtitulo-stand text-[4vw] font-semibold leading-[1.2] text-white/60">Red Human se está conectando…</p>;
+                  const ia = actual.rol === "assistant";
+                  return (
+                    <p className={cn("subtitulo-stand text-[4vw] font-semibold leading-[1.2]", ia ? "text-white" : "text-[#ffe08a]")}>
+                      <span className={cn("mr-[1vw]", ia ? "text-brand" : "text-white/70")}>{ia ? "Red Human:" : "Tú:"}</span>
+                      {colaSubtitulo(actual.texto, 130)}
+                    </p>
+                  );
+                })()}
+              </div>
+            </div>
+
+            {/* Franja del operador: invisible salvo al mover el ratón (el público nunca la ve) */}
+            <div
+              className={cn(
+                "fixed right-[1.5vw] top-[1.5vw] z-20 flex gap-2 rounded-2xl bg-black/70 p-2 backdrop-blur transition-opacity duration-300",
+                cursorStand ? "opacity-100" : "pointer-events-none opacity-0",
+              )}
+            >
+              <Button size="sm" variant="secondary" onClick={alternarMic} disabled={fase === "finalizando"} title="Micrófono (M)">
+                {micActivo ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                {micActivo ? "Pausar mic" : "Activar mic"}
+              </Button>
+              <Button size="sm" variant="secondary" onClick={alternarSonido} disabled={fase === "finalizando"} title="Sonido (S)">
+                {sonido ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                {sonido ? "Silenciar" : "Sonido"}
+              </Button>
+              <Button size="sm" onClick={terminar} disabled={fase === "finalizando"}>
+                {fase === "finalizando" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Phone className="h-4 w-4 rotate-[135deg]" />}
+                Terminar
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {enSala && !salaTotem && !salaStand && (
           <Card className="overflow-hidden">
             {modo === "avatar" ? (
               <div className="relative aspect-video bg-[#151517]">
@@ -844,8 +986,8 @@ export default function SalaEntrevista() {
             <span className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-good/10">
               <CheckCircle2 className="h-7 w-7 text-good" />
             </span>
-            <h1 className={cn("font-display mt-4 text-2xl font-bold", totem && "text-5xl")}>¡Gracias por tu entrevista!</h1>
-            <p className={cn("mx-auto mt-2 max-w-md leading-relaxed text-ink-2", totem ? "max-w-2xl text-2xl" : "text-sm")}>
+            <h1 className={cn("font-display mt-4 text-2xl font-bold", (totem || stand) && "text-5xl")}>¡Gracias por tu entrevista!</h1>
+            <p className={cn("mx-auto mt-2 max-w-md leading-relaxed text-ink-2", totem || stand ? "max-w-2xl text-2xl" : "text-sm")}>
               Tus respuestas quedaron registradas. El equipo de RH{info ? ` de ${info.empresa}` : ""} las revisará y te
               contactará muy pronto con el siguiente paso. 😊
             </p>
